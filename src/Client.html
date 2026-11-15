@@ -5,6 +5,8 @@
   const $=(id)=>document.getElementById(id);
   let bootstrap=null, selectedFolder=null, busy=false, formMode=null, renameId=null, creationRequest=null;
   let collapsed=matchMedia('(max-width:640px)').matches;
+  let activeView='registry', segmentsTimer=null, lastSegmentsAttempt=0, segmentsRefreshing=false;
+  let segmentsRefreshError=null, renderedSegmentsKey=null;
   const expanded=new Set();
   const sorted=(items)=>items.slice().sort((a,b)=>a.name.localeCompare(b.name,'ru'));
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
@@ -16,6 +18,11 @@
   function folderPath(id){const names=[],seen=new Set();while(id&&bootstrap&&id!==bootstrap.registry.id&&!seen.has(id)){seen.add(id);const folder=folderById(id);if(!folder)break;names.unshift(folder.name);id=folder.parentId;}return [bootstrap?.registry.name,...names].filter(Boolean).join(' / ');}
   function button(className,text){const node=document.createElement('button');node.type='button';node.className='br-button '+className;if(text)node.textContent=text;return node;}
   function sheetLink(file,className){const anchor=document.createElement('a');anchor.className=className;anchor.href=nativeUrl(file.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.dataset.file=file.id;anchor.title=file.name;return anchor;}
+  function metricNumber(value){return Number.isSafeInteger(value)&&value>=0?value.toLocaleString('ru-RU'):'—';}
+  function channelStatus(value){const states={active:{id:'active',label:'В работе',mark:'✓'},inactive:{id:'inactive',label:'Не в работе',mark:'−'}};return Object.prototype.hasOwnProperty.call(states,value)?states[value]:{id:'unknown',label:'Статус ещё не определён',mark:'—'};}
+  function segmentStatus(value){const labels={in_work:'В работе',preparation:'Подготовка',no_contacts:'Нет контактов'};return Object.prototype.hasOwnProperty.call(labels,value)?{id:value,label:labels[value]}:{id:'unknown',label:'Статус ещё не определён'};}
+  function segmentContentKey(data){return JSON.stringify({state:data?.state||'unavailable',source:data?.source||null,rulesConfigured:data?.rulesConfigured===true,items:data?.items||[]});}
+  function folderUrl(id){return 'https://drive.google.com/drive/folders/'+encodeURIComponent(id);}
   function openFolder(id){if(busy||!folderById(id))return;selectedFolder=id;expanded.add(id);render();}
   function renderTree(){
     const target=$('br-tree');target.replaceChildren();if(!bootstrap)return;
@@ -41,7 +48,7 @@
     $('br-destination').textContent='Создание в папке: '+folderName(selectedFolder);
   }
   function renderFolder(){
-    $('br-folder-view').hidden=!bootstrap;if(!bootstrap)return;
+    $('br-folder-view').hidden=!bootstrap||activeView!=='registry';if(!bootstrap)return;
     $('br-folder-title').textContent=folderName(selectedFolder);$('br-breadcrumb').textContent=folderPath(selectedFolder);
     const folders=sorted(bootstrap.folders.filter((item)=>item.parentId===selectedFolder));
     const files=sorted(bootstrap.files.filter((item)=>item.parentId===selectedFolder));
@@ -59,20 +66,70 @@
     folders.forEach((folder)=>appendEntry(folder,true));files.forEach((file)=>appendEntry(file,false));
     $('br-empty').hidden=folders.length+files.length!==0;
   }
+  function renderSegmentsHealth(){
+    const node=$('br-segments-health');node.classList.toggle('br-error',!!segmentsRefreshError);
+    if(segmentsRefreshError){node.textContent='Не удалось обновить сегменты. Показаны последние данные. '+segmentsRefreshError;return;}
+    if(segmentsRefreshing){node.textContent='Обновляем сегменты…';return;}
+    if(formMode){node.textContent='Автообновление приостановлено: открыта форма.';return;}
+    const generated=new Date(bootstrap?.segments?.generatedAt||'');
+    node.textContent=(Number.isNaN(generated.getTime())?'':'Обновлено в '+generated.toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'})+' · ')+'Автообновление: каждые 60 с';
+  }
+  function renderSegments(){
+    $('br-segments-view').hidden=activeView!=='segments';if(activeView!=='segments')return;
+    const data=bootstrap?.segments,ready=data?.state==='ready',items=ready&&Array.isArray(data.items)?data.items:[];
+    $('br-segments-count').textContent=ready?'Сегментов: '+items.length:bootstrap?'Список недоступен':'Загружаем сегменты…';
+    $('br-segments-rules').hidden=data?.rulesConfigured===true;
+    const source=$('br-segments-source');source.hidden=!data?.source?.id;
+    if(data?.source?.id){source.href=folderUrl(data.source.id);source.textContent='Папка «'+data.source.name+'» →';}
+    renderSegmentsHealth();
+    const key=segmentContentKey(data);if(key===renderedSegmentsKey)return;renderedSegmentsKey=key;
+    const cards=$('br-segments-cards');const openDetails=new Set(Array.from(cards.querySelectorAll('details[open]')).map((node)=>node.dataset.segment));
+    const focusKey=document.activeElement?.dataset?.segmentFocus;const oldX=window.scrollX,oldY=window.scrollY;
+    cards.replaceChildren();$('br-segments-empty').hidden=ready&&items.length>0;
+    const emptyStates={source_missing:['Папка «Аутричи» не найдена','Уточните привязку папки у администратора. Реестр доступен в соседнем разделе.'],source_ambiguous:['Найдено несколько папок «Аутричи»','Администратору нужно указать, какую папку использовать для сегментов.'],source_outside_registry:['Папка «Аутричи» недоступна в реестре','Проверьте права доступа и привязку папки у администратора. Реестр остаётся доступен.']};
+    const empty=ready?['В «Аутричи» пока нет сегментов','Каждая папка первого уровня внутри «Аутричи» станет отдельным сегментом.']:emptyStates[data?.state]||[bootstrap?'Не удалось загрузить список сегментов':'Загружаем сегменты…',bootstrap?'Нажмите «Обновить», чтобы повторить загрузку.':''];
+    $('br-segments-empty-title').textContent=empty[0];$('br-segments-empty-description').textContent=empty[1];
+    for(const item of items){
+      const card=document.createElement('article');card.className='br-segment-card';card.dataset.segment=item.id;card.setAttribute('aria-label','Сегмент '+item.name);
+      const heading=document.createElement('h2');const title=document.createElement('a');title.className='br-segment-title';title.href=folderUrl(item.id);title.target='_blank';title.rel='noopener noreferrer';title.textContent=item.name;title.dataset.segmentFocus=item.id+'/folder';heading.append(title);card.append(heading);
+      const meta=document.createElement('p');meta.className='br-segment-meta';const files=Array.isArray(item.files)?item.files:[];meta.textContent='Таблиц: '+(Number.isSafeInteger(item.tableCount)?item.tableCount:files.length);card.append(meta);
+      const channels=[['email','Email'],['telegram','Telegram'],['retargeting','Ретаргетинг']];const pills=document.createElement('div');pills.className='br-channel-pills';
+      for(const channel of channels){const state=channelStatus(item.channels?.[channel[0]]?.state);const pill=document.createElement('span');pill.className='br-channel-pill';pill.dataset.channel=channel[0];pill.dataset.state=state.id;pill.textContent=channel[1]+' '+state.mark;pill.setAttribute('aria-label',channel[1]+': '+state.label);pill.title=state.label;pills.append(pill);}card.append(pills);
+      const metrics=document.createElement('dl');metrics.className='br-segment-metrics';const values=channels.map((channel)=>[channel[1]+' · контактов в работе',item.channels?.[channel[0]]?.inWork]);values.push(['Компаний · ≥1 канал в работе',item.companiesInWork]);
+      for(const entry of values){const group=document.createElement('div');group.className='br-segment-metric';const label=document.createElement('dt');label.textContent=entry[0];const value=document.createElement('dd');value.textContent=metricNumber(entry[1]);group.append(label,value);metrics.append(group);}card.append(metrics);
+      if(folderById(item.id)){const actions=document.createElement('div');actions.className='br-segment-actions';const open=button('','Открыть в реестре →');open.dataset.segmentFocus=item.id+'/registry';open.addEventListener('click',()=>{if(busy)return;selectedFolder=item.id;let folder=folderById(item.id);const seen=new Set();while(folder&&!seen.has(folder.id)){seen.add(folder.id);expanded.add(folder.id);folder=folderById(folder.parentId);}setView('registry');});actions.append(open);card.append(actions);}
+      const details=document.createElement('details');details.className='br-segment-details';details.dataset.segment=item.id;details.open=openDetails.has(item.id);const summary=document.createElement('summary');summary.textContent='Таблицы ('+files.length+')';summary.dataset.segmentFocus=item.id+'/tables';details.append(summary);
+      if(files.length){const list=document.createElement('ul');for(const file of files){const row=document.createElement('li');const link=sheetLink(file,'br-segment-sheet-link');link.textContent=file.name;link.dataset.segmentFocus=item.id+'/sheet/'+file.id;row.append(link);list.append(row);}details.append(list);}else{const text=document.createElement('p');text.textContent='В папке сегмента пока нет таблиц.';details.append(text);}card.append(details);
+      const overall=segmentStatus(item.overallStatus);const status=document.createElement('div');status.className='br-segment-overall';status.dataset.status=overall.id;status.textContent=overall.label;card.append(status);cards.append(card);
+    }
+    if(focusKey){const focused=Array.from(cards.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===focusKey);focused?.focus({preventScroll:true});}
+    if(window.scrollX!==oldX||window.scrollY!==oldY)window.scrollTo(oldX,oldY);
+  }
+  function stopSegmentsTimer(){if(segmentsTimer!==null){clearInterval(segmentsTimer);segmentsTimer=null;}}
+  function armSegmentsTimer(){stopSegmentsTimer();if(activeView==='segments'&&!document.hidden)segmentsTimer=setInterval(()=>autoRefreshSegments(),60000);}
+  function setView(view){activeView=view;root.dataset.view=view;$('br-view-registry').setAttribute('aria-pressed',String(view==='registry'));$('br-view-segments').setAttribute('aria-pressed',String(view==='segments'));render();armSegmentsTimer();if(view==='segments')autoRefreshSegments();}
+  async function autoRefreshSegments(){
+    if(activeView!=='segments'||document.hidden||formMode||busy||Date.now()-lastSegmentsAttempt<15000)return;
+    busy=true;segmentsRefreshing=true;lastSegmentsAttempt=Date.now();updateControls();renderSegmentsHealth();
+    try{const result=await rpc('getBootstrap');bootstrap=result;segmentsRefreshError=null;if(!folderById(selectedFolder))selectedFolder=result.registry.id;if(activeView==='segments')renderSegments();}
+    catch(error){segmentsRefreshError=failure(error).message;}
+    finally{busy=false;segmentsRefreshing=false;updateControls();renderSegmentsHealth();}
+  }
   function setCollapsed(){root.dataset.collapsed=String(collapsed);$('br-menu-toggle').setAttribute('aria-label',collapsed?'Показать меню':'Свернуть меню');$('br-menu-toggle').setAttribute('aria-expanded',String(!collapsed));}
   function updateControls(){
     $('br-refresh').disabled=busy;
     for(const id of ['br-new-base','br-new-folder','br-empty-create'])$(id).disabled=busy||!bootstrap;
-    for(const node of root.querySelectorAll('#br-tree button,#br-entries button'))node.disabled=busy;
+    for(const node of root.querySelectorAll('#br-tree button,#br-entries button,#br-segments-cards button'))node.disabled=busy;
     $('br-item-submit').disabled=busy;$('br-item-name').disabled=busy;$('br-item-cancel').disabled=busy;
   }
-  function renderForm(){const node=$('br-item-form');node.hidden=!formMode;if(!formMode)return;const rename=formMode==='rename';$('br-item-label').textContent=rename?'Название базы':formMode==='folder'?'Новая папка':'Новая база';$('br-item-destination').textContent=rename?'':'В папке «'+folderName(selectedFolder)+'»';$('br-item-submit').textContent=rename?'Сохранить':'Создать';}
-  function render(){renderTree();renderFolder();renderForm();updateControls();}
+  function renderForm(){const node=$('br-item-form');node.hidden=!formMode||activeView!=='registry';if(!formMode)return;const rename=formMode==='rename';$('br-item-label').textContent=rename?'Название базы':formMode==='folder'?'Новая папка':'Новая база';$('br-item-destination').textContent=rename?'':'В папке «'+folderName(selectedFolder)+'»';$('br-item-submit').textContent=rename?'Сохранить':'Создать';}
+  function render(){renderTree();renderFolder();renderForm();renderSegments();updateControls();}
   function showForm(mode,id){if(busy||!bootstrap)return;const file=mode==='rename'?bootstrap.files.find((item)=>item.id===id):null;if(mode==='rename'&&!file)return;formMode=mode;renameId=file?.id||null;$('br-item-name').value=file?.name||'';$('br-form-error').textContent='';renderForm();$('br-item-name').focus();}
   async function runAction(action,label){if(busy)return;busy=true;$('br-loading').textContent=label||'Обновляем реестр…';$('br-loading').hidden=false;updateControls();try{await action();}catch(error){notice(failure(error).message,'error');}finally{busy=false;$('br-loading').hidden=true;updateControls();}}
-  async function refreshRegistry(){const result=await rpc('getBootstrap');bootstrap=result;if(!folderById(selectedFolder))selectedFolder=result.registry.id;expanded.add(result.registry.id);$('br-user').textContent=result.user.email||'';render();}
+  async function refreshRegistry(){lastSegmentsAttempt=Date.now();const result=await rpc('getBootstrap');bootstrap=result;segmentsRefreshError=null;if(!folderById(selectedFolder))selectedFolder=result.registry.id;expanded.add(result.registry.id);$('br-user').textContent=result.user.email||'';render();}
   $('br-menu-toggle').addEventListener('click',()=>{collapsed=!collapsed;setCollapsed();});
-  $('br-refresh').addEventListener('click',()=>runAction(async()=>{notice(null);await refreshRegistry();}));
+  $('br-refresh').addEventListener('click',()=>runAction(async()=>{await refreshRegistry();notice(null);}));
+  $('br-view-registry').addEventListener('click',()=>setView('registry'));$('br-view-segments').addEventListener('click',()=>setView('segments'));
   $('br-new-base').addEventListener('click',()=>showForm('file'));$('br-empty-create').addEventListener('click',()=>showForm('file'));$('br-new-folder').addEventListener('click',()=>showForm('folder'));
   $('br-item-cancel').addEventListener('click',()=>{if(busy)return;formMode=null;renameId=null;renderForm();});
   $('br-item-form').addEventListener('submit',(event)=>{
@@ -93,6 +150,7 @@
       catch(error){notice((mode==='file'?'База':'Папка')+' «'+name+'» создана. Обновить реестр не удалось: '+failure(error).message,'error',mode==='file'?{id:created.file.id}:null);}
     },mode==='rename'?'Сохраняем название…':mode==='file'?'Создаём базу…':'Создаём папку…');
   });
-  setCollapsed();runAction(async()=>{await refreshRegistry();notice(null);},'Подключаем Google Диск…');
+  window.addEventListener('focus',()=>autoRefreshSegments());document.addEventListener('visibilitychange',()=>{armSegmentsTimer();if(!document.hidden)autoRefreshSegments();});window.addEventListener('beforeunload',stopSegmentsTimer);
+  setCollapsed();root.dataset.view='registry';runAction(async()=>{await refreshRegistry();notice(null);},'Подключаем Google Диск…');
 })();
 </script>

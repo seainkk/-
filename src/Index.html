@@ -9,7 +9,7 @@
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span aria-hidden="true">▦</span><strong>Реестр баз</strong></div><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span aria-hidden="true">▦</span><strong>Реестр баз</strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-registry" type="button" class="br-button" aria-pressed="true">Реестр</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
   <div id="br-notice" class="br-notice" role="status" aria-live="polite" hidden></div>
   <div class="br-layout">
     <aside class="br-sidebar" aria-label="Папки и таблицы">
@@ -23,6 +23,13 @@
         <div class="br-folder-heading"><p id="br-breadcrumb" class="br-breadcrumb"></p><h1 id="br-folder-title"></h1><p id="br-folder-summary" class="br-muted"></p></div>
         <div id="br-entries" class="br-entries" aria-label="Содержимое папки"></div>
         <div id="br-empty" class="br-empty" hidden><span aria-hidden="true">▱</span><h2>В этой папке пока пусто</h2><p>Создайте базу или добавьте Google Таблицу в эту папку на Диске, затем обновите реестр.</p><button id="br-empty-create" type="button" class="br-button br-primary">Создать базу</button></div>
+      </section>
+      <section id="br-segments-view" class="br-segments-view" hidden aria-labelledby="br-segments-title">
+        <div class="br-segments-heading"><div><h1 id="br-segments-title">Сегменты</h1><p id="br-segments-count" class="br-muted"></p></div><a id="br-segments-source" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Папка «Аутричи» →</a></div>
+        <p id="br-segments-rules" class="br-segments-rules">Правила статусов и подсчёта ещё не настроены. Будущие статусы: «В работе», «Подготовка», «Нет контактов».</p>
+        <p id="br-segments-health" class="br-segments-health" role="status" aria-live="polite"></p>
+        <div id="br-segments-empty" class="br-segments-empty" role="status" hidden><h2 id="br-segments-empty-title"></h2><p id="br-segments-empty-description"></p></div>
+        <div id="br-segments-cards" class="br-segments-cards"></div>
       </section>
     </main>
   </div>

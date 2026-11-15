@@ -2,6 +2,8 @@
 var REGISTRY_CONFIG = Object.freeze({
   title: 'Реестр баз',
   defaultRootFolderId: '1WKcvDDKqYBo94eXsYc5vKp6OPtOzv6Wh',
+  defaultSegmentsFolderId: '1sQ8WrTgdEOPTPYLIwoBwHb6gL_ULT4yu',
+  segmentsFolderName: 'Аутричи',
   spreadsheetMime: 'application/vnd.google-apps.spreadsheet',
   maxTreeEntries: 500,
   maxTreeDepth: 10,

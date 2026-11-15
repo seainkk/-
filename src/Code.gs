@@ -49,7 +49,8 @@ function getBootstrap() {
     visit(root, 0);
     folders.sort(byName_);
     files.sort(byName_);
-    return { user: { email: context.email, isAdmin: context.isAdmin }, registry: { id: root.getId(), name: root.getName() }, folders: folders, files: files };
+    var registry = { id: root.getId(), name: root.getName() };
+    return { user: { email: context.email, isAdmin: context.isAdmin }, registry: registry, folders: folders, files: files, segments: buildSegments_(context, registry, folders, files) };
   });
 }
 

@@ -14,7 +14,7 @@ const OUTSIDE = 'outside_sheet_1234567890';
 const OTHER = 'outside_folder_1234567890';
 const MEMBER = 'member@example.com';
 const SHEET_MIME = 'application/vnd.google-apps.spreadsheet';
-const code = () => ['Config.gs', 'Code.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
+const code = () => ['Config.gs', 'Code.gs', 'Segments.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
 
 function iterator(items) {
   let position = 0;
