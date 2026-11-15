@@ -6,12 +6,6 @@ var REGISTRY_CONFIG = Object.freeze({
   maxTreeEntries: 500,
   maxTreeDepth: 10,
   maxAncestryNodes: 100,
-  maxWindowRows: 50,
-  maxWindowColumns: 10,
-  maxCellLength: 5000,
-  maxExtraRows: 500,
-  maxExtraColumns: 50,
-  maxGridCells: 10000000,
   creationReceiptLimit: 80
 });
 

@@ -1,7 +1,8 @@
 /**
  * Standalone Apps Script web app. Every remote operation verifies the signed-in
- * user and the item's actual Drive ancestry. Drive/Sheets OAuth scopes cover the
- * user's Drive broadly; the application restricts operations to its registry.
+ * user and the item's actual Drive ancestry. Existing spreadsheets are opened
+ * only by their Google Sheets links; this app never reads or edits cell data.
+ * Drive/Sheets scopes are needed for file metadata and creating blank bases.
  */
 function doGet() {
   try {
@@ -48,71 +49,7 @@ function getBootstrap() {
     visit(root, 0);
     folders.sort(byName_);
     files.sort(byName_);
-    return { user: { email: context.email, isAdmin: context.isAdmin }, registry: { id: root.getId(), name: root.getName() }, folders: folders, files: files, limits: { rows: REGISTRY_CONFIG.maxWindowRows, columns: REGISTRY_CONFIG.maxWindowColumns } };
-  });
-}
-
-function loadTable(request) {
-  return api_(function () {
-    var context = authorize_();
-    var input = object_(request);
-    var file = registryFile_(context, input.fileId);
-    var book = SpreadsheetApp.openById(file.getId());
-    var sheet = selectedSheet_(book, input.sheetId);
-    var startRow = positiveInteger_(input.startRow === undefined ? 1 : input.startRow, 'Номер строки');
-    var startColumn = positiveInteger_(input.startColumn === undefined ? 1 : input.startColumn, 'Номер столбца');
-    var rowCount = windowSize_(input.rowCount, REGISTRY_CONFIG.maxWindowRows);
-    var columnCount = windowSize_(input.columnCount, REGISTRY_CONFIG.maxWindowColumns);
-    var gridRows = sheet.getMaxRows(), gridColumns = sheet.getMaxColumns();
-    if (startRow > gridRows || startColumn > gridColumns) fail_('INVALID_RANGE', 'Выбранная область находится за границей листа.');
-    rowCount = Math.min(rowCount, gridRows - startRow + 1);
-    columnCount = Math.min(columnCount, gridColumns - startColumn + 1);
-    var range = sheet.getRange(startRow, startColumn, rowCount, columnCount);
-    var display = range.getDisplayValues(), values = range.getValues(), formulas = range.getFormulas();
-    var inputs = [], revisions = [];
-    for (var row = 0; row < rowCount; row++) {
-      inputs[row] = []; revisions[row] = [];
-      for (var column = 0; column < columnCount; column++) {
-        inputs[row][column] = editableValue_(values[row][column], formulas[row][column], display[row][column]);
-        revisions[row][column] = revision_(values[row][column], formulas[row][column]);
-      }
-    }
-    return { fileId: file.getId(), fileName: file.getName(), url: spreadsheetUrl_(file.getId()), sheets: book.getSheets().map(function (item) { return { id: item.getSheetId(), name: item.getName() }; }), sheetId: sheet.getSheetId(), sheetName: sheet.getName(), startRow: startRow, startColumn: startColumn, gridRows: gridRows, gridColumns: gridColumns, values: display, inputs: inputs, revisions: revisions };
-  });
-}
-
-function writeCell(request) {
-  return api_(function () {
-    var context = authorize_();
-    var input = object_(request);
-    var row = positiveInteger_(input.row, 'Номер строки'), column = positiveInteger_(input.column, 'Номер столбца');
-    if (typeof input.value !== 'string' || input.value.length > REGISTRY_CONFIG.maxCellLength) fail_('INVALID_VALUE', 'Значение ячейки должно содержать не более 5000 символов.');
-    if (typeof input.expected !== 'string' || !input.expected || input.expected.length > 200) fail_('INVALID_REQUEST', 'Сначала обновите данные выбранной ячейки.');
-    return locked_(function () {
-      var file = registryFile_(context, input.fileId);
-      var book = SpreadsheetApp.openById(file.getId());
-      var sheet = selectedSheet_(book, input.sheetId);
-      var rows = sheet.getMaxRows(), columns = sheet.getMaxColumns();
-      if (row > rows + REGISTRY_CONFIG.maxExtraRows || column > columns + REGISTRY_CONFIG.maxExtraColumns) fail_('INVALID_RANGE', 'Выбранная ячейка слишком далеко за границей листа.');
-      var exists = row <= rows && column <= columns;
-      var cell = exists ? sheet.getRange(row, column) : null;
-      var currentRevision = cell ? revision_(cell.getValue(), cell.getFormula()) : revision_('', '');
-      if (currentRevision !== input.expected) fail_('CONFLICT', 'Эту ячейку уже изменили. Обновите таблицу перед повторным редактированием.');
-      if (!exists) {
-        var finalRows = Math.max(row, rows), finalColumns = Math.max(column, columns);
-        var total = book.getSheets().reduce(function (sum, item) { return sum + item.getMaxRows() * item.getMaxColumns(); }, 0);
-        if (total - rows * columns + finalRows * finalColumns > REGISTRY_CONFIG.maxGridCells) fail_('GRID_LIMIT', 'Достигнут лимит размера Google Таблицы.');
-        if (row > rows) sheet.insertRowsAfter(rows, row - rows);
-        if (column > columns) sheet.insertColumnsAfter(columns, column - columns);
-        cell = sheet.getRange(row, column);
-      }
-      if (input.value === '') cell.clearContent();
-      else if (input.value.charAt(0) === '=') cell.setFormula(input.value);
-      else cell.setValue(typedValue_(input.value));
-      SpreadsheetApp.flush();
-      var value = cell.getValue(), formula = cell.getFormula(), display = cell.getDisplayValue();
-      return { row: row, column: column, display: display, input: editableValue_(value, formula, display), revision: revision_(value, formula), gridRows: sheet.getMaxRows(), gridColumns: sheet.getMaxColumns() };
-    });
+    return { user: { email: context.email, isAdmin: context.isAdmin }, registry: { id: root.getId(), name: root.getName() }, folders: folders, files: files };
   });
 }
 
@@ -221,16 +158,6 @@ function insideRegistry_(item, rootId) {
   return false;
 }
 
-function selectedSheet_(book, sheetId) {
-  var sheets = book.getSheets();
-  if (!sheets.length) fail_('NOT_FOUND', 'В Google Таблице нет доступных листов.');
-  if (sheetId === undefined || sheetId === null || sheetId === '') return sheets[0];
-  var numericId = Number(sheetId);
-  if (!Number.isInteger(numericId) || numericId < 0) fail_('INVALID_REQUEST', 'Некорректный идентификатор листа.');
-  for (var index = 0; index < sheets.length; index++) if (sheets[index].getSheetId() === numericId) return sheets[index];
-  fail_('NOT_FOUND', 'Выбранный лист больше не существует. Обновите таблицу.');
-}
-
 function creation_(context, kind, requestId, args, callback) {
   if (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) fail_('INVALID_REQUEST', 'Не удалось определить запрос создания. Откройте форму ещё раз.');
   var key = 'CREATE_' + digest_(context.email + '|' + kind + '|' + requestId).slice(0,32);
@@ -270,29 +197,8 @@ function locked_(callback) {
   try { return callback(); } finally { lock.releaseLock(); }
 }
 
-function revision_(value, formula) {
-  var normalized = Object.prototype.toString.call(value) === '[object Date]' ? { date: value.toISOString() } : { type: typeof value, value: value };
-  return digest_(JSON.stringify([normalized, formula || '']));
-}
-
 function digest_(value) {
   return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, value, Utilities.Charset.UTF_8)).replace(/=+$/, '');
-}
-
-function editableValue_(value, formula, display) {
-  if (formula) return formula;
-  if (Object.prototype.toString.call(value) === '[object Date]') return String(display);
-  if (value === null || value === undefined) return '';
-  return String(value);
-}
-
-function typedValue_(value) {
-  if (/^(true|false)$/i.test(value)) return value.toLowerCase() === 'true';
-  if (/^[+-]?(?:(?:0|[1-9]\d*)(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?$/.test(value)) {
-    var number = Number(value.replace(',', '.'));
-    if (Number.isFinite(number) && (!Number.isInteger(number) || Number.isSafeInteger(number))) return number;
-  }
-  return value;
 }
 
 function itemName_(value) {
@@ -301,8 +207,6 @@ function itemName_(value) {
 }
 function id_(value) { if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{10,200}$/.test(value)) fail_('INVALID_ID', 'Некорректный идентификатор файла или папки.'); return value; }
 function object_(value) { if (!value || typeof value !== 'object' || Array.isArray(value)) fail_('INVALID_REQUEST', 'Некорректный запрос приложения.'); return value; }
-function positiveInteger_(value, label) { if (!Number.isInteger(value) || value < 1 || value > 10000000) fail_('INVALID_RANGE', label + ' должен быть положительным целым числом.'); return value; }
-function windowSize_(value, maximum) { if (value === undefined) return maximum; return Math.min(positiveInteger_(value, 'Размер области'), maximum); }
 function normalizeEmail_(value) { return typeof value === 'string' ? value.trim().toLowerCase() : ''; }
 function emailList_(value) { var list; try { list = JSON.parse(value); } catch (error) { list = String(value).split(/[\s,;]+/); } if (!Array.isArray(list)) list = []; return list.map(normalizeEmail_).filter(function (email) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); }); }
 function spreadsheetUrl_(fileId) { return 'https://docs.google.com/spreadsheets/d/' + id_(fileId) + '/edit'; }

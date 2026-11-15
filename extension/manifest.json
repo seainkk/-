@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Реестр баз — задачи в Google Таблицах",
+  "version": "0.1.0",
+  "description": "Сворачиваемое меню задач слева в Google Таблицах и переход в реестр команды. Две задачи пока недоступны.",
+  "minimum_chrome_version": "109",
+  "permissions": ["storage"],
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_title": "Показать / скрыть задачи. Вне таблиц — открыть реестр",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [{
+    "matches": ["https://docs.google.com/spreadsheets/*"],
+    "js": ["shared.js", "content.js"],
+    "run_at": "document_idle",
+    "all_frames": false
+  }]
+}

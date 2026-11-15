@@ -3,107 +3,96 @@
   'use strict';
   const root=document.getElementById('bases-registry-app');
   const $=(id)=>document.getElementById(id);
-  let bootstrap=null, table=null, selectedFolder=null, busy=false, loadEpoch=0;
+  let bootstrap=null, selectedFolder=null, busy=false, formMode=null, renameId=null, creationRequest=null;
   let collapsed=matchMedia('(max-width:640px)').matches;
-  let formMode=null, creationRequest=null, savePromise=null, saveError=null;
-  let selectedKey=null, saveVersion=0;
-  const expanded=new Set(), models=new Map(), dirty=new Map();
+  const expanded=new Set();
   const sorted=(items)=>items.slice().sort((a,b)=>a.name.localeCompare(b.name,'ru'));
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
   function rpc(name,payload){return new Promise((resolve,reject)=>{if(!globalThis.google?.script?.run){reject(new Error('Нет соединения с сервером Google. Откройте опубликованное веб-приложение Apps Script.'));return;}const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);payload===undefined?runner[name]():runner[name](payload);});}
   function nativeUrl(id,sheetId){return 'https://docs.google.com/spreadsheets/d/'+encodeURIComponent(id)+'/edit'+(sheetId===undefined?'':'#gid='+encodeURIComponent(sheetId));}
   function notice(message,kind='info',link=null){const node=$('br-notice');node.hidden=!message;node.className='br-notice'+(kind==='error'?' br-error':'');node.replaceChildren();if(message)node.append(document.createTextNode(message));if(link){const anchor=document.createElement('a');anchor.href=nativeUrl(link.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent=link.label||'Открыть созданную базу';node.append(anchor);}}
-  function folderName(id){if(!bootstrap)return '';if(id===bootstrap.registry.id)return bootstrap.registry.name;return bootstrap.folders.find((folder)=>folder.id===id)?.name||'Папка';}
-  function fileById(id){return bootstrap?.files.find((file)=>file.id===id);}
-  function folderPath(id){const names=[],seen=new Set();while(id&&bootstrap&&id!==bootstrap.registry.id&&!seen.has(id)){seen.add(id);const folder=bootstrap.folders.find((item)=>item.id===id);if(!folder)break;names.unshift(folder.name);id=folder.parentId;}return [bootstrap?.registry.name,...names].filter(Boolean).join(' / ');}
+  function folderById(id){if(!bootstrap)return null;return id===bootstrap.registry.id?bootstrap.registry:bootstrap.folders.find((folder)=>folder.id===id);}
+  function folderName(id){return folderById(id)?.name||'Папка';}
+  function folderPath(id){const names=[],seen=new Set();while(id&&bootstrap&&id!==bootstrap.registry.id&&!seen.has(id)){seen.add(id);const folder=folderById(id);if(!folder)break;names.unshift(folder.name);id=folder.parentId;}return [bootstrap?.registry.name,...names].filter(Boolean).join(' / ');}
   function button(className,text){const node=document.createElement('button');node.type='button';node.className='br-button '+className;if(text)node.textContent=text;return node;}
+  function sheetLink(file,className){const anchor=document.createElement('a');anchor.className=className;anchor.href=nativeUrl(file.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.dataset.file=file.id;anchor.title=file.name;return anchor;}
+  function openFolder(id){if(busy||!folderById(id))return;selectedFolder=id;expanded.add(id);render();}
   function renderTree(){
     const target=$('br-tree');target.replaceChildren();if(!bootstrap)return;
     const seen=new Set();
-    function appendFolder(folder,depth){if(seen.has(folder.id)||depth>20)return;seen.add(folder.id);const group=document.createElement('div');group.className='br-tree-group';const node=button('br-folder-button');node.style.paddingLeft=(Math.min(depth,8)*12+5)+'px';node.dataset.folder=folder.id;node.setAttribute('aria-expanded',String(expanded.has(folder.id)));node.setAttribute('aria-current',String(selectedFolder===folder.id));const arrow=document.createElement('span');arrow.className='br-tree-arrow';arrow.textContent=expanded.has(folder.id)?'▾':'▸';const symbol=document.createElement('span');symbol.className='br-tree-symbol';symbol.textContent='▱';const label=document.createElement('span');label.className='br-tree-name';label.textContent=folder.name;node.append(arrow,symbol,label);node.title=folder.name;node.addEventListener('click',()=>{if(busy)return;selectedFolder=folder.id;expanded.has(folder.id)?expanded.delete(folder.id):expanded.add(folder.id);renderTree();renderForm();});group.append(node);
-      if(expanded.has(folder.id)){const folders=sorted(bootstrap.folders.filter((item)=>item.parentId===folder.id));const files=sorted(bootstrap.files.filter((item)=>item.parentId===folder.id));for(const child of folders)appendFolderTo(child,depth+1,group);for(const file of files){const item=button('br-file-button');item.dataset.file=file.id;item.style.paddingLeft=(Math.min(depth,8)*12+26)+'px';item.setAttribute('aria-current',table?.fileId===file.id?'page':'false');const icon=document.createElement('span');icon.className='br-tree-symbol';icon.textContent='▦';const name=document.createElement('span');name.className='br-tree-name';name.textContent=file.name;item.append(icon,name);item.title=file.name;item.addEventListener('click',()=>navigate(()=>loadFile(file.id)));group.append(item);}if(!folders.length&&!files.length){const empty=document.createElement('div');empty.className='br-empty-folder';empty.textContent='Папка пуста';group.append(empty);}}
+    function makeFolder(folder,depth){
+      if(seen.has(folder.id)||depth>20)return null;seen.add(folder.id);
+      const group=document.createElement('div');group.className='br-tree-group';
+      const node=button('br-folder-button');node.style.paddingLeft=(Math.min(depth,8)*12+5)+'px';node.dataset.folder=folder.id;node.setAttribute('aria-expanded',String(expanded.has(folder.id)));node.setAttribute('aria-current',String(selectedFolder===folder.id));node.title=folder.name;
+      const arrow=document.createElement('span');arrow.className='br-tree-arrow';arrow.textContent=expanded.has(folder.id)?'▾':'▸';
+      const symbol=document.createElement('span');symbol.className='br-tree-symbol';symbol.textContent='▱';
+      const label=document.createElement('span');label.className='br-tree-name';label.textContent=folder.name;node.append(arrow,symbol,label);
+      node.addEventListener('click',()=>{if(busy)return;selectedFolder=folder.id;expanded.has(folder.id)?expanded.delete(folder.id):expanded.add(folder.id);render();});group.append(node);
+      if(expanded.has(folder.id)){
+        const folders=sorted(bootstrap.folders.filter((item)=>item.parentId===folder.id));
+        const files=sorted(bootstrap.files.filter((item)=>item.parentId===folder.id));
+        for(const child of folders){const subtree=makeFolder(child,depth+1);if(subtree)group.append(subtree);}
+        for(const file of files){const anchor=sheetLink(file,'br-button br-file-link');anchor.style.paddingLeft=(Math.min(depth,8)*12+26)+'px';const icon=document.createElement('span');icon.className='br-tree-symbol';icon.textContent='▦';const name=document.createElement('span');name.className='br-tree-name';name.textContent=file.name;anchor.append(icon,name);group.append(anchor);}
+        if(!folders.length&&!files.length){const empty=document.createElement('div');empty.className='br-empty-folder';empty.textContent='Папка пуста';group.append(empty);}
+      }
       return group;
     }
-    function appendFolderTo(folder,depth,parent){const group=appendFolder(folder,depth);if(group)parent.append(group);}
-    appendFolderTo(bootstrap.registry,0,target);
+    const tree=makeFolder(bootstrap.registry,0);if(tree)target.append(tree);
     $('br-destination').textContent='Создание в папке: '+folderName(selectedFolder);
-    updateControls();
+  }
+  function renderFolder(){
+    $('br-folder-view').hidden=!bootstrap;if(!bootstrap)return;
+    $('br-folder-title').textContent=folderName(selectedFolder);$('br-breadcrumb').textContent=folderPath(selectedFolder);
+    const folders=sorted(bootstrap.folders.filter((item)=>item.parentId===selectedFolder));
+    const files=sorted(bootstrap.files.filter((item)=>item.parentId===selectedFolder));
+    $('br-folder-summary').textContent='Папок: '+folders.length+' · Таблиц: '+files.length;
+    const entries=$('br-entries');entries.replaceChildren();
+    function appendEntry(item,isFolder){
+      const row=document.createElement('div');row.className='br-entry';
+      const main=isFolder?button('br-entry-main'):sheetLink(item,'br-entry-main');
+      if(isFolder){main.dataset.openFolder=item.id;main.addEventListener('click',()=>openFolder(item.id));}
+      const icon=document.createElement('span');icon.className='br-entry-icon';icon.textContent=isFolder?'▱':'▦';icon.setAttribute('aria-hidden','true');
+      const details=document.createElement('span');details.className='br-entry-details';const name=document.createElement('span');name.className='br-entry-name';name.textContent=item.name;const kind=document.createElement('span');kind.className='br-entry-kind';kind.textContent=isFolder?'Папка':'Google Таблица';details.append(name,kind);main.append(icon,details);row.append(main);
+      if(isFolder){const arrow=document.createElement('span');arrow.className='br-entry-arrow';arrow.textContent='›';arrow.setAttribute('aria-hidden','true');row.append(arrow);}else{const rename=button('br-rename','✎');rename.dataset.rename=item.id;rename.setAttribute('aria-label','Переименовать базу «'+item.name+'»');rename.title='Переименовать базу';rename.addEventListener('click',()=>showForm('rename',item.id));row.append(rename);}
+      entries.append(row);
+    }
+    folders.forEach((folder)=>appendEntry(folder,true));files.forEach((file)=>appendEntry(file,false));
+    $('br-empty').hidden=folders.length+files.length!==0;
   }
   function setCollapsed(){root.dataset.collapsed=String(collapsed);$('br-menu-toggle').setAttribute('aria-label',collapsed?'Показать меню':'Свернуть меню');$('br-menu-toggle').setAttribute('aria-expanded',String(!collapsed));}
   function updateControls(){
     $('br-refresh').disabled=busy;
     for(const id of ['br-new-base','br-new-folder','br-empty-create'])$(id).disabled=busy||!bootstrap;
-    for(const node of root.querySelectorAll('#br-tree button'))node.disabled=busy;
+    for(const node of root.querySelectorAll('#br-tree button,#br-entries button'))node.disabled=busy;
     $('br-item-submit').disabled=busy;$('br-item-name').disabled=busy;$('br-item-cancel').disabled=busy;
-    $('br-rename').disabled=busy||!table;$('br-sheet-select').disabled=busy||!table;
-    for(const model of models.values())model.element.contentEditable=busy||!!saveError?'false':'plaintext-only';
-    if(table){const rows=bootstrap.limits.rows,columns=bootstrap.limits.columns;$('br-prev-rows').disabled=busy||table.startRow<=1;$('br-next-rows').disabled=busy||table.startRow+rows>table.gridRows;$('br-prev-columns').disabled=busy||table.startColumn<=1;$('br-next-columns').disabled=busy||table.startColumn+columns>table.gridColumns;}
-    $('br-retry-save').disabled=busy||!!savePromise;$('br-revert-edit').disabled=busy||!!savePromise;
   }
   function renderForm(){const node=$('br-item-form');node.hidden=!formMode;if(!formMode)return;const rename=formMode==='rename';$('br-item-label').textContent=rename?'Название базы':formMode==='folder'?'Новая папка':'Новая база';$('br-item-destination').textContent=rename?'':'В папке «'+folderName(selectedFolder)+'»';$('br-item-submit').textContent=rename?'Сохранить':'Создать';}
-  function showForm(mode){if(busy||!bootstrap)return;formMode=mode;$('br-item-name').value=mode==='rename'?table.fileName:'';$('br-form-error').textContent='';renderForm();$('br-item-name').focus();}
-  function columnLabel(index){let result='';for(let value=index;value>0;value=Math.floor((value-1)/26))result=String.fromCharCode(65+(value-1)%26)+result;return result;}
-  function updateCellBar(model){if(!model)return;$('br-cell-address').textContent=columnLabel(model.column)+model.row;$('br-cell-value').textContent=document.activeElement===model.element?model.element.textContent:dirty.get(model.key)?.value??model.input;}
-  function renderTable(){
-    models.clear();selectedKey=null;$('br-document').hidden=!table;$('br-empty').hidden=!!table;if(!table)return;
-    const file=fileById(table.fileId);$('br-file-name').textContent=table.fileName;$('br-breadcrumb').textContent=folderPath(file?.parentId||selectedFolder);$('br-native-link').href=nativeUrl(table.fileId,table.sheetId);
-    const select=$('br-sheet-select');select.replaceChildren();for(const sheet of table.sheets){const option=document.createElement('option');option.value=String(sheet.id);option.textContent=sheet.name;option.selected=String(sheet.id)===String(table.sheetId);select.append(option);}
-    const rows=Math.min(bootstrap.limits.rows,Math.max(1,table.gridRows-table.startRow+1));const columns=Math.min(bootstrap.limits.columns,Math.max(1,table.gridColumns-table.startColumn+1));
-    const thead=$('br-grid').tHead,tbody=$('br-grid').tBodies[0];thead.replaceChildren();tbody.replaceChildren();$('br-grid').style.minWidth=Math.max(450,columns*145+43)+'px';
-    const head=document.createElement('tr');for(let c=-1;c<columns;c++){const th=document.createElement('th');th.scope='col';th.textContent=c<0?'':columnLabel(table.startColumn+c);head.append(th);}thead.append(head);
-    for(let r=0;r<rows;r++){const tr=document.createElement('tr');const number=document.createElement('th');number.scope='row';number.textContent=String(table.startRow+r);tr.append(number);
-      for(let c=0;c<columns;c++){const cell=document.createElement('td');const row=table.startRow+r,column=table.startColumn+c,key=row+':'+column;const model={key,row,column,input:String(table.inputs[r]?.[c]??''),display:String(table.values[r]?.[c]??''),revision:table.revisions[r]?.[c],element:cell};models.set(key,model);cell.contentEditable='plaintext-only';cell.spellcheck=false;cell.dataset.key=key;cell.setAttribute('aria-label',columnLabel(column)+row);cell.textContent=model.display;
-        cell.addEventListener('focus',()=>{root.querySelectorAll('.br-cell-selected').forEach((node)=>node.classList.remove('br-cell-selected'));selectedKey=key;cell.classList.add('br-cell-selected');cell.textContent=dirty.get(key)?.value??model.input;cell.__start=cell.textContent;updateCellBar(model);});
-        cell.addEventListener('input',()=>{cell.classList.add('br-cell-dirty');$('br-save-status').textContent='Есть несохранённая правка';updateCellBar(model);});
-        cell.addEventListener('blur',()=>commitCell(model));
-        cell.addEventListener('paste',(event)=>{const text=event.clipboardData?.getData('text/plain');if(typeof text==='string'){event.preventDefault();document.execCommand('insertText',false,text.replace(/[\r\n\t]/g,' '));}});
-        cell.addEventListener('keydown',(event)=>{if(event.key==='Escape'){event.preventDefault();cell.textContent=cell.__start??model.input;cell.blur();return;}if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();const dc=event.key==='Tab'?(event.shiftKey?-1:1):0;const dr=event.key==='Enter'?(event.shiftKey?-1:1):0;let nr=row+dr,nc=column+dc;if(nc>=table.startColumn+columns){nc=table.startColumn;nr++;}if(nc<table.startColumn){nc=table.startColumn+columns-1;nr--;}cell.blur();models.get(nr+':'+nc)?.element.focus();}});
-        tr.append(cell);
-      }tbody.append(tr);
-    }
-    $('br-row-range').textContent='Строки '+table.startRow+'–'+(table.startRow+rows-1)+' / '+table.gridRows;$('br-column-range').textContent=columnLabel(table.startColumn)+'–'+columnLabel(table.startColumn+columns-1)+' / '+columnLabel(table.gridColumns);$('br-cell-address').textContent=columnLabel(table.startColumn)+table.startRow;$('br-cell-value').textContent='';$('br-save-status').textContent='Таблица загружена';updateControls();
-  }
-  function commitCell(model){
-    if(busy&&model.element.contentEditable==='false')return;
-    const value=model.element.textContent;const pending=dirty.get(model.key);
-    if(value===model.input&&!pending){model.element.textContent=model.display;model.element.classList.remove('br-cell-dirty');return;}
-    if(pending?.value===value){if(!saveError)startSaving();return;}
-    dirty.set(model.key,{value,version:++saveVersion});model.element.classList.add('br-cell-dirty');startSaving();
-  }
-  function showSaveError(){const node=$('br-save-error');node.hidden=!saveError;if(saveError){const conflict=saveError.code==='CONFLICT';$('br-save-error-text').textContent=saveError.message+(conflict?' Правка сохранена на экране. Отмените несохранённые правки и перечитайте таблицу, чтобы увидеть актуальное значение.':' Несохранённый текст остался в ячейке.');$('br-retry-save').hidden=conflict;$('br-save-status').textContent='Не сохранено';}updateControls();}
-  function startSaving(){
-    if(saveError)return Promise.resolve();if(savePromise)return savePromise;
-    savePromise=(async()=>{while(dirty.size&&!saveError){const [key,entry]=dirty.entries().next().value;const model=models.get(key);if(!model){dirty.delete(key);continue;}$('br-save-status').textContent='Сохранение в Google Таблицу…';
-      try{const result=await rpc('writeCell',{fileId:table.fileId,sheetId:table.sheetId,row:model.row,column:model.column,value:entry.value,expected:model.revision});model.input=String(result.input??entry.value);model.display=String(result.display??model.input);model.revision=result.revision;table.gridRows=result.gridRows;table.gridColumns=result.gridColumns;const latest=dirty.get(key);if(latest?.version===entry.version){dirty.delete(key);const activeChanged=document.activeElement===model.element&&model.element.textContent!==model.input;model.element.classList.remove('br-cell-error');model.element.classList.toggle('br-cell-dirty',activeChanged);if(document.activeElement!==model.element)model.element.textContent=model.display;}if(selectedKey===key)updateCellBar(model);$('br-save-status').textContent=dirty.size?'Сохранение в Google Таблицу…':root.querySelector('td:focus.br-cell-dirty')?'Есть несохранённая правка':'Сохранено в Google Таблице';}
-      catch(error){const parsed=failure(error);saveError={...parsed,key};const active=document.activeElement;if(active?.dataset?.key&&root.contains(active))active.blur();model.element.classList.add('br-cell-error');showSaveError();}
-    }})().finally(()=>{savePromise=null;updateControls();});return savePromise;
-  }
-  async function flushEdits(){const active=document.activeElement;if(active?.dataset?.key&&root.contains(active))active.blur();await startSaving();if(saveError||dirty.size)throw new Error('Сначала сохраните или отмените несохранённые правки в таблице.');}
-  async function navigate(action){if(busy)return;busy=true;const active=document.activeElement;if(active?.dataset?.key&&root.contains(active))active.blur();updateControls();try{await flushEdits();await action();}catch(error){notice(failure(error).message,'error');}finally{busy=false;$('br-loading').hidden=true;updateControls();}}
-  async function loadFile(fileId,sheetId,startRow=1,startColumn=1){const epoch=++loadEpoch;$('br-loading').hidden=false;$('br-loading').textContent='Загружаем таблицу…';const result=await rpc('loadTable',{fileId,...(sheetId===undefined?{}:{sheetId}),startRow,startColumn,rowCount:bootstrap.limits.rows,columnCount:bootstrap.limits.columns});if(epoch!==loadEpoch)return;table=result;selectedFolder=fileById(fileId)?.parentId||bootstrap.registry.id;dirty.clear();saveError=null;showSaveError();renderTree();renderTable();$('br-loading').hidden=true;}
-  async function refreshRegistry(preserve=true){const previous=table;const result=await rpc('getBootstrap');bootstrap=result;selectedFolder=selectedFolder&&(selectedFolder===result.registry.id||result.folders.some((f)=>f.id===selectedFolder))?selectedFolder:result.registry.id;expanded.add(result.registry.id);$('br-user').textContent=result.user.email||'';renderTree();renderForm();if(preserve&&previous&&fileById(previous.fileId))await loadFile(previous.fileId,previous.sheetId,previous.startRow,previous.startColumn);else if(!previous||!fileById(previous.fileId)){table=null;renderTable();renderEmpty();}}
-  function renderEmpty(){if(table)return;$('br-empty').hidden=false;const any=!!bootstrap?.files.length;$('br-empty-title').textContent=any?'Выберите базу':'В реестре пока нет баз';$('br-empty-description').textContent=any?'Откройте таблицу в меню слева.':'Создайте первую Google Таблицу. Она появится в выбранной папке реестра.';$('br-empty-create').hidden=any;}
+  function render(){renderTree();renderFolder();renderForm();updateControls();}
+  function showForm(mode,id){if(busy||!bootstrap)return;const file=mode==='rename'?bootstrap.files.find((item)=>item.id===id):null;if(mode==='rename'&&!file)return;formMode=mode;renameId=file?.id||null;$('br-item-name').value=file?.name||'';$('br-form-error').textContent='';renderForm();$('br-item-name').focus();}
+  async function runAction(action,label){if(busy)return;busy=true;$('br-loading').textContent=label||'Обновляем реестр…';$('br-loading').hidden=false;updateControls();try{await action();}catch(error){notice(failure(error).message,'error');}finally{busy=false;$('br-loading').hidden=true;updateControls();}}
+  async function refreshRegistry(){const result=await rpc('getBootstrap');bootstrap=result;if(!folderById(selectedFolder))selectedFolder=result.registry.id;expanded.add(result.registry.id);$('br-user').textContent=result.user.email||'';render();}
   $('br-menu-toggle').addEventListener('click',()=>{collapsed=!collapsed;setCollapsed();});
-  $('br-refresh').addEventListener('click',()=>navigate(async()=>{notice(null);await refreshRegistry();}));
-  $('br-new-base').addEventListener('click',()=>showForm('file'));$('br-empty-create').addEventListener('click',()=>showForm('file'));$('br-new-folder').addEventListener('click',()=>showForm('folder'));$('br-rename').addEventListener('click',()=>showForm('rename'));
-  $('br-item-cancel').addEventListener('click',()=>{if(busy)return;formMode=null;renderForm();});
-  $('br-item-form').addEventListener('submit',(event)=>{event.preventDefault();const name=$('br-item-name').value.trim();if(!name||!formMode)return;const mode=formMode,parentId=selectedFolder;
-    navigate(async()=>{notice(null);$('br-form-error').textContent='';if(mode==='rename'){const result=await rpc('renameItem',{id:table.fileId,name,kind:'file'});table.fileName=result.name;const file=fileById(result.id);if(file)file.name=result.name;formMode=null;renderForm();$('br-file-name').textContent=result.name;renderTree();return;}
+  $('br-refresh').addEventListener('click',()=>runAction(async()=>{notice(null);await refreshRegistry();}));
+  $('br-new-base').addEventListener('click',()=>showForm('file'));$('br-empty-create').addEventListener('click',()=>showForm('file'));$('br-new-folder').addEventListener('click',()=>showForm('folder'));
+  $('br-item-cancel').addEventListener('click',()=>{if(busy)return;formMode=null;renameId=null;renderForm();});
+  $('br-item-form').addEventListener('submit',(event)=>{
+    event.preventDefault();const name=$('br-item-name').value.trim();if(!name||!formMode)return;const mode=formMode,parentId=selectedFolder,id=renameId;
+    runAction(async()=>{
+      notice(null);$('br-form-error').textContent='';
+      if(mode==='rename'){
+        try{const result=await rpc('renameItem',{id,name,kind:'file'});const file=bootstrap.files.find((item)=>item.id===result.id);if(file)file.name=result.name;formMode=null;renameId=null;render();notice('Название базы изменено.');}
+        catch(error){$('br-form-error').textContent=failure(error).message;throw error;}return;
+      }
       const signature=JSON.stringify({mode,parentId,name});if(creationRequest?.signature!==signature)creationRequest={signature,id:globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2)};
       let created;try{created=await rpc(mode==='file'?'createBase':'createFolder',{parentId,name,requestId:creationRequest.id});}catch(error){$('br-form-error').textContent=failure(error).message;throw error;}
-      formMode=null;renderForm();creationRequest=null;
-      try{await refreshRegistry(false);if(mode==='file')await loadFile(created.file.id);else{selectedFolder=created.folder.id;expanded.add(parentId);expanded.add(selectedFolder);renderTree();}notice(mode==='file'?'База создана в Google Диске.':'Папка создана в реестре.');}
-      catch(error){notice((mode==='file'?'База':'Папка')+' «'+name+'» создана. Обновить интерфейс не удалось: '+failure(error).message,'error',mode==='file'?{id:created.file.id}:null);}
-    });
+      formMode=null;creationRequest=null;
+      if(mode==='file'){if(!bootstrap.files.some((file)=>file.id===created.file.id))bootstrap.files.push(created.file);selectedFolder=parentId;}
+      else{if(!bootstrap.folders.some((folder)=>folder.id===created.folder.id))bootstrap.folders.push(created.folder);selectedFolder=created.folder.id;expanded.add(selectedFolder);}
+      expanded.add(parentId);render();
+      try{await refreshRegistry();notice(mode==='file'?'База создана в Google Диске.':'Папка создана в реестре.','info',mode==='file'?{id:created.file.id}:null);}
+      catch(error){notice((mode==='file'?'База':'Папка')+' «'+name+'» создана. Обновить реестр не удалось: '+failure(error).message,'error',mode==='file'?{id:created.file.id}:null);}
+    },mode==='rename'?'Сохраняем название…':mode==='file'?'Создаём базу…':'Создаём папку…');
   });
-  $('br-sheet-select').addEventListener('change',()=>{const next=$('br-sheet-select').value;const previous=table.sheetId;navigate(()=>loadFile(table.fileId,next)).finally(()=>{if(table)$('br-sheet-select').value=String(table.sheetId??previous);});});
-  $('br-prev-rows').addEventListener('click',()=>navigate(()=>loadFile(table.fileId,table.sheetId,Math.max(1,table.startRow-bootstrap.limits.rows),table.startColumn)));
-  $('br-next-rows').addEventListener('click',()=>navigate(()=>loadFile(table.fileId,table.sheetId,table.startRow+bootstrap.limits.rows,table.startColumn)));
-  $('br-prev-columns').addEventListener('click',()=>navigate(()=>loadFile(table.fileId,table.sheetId,table.startRow,Math.max(1,table.startColumn-bootstrap.limits.columns))));
-  $('br-next-columns').addEventListener('click',()=>navigate(()=>loadFile(table.fileId,table.sheetId,table.startRow,table.startColumn+bootstrap.limits.columns)));
-  $('br-retry-save').addEventListener('click',async()=>{if(savePromise)return;saveError=null;showSaveError();await startSaving();});
-  $('br-revert-edit').addEventListener('click',()=>{if(savePromise||busy)return;dirty.clear();saveError=null;showSaveError();navigate(()=>loadFile(table.fileId,table.sheetId,table.startRow,table.startColumn));});
-  window.addEventListener('beforeunload',(event)=>{if(dirty.size||savePromise||root.querySelector('td:focus.br-cell-dirty')){event.preventDefault();event.returnValue='';}});
-  setCollapsed();navigate(async()=>{await refreshRegistry(false);notice(null);}).catch(()=>{});
+  setCollapsed();runAction(async()=>{await refreshRegistry();notice(null);},'Подключаем Google Диск…');
 })();
 </script>

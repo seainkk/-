@@ -19,14 +19,10 @@
     <main class="br-main">
       <form id="br-item-form" class="br-item-form" hidden><div class="br-form-heading"><label id="br-item-label" for="br-item-name">Название</label><span id="br-item-destination" class="br-muted"></span></div><div class="br-form-fields"><input id="br-item-name" type="text" autocomplete="off" maxlength="100" required><button id="br-item-submit" type="submit" class="br-button br-primary">Создать</button><button id="br-item-cancel" type="button" class="br-button">Отмена</button></div><p id="br-form-error" class="br-form-error" role="alert"></p></form>
       <div id="br-loading" class="br-loading" aria-live="polite">Подключаем Google Диск…</div>
-      <section id="br-empty" class="br-empty" hidden><span aria-hidden="true">▦</span><h1 id="br-empty-title">Выберите базу</h1><p id="br-empty-description">Откройте таблицу в меню слева.</p><button id="br-empty-create" type="button" class="br-button br-primary">Создать первую базу</button></section>
-      <section id="br-document" class="br-document" hidden>
-        <div class="br-document-heading"><div class="br-title-group"><p id="br-breadcrumb" class="br-breadcrumb"></p><div class="br-title-row"><h1 id="br-file-name"></h1><button id="br-rename" type="button" class="br-button br-rename" aria-label="Переименовать базу">✎</button></div></div><a id="br-native-link" class="br-button br-native-link" target="_blank" rel="noopener noreferrer">Открыть в Google Таблицах ↗</a></div>
-        <div class="br-sheet-controls"><label for="br-sheet-select">Лист</label><select id="br-sheet-select" aria-label="Лист таблицы"></select></div>
-        <div class="br-formula-bar"><span id="br-cell-address">A1</span><span class="br-fx">fx</span><span id="br-cell-value"></span></div>
-        <div class="br-grid-wrap"><table id="br-grid" class="br-grid" aria-label="Редактируемая Google Таблица"><thead></thead><tbody></tbody></table></div>
-        <div id="br-save-error" class="br-save-error" role="alert" hidden><p id="br-save-error-text"></p><div><button id="br-retry-save" type="button" class="br-button br-primary">Повторить сохранение</button><button id="br-revert-edit" type="button" class="br-button">Отменить правки и перечитать</button></div></div>
-        <div class="br-table-footer"><span id="br-save-status" class="br-muted" aria-live="polite">Таблица загружена</span><div class="br-paging"><div class="br-page-group"><button id="br-prev-rows" type="button" class="br-button br-page-button" aria-label="Предыдущие строки">↑</button><span id="br-row-range"></span><button id="br-next-rows" type="button" class="br-button br-page-button" aria-label="Следующие строки">↓</button></div><div class="br-page-group"><button id="br-prev-columns" type="button" class="br-button br-page-button" aria-label="Предыдущие столбцы">←</button><span id="br-column-range"></span><button id="br-next-columns" type="button" class="br-button br-page-button" aria-label="Следующие столбцы">→</button></div></div></div>
+      <section id="br-folder-view" hidden aria-labelledby="br-folder-title">
+        <div class="br-folder-heading"><p id="br-breadcrumb" class="br-breadcrumb"></p><h1 id="br-folder-title"></h1><p id="br-folder-summary" class="br-muted"></p></div>
+        <div id="br-entries" class="br-entries" aria-label="Содержимое папки"></div>
+        <div id="br-empty" class="br-empty" hidden><span aria-hidden="true">▱</span><h2>В этой папке пока пусто</h2><p>Создайте базу или добавьте Google Таблицу в эту папку на Диске, затем обновите реестр.</p><button id="br-empty-create" type="button" class="br-button br-primary">Создать базу</button></div>
       </section>
     </main>
   </div>
