@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  APPS_SCRIPT_DEPLOYMENT_ID: ${{ vars.APPS_SCRIPT_DEPLOYMENT_ID || 'AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA' }}
+
 concurrency:
   group: apps-script-production
   cancel-in-progress: false
@@ -29,11 +32,10 @@ jobs:
         shell: bash
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
-          APPS_SCRIPT_DEPLOYMENT_ID: ${{ vars.APPS_SCRIPT_DEPLOYMENT_ID }}
         run: |
           if [[ -z "$CLASPRC_JSON" || -z "$APPS_SCRIPT_DEPLOYMENT_ID" ]]; then
             echo 'ready=false' >> "$GITHUB_OUTPUT"
-            echo '::notice::Publication skipped. Add secret CLASPRC_JSON and variable APPS_SCRIPT_DEPLOYMENT_ID after the one-time setup described in DEPLOYMENT.md.'
+            echo '::notice::Publication skipped. Add secret CLASPRC_JSON after the one-time setup described in DEPLOYMENT.md. The existing deployment ID is already configured.'
           else
             echo 'ready=true' >> "$GITHUB_OUTPUT"
           fi
@@ -41,5 +43,4 @@ jobs:
         if: steps.setup.outputs.ready == 'true'
         env:
           CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
-          APPS_SCRIPT_DEPLOYMENT_ID: ${{ vars.APPS_SCRIPT_DEPLOYMENT_ID }}
         run: npm run deploy
