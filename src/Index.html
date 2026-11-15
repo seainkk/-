@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Реестр баз</title>
+  <?!= include_('Styles'); ?>
+</head>
+<body>
+<div id="bases-registry-app">
+  <header class="br-header"><div class="br-brand"><span aria-hidden="true">▦</span><strong>Реестр баз</strong></div><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <div id="br-notice" class="br-notice" role="status" aria-live="polite" hidden></div>
+  <div class="br-layout">
+    <aside class="br-sidebar" aria-label="Папки и таблицы">
+      <button id="br-menu-toggle" class="br-button br-menu-toggle" type="button" aria-expanded="true" aria-label="Свернуть меню"><span aria-hidden="true">☰</span><span class="br-nav-label">Папки и базы</span></button>
+      <div class="br-sidebar-body"><nav id="br-tree" aria-label="Реестр баз"><span class="br-muted">Загружаем реестр…</span></nav><div class="br-nav-actions"><button id="br-new-base" type="button" class="br-button br-primary" disabled>＋ Новая база</button><button id="br-new-folder" type="button" class="br-button" disabled>＋ Новая папка</button></div><p id="br-destination" class="br-destination"></p></div>
+    </aside>
+    <main class="br-main">
+      <form id="br-item-form" class="br-item-form" hidden><div class="br-form-heading"><label id="br-item-label" for="br-item-name">Название</label><span id="br-item-destination" class="br-muted"></span></div><div class="br-form-fields"><input id="br-item-name" type="text" autocomplete="off" maxlength="100" required><button id="br-item-submit" type="submit" class="br-button br-primary">Создать</button><button id="br-item-cancel" type="button" class="br-button">Отмена</button></div><p id="br-form-error" class="br-form-error" role="alert"></p></form>
+      <div id="br-loading" class="br-loading" aria-live="polite">Подключаем Google Диск…</div>
+      <section id="br-empty" class="br-empty" hidden><span aria-hidden="true">▦</span><h1 id="br-empty-title">Выберите базу</h1><p id="br-empty-description">Откройте таблицу в меню слева.</p><button id="br-empty-create" type="button" class="br-button br-primary">Создать первую базу</button></section>
+      <section id="br-document" class="br-document" hidden>
+        <div class="br-document-heading"><div class="br-title-group"><p id="br-breadcrumb" class="br-breadcrumb"></p><div class="br-title-row"><h1 id="br-file-name"></h1><button id="br-rename" type="button" class="br-button br-rename" aria-label="Переименовать базу">✎</button></div></div><a id="br-native-link" class="br-button br-native-link" target="_blank" rel="noopener noreferrer">Открыть в Google Таблицах ↗</a></div>
+        <div class="br-sheet-controls"><label for="br-sheet-select">Лист</label><select id="br-sheet-select" aria-label="Лист таблицы"></select></div>
+        <div class="br-formula-bar"><span id="br-cell-address">A1</span><span class="br-fx">fx</span><span id="br-cell-value"></span></div>
+        <div class="br-grid-wrap"><table id="br-grid" class="br-grid" aria-label="Редактируемая Google Таблица"><thead></thead><tbody></tbody></table></div>
+        <div id="br-save-error" class="br-save-error" role="alert" hidden><p id="br-save-error-text"></p><div><button id="br-retry-save" type="button" class="br-button br-primary">Повторить сохранение</button><button id="br-revert-edit" type="button" class="br-button">Отменить правки и перечитать</button></div></div>
+        <div class="br-table-footer"><span id="br-save-status" class="br-muted" aria-live="polite">Таблица загружена</span><div class="br-paging"><div class="br-page-group"><button id="br-prev-rows" type="button" class="br-button br-page-button" aria-label="Предыдущие строки">↑</button><span id="br-row-range"></span><button id="br-next-rows" type="button" class="br-button br-page-button" aria-label="Следующие строки">↓</button></div><div class="br-page-group"><button id="br-prev-columns" type="button" class="br-button br-page-button" aria-label="Предыдущие столбцы">←</button><span id="br-column-range"></span><button id="br-next-columns" type="button" class="br-button br-page-button" aria-label="Следующие столбцы">→</button></div></div></div>
+      </section>
+    </main>
+  </div>
+</div>
+<?!= include_('Client'); ?>
+</body>
+</html>

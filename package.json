@@ -1,0 +1,16 @@
+{
+  "name": "team-bases-registry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Закрытый реестр Google Таблиц для команды на Google Apps Script",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "node --test tests/*.test.js",
+    "push": "clasp push",
+    "deploy": "node scripts/deploy.mjs",
+    "configure": "node scripts/configure.mjs"
+  },
+  "devDependencies": { "@google/clasp": "3.4.1" }
+}
