@@ -4,10 +4,22 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 const client = readFileSync(new URL('../src/Client.html', import.meta.url), 'utf8');
+function source(name) {
+  const start = client.indexOf('function ' + name + '(');
+  assert.ok(start >= 0, 'Actual import helper exists: ' + name);
+  let depth = 0, quote = null, escaped = false;
+  for (let i = client.indexOf('{', start); i < client.length; i++) {
+    const character = client[i];
+    if (quote) { if (escaped) escaped = false; else if (character === '\\') escaped = true; else if (character === quote) quote = null; continue; }
+    if (character === '"' || character === "'" || character === '`') { quote = character; continue; }
+    if (character === '{') depth++;
+    if (character === '}' && --depth === 0) return client.slice(start, i + 1);
+  }
+  assert.fail('Complete function body is present: ' + name);
+}
 function helper(name) {
-  const line = client.split('\n').find(value => value.trimStart().startsWith('function ' + name + '('));
-  assert.ok(line, 'Actual import helper exists: ' + name);
-  return vm.runInNewContext(line.trim() + ';' + name + ';', { URL });
+  const dependencies = ['normalizeContents'].filter(value => value !== name && client.includes('function ' + value + '('));
+  return vm.runInNewContext(dependencies.map(source).join('\n') + '\n' + source(name) + ';' + name + ';', { URL });
 }
 
 test('supported import files have a bounded nonempty binary payload', () => {
@@ -26,13 +38,14 @@ test('link imports accept original Google Sheets links and preserve no foreign U
 
 test('the retry fingerprint changes only when import intent or selected file changes', () => {
   const key = helper('importFingerprint');
-  const fields = { name: 'База', baseType: 'general', status: 'collection' };
+  const fields = { name: 'База', contents: ['companies'], status: 'collection' };
   const file = { name: 'base.csv', size: 12, type: 'text/csv', lastModified: 123 };
   assert.equal(key('file', fields, file, 1), key('file', { ...fields }, { ...file }, 1));
-  for (const change of [{ name: 'Другая база' }, { baseType: 'lpr' }, { status: 'ready' }]) assert.notEqual(key('file', fields, file, 1), key('file', { ...fields, ...change }, file, 1));
+  for (const change of [{ name: 'Другая база' }, { contents: ['lpr'] }, { contents: ['companies', 'lpr'] }, { status: 'ready' }]) assert.notEqual(key('file', fields, file, 1), key('file', { ...fields, ...change }, file, 1));
   assert.notEqual(key('file', fields, file, 1), key('file', fields, file, 2));
   const link = { ...fields, url: 'https://docs.google.com/spreadsheets/d/source_123456/edit', mode: 'copy' };
   assert.notEqual(key('link', link), key('link', { ...link, mode: 'move' }));
+  assert.equal(key('file', { ...fields, contents: ['companies', 'lpr'] }, file, 1), key('file', { ...fields, contents: ['lpr', 'companies'] }, file, 1));
 });
 
 test('an uncertain import recovery link becomes only a canonical native Sheets ID', () => {
@@ -42,16 +55,24 @@ test('an uncertain import recovery link becomes only a canonical native Sheets I
   assert.equal(recovery('javascript:alert(1)'), null);
 });
 
-test('changing source type resets the manual mark until an explicit later check', () => {
+test('changing source contents resets the manual mark until an explicit later check', () => {
   const change = helper('sourceDraftChange');
-  const item = { revision: 7, baseType: 'general', formatCheck: 'valid', status: 'collection' };
-  const switched = change(item, null, 'baseType', 'lpr');
-  assert.equal(switched.values.baseType, 'lpr');
+  const item = { revision: 7, contents: ['companies'], formatCheck: 'valid', status: 'collection' };
+  const switched = change(item, null, 'contents', ['companies', 'lpr']);
+  assert.deepEqual(Array.from(switched.values.contents), ['companies', 'lpr']);
   assert.equal(switched.values.formatCheck, 'unchecked');
   const checked = change(item, switched, 'formatCheck', 'valid');
   assert.equal(checked.values.formatCheck, 'valid');
   assert.equal(checked.expectedRevision, 7);
   assert.equal(switched.values.formatCheck, 'unchecked');
-  assert.equal(helper('sourceTypeCriterion')('lpr'), '1 строка = 1 человек (контакты одного человека).');
-  assert.equal(helper('sourceTypeLabel')('general'), 'Общая');
+  assert.match(helper('contentsCriterion')(['lpr']), /1\s*строка\s*=\s*1\s*человек/u);
+  assert.equal(helper('contentsLabel')(['companies']), 'Компании');
+});
+
+test('the live file form has only the agreed Blob-transfer field names', () => {
+  const index = readFileSync(new URL('../src/Index.html', import.meta.url), 'utf8');
+  const form = index.match(/<form\b[^>]*\bid="br-import-file-form"[^>]*>[\s\S]*?<\/form>/);
+  assert.ok(form, 'The actual import file form is present');
+  const names = Array.from(form[0].matchAll(/\bname="([^"]+)"/g), match => match[1]).sort();
+  assert.deepEqual(names, ['contentsJSON', 'file', 'name', 'requestId', 'status']);
 });

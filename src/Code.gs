@@ -1,9 +1,9 @@
 /**
  * Standalone Apps Script web app. Every remote operation verifies the signed-in
- * user and the item's actual Drive ancestry. Business/source spreadsheets are
- * opened only by their original links; their cell data is never read or edited.
- * SourceBases.gs alone reads/writes metadata in the fixed, root-validated service
- * book. Drive/Sheets scopes also cover file metadata and creating blank bases.
+ * user and the item's actual Drive ancestry. The catalog stores workflow data
+ * in a fixed, root-validated service book. Segment actions copy selected sheets
+ * from ready source files; analytics reads bounded contact-presence data only.
+ * There is no in-app cell editor, and source worksheets are never modified.
  */
 function doGet() {
   try {
@@ -18,6 +18,17 @@ function doGet() {
 function include_(name) {
   if (['Styles', 'Client'].indexOf(name) === -1) fail_('INVALID_REQUEST', 'Неизвестный компонент интерфейса.');
   return HtmlService.createHtmlOutputFromFile(name).getContent();
+}
+
+/** Minimal app startup: the former Drive-tree screen is no longer rendered. */
+function getAppBootstrap() {
+  return api_(function () {
+    var context = authorize_(), root = registryRoot_(context);
+    return {
+      user: { email: context.email, isAdmin: context.isAdmin },
+      registry: { id: root.getId(), name: root.getName() }
+    };
+  });
 }
 
 function getBootstrap() {

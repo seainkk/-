@@ -3,139 +3,45 @@
   'use strict';
   const root=document.getElementById('bases-registry-app');
   const $=(id)=>document.getElementById(id);
-  let bootstrap=null, selectedFolder=null, busy=false, formMode=null, renameId=null, creationRequest=null;
-  let collapsed=matchMedia('(max-width:640px)').matches;
-  let activeView='registry', segmentsTimer=null, lastSegmentsAttempt=0, segmentsRefreshing=false;
-  let segmentsRefreshError=null, renderedSegmentsKey=null;
-  let sourceData=null, sourceTimer=null, lastSourceAttempt=0, sourceLoading=false, sourceSaving=null, sourceRefreshError=null, renderedSourceKey=null;
-  let importOpen=false, importMode='file', importing=false, importFileSelection=0;
-  const importRequests=new Map();
-  const sourceDrafts=new Map(), sourceMessages=new Map();
-  const expanded=new Set();
-  const sorted=(items)=>items.slice().sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  let bootstrap=null,activeView='sources',busy=false,networkPending=0,pendingView=null,formMode=null;
+  let sourceData=null,sourceTimer=null,lastSourceAttempt=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
+  let importOpen=false,importMode='file',importing=false,importFileSelection=0;
+  let dashboard=null,dashboardLoading=false,dashboardError=null,lastDashboardAttempt=0,renderedDashboardKey=null;
+  let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0;
+  let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
+  const sourceDrafts=new Map(),sourceMessages=new Map(),importRequests=new Map(),segmentRequests=new Map();
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
-  function rpc(name,payload){return new Promise((resolve,reject)=>{if(!globalThis.google?.script?.run){reject(new Error('Нет соединения с сервером Google. Откройте опубликованное веб-приложение Apps Script.'));return;}const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);payload===undefined?runner[name]():runner[name](payload);});}
+  function rpc(name,payload){networkPending++;return new Promise((resolve,reject)=>{if(!globalThis.google?.script?.run){reject(new Error('Нет соединения с сервером Google. Откройте опубликованное веб-приложение Apps Script.'));return;}const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);payload===undefined?runner[name]():runner[name](payload);}).finally(()=>{networkPending--;setTimeout(flushPendingView,0);});}
   function nativeUrl(id,sheetId){return 'https://docs.google.com/spreadsheets/d/'+encodeURIComponent(id)+'/edit'+(sheetId===undefined?'':'#gid='+encodeURIComponent(sheetId));}
   function notice(message,kind='info',link=null){const node=$('br-notice');node.hidden=!message;node.className='br-notice'+(kind==='error'?' br-error':'');node.replaceChildren();if(message)node.append(document.createTextNode(message));if(link){const anchor=document.createElement('a');anchor.href=nativeUrl(link.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent=link.label||'Открыть созданную базу';node.append(anchor);}}
-  function folderById(id){if(!bootstrap)return null;return id===bootstrap.registry.id?bootstrap.registry:bootstrap.folders.find((folder)=>folder.id===id);}
-  function folderName(id){return folderById(id)?.name||'Папка';}
-  function folderPath(id){const names=[],seen=new Set();while(id&&bootstrap&&id!==bootstrap.registry.id&&!seen.has(id)){seen.add(id);const folder=folderById(id);if(!folder)break;names.unshift(folder.name);id=folder.parentId;}return [bootstrap?.registry.name,...names].filter(Boolean).join(' / ');}
-  function button(className,text){const node=document.createElement('button');node.type='button';node.className='br-button '+className;if(text)node.textContent=text;return node;}
-  function sheetLink(file,className){const anchor=document.createElement('a');anchor.className=className;anchor.href=nativeUrl(file.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.dataset.file=file.id;anchor.title=file.name;return anchor;}
-  function metricNumber(value){return Number.isSafeInteger(value)&&value>=0?value.toLocaleString('ru-RU'):'—';}
-  function channelStatus(value){const states={active:{id:'active',label:'В работе',mark:'✓'},inactive:{id:'inactive',label:'Не в работе',mark:'−'}};return Object.prototype.hasOwnProperty.call(states,value)?states[value]:{id:'unknown',label:'Статус ещё не определён',mark:'—'};}
-  function segmentStatus(value){const labels={in_work:'В работе',preparation:'Подготовка',no_contacts:'Нет контактов'};return Object.prototype.hasOwnProperty.call(labels,value)?{id:value,label:labels[value]}:{id:'unknown',label:'Статус ещё не определён'};}
-  function segmentContentKey(data){return JSON.stringify({state:data?.state||'unavailable',source:data?.source||null,rulesConfigured:data?.rulesConfigured===true,items:data?.items||[]});}
   function folderUrl(id){return 'https://drive.google.com/drive/folders/'+encodeURIComponent(id);}
+  function button(className,text){const node=document.createElement('button');node.type='button';node.className='br-button '+className;if(text)node.textContent=text;return node;}
+  function metricNumber(value){return Number.isSafeInteger(value)&&value>=0?value.toLocaleString('ru-RU'):'—';}
+  function channelStatus(value){const states={active:{id:'active',label:'В работе',mark:'✓'},inactive:{id:'inactive',label:'Не запущен',mark:'−'}};return Object.prototype.hasOwnProperty.call(states,value)?states[value]:{id:'unknown',label:'Статус не определён',mark:'—'};}
+  function segmentStatus(value){const labels={in_work:'В работе',preparation:'Подготовка',no_contacts:'Нет контактов'};return Object.prototype.hasOwnProperty.call(labels,value)?{id:value,label:labels[value]}:{id:'unknown',label:'Статус ещё не определён'};}
+  function segmentContentKey(data){return JSON.stringify({state:data?.state||'unavailable',source:data?.source||null,items:data?.items||[]});}
+  function normalizeContents(value){return Array.isArray(value)?['companies','lpr'].filter((kind)=>value.includes(kind)):[];}
+  function contentsLabel(value){const kinds=normalizeContents(value);return value==null?'Недоступно':kinds.length===2?'Компании и ЛПР':kinds[0]==='companies'?'Компании':kinds[0]==='lpr'?'ЛПР':'Не указано';}
+  function contentsCriterion(value){const kinds=normalizeContents(value);return kinds.length===2?'Листы с компаниями и ЛПР распределяются отдельно при добавлении в сегмент.':kinds[0]==='companies'?'1 строка = 1 компания.':kinds[0]==='lpr'?'1 строка = 1 человек (контакты одного человека).':'Укажите наполнение базы.';}
+  function readySource(item){return item?.canAddToSegment===true&&item.status==='ready'&&item.present!==false&&item.mimeType==='application/vnd.google-apps.spreadsheet'&&normalizeContents(item.contents).length>0&&Number.isSafeInteger(item.revision)&&item.revision>=0;}
   function sourceStatusLabel(value){const labels={collection:'Сбор',ready:'Готова',rework:'Доработка'};return Object.prototype.hasOwnProperty.call(labels,value)?labels[value]:'Недоступно';}
   function sourceCheckLabel(value){const labels={unchecked:'Не проверено',valid:'Корректно',invalid:'Некорректно'};return Object.prototype.hasOwnProperty.call(labels,value)?labels[value]:'Недоступно';}
   function sourceTypeLabel(value){return value==='general'?'Общая':value==='lpr'?'ЛПР':'Недоступно';}
   function sourceTypeCriterion(value){return value==='lpr'?'1 строка = 1 человек (контакты одного человека).':value==='general'?'1 строка = 1 компания.':'Тип базы недоступен.';}
-  function sourceDraftChange(item,existing,field,value){const next=existing?{expectedRevision:existing.expectedRevision,values:Object.assign({},existing.values)}:{expectedRevision:item.revision,values:{}};if(field==='formatCheck'&&Object.prototype.hasOwnProperty.call(next.values,'baseType'))next.values[field]=value;else if(value===item[field])delete next.values[field];else next.values[field]=value;if(field==='baseType')next.values.formatCheck='unchecked';return next;}
-  function importFileError(file){if(!file)return 'Выберите файл базы.';if(!/\.(csv|tsv|xls|xlsx|ods)$/i.test(file.name))return 'Поддерживаются файлы CSV, TSV, XLS, XLSX и ODS.';if(!Number.isFinite(file.size)||file.size<=0)return 'Выберите непустой файл.';if(file.size>10*1024*1024)return 'Размер файла не должен превышать 10 МиБ.';return null;}
-  function importLinkId(value){try{const url=new URL(value.trim()),match=url.pathname.match(/^\/spreadsheets\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{10,200})(?:\/|$)/);return url.protocol==='https:'&&url.hostname==='docs.google.com'&&!url.username&&!url.password&&!url.port&&match?match[1]:null;}catch(error){return null;}}
-  function importFingerprint(kind,fields,file,selection){return JSON.stringify({kind,name:fields.name.trim(),baseType:fields.baseType,status:fields.status,url:kind==='link'?fields.url.trim():'',mode:kind==='link'?fields.mode:'upload',file:kind==='file'&&file?{name:file.name,size:file.size,type:file.type,lastModified:file.lastModified,selection}:null});}
-  function importRecoveryId(message){const match=String(message).match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/([A-Za-z0-9_-]{10,200})(?=\/|\?|#|\s|$)/);return match?match[1]:null;}
+  function sourceDraftChange(item,existing,field,value){const next=existing?{expectedRevision:existing.expectedRevision,values:Object.assign({},existing.values)}:{expectedRevision:item.revision,values:{}};if(field==='contents'){const contents=normalizeContents(value);if(JSON.stringify(contents)===JSON.stringify(normalizeContents(item.contents)))delete next.values.contents;else next.values.contents=contents;next.values.formatCheck='unchecked';}else if(field==='formatCheck'&&Object.prototype.hasOwnProperty.call(next.values,'contents'))next.values[field]=value;else if(value===item[field])delete next.values[field];else next.values[field]=value;return next;}
   function sourceFormatLabel(item){return item.mimeType==='application/vnd.google-apps.spreadsheet'?'Google Таблица':typeof item.format==='string'&&item.format?item.format:'Файл';}
   function sourceFileUrl(item){try{const url=new URL(item.url),match=url.pathname.match(/^\/(?:file|spreadsheets|document|presentation|forms|drawings)\/d\/([^/]+)/);if(url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&['docs.google.com','drive.google.com'].includes(url.hostname)&&match&&decodeURIComponent(match[1])===item.id)return url.href;}catch(error){}return item.mimeType==='application/vnd.google-apps.spreadsheet'?nativeUrl(item.id):'https://drive.google.com/file/d/'+encodeURIComponent(item.id)+'/view';}
   function sourceCanEdit(data,item){return data?.canEdit===true&&item?.canEdit!==false&&item?.present!==false&&Number.isSafeInteger(item?.revision)&&item.revision>=0;}
   function sourceAssociationsKnown(data,item){return data?.associationsAvailable!==false&&item?.associationsAvailable!==false&&Array.isArray(item?.segments);}
-  function sourcePatch(item,draft,reviewed){const patch={id:item.id,expectedRevision:reviewed?item.revision:draft.expectedRevision};for(const field of ['baseType','status','formatCheck'])if(Object.prototype.hasOwnProperty.call(draft.values,field))patch[field]=draft.values[field];return patch;}
-  function openFolder(id){if(busy||!folderById(id))return;selectedFolder=id;expanded.add(id);render();}
-  function renderTree(){
-    const target=$('br-tree');target.replaceChildren();if(!bootstrap)return;
-    const seen=new Set();
-    function makeFolder(folder,depth){
-      if(seen.has(folder.id)||depth>20)return null;seen.add(folder.id);
-      const group=document.createElement('div');group.className='br-tree-group';
-      const node=button('br-folder-button');node.style.paddingLeft=(Math.min(depth,8)*12+5)+'px';node.dataset.folder=folder.id;node.setAttribute('aria-expanded',String(expanded.has(folder.id)));node.setAttribute('aria-current',String(selectedFolder===folder.id));node.title=folder.name;
-      const arrow=document.createElement('span');arrow.className='br-tree-arrow';arrow.textContent=expanded.has(folder.id)?'▾':'▸';
-      const symbol=document.createElement('span');symbol.className='br-tree-symbol';symbol.textContent='▱';
-      const label=document.createElement('span');label.className='br-tree-name';label.textContent=folder.name;node.append(arrow,symbol,label);
-      node.addEventListener('click',()=>{if(busy)return;selectedFolder=folder.id;expanded.has(folder.id)?expanded.delete(folder.id):expanded.add(folder.id);render();});group.append(node);
-      if(expanded.has(folder.id)){
-        const folders=sorted(bootstrap.folders.filter((item)=>item.parentId===folder.id));
-        const files=sorted(bootstrap.files.filter((item)=>item.parentId===folder.id));
-        for(const child of folders){const subtree=makeFolder(child,depth+1);if(subtree)group.append(subtree);}
-        for(const file of files){const anchor=sheetLink(file,'br-button br-file-link');anchor.style.paddingLeft=(Math.min(depth,8)*12+26)+'px';const icon=document.createElement('span');icon.className='br-tree-symbol';icon.textContent='▦';const name=document.createElement('span');name.className='br-tree-name';name.textContent=file.name;anchor.append(icon,name);group.append(anchor);}
-        if(!folders.length&&!files.length){const empty=document.createElement('div');empty.className='br-empty-folder';empty.textContent='Папка пуста';group.append(empty);}
-      }
-      return group;
-    }
-    const tree=makeFolder(bootstrap.registry,0);if(tree)target.append(tree);
-    $('br-destination').textContent='Создание в папке: '+folderName(selectedFolder);
-  }
-  function renderFolder(){
-    $('br-folder-view').hidden=!bootstrap||activeView!=='registry';if(!bootstrap)return;
-    $('br-folder-title').textContent=folderName(selectedFolder);$('br-breadcrumb').textContent=folderPath(selectedFolder);
-    const folders=sorted(bootstrap.folders.filter((item)=>item.parentId===selectedFolder));
-    const files=sorted(bootstrap.files.filter((item)=>item.parentId===selectedFolder));
-    $('br-folder-summary').textContent='Папок: '+folders.length+' · Таблиц: '+files.length;
-    const entries=$('br-entries');entries.replaceChildren();
-    function appendEntry(item,isFolder){
-      const row=document.createElement('div');row.className='br-entry';
-      const main=isFolder?button('br-entry-main'):sheetLink(item,'br-entry-main');
-      if(isFolder){main.dataset.openFolder=item.id;main.addEventListener('click',()=>openFolder(item.id));}
-      const icon=document.createElement('span');icon.className='br-entry-icon';icon.textContent=isFolder?'▱':'▦';icon.setAttribute('aria-hidden','true');
-      const details=document.createElement('span');details.className='br-entry-details';const name=document.createElement('span');name.className='br-entry-name';name.textContent=item.name;const kind=document.createElement('span');kind.className='br-entry-kind';kind.textContent=isFolder?'Папка':'Google Таблица';details.append(name,kind);main.append(icon,details);row.append(main);
-      if(isFolder){const arrow=document.createElement('span');arrow.className='br-entry-arrow';arrow.textContent='›';arrow.setAttribute('aria-hidden','true');row.append(arrow);}else{const rename=button('br-rename','✎');rename.dataset.rename=item.id;rename.setAttribute('aria-label','Переименовать базу «'+item.name+'»');rename.title='Переименовать базу';rename.addEventListener('click',()=>showForm('rename',item.id));row.append(rename);}
-      entries.append(row);
-    }
-    folders.forEach((folder)=>appendEntry(folder,true));files.forEach((file)=>appendEntry(file,false));
-    $('br-empty').hidden=folders.length+files.length!==0;
-  }
-  function renderSegmentsHealth(){
-    const node=$('br-segments-health');node.classList.toggle('br-error',!!segmentsRefreshError);
-    if(segmentsRefreshError){node.textContent='Не удалось обновить сегменты. Показаны последние данные. '+segmentsRefreshError;return;}
-    if(segmentsRefreshing){node.textContent='Обновляем сегменты…';return;}
-    if(formMode){node.textContent='Автообновление приостановлено: открыта форма.';return;}
-    const generated=new Date(bootstrap?.segments?.generatedAt||'');
-    node.textContent=(Number.isNaN(generated.getTime())?'':'Обновлено в '+generated.toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'})+' · ')+'Автообновление: каждые 60 с';
-  }
-  function renderSegments(){
-    $('br-segments-view').hidden=activeView!=='segments';if(activeView!=='segments')return;
-    const data=bootstrap?.segments,ready=data?.state==='ready',items=ready&&Array.isArray(data.items)?data.items:[];
-    $('br-segments-count').textContent=ready?'Сегментов: '+items.length:bootstrap?'Список недоступен':'Загружаем сегменты…';
-    $('br-segments-rules').hidden=data?.rulesConfigured===true;
-    const source=$('br-segments-source');source.hidden=!data?.source?.id;
-    if(data?.source?.id){source.href=folderUrl(data.source.id);source.textContent='Папка «'+data.source.name+'» →';}
-    renderSegmentsHealth();
-    const key=segmentContentKey(data);if(key===renderedSegmentsKey)return;renderedSegmentsKey=key;
-    const cards=$('br-segments-cards');const openDetails=new Set(Array.from(cards.querySelectorAll('details[open]')).map((node)=>node.dataset.segment));
-    const focusKey=document.activeElement?.dataset?.segmentFocus;const oldX=window.scrollX,oldY=window.scrollY;
-    cards.replaceChildren();$('br-segments-empty').hidden=ready&&items.length>0;
-    const emptyStates={source_missing:['Папка «Аутричи» не найдена','Уточните привязку папки у администратора. Реестр доступен в соседнем разделе.'],source_ambiguous:['Найдено несколько папок «Аутричи»','Администратору нужно указать, какую папку использовать для сегментов.'],source_outside_registry:['Папка «Аутричи» недоступна в реестре','Проверьте права доступа и привязку папки у администратора. Реестр остаётся доступен.']};
-    const empty=ready?['В «Аутричи» пока нет сегментов','Каждая папка первого уровня внутри «Аутричи» станет отдельным сегментом.']:emptyStates[data?.state]||[bootstrap?'Не удалось загрузить список сегментов':'Загружаем сегменты…',bootstrap?'Нажмите «Обновить», чтобы повторить загрузку.':''];
-    $('br-segments-empty-title').textContent=empty[0];$('br-segments-empty-description').textContent=empty[1];
-    for(const item of items){
-      const card=document.createElement('article');card.className='br-segment-card';card.dataset.segment=item.id;card.setAttribute('aria-label','Сегмент '+item.name);
-      const heading=document.createElement('h2');const title=document.createElement('a');title.className='br-segment-title';title.href=folderUrl(item.id);title.target='_blank';title.rel='noopener noreferrer';title.textContent=item.name;title.dataset.segmentFocus=item.id+'/folder';heading.append(title);card.append(heading);
-      const meta=document.createElement('p');meta.className='br-segment-meta';const files=Array.isArray(item.files)?item.files:[];meta.textContent='Таблиц: '+(Number.isSafeInteger(item.tableCount)?item.tableCount:files.length);card.append(meta);
-      const channels=[['email','Email'],['telegram','Telegram'],['retargeting','Ретаргетинг']];const pills=document.createElement('div');pills.className='br-channel-pills';
-      for(const channel of channels){const state=channelStatus(item.channels?.[channel[0]]?.state);const pill=document.createElement('span');pill.className='br-channel-pill';pill.dataset.channel=channel[0];pill.dataset.state=state.id;pill.textContent=channel[1]+' '+state.mark;pill.setAttribute('aria-label',channel[1]+': '+state.label);pill.title=state.label;pills.append(pill);}card.append(pills);
-      const metrics=document.createElement('dl');metrics.className='br-segment-metrics';const values=channels.map((channel)=>[channel[1]+' · контактов в работе',item.channels?.[channel[0]]?.inWork]);values.push(['Компаний · ≥1 канал в работе',item.companiesInWork]);
-      for(const entry of values){const group=document.createElement('div');group.className='br-segment-metric';const label=document.createElement('dt');label.textContent=entry[0];const value=document.createElement('dd');value.textContent=metricNumber(entry[1]);group.append(label,value);metrics.append(group);}card.append(metrics);
-      if(folderById(item.id)){const actions=document.createElement('div');actions.className='br-segment-actions';const open=button('','Открыть в реестре →');open.dataset.segmentFocus=item.id+'/registry';open.addEventListener('click',()=>{if(busy)return;selectedFolder=item.id;let folder=folderById(item.id);const seen=new Set();while(folder&&!seen.has(folder.id)){seen.add(folder.id);expanded.add(folder.id);folder=folderById(folder.parentId);}setView('registry');});actions.append(open);card.append(actions);}
-      const details=document.createElement('details');details.className='br-segment-details';details.dataset.segment=item.id;details.open=openDetails.has(item.id);const summary=document.createElement('summary');summary.textContent='Таблицы ('+files.length+')';summary.dataset.segmentFocus=item.id+'/tables';details.append(summary);
-      if(files.length){const list=document.createElement('ul');for(const file of files){const row=document.createElement('li');const link=sheetLink(file,'br-segment-sheet-link');link.textContent=file.name;link.dataset.segmentFocus=item.id+'/sheet/'+file.id;row.append(link);list.append(row);}details.append(list);}else{const text=document.createElement('p');text.textContent='В папке сегмента пока нет таблиц.';details.append(text);}card.append(details);
-      const overall=segmentStatus(item.overallStatus);const status=document.createElement('div');status.className='br-segment-overall';status.dataset.status=overall.id;status.textContent=overall.label;card.append(status);cards.append(card);
-    }
-    if(focusKey){const focused=Array.from(cards.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===focusKey);focused?.focus({preventScroll:true});}
-    if(window.scrollX!==oldX||window.scrollY!==oldY)window.scrollTo(oldX,oldY);
-  }
-  function stopSegmentsTimer(){if(segmentsTimer!==null){clearInterval(segmentsTimer);segmentsTimer=null;}}
-  function armSegmentsTimer(){stopSegmentsTimer();if(activeView==='segments'&&!document.hidden)segmentsTimer=setInterval(()=>autoRefreshSegments(),60000);}
-  function stopSourceTimer(){if(sourceTimer!==null){clearInterval(sourceTimer);sourceTimer=null;}}
-  function armSourceTimer(){stopSourceTimer();if(activeView==='sources'&&!document.hidden)sourceTimer=setInterval(()=>refreshSourceBases({automatic:true}),60000);}
-  function setView(view){activeView=view;root.dataset.view=view;for(const name of ['registry','segments','sources'])$('br-view-'+name).setAttribute('aria-pressed',String(view===name));render();armSegmentsTimer();armSourceTimer();if(view==='segments')autoRefreshSegments();if(view==='sources')refreshSourceBases({automatic:true,opening:true});}
-  async function autoRefreshSegments(){
-    if(activeView!=='segments'||document.hidden||formMode||busy||sourceLoading||sourceSaving||importing||Date.now()-lastSegmentsAttempt<15000)return;
-    busy=true;segmentsRefreshing=true;lastSegmentsAttempt=Date.now();updateControls();renderSegmentsHealth();
-    try{const result=await rpc('getBootstrap');bootstrap=result;segmentsRefreshError=null;if(!folderById(selectedFolder))selectedFolder=result.registry.id;if(activeView==='segments')renderSegments();}
-    catch(error){segmentsRefreshError=failure(error).message;}
-    finally{busy=false;segmentsRefreshing=false;updateControls();renderSegmentsHealth();continueSourceOpening();}
-  }
-  function continueSourceOpening(){if(activeView==='sources'&&!sourceData&&lastSourceAttempt===0&&!busy&&!sourceLoading&&!sourceSaving)refreshSourceBases({automatic:true,opening:true});}
+  function sourcePatch(item,draft,reviewed){const patch={id:item.id,expectedRevision:reviewed?item.revision:draft.expectedRevision};for(const field of ['contents','status','formatCheck'])if(Object.prototype.hasOwnProperty.call(draft.values,field))patch[field]=draft.values[field];return patch;}
+  function importFileError(file){if(!file)return 'Выберите файл базы.';if(!/\.(csv|tsv|xls|xlsx|ods)$/i.test(file.name))return 'Поддерживаются файлы CSV, TSV, XLS, XLSX и ODS.';if(!Number.isFinite(file.size)||file.size<=0)return 'Выберите непустой файл.';if(file.size>10*1024*1024)return 'Размер файла не должен превышать 10 МиБ.';return null;}
+  function importLinkId(value){try{const url=new URL(value.trim()),match=url.pathname.match(/^\/spreadsheets\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{10,200})(?:\/|$)/);return url.protocol==='https:'&&url.hostname==='docs.google.com'&&!url.username&&!url.password&&!url.port&&match?match[1]:null;}catch(error){return null;}}
+  function importFingerprint(kind,fields,file,selection){return JSON.stringify({kind,name:fields.name.trim(),contents:normalizeContents(fields.contents),status:fields.status,url:kind==='link'?fields.url.trim():'',mode:kind==='link'?fields.mode:'upload',file:kind==='file'&&file?{name:file.name,size:file.size,type:file.type,lastModified:file.lastModified,selection}:null});}
+  function importRecoveryId(message){const match=String(message).match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/([A-Za-z0-9_-]{10,200})(?=\/|\?|#|\s|$)/);return match?match[1]:null;}
+  function folderRecoveryId(message){const match=String(message).match(/https:\/\/drive\.google\.com\/drive\/folders\/([A-Za-z0-9_-]{10,200})(?=\/|\?|#|\s|$)/);return match?match[1]:null;}
+  function mailingMetric(value,connected){return connected?metricNumber(value):'—';}
+  function requesting(){return networkPending>0||busy||sourceLoading||!!sourceSaving||importing||dashboardLoading||mailingsLoading||segmentSaving||segmentPreviewLoading;}
+  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0;}
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
   function sourceFocused(){return !!document.activeElement?.closest?.('.br-source-fields');}
   function renderSourcesHealth(){
@@ -145,7 +51,7 @@
     if(sourceSaving){node.textContent='Сохраняем выбранные отметки…';return;}
     if(sourceData?.state==='storage_unavailable'){node.textContent='Общее хранилище недоступно. Файлы можно открывать; изменение отметок отключено.'+(sourceData.storage?.message?' '+sourceData.storage.message:'');return;}
     if(sourceData&&sourceData.state!=='ready'){node.textContent='Источник исходных баз недоступен. Реестр и сегменты продолжают работать.';return;}
-    node.textContent=formMode||sourceFocused()||importOpen?'Автообновление приостановлено на время редактирования.':'Список обновляется каждую минуту, пока раздел открыт.';
+    node.textContent=formIsOpen()||sourceFocused()?'Автообновление приостановлено на время редактирования.':'Список обновляется каждую минуту, пока раздел открыт.';
   }
   function renderSources(){
     $('br-sources-view').hidden=activeView!=='sources';if(activeView!=='sources')return;
@@ -163,17 +69,19 @@
       const heading=document.createElement('h2');heading.textContent=item.name;row.append(heading);
       const link=document.createElement('a');link.className='br-source-file';link.href=sourceFileUrl(item);link.target='_blank';link.rel='noopener noreferrer';link.textContent=(item.fileName||item.name)+' · '+sourceFormatLabel(item);link.dataset.sourceFocus=item.id+'/file';row.append(link);
       const draft=sourceDrafts.get(item.id),editable=sourceCanEdit(data,item),changedElsewhere=!!draft&&Number.isSafeInteger(item.revision)&&draft.expectedRevision!==item.revision;
-      const typeValue=draft&&Object.prototype.hasOwnProperty.call(draft.values,'baseType')?draft.values.baseType:item.baseType;const type=document.createElement('div');const badge=document.createElement('span');badge.className='br-source-type';badge.textContent='Тип базы: '+sourceTypeLabel(typeValue);type.append(badge);row.append(type);const criterion=document.createElement('p');criterion.className='br-source-criterion';criterion.textContent=sourceTypeCriterion(typeValue);row.append(criterion);
+      const contentValue=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')?draft.values.contents:item.contents;const type=document.createElement('div');const badge=document.createElement('span');badge.className='br-source-type';badge.textContent='Наполнение: '+contentsLabel(contentValue);type.append(badge);row.append(type);const criterion=document.createElement('p');criterion.className='br-source-criterion';criterion.textContent=contentsCriterion(contentValue);row.append(criterion);
       const fields=document.createElement('div');fields.className='br-source-fields';
-      for(const field of ['baseType','status','formatCheck']){
-        const label=document.createElement('label');label.append(document.createTextNode(field==='baseType'?'Тип базы':field==='status'?'Статус обработки':'Формат · вручную'));
-        const select=document.createElement('select');select.dataset.sourceFocus=item.id+'/'+field;select.dataset.sourceField=field;select.setAttribute('aria-label',(field==='baseType'?'Тип базы: ':field==='status'?'Статус обработки: ':'Ручная проверка формата: ')+item.name);
-        const options=field==='baseType'?[['general','Общая'],['lpr','ЛПР']]:field==='status'?[['collection','Сбор'],['ready','Готова'],['rework','Доработка']]:[['unchecked','Не проверено'],['valid','Корректно'],['invalid','Некорректно']];
-        const chosen=draft&&Object.prototype.hasOwnProperty.call(draft.values,field)?draft.values[field]:item[field];if(!options.some((entry)=>entry[0]===chosen)){const unknown=document.createElement('option');unknown.value='';unknown.textContent='Недоступно';unknown.disabled=true;select.append(unknown);}for(const entry of options){const option=document.createElement('option');option.value=entry[0];option.textContent=entry[1];select.append(option);}select.value=options.some((entry)=>entry[0]===chosen)?chosen:'';select.disabled=!editable||!!sourceSaving||sourceLoading||busy;
+      const choice=document.createElement('fieldset');choice.className='br-contents-choice';const legend=document.createElement('legend');legend.textContent='Наполнение';choice.append(legend);
+      for(const kind of ['companies','lpr']){const label=document.createElement('label');const check=document.createElement('input');check.type='checkbox';check.dataset.sourceContent=kind;check.dataset.sourceFocus=item.id+'/contents/'+kind;check.checked=normalizeContents(contentValue).includes(kind);check.disabled=!editable||requesting()||!!segmentEditor;check.setAttribute('aria-label',(kind==='companies'?'Компании: ':'ЛПР: ')+item.name);check.addEventListener('change',()=>{const value=Array.from(choice.querySelectorAll('input:checked')).map((input)=>input.dataset.sourceContent);const next=sourceDraftChange(sourceItem(item.id),sourceDrafts.get(item.id),'contents',value);if(Object.keys(next.values).length)sourceDrafts.set(item.id,next);else sourceDrafts.delete(item.id);sourceMessages.delete(item.id);renderSources();updateControls();});label.append(check,document.createTextNode(kind==='companies'?'Компании':'ЛПР'));choice.append(label);}fields.append(choice);
+      for(const field of ['status','formatCheck']){
+        const label=document.createElement('label');label.append(document.createTextNode(field==='status'?'Статус обработки':'Формат · вручную'));
+        const select=document.createElement('select');select.dataset.sourceFocus=item.id+'/'+field;select.dataset.sourceField=field;select.setAttribute('aria-label',(field==='status'?'Статус обработки: ':'Ручная проверка формата: ')+item.name);
+        const options=field==='status'?[['collection','Сбор'],['ready','Готова'],['rework','Доработка']]:[['unchecked','Не проверено'],['valid','Корректно'],['invalid','Некорректно']];
+        const chosen=draft&&Object.prototype.hasOwnProperty.call(draft.values,field)?draft.values[field]:item[field];if(!options.some((entry)=>entry[0]===chosen)){const unknown=document.createElement('option');unknown.value='';unknown.textContent='Недоступно';unknown.disabled=true;select.append(unknown);}for(const entry of options){const option=document.createElement('option');option.value=entry[0];option.textContent=entry[1];select.append(option);}select.value=options.some((entry)=>entry[0]===chosen)?chosen:'';select.disabled=!editable||requesting()||!!segmentEditor;
         select.addEventListener('change',()=>{const current=sourceItem(item.id),next=sourceDraftChange(current,sourceDrafts.get(item.id),field,select.value);if(Object.keys(next.values).length)sourceDrafts.set(item.id,next);else sourceDrafts.delete(item.id);sourceMessages.delete(item.id);renderSources();updateControls();});
         select.addEventListener('focus',renderSourcesHealth);select.addEventListener('blur',()=>setTimeout(renderSourcesHealth,0));label.append(select);fields.append(label);
       }row.append(fields);
-      const persisted=document.createElement('p');persisted.className='br-source-persisted';persisted.textContent=(Number.isSafeInteger(item.revision)?'Сохранённое состояние: ':'Сохранённое состояние недоступно: ')+sourceStatusLabel(item.status)+' · '+sourceCheckLabel(item.formatCheck)+' · '+sourceTypeLabel(item.baseType);row.append(persisted);
+      const persisted=document.createElement('p');persisted.className='br-source-persisted';persisted.textContent=(Number.isSafeInteger(item.revision)?'Сохранённое состояние: ':'Сохранённое состояние недоступно: ')+sourceStatusLabel(item.status)+' · '+sourceCheckLabel(item.formatCheck)+' · '+contentsLabel(item.contents);row.append(persisted);
       if(!editable){const reason=document.createElement('p');reason.className='br-source-reason';reason.textContent=item.present===false?'Файл больше недоступен в исходной папке. Изменения не отправлены.':data.state==='storage_unavailable'?'Изменение отметок недоступно без общего хранилища.':'Изменение отметок сейчас недоступно.';row.append(reason);}
       if(draft){
         const pending=document.createElement('p');pending.className='br-source-message';pending.textContent=changedElsewhere?'Состояние на сервере изменилось. Ваш выбор не сохранён. Проверьте сохранённое состояние перед повторным сохранением.':'Есть несохранённые изменения.';row.append(pending);
@@ -185,50 +93,173 @@
       const associations=document.createElement('div');associations.className='br-source-associations';const known=sourceAssociationsKnown(data,item);const segments=Array.isArray(item.segments)?item.segments:[];
       const caption=document.createElement('p');caption.textContent=known?(segments.length?'Добавлена в сегменты:':'В сегменты пока не добавлена.'):(item.associationWarning||'Связи с сегментами недоступны. Требуется проверка.');associations.append(caption);
       if(segments.length){const list=document.createElement('ul');for(const segment of segments){const li=document.createElement('li');const anchor=document.createElement('a');anchor.href=folderUrl(segment.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent=segment.name;li.append(anchor);list.append(li);}associations.append(list);}
-      if(known&&!segments.length){const add=button('','Добавить в сегмент');add.disabled=true;add.setAttribute('aria-describedby','br-source-add-reason-'+item.id);associations.append(add);const reason=document.createElement('span');reason.className='br-source-reason';reason.id='br-source-add-reason-'+item.id;reason.textContent='Алгоритм добавления в сегмент пока не подключён.';associations.append(reason);}row.append(associations);target.append(row);
+      const add=button('','Добавить в сегмент');add.dataset.addSource=item.id;add.disabled=!readySource(item)||sourceDrafts.has(item.id)||requesting()||importOpen||!!segmentEditor;add.addEventListener('click',()=>openSegmentEditor({sourceId:item.id,fromCatalog:true}));associations.append(add);if(!readySource(item)||sourceDrafts.has(item.id)){const reason=document.createElement('span');reason.className='br-source-reason';reason.textContent=sourceDrafts.has(item.id)?'Сначала сохраните или отмените изменения.':'Доступно только для готовой базы Google Таблиц с указанным наполнением.';associations.append(reason);}row.append(associations);target.append(row);
     }
     if(focusKey){const node=Array.from(target.querySelectorAll('[data-source-focus]')).find((entry)=>entry.dataset.sourceFocus===focusKey);if(node&&!node.disabled)node.focus({preventScroll:true});}
     if(window.scrollX!==oldX||window.scrollY!==oldY)window.scrollTo(oldX,oldY);
   }
   async function refreshSourceBases(options={}){
-    if(sourceLoading||sourceSaving||busy||importing)return;
-    if(options.automatic&&(activeView!=='sources'||document.hidden||formMode||sourceFocused()||importOpen||!options.opening&&Date.now()-lastSourceAttempt<15000))return;
+    if(requesting())return;
+    if(options.automatic&&(activeView!=='sources'||document.hidden||formMode||sourceDrafts.size||sourceFocused()||importOpen||!options.opening&&Date.now()-lastSourceAttempt<15000))return;
     sourceLoading=true;lastSourceAttempt=Date.now();updateControls();if(!sourceData&&activeView==='sources')renderSources();renderSourcesHealth();
     try{const result=await rpc('getSourceBases');const previous=sourceData;sourceData=result;sourceRefreshError=null;
       for(const [id,draft] of sourceDrafts){if(!sourceData.items.some((item)=>item.id===id)){const old=previous?.items.find((item)=>item.id===id);if(old)sourceData.items.push(Object.assign({},old,{present:false}));}}
       for(const [id,message] of sourceMessages)if(!message.error)sourceMessages.delete(id);
       if(activeView==='sources')renderSources();if(!options.automatic&&!options.preserveNotice)notice(null);
     }catch(error){sourceRefreshError=failure(error).message;}
-    finally{sourceLoading=false;updateControls();if(activeView==='sources')renderSources();renderSourcesHealth();}
+    finally{sourceLoading=false;updateControls();if(activeView==='sources')renderSources();renderSourcesHealth();if(segmentEditor)renderSegmentSources();flushPendingView();}
   }
   async function saveSourceItem(id,reviewed){
-    const item=sourceItem(id),draft=sourceDrafts.get(id);if(!draft||!sourceCanEdit(sourceData,item)||sourceSaving||sourceLoading||busy||importing)return;
+    const item=sourceItem(id),draft=sourceDrafts.get(id);if(!draft||!sourceCanEdit(sourceData,item)||requesting()||segmentEditor)return;if(Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length){sourceMessages.set(id,{error:true,text:'Выберите хотя бы один вид наполнения.'});renderSources();return;}
     sourceSaving=id;sourceMessages.delete(id);renderSources();updateControls();renderSourcesHealth();
     try{const result=await rpc('updateSourceBase',sourcePatch(item,draft,reviewed));const index=sourceData.items.findIndex((entry)=>entry.id===id);if(index>=0)sourceData.items[index]=result.item;sourceDrafts.delete(id);sourceMessages.set(id,{text:'Изменения сохранены.',error:false});}
     catch(error){const parsed=failure(error);sourceMessages.set(id,{error:true,code:parsed.code,text:parsed.message+' Выбранные изменения не подтверждены. Проверьте сохранённое состояние и повторите попытку.'});}
-    finally{sourceSaving=null;if(activeView==='sources')renderSources();updateControls();renderSourcesHealth();}
+    finally{sourceSaving=null;if(activeView==='sources')renderSources();updateControls();renderSourcesHealth();flushPendingView();}
   }
+  function buildSegmentLoads(entries){
+    if(!Array.isArray(entries)||entries.length>5)throw new Error('За один раз можно выбрать до 5 баз.');
+    const loads=[],seen=new Set();let count=0;
+    for(const entry of entries){const allowed=normalizeContents(entry.contents),sheets=[];if(!Number.isSafeInteger(entry.revision))throw new Error('Обновите список листов выбранной базы.');
+      for(const leaf of entry.sheets||[]){if(!leaf.included)continue;const key=entry.sourceId+'/'+String(leaf.id);if(seen.has(key))throw new Error('Один лист нельзя добавить в два назначения.');seen.add(key);if(!allowed.includes(leaf.target))throw new Error('Выберите назначение для каждого отмеченного листа.');sheets.push({sheetId:leaf.id,target:leaf.target,hasHeader:leaf.hasHeader!==false});count++;}
+      if(!sheets.length)throw new Error('Выберите хотя бы один лист отмеченной базы или снимите выбор базы.');loads.push({sourceId:entry.sourceId,expectedRevision:entry.revision,sheets});
+    }if(count>20)throw new Error('За один раз можно добавить до 20 листов.');return loads;
+  }
+  function segmentById(id){return dashboard?.items?.find((item)=>item.id===id);}
+  function renderSegmentsHealth(){const node=$('br-segments-health');node.classList.toggle('br-error',!!dashboardError);node.textContent=dashboardError?'Не удалось обновить сегменты. '+dashboardError:dashboardLoading?'Обновляем сегменты…':formIsOpen()?'Автообновление приостановлено на время редактирования.':'Данные обновляются каждую минуту, пока раздел открыт.';}
+  function renderSegments(){
+    $('br-segments-view').hidden=activeView!=='segments';if(activeView!=='segments')return;renderSegmentsHealth();
+    const ready=dashboard?.state==='ready',items=ready&&Array.isArray(dashboard.items)?dashboard.items:[];$('br-segments-count').textContent=ready?'Сегментов: '+items.length:dashboard?'Список недоступен':'Загружаем сегменты…';
+    const key=segmentContentKey(dashboard);if(key===renderedDashboardKey)return;renderedDashboardKey=key;
+    const target=$('br-segments-rows'),focusKey=document.activeElement?.dataset?.segmentFocus,oldY=window.scrollY;target.replaceChildren();$('br-segments-empty').hidden=ready&&items.length>0;
+    const messages={source_missing:['Папка «Аутричи» не найдена','Проверьте привязку папки у администратора.'],source_ambiguous:['Источник сегментов не определён','Нужно уточнить привязку папки «Аутричи».'],source_outside_registry:['Папка «Аутричи» недоступна','Проверьте права доступа и привязку папки.']};const empty=ready?['Пока нет сегментов','Добавьте сегмент — в нём будут отдельные таблицы компаний и ЛПР.']:messages[dashboard?.state]||[dashboardLoading?'Загружаем сегменты…':'Список сегментов недоступен','Нажмите «Обновить», чтобы повторить загрузку.'];$('br-segments-empty-title').textContent=empty[0];$('br-segments-empty-description').textContent=empty[1];
+    for(const item of items){
+      const row=document.createElement('article');row.className='br-segment-row';row.dataset.segment=item.id;
+      const head=document.createElement('div');head.className='br-segment-row-head';const name=document.createElement('a');name.href=folderUrl(item.id);name.target='_blank';name.rel='noopener noreferrer';name.className='br-segment-row-name';name.textContent=item.name;name.dataset.segmentFocus=item.id+'/folder';head.append(name);
+      const actions=document.createElement('div');actions.className='br-segment-row-actions';const edit=button('','Редактировать сегмент');edit.dataset.editSegment=item.id;edit.dataset.segmentFocus=item.id+'/edit';edit.addEventListener('click',()=>openSegmentEditor({segmentId:item.id}));const campaigns=button('br-link-button','Рассылки →');campaigns.dataset.segmentFocus=item.id+'/mailings';campaigns.addEventListener('click',()=>{segmentBackScroll=window.scrollY;mailingSegmentId=item.id;mailings=null;mailingsError=null;setView('mailings');});actions.append(edit,campaigns);head.append(actions);row.append(head);
+      const inline=document.createElement('div');inline.className='br-segment-inline';const pills=document.createElement('div');pills.className='br-channel-pills';for(const channel of [['email','Email'],['telegram','Telegram'],['retargeting','Ретаргетинг']]){const info=channelStatus(item.channels?.[channel[0]]?.state);const pill=document.createElement('span');pill.className='br-channel-pill';pill.dataset.channel=channel[0];pill.dataset.state=info.id;pill.textContent=channel[1]+' '+info.mark;pill.setAttribute('aria-label',channel[1]+': '+info.label);pill.title=info.label;pills.append(pill);}inline.append(pills);
+      const metrics=document.createElement('dl');metrics.className='br-segment-row-metrics';for(const entry of [['Email',item.channels?.email?.inWork],['Telegram',item.channels?.telegram?.inWork],['Ретаргетинг',item.channels?.retargeting?.inWork],['Компании ≥1 канал',item.companiesInWork]]){const group=document.createElement('div');const label=document.createElement('dt');label.textContent=entry[0];const value=document.createElement('dd');value.textContent=metricNumber(entry[1]);group.append(label,value);metrics.append(group);}inline.append(metrics);const info=segmentStatus(item.overallStatus),status=document.createElement('span');status.className='br-segment-status';status.dataset.status=info.id;status.textContent=info.label;inline.append(status);row.append(inline);
+      const links=document.createElement('div');links.className='br-segment-sheet-links';for(const file of item.files||[]){const link=document.createElement('a');link.href=nativeUrl(file.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent=file.kind==='companies'?'Компании':file.kind==='lpr'?'ЛПР':file.name;link.title=file.name;links.append(link);}row.append(links);
+      if(item.analysis?.warnings?.length){const warning=document.createElement('p');warning.className='br-segment-warning';warning.textContent=item.analysis.warnings.join(' ');row.append(warning);}target.append(row);
+    }
+    if(focusKey)Array.from(target.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===focusKey)?.focus({preventScroll:true});if(window.scrollY!==oldY)window.scrollTo(0,oldY);
+  }
+  async function refreshSegments(options={}){
+    if(requesting())return;if(options.automatic&&(activeView!=='segments'||document.hidden||formIsOpen()||Date.now()-lastDashboardAttempt<15000))return;
+    dashboardLoading=true;lastDashboardAttempt=Date.now();updateControls();renderSegmentsHealth();
+    try{dashboard=await rpc('getSegmentsDashboard');dashboardError=null;if(activeView==='segments')renderSegments();if(segmentEditor)renderSegmentEditor();}
+    catch(error){dashboardError=failure(error).message;}
+    finally{dashboardLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();}
+  }
+  function renderMailings(){
+    $('br-mailings-view').hidden=activeView!=='mailings';if(activeView!=='mailings')return;
+    const segment=mailings?.segment||segmentById(mailingSegmentId);$('br-mailings-title').textContent='Рассылки'+(segment?.name?' · '+segment.name:'');$('br-mailings-health').textContent=mailingsError?'Не удалось загрузить экран рассылок. '+mailingsError:mailingsLoading?'Загружаем рассылки…':mailings?.message||'Сервисы ещё не подключены. Показатели появятся после подключения.';
+    const totals=$('br-mailings-totals'),services=$('br-mailings-services');totals.replaceChildren();services.replaceChildren();if(!mailings)return;
+    function appendMetrics(parent,values,connected){const list=document.createElement('dl');list.className='br-mailing-metrics';for(const entry of [['Отправлено','sent'],['Ответы','replies'],['Лиды','leads']]){const group=document.createElement('div');const label=document.createElement('dt');label.textContent=entry[0];const value=document.createElement('dd');value.textContent=mailingMetric(values?.[entry[1]],connected);group.append(label,value);list.append(group);}parent.append(list);}
+    const totalTitle=document.createElement('h2');totalTitle.textContent='Итого по сегменту';totals.append(totalTitle);appendMetrics(totals,mailings.totals,mailings.state==='connected');
+    for(const service of mailings.services||[]){const block=document.createElement('section');block.className='br-mailing-service';const title=document.createElement('h2');title.textContent=service.name+' · '+(service.channel==='email'?'Email':service.channel==='telegram'?'Telegram':service.channel);block.append(title);const connected=service.state==='connected';const state=document.createElement('p');state.className='br-muted';state.textContent=connected?'Сервис подключён':'Сервис не подключён';block.append(state);appendMetrics(block,service.totals,connected);
+      const wrap=document.createElement('div');wrap.className='br-mailing-table-wrap';const table=document.createElement('table');table.className='br-mailing-table';const head=document.createElement('thead'),hr=document.createElement('tr');for(const name of ['Кампания','Отправлено','Ответы','Лиды']){const th=document.createElement('th');th.scope='col';th.textContent=name;hr.append(th);}head.append(hr);table.append(head);const body=document.createElement('tbody');
+      if(connected&&Array.isArray(service.campaigns)&&service.campaigns.length){for(const campaign of service.campaigns){const tr=document.createElement('tr');for(const value of [campaign.name,mailingMetric(campaign.sent,true),mailingMetric(campaign.replies,true),mailingMetric(campaign.leads,true)]){const td=document.createElement('td');td.textContent=String(value??'—');tr.append(td);}body.append(tr);}}else{const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=4;td.className='br-muted';td.textContent=connected?'Пока нет кампаний.':'Кампании появятся после подключения сервиса.';tr.append(td);body.append(tr);}table.append(body);wrap.append(table);block.append(wrap);services.append(block);
+    }
+  }
+  async function refreshMailings(options={}){
+    if(requesting()||!mailingSegmentId)return;if(options.automatic&&(activeView!=='mailings'||document.hidden||formIsOpen()||Date.now()-lastMailingsAttempt<15000))return;
+    mailingsLoading=true;lastMailingsAttempt=Date.now();updateControls();renderMailings();const id=mailingSegmentId;
+    try{const result=await rpc('getSegmentMailings',{segmentId:id});if(mailingSegmentId===id){mailings=result;mailingsError=null;}}
+    catch(error){if(mailingSegmentId===id)mailingsError=failure(error).message;}
+    finally{mailingsLoading=false;updateControls();if(activeView==='mailings')renderMailings();flushPendingView();}
+  }
+  function segmentRecoveryLocked(){return segmentError?.code==='SEGMENT_RECOVERY_REQUIRED';}
+  function renderSegmentError(){const node=$('br-segment-error');node.hidden=!segmentError;node.replaceChildren();if(!segmentError)return;node.append(document.createTextNode(segmentError.message));const folderId=folderRecoveryId(segmentError.message),sheetId=importRecoveryId(segmentError.message);if(folderId||sheetId){const link=document.createElement('a');link.href=folderId?folderUrl(folderId):nativeUrl(sheetId);link.target='_blank';link.rel='noopener noreferrer';link.textContent=' Открыть результат в Google Диске';node.append(link);}$('br-segment-reread').hidden=!segmentError;}
+  function renderSegmentEditor(){
+    $('br-segment-panel').hidden=!segmentEditor;if(!segmentEditor)return;
+    $('br-segment-editor-title').textContent=segmentEditor.id?'Изменить сегмент':segmentEditor.fromCatalog?'Добавить базу в сегмент':'Добавить сегмент';
+    $('br-segment-target-label').hidden=!segmentEditor.fromCatalog;
+    const target=$('br-segment-target'),selected=segmentEditor.id||'';target.replaceChildren();const fresh=document.createElement('option');fresh.value='';fresh.textContent='Новый сегмент';target.append(fresh);for(const item of dashboard?.items||[]){const option=document.createElement('option');option.value=item.id;option.textContent=item.name;target.append(option);}if(selected&&!segmentById(selected)){const option=document.createElement('option');option.value=selected;option.textContent='Текущий сегмент недоступен';option.disabled=true;target.append(option);}target.value=selected;
+    renderSegmentSources();renderSegmentError();updateControls();
+  }
+  function renderSegmentSources(){
+    if(!segmentEditor)return;const editor=segmentEditor,target=$('br-segment-source-options'),focusKey=document.activeElement?.dataset?.editorFocus;
+    target.replaceChildren();const items=sourceData?.items||[],choices=items.filter((item)=>readySource(item)||editor.selected.has(item.id));
+    $('br-segment-sources-health').textContent=editor.loadingLists?'Загружаем готовые базы…':sourceRefreshError?'Не удалось обновить базы. '+sourceRefreshError:sourceData?.canEdit!==true?'Список готовых баз недоступен. Можно создать пустой сегмент без загрузки листов.':choices.length?'Отметьте базы и нужные листы. За один раз — до 5 баз и 20 листов.':'Готовых баз Google Таблиц пока нет. Сначала измените статус нужной базы в реестре.';
+    let selectedCount=0;
+    for(const item of choices){
+      const entry=editor.selected.get(item.id),allowed=readySource(item)&&!sourceDrafts.has(item.id);const box=document.createElement('div');box.className='br-ready-source';box.dataset.readySource=item.id;
+      const line=document.createElement('div');line.className='br-ready-source-heading';const label=document.createElement('label');const check=document.createElement('input');check.type='checkbox';check.checked=!!entry;check.dataset.chooseSource=item.id;check.dataset.editorFocus=item.id+'/source';check.disabled=requesting()||segmentRecoveryLocked()||!entry&&!allowed;check.addEventListener('change',()=>chooseSegmentSource(item.id,check.checked));label.append(check,document.createTextNode(item.name+' · '+contentsLabel(item.contents)));line.append(label);const original=document.createElement('a');original.href=sourceFileUrl(item);original.target='_blank';original.rel='noopener noreferrer';original.textContent='Открыть';line.append(original);box.append(line);
+      if(!allowed){const warning=document.createElement('p');warning.className='br-error br-source-reason';warning.textContent=sourceDrafts.has(item.id)?'В реестре есть несохранённые изменения этой базы. Сначала сохраните или отмените их.':'Эта база больше не готова к добавлению. Снимите выбор или обновите список.';box.append(warning);}
+      if(entry){
+        if(entry.loading){const text=document.createElement('p');text.className='br-muted';text.textContent='Читаем список листов…';box.append(text);}
+        if(entry.error){const error=document.createElement('p');error.className='br-error br-source-message';error.textContent=entry.error;box.append(error);}
+        if(entry.preview){
+          const list=document.createElement('div');list.className='br-leaf-list';
+          for(const leaf of entry.sheets){const row=document.createElement('div');row.className='br-leaf-row';row.dataset.leaf=String(leaf.id);const includeLabel=document.createElement('label');const include=document.createElement('input');include.type='checkbox';include.checked=leaf.included;include.dataset.editorFocus=item.id+'/'+leaf.id+'/include';include.disabled=requesting()||segmentRecoveryLocked()||!allowed;include.addEventListener('change',()=>{leaf.included=include.checked;renderSegmentSources();updateControls();});includeLabel.append(include,document.createTextNode(leaf.name));row.append(includeLabel);
+            const destinationLabel=document.createElement('label');destinationLabel.className='br-leaf-destination';destinationLabel.append(document.createTextNode('Куда'));const select=document.createElement('select');select.dataset.editorFocus=item.id+'/'+leaf.id+'/target';select.setAttribute('aria-label','Назначение листа '+leaf.name);const empty=document.createElement('option');empty.value='';empty.textContent='Выберите назначение';select.append(empty);for(const kind of normalizeContents(entry.preview.contents)){const option=document.createElement('option');option.value=kind;option.textContent=kind==='companies'?'Компании':'ЛПР';select.append(option);}select.value=leaf.target;select.disabled=!leaf.included||requesting()||segmentRecoveryLocked()||!allowed;select.addEventListener('change',()=>{leaf.target=select.value;updateSegmentSummary();});destinationLabel.append(select);row.append(destinationLabel);
+            const headerLabel=document.createElement('label');headerLabel.className='br-leaf-header';const header=document.createElement('input');header.type='checkbox';header.checked=leaf.hasHeader!==false;header.dataset.editorFocus=item.id+'/'+leaf.id+'/header';header.disabled=!leaf.included||requesting()||segmentRecoveryLocked()||!allowed;header.addEventListener('change',()=>{leaf.hasHeader=header.checked;});headerLabel.append(header,document.createTextNode('Первая строка — заголовок'));row.append(headerLabel);list.append(row);if(leaf.included)selectedCount++;
+          }box.append(list);
+        }
+        const reload=button('','Обновить листы');reload.disabled=requesting()||segmentRecoveryLocked()||!allowed;reload.addEventListener('click',()=>loadSourcePreview(item.id));box.append(reload);
+      }target.append(box);
+    }
+    updateSegmentSummary(selectedCount);if(focusKey)Array.from(target.querySelectorAll('[data-editor-focus]')).find((node)=>node.dataset.editorFocus===focusKey)?.focus({preventScroll:true});
+  }
+  function updateSegmentSummary(count){if(!segmentEditor)return;const selected=count===undefined?Array.from(segmentEditor.selected.values()).reduce((sum,entry)=>sum+entry.sheets.filter((leaf)=>leaf.included).length,0):count;$('br-segment-selection-summary').textContent='Выбрано листов: '+selected+'. Неотмеченные листы не добавляются.';}
+  async function openSegmentEditor(options={}){
+    if(requesting()||importOpen||segmentEditor)return;
+    if(options.sourceId){const item=sourceItem(options.sourceId);if(!readySource(item)||sourceDrafts.has(item.id)){notice('Добавлять можно только готовые базы Google Таблиц без несохранённых изменений.','error');return;}}
+    const existing=options.segmentId?segmentById(options.segmentId):null;if(options.segmentId&&!existing)return;
+    const epoch=++segmentEditorEpoch;segmentEditor={epoch,id:existing?.id||null,baselineName:existing?.name||'',fromCatalog:options.fromCatalog===true,selected:new Map(),loadingLists:true};formMode='segment';segmentError=null;$('br-segment-name').value=existing?.name||'';renderSegmentEditor();$('br-segment-name').focus();
+    if(!dashboard)await refreshSegments({forEditor:true});if(segmentEditor?.epoch!==epoch)return;
+    await refreshSourceBases({forEditor:true,preserveNotice:true});if(segmentEditor?.epoch!==epoch)return;
+    segmentEditor.loadingLists=false;renderSegmentEditor();if(options.sourceId)await chooseSegmentSource(options.sourceId,true);
+  }
+  async function chooseSegmentSource(id,checked){
+    if(!segmentEditor||requesting()||segmentRecoveryLocked())return;
+    if(!checked){segmentEditor.selected.delete(id);renderSegmentSources();updateControls();return;}
+    const item=sourceItem(id);if(!readySource(item)||sourceDrafts.has(id)){segmentError={message:'Эта база не готова к добавлению. Обновите реестр баз.'};renderSegmentError();return;}
+    if(segmentEditor.selected.size>=5){segmentError={message:'За один раз можно добавить до 5 баз.'};renderSegmentError();return;}
+    segmentEditor.selected.set(id,{preview:null,sheets:[],loading:true,error:null});renderSegmentSources();await loadSourcePreview(id);
+  }
+  async function loadSourcePreview(id){
+    if(!segmentEditor||requesting()||segmentRecoveryLocked())return;const editor=segmentEditor,entry=editor.selected.get(id),item=sourceItem(id);if(!entry)return;
+    if(!readySource(item)||sourceDrafts.has(id)){entry.error='База больше не готова к добавлению. Обновите реестр баз.';renderSegmentSources();return;}
+    segmentPreviewLoading=true;entry.loading=true;entry.error=null;updateControls();renderSegmentSources();
+    try{const preview=await rpc('getSourceSheets',{sourceId:id,expectedRevision:item.revision});if(segmentEditor!==editor||!editor.selected.has(id))return;const previous=new Map(entry.sheets.map((leaf)=>[String(leaf.id),leaf]));entry.preview=preview;entry.sheets=(preview.sheets||[]).map((sheet)=>{const old=previous.get(String(sheet.id)),contents=normalizeContents(preview.contents);return {id:sheet.id,name:sheet.name,included:old?.included===true,target:old&&contents.includes(old.target)?old.target:contents.length===1?contents[0]:'',hasHeader:old?old.hasHeader!==false:true};});}
+    catch(error){if(segmentEditor===editor)entry.error=failure(error).message;}
+    finally{entry.loading=false;segmentPreviewLoading=false;if(segmentEditor===editor)renderSegmentSources();updateControls();flushPendingView();}
+  }
+  function showSegmentResult(message,error,segment){notice(message,error?'error':'info');if(segment?.id){const link=document.createElement('a');link.href=folderUrl(segment.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent='Открыть сегмент';$('br-notice').append(link);}}
+  async function submitSegment(){
+    if(!segmentEditor||requesting()||segmentEditor.loadingLists)return;const editor=segmentEditor,name=$('br-segment-name').value.trim();if(!name||name.length>100){segmentError={message:'Введите название сегмента от 1 до 100 символов.'};renderSegmentError();return;}
+    let loads;try{const entries=[];for(const [id,entry] of editor.selected){if(entry.loading||entry.error||!entry.preview||!readySource(sourceItem(id))||sourceDrafts.has(id))throw new Error('Проверьте готовность и список листов каждой отмеченной базы.');entries.push({sourceId:id,revision:entry.preview.revision,contents:entry.preview.contents,sheets:entry.sheets});}loads=buildSegmentLoads(entries);if(editor.id&&name===editor.baselineName&&!loads.length)throw new Error('Измените название или выберите листы для добавления.');}catch(error){segmentError={message:error.message};renderSegmentError();return;}
+    const payload=editor.id?{id:editor.id,loads}: {name,loads};if(editor.id&&name!==editor.baselineName)payload.name=name;const fingerprint=JSON.stringify({operation:editor.id?'update':'create',payload});let requestId=segmentRequests.get(fingerprint);if(!requestId){requestId=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);segmentRequests.set(fingerprint,requestId);}payload.requestId=requestId;
+    segmentSaving=true;segmentError=null;renderSegmentError();updateControls();
+    try{const result=await rpc(editor.id?'updateSegment':'createSegment',payload);segmentEditor=null;formMode=null;segmentRequests.clear();segmentSaving=false;renderSegmentEditor();if(activeView==='segments')await refreshSegments();if(activeView==='sources')await refreshSourceBases({preserveNotice:true});const refreshError=activeView==='segments'?dashboardError:activeView==='sources'?sourceRefreshError:null;showSegmentResult((editor.id?'Сегмент обновлён.':'Сегмент создан.')+' Добавлено листов: '+(result.loadedSheets?.length||0)+(refreshError?' Обновить список не удалось: '+refreshError:''),!!refreshError,result.segment);}
+    catch(error){segmentError=failure(error);renderSegmentError();}
+    finally{segmentSaving=false;updateControls();if(segmentEditor)renderSegmentSources();flushPendingView();}
+  }
+  function readImportContents(prefix){return ['companies','lpr'].filter((kind)=>$('br-'+prefix+'-'+kind).checked);}
+  function setImportContents(prefix,contents){for(const kind of ['companies','lpr'])$('br-'+prefix+'-'+kind).checked=normalizeContents(contents).includes(kind);}
   function updateImportView(){
     $('br-import-panel').hidden=!importOpen;$('br-import-file-form').hidden=importMode!=='file';$('br-import-link-form').hidden=importMode!=='link';
     $('br-import-mode-file').setAttribute('aria-pressed',String(importMode==='file'));$('br-import-mode-link').setAttribute('aria-pressed',String(importMode==='link'));
-    $('br-upload-criterion').textContent=sourceTypeCriterion($('br-upload-type').value);$('br-link-criterion').textContent=sourceTypeCriterion($('br-link-type').value);
+    $('br-upload-criterion').textContent=contentsCriterion(readImportContents('upload'));$('br-link-criterion').textContent=contentsCriterion(readImportContents('link'));
     const move=$('br-import-link-form').querySelector('input[name="br-link-transfer"]:checked')?.value==='move';$('br-link-move-help').hidden=!move;$('br-link-submit').textContent=move?'Перенести таблицу':'Создать копию';
     for(const id of ['br-import-mode-file','br-import-mode-link','br-import-cancel'])$(id).disabled=importing;
     for(const form of [$('br-import-file-form'),$('br-import-link-form')]){form.setAttribute('aria-busy',String(importing));for(const field of form.elements)field.disabled=importing;}
-    for(const id of ['br-upload-submit','br-link-submit'])$(id).disabled=importing||sourceLoading||!!sourceSaving||busy||sourceData?.state!=='ready'||sourceData?.canEdit!==true;
+    for(const id of ['br-upload-submit','br-link-submit'])$(id).disabled=requesting()||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;
     $('br-import-reread').disabled=importing||sourceLoading||!!sourceSaving||busy;
   }
   function showImportMessage(text,error,recoveryId,reread){const node=$('br-import-message');node.hidden=!text;node.className='br-source-message'+(error?' br-error':'');node.setAttribute('role',error?'alert':'status');node.replaceChildren();if(text)node.append(document.createTextNode(text));if(recoveryId){const link=document.createElement('a');link.href=nativeUrl(recoveryId);link.target='_blank';link.rel='noopener noreferrer';link.textContent='Проверить таблицу';node.append(link);}$('br-import-reread').hidden=!reread;}
-  function switchImportMode(mode){if(importing||mode===importMode)return;const old=importMode==='file'?'upload':'link',next=mode==='file'?'upload':'link';for(const name of ['name','type','status'])$('br-'+next+'-'+name).value=$('br-'+old+'-'+name).value;importMode=mode;updateImportView();$('br-'+next+'-name').focus();}
+  function switchImportMode(mode){if(importing||mode===importMode)return;const old=importMode==='file'?'upload':'link',next=mode==='file'?'upload':'link';for(const name of ['name','status'])$('br-'+next+'-'+name).value=$('br-'+old+'-'+name).value;setImportContents(next,readImportContents(old));importMode=mode;updateImportView();$('br-'+next+'-name').focus();}
   async function submitSourceImport(kind,form){
-    if(importing||sourceLoading||sourceSaving||busy||sourceData?.state!=='ready'||sourceData?.canEdit!==true)return;
-    const prefix=kind==='file'?'upload':'link',fields={name:$('br-'+prefix+'-name').value.trim(),baseType:$('br-'+prefix+'-type').value,status:$('br-'+prefix+'-status').value};
+    if(requesting()||segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true)return;
+    const prefix=kind==='file'?'upload':'link',fields={name:$('br-'+prefix+'-name').value.trim(),contents:readImportContents(prefix),status:$('br-'+prefix+'-status').value};
     if(!fields.name||fields.name.length>100){showImportMessage('Введите название базы от 1 до 100 символов.',true);return;}
+    if(!fields.contents.length){showImportMessage('Выберите наполнение: Компании, ЛПР или оба варианта.',true);return;}
     const file=kind==='file'?$('br-upload-file').files[0]:null;
     if(kind==='file'){const invalid=importFileError(file);if(invalid){showImportMessage(invalid,true);return;}}
     else{fields.url=$('br-link-url').value.trim();fields.mode=$('br-import-link-form').querySelector('input[name="br-link-transfer"]:checked')?.value||'copy';if(!importLinkId(fields.url)){showImportMessage('Укажите ссылку на исходную Google Таблицу в docs.google.com.',true);return;}}
     const fingerprint=importFingerprint(kind,fields,file,importFileSelection);let requestId=importRequests.get(fingerprint);if(!requestId){requestId=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);importRequests.set(fingerprint,requestId);}
-    showImportMessage('Добавляем базу…',false);$('br-upload-request').value=requestId;
+    showImportMessage('Добавляем базу…',false);$('br-upload-request').value=requestId;$('br-upload-contents').value=JSON.stringify(fields.contents);
     // Dispatch the live form before disabling its named fields: Google serializes it into a Blob payload here.
     const pending=kind==='file'?rpc('uploadSourceBase',form):rpc('importSourceBaseLink',Object.assign({},fields,{requestId}));
     importing=true;updateControls();renderSourcesHealth();
@@ -240,54 +271,52 @@
       const success=result.recovered?'Результат предыдущей операции найден. База доступна в «Исходных базах».':result.mode==='move'?'Таблица перенесена в «Исходные базы».':result.mode==='copy'?'Копия Google Таблицы создана в «Исходных базах».':'База загружена как новая Google Таблица в «Исходные базы».';
       notice(success+(sourceRefreshError?' Обновить список не удалось: '+sourceRefreshError:''),sourceRefreshError?'error':'info',{id:fileId,label:'Открыть таблицу'});
     }catch(error){const parsed=failure(error),recoveryId=importRecoveryId(parsed.message);let text=parsed.code==='CREATION_UNCERTAIN'?'Результат операции не подтверждён. Проверьте таблицу и перечитайте список перед повторной отправкой. '+parsed.message:parsed.message;if(parsed.code==='DRIVE_SETUP_REQUIRED')text+=' Администратору нужно включить сервис Drive v3 в Apps Script, а для стандартного Cloud-проекта — Google Drive API.';showImportMessage(text,true,recoveryId,true);}
-    finally{importing=false;updateControls();renderSourcesHealth();}
+    finally{importing=false;updateControls();renderSourcesHealth();flushPendingView();}
   }
-  function setCollapsed(){root.dataset.collapsed=String(collapsed);$('br-menu-toggle').setAttribute('aria-label',collapsed?'Показать меню':'Свернуть меню');$('br-menu-toggle').setAttribute('aria-expanded',String(!collapsed));}
+  function render(){
+    $('br-sources-view').hidden=activeView!=='sources';$('br-segments-view').hidden=activeView!=='segments';$('br-mailings-view').hidden=activeView!=='mailings';$('br-retarget-view').hidden=activeView!=='retarget';
+    for(const view of ['sources','segments','retarget'])$('br-view-'+view).setAttribute('aria-pressed',String(activeView===view||view==='segments'&&activeView==='mailings'));
+    root.dataset.view=activeView;renderSources();renderSegments();renderMailings();updateControls();
+  }
   function updateControls(){
-    $('br-refresh').disabled=busy||sourceLoading||!!sourceSaving||importing;
-    for(const id of ['br-new-base','br-new-folder','br-empty-create'])$(id).disabled=busy||!bootstrap;
-    for(const node of root.querySelectorAll('#br-tree button,#br-entries button,#br-segments-cards button'))node.disabled=busy;
-    $('br-item-submit').disabled=busy;$('br-item-name').disabled=busy;$('br-item-cancel').disabled=busy;
-    for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId);for(const select of row.querySelectorAll('select'))select.disabled=!sourceCanEdit(sourceData,item)||busy||sourceLoading||!!sourceSaving||importing;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing:!sourceCanEdit(sourceData,item)||busy||sourceLoading||!!sourceSaving||importing;}
-    $('br-import-open').disabled=importOpen||importing||busy||sourceLoading||!!sourceSaving||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
+    const waiting=requesting();$('br-refresh').disabled=waiting;$('br-refresh').hidden=activeView==='retarget';
+    for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
+    $('br-import-open').disabled=importOpen||waiting||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
+    $('br-add-segment').disabled=waiting||importOpen||!!segmentEditor||dashboard&&dashboard.state!=='ready';
+    for(const edit of root.querySelectorAll('[data-edit-segment]'))edit.disabled=waiting||importOpen||!!segmentEditor;
+    $('br-segment-close').disabled=segmentSaving;$('br-segment-name').disabled=segmentSaving||segmentRecoveryLocked();$('br-segment-target').disabled=waiting||segmentRecoveryLocked();$('br-segment-refresh-sources').disabled=waiting||segmentRecoveryLocked();$('br-segment-submit').disabled=waiting||!!segmentEditor?.loadingLists;$('br-segment-submit').textContent=segmentSaving?'Сохраняем…':segmentRecoveryLocked()?'Повторить запрос':segmentEditor?.id?'Сохранить изменения':'Создать сегмент';$('br-segment-reread').disabled=waiting;
+    for(const control of root.querySelectorAll('#br-segment-source-options input,#br-segment-source-options select,#br-segment-source-options button')){if(waiting||segmentRecoveryLocked())control.disabled=true;}
   }
-  function renderForm(){const node=$('br-item-form');node.hidden=!formMode||activeView!=='registry';if(!formMode)return;const rename=formMode==='rename';$('br-item-label').textContent=rename?'Название базы':formMode==='folder'?'Новая папка':'Новая база';$('br-item-destination').textContent=rename?'':'В папке «'+folderName(selectedFolder)+'»';$('br-item-submit').textContent=rename?'Сохранить':'Создать';}
-  function render(){renderTree();renderFolder();renderForm();renderSegments();renderSources();updateControls();}
-  function showForm(mode,id){if(busy||!bootstrap)return;const file=mode==='rename'?bootstrap.files.find((item)=>item.id===id):null;if(mode==='rename'&&!file)return;formMode=mode;renameId=file?.id||null;$('br-item-name').value=file?.name||'';$('br-form-error').textContent='';renderForm();$('br-item-name').focus();}
-  async function runAction(action,label){if(busy)return;busy=true;$('br-loading').textContent=label||'Обновляем реестр…';$('br-loading').hidden=false;updateControls();try{await action();}catch(error){notice(failure(error).message,'error');}finally{busy=false;$('br-loading').hidden=true;updateControls();continueSourceOpening();}}
-  async function refreshRegistry(){lastSegmentsAttempt=Date.now();const result=await rpc('getBootstrap');bootstrap=result;segmentsRefreshError=null;if(!folderById(selectedFolder))selectedFolder=result.registry.id;expanded.add(result.registry.id);$('br-user').textContent=result.user.email||'';render();}
-  $('br-menu-toggle').addEventListener('click',()=>{collapsed=!collapsed;setCollapsed();});
-  $('br-refresh').addEventListener('click',()=>activeView==='sources'?refreshSourceBases():runAction(async()=>{await refreshRegistry();notice(null);}));
-  $('br-view-registry').addEventListener('click',()=>setView('registry'));$('br-view-segments').addEventListener('click',()=>setView('segments'));
-  $('br-view-sources').addEventListener('click',()=>setView('sources'));
-  $('br-import-open').addEventListener('click',()=>{if(importing)return;importOpen=true;updateControls();renderSourcesHealth();$('br-'+(importMode==='file'?'upload':'link')+'-name').focus();});
+  function clearViewTimer(){if(viewTimer!==null){clearInterval(viewTimer);viewTimer=null;}}
+  function armViewTimer(){clearViewTimer();if(!document.hidden&&['sources','segments','mailings'].includes(activeView))viewTimer=setInterval(()=>refreshActiveView({automatic:true}),60000);}
+  async function refreshActiveView(options={}){
+    if(requesting()){if(options.opening)pendingView=activeView;return;}
+    if(options.automatic&&(document.hidden||formIsOpen()))return;
+    if(activeView==='sources')return refreshSourceBases(Object.assign({},options,{preserveNotice:!options.manual}));
+    if(activeView==='segments')return refreshSegments(options);
+    if(activeView==='mailings')return refreshMailings(options);
+  }
+  function flushPendingView(){if(requesting())return;if(segmentEditor)renderSegmentSources();updateControls();if(!pendingView)return;const view=pendingView;pendingView=null;if(view===activeView)refreshActiveView({opening:true,preserveNotice:true});}
+  function setView(view,options={}){activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});}
+  $('br-view-sources').addEventListener('click',()=>setView('sources'));$('br-view-segments').addEventListener('click',()=>setView('segments'));$('br-view-retarget').addEventListener('click',()=>setView('retarget'));
+  $('br-refresh').addEventListener('click',()=>refreshActiveView({manual:true}));
+  $('br-mailings-back').addEventListener('click',()=>{setView('segments',{cached:true});setTimeout(()=>{window.scrollTo(0,segmentBackScroll);Array.from(root.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===mailingSegmentId+'/mailings')?.focus({preventScroll:true});},0);});
+  $('br-add-segment').addEventListener('click',()=>openSegmentEditor());
+  $('br-segment-close').addEventListener('click',()=>{if(segmentSaving)return;segmentEditor=null;formMode=null;segmentError=null;segmentEditorEpoch++;renderSegmentEditor();updateControls();});
+  $('br-segment-target').addEventListener('change',()=>{if(!segmentEditor)return;const item=segmentById($('br-segment-target').value);segmentEditor.id=item?.id||null;segmentEditor.baselineName=item?.name||'';$('br-segment-name').value=item?.name||'';renderSegmentEditor();});
+  $('br-segment-refresh-sources').addEventListener('click',()=>refreshSourceBases({forEditor:true,preserveNotice:true}));
+  $('br-segment-reread').addEventListener('click',()=>refreshSegments({forEditor:true}));
+  $('br-segment-form').addEventListener('submit',(event)=>{event.preventDefault();submitSegment();});
+  $('br-import-open').addEventListener('click',()=>{if(requesting()||segmentEditor)return;importOpen=true;updateControls();renderSourcesHealth();$('br-'+(importMode==='file'?'upload':'link')+'-name').focus();});
   $('br-import-cancel').addEventListener('click',()=>{if(importing)return;importOpen=false;updateControls();renderSourcesHealth();$('br-import-open').focus();});
   $('br-import-mode-file').addEventListener('click',()=>switchImportMode('file'));$('br-import-mode-link').addEventListener('click',()=>switchImportMode('link'));
-  $('br-upload-type').addEventListener('change',updateImportView);$('br-link-type').addEventListener('change',updateImportView);for(const radio of $('br-import-link-form').querySelectorAll('input[type="radio"]'))radio.addEventListener('change',updateImportView);
+  for(const prefix of ['upload','link'])for(const kind of ['companies','lpr'])$('br-'+prefix+'-'+kind).addEventListener('change',updateImportView);
+  for(const radio of $('br-import-link-form').querySelectorAll('input[type="radio"]'))radio.addEventListener('change',updateImportView);
   $('br-upload-file').addEventListener('change',()=>{importFileSelection++;});
   $('br-import-file-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('file',event.currentTarget);});$('br-import-link-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('link',event.currentTarget);});
   $('br-import-reread').addEventListener('click',()=>refreshSourceBases({preserveNotice:true}));
-  $('br-new-base').addEventListener('click',()=>showForm('file'));$('br-empty-create').addEventListener('click',()=>showForm('file'));$('br-new-folder').addEventListener('click',()=>showForm('folder'));
-  $('br-item-cancel').addEventListener('click',()=>{if(busy)return;formMode=null;renameId=null;renderForm();});
-  $('br-item-form').addEventListener('submit',(event)=>{
-    event.preventDefault();const name=$('br-item-name').value.trim();if(!name||!formMode)return;const mode=formMode,parentId=selectedFolder,id=renameId;
-    runAction(async()=>{
-      notice(null);$('br-form-error').textContent='';
-      if(mode==='rename'){
-        try{const result=await rpc('renameItem',{id,name,kind:'file'});const file=bootstrap.files.find((item)=>item.id===result.id);if(file)file.name=result.name;formMode=null;renameId=null;render();notice('Название базы изменено.');}
-        catch(error){$('br-form-error').textContent=failure(error).message;throw error;}return;
-      }
-      const signature=JSON.stringify({mode,parentId,name});if(creationRequest?.signature!==signature)creationRequest={signature,id:globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2)};
-      let created;try{created=await rpc(mode==='file'?'createBase':'createFolder',{parentId,name,requestId:creationRequest.id});}catch(error){$('br-form-error').textContent=failure(error).message;throw error;}
-      formMode=null;creationRequest=null;
-      if(mode==='file'){if(!bootstrap.files.some((file)=>file.id===created.file.id))bootstrap.files.push(created.file);selectedFolder=parentId;}
-      else{if(!bootstrap.folders.some((folder)=>folder.id===created.folder.id))bootstrap.folders.push(created.folder);selectedFolder=created.folder.id;expanded.add(selectedFolder);}
-      expanded.add(parentId);render();
-      try{await refreshRegistry();notice(mode==='file'?'База создана в Google Диске.':'Папка создана в реестре.','info',mode==='file'?{id:created.file.id}:null);}
-      catch(error){notice((mode==='file'?'База':'Папка')+' «'+name+'» создана. Обновить реестр не удалось: '+failure(error).message,'error',mode==='file'?{id:created.file.id}:null);}
-    },mode==='rename'?'Сохраняем название…':mode==='file'?'Создаём базу…':'Создаём папку…');
-  });
-  window.addEventListener('focus',()=>{autoRefreshSegments();refreshSourceBases({automatic:true});});document.addEventListener('visibilitychange',()=>{armSegmentsTimer();armSourceTimer();if(!document.hidden){autoRefreshSegments();refreshSourceBases({automatic:true});}});window.addEventListener('beforeunload',(event)=>{stopSegmentsTimer();stopSourceTimer();if(importing){event.preventDefault();event.returnValue='';}});
-  setCollapsed();root.dataset.view='registry';runAction(async()=>{await refreshRegistry();notice(null);},'Подключаем Google Диск…');
+  window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving){event.preventDefault();event.returnValue='';}});
+  render();armViewTimer();
+  (async()=>{busy=true;updateControls();try{bootstrap=await rpc('getAppBootstrap');$('br-user').textContent=bootstrap.user.email||'';}catch(error){notice(failure(error).message,'error');}finally{busy=false;$('br-loading').hidden=true;updateControls();pendingView=activeView;flushPendingView();}})();
 })();
 </script>

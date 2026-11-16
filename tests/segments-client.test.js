@@ -22,7 +22,7 @@ test('only approved actual channel states receive channel labels and indicators'
   assert.equal(status('active').id, 'active');
   assert.equal(status('active').label, 'В работе');
   assert.equal(status('inactive').id, 'inactive');
-  assert.equal(status('inactive').label, 'Не в работе');
+  assert.equal(status('inactive').label, 'Не запущен');
   for (const value of [null, undefined, 'unknown', 'unexpected', '__proto__']) {
     assert.equal(status(value).id, 'unknown');
     assert.equal(status(value).mark, '—');

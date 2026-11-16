@@ -9,36 +9,32 @@
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span aria-hidden="true">▦</span><strong>Реестр баз</strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-registry" type="button" class="br-button" aria-pressed="true">Реестр</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-sources" type="button" class="br-button" aria-pressed="false">Исходные базы</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span aria-hidden="true">▦</span><strong>Реестр баз</strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
   <div id="br-notice" class="br-notice" role="status" aria-live="polite" hidden></div>
-  <div class="br-layout">
-    <aside class="br-sidebar" aria-label="Папки и таблицы">
-      <button id="br-menu-toggle" class="br-button br-menu-toggle" type="button" aria-expanded="true" aria-label="Свернуть меню"><span aria-hidden="true">☰</span><span class="br-nav-label">Папки и базы</span></button>
-      <div class="br-sidebar-body"><nav id="br-tree" aria-label="Реестр баз"><span class="br-muted">Загружаем реестр…</span></nav><div class="br-nav-actions"><button id="br-new-base" type="button" class="br-button br-primary" disabled>＋ Новая база</button><button id="br-new-folder" type="button" class="br-button" disabled>＋ Новая папка</button></div><p id="br-destination" class="br-destination"></p></div>
-    </aside>
-    <main class="br-main">
-      <form id="br-item-form" class="br-item-form" hidden><div class="br-form-heading"><label id="br-item-label" for="br-item-name">Название</label><span id="br-item-destination" class="br-muted"></span></div><div class="br-form-fields"><input id="br-item-name" type="text" autocomplete="off" maxlength="100" required><button id="br-item-submit" type="submit" class="br-button br-primary">Создать</button><button id="br-item-cancel" type="button" class="br-button">Отмена</button></div><p id="br-form-error" class="br-form-error" role="alert"></p></form>
-      <div id="br-loading" class="br-loading" aria-live="polite">Подключаем Google Диск…</div>
-      <section id="br-folder-view" hidden aria-labelledby="br-folder-title">
-        <div class="br-folder-heading"><p id="br-breadcrumb" class="br-breadcrumb"></p><h1 id="br-folder-title"></h1><p id="br-folder-summary" class="br-muted"></p></div>
-        <div id="br-entries" class="br-entries" aria-label="Содержимое папки"></div>
-        <div id="br-empty" class="br-empty" hidden><span aria-hidden="true">▱</span><h2>В этой папке пока пусто</h2><p>Создайте базу или добавьте Google Таблицу в эту папку на Диске, затем обновите реестр.</p><button id="br-empty-create" type="button" class="br-button br-primary">Создать базу</button></div>
-      </section>
-      <section id="br-segments-view" class="br-segments-view" hidden aria-labelledby="br-segments-title">
-        <div class="br-segments-heading"><div><h1 id="br-segments-title">Сегменты</h1><p id="br-segments-count" class="br-muted"></p></div><a id="br-segments-source" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Папка «Аутричи» →</a></div>
-        <p id="br-segments-rules" class="br-segments-rules">Правила статусов и подсчёта ещё не настроены. Будущие статусы: «В работе», «Подготовка», «Нет контактов».</p>
-        <p id="br-segments-health" class="br-segments-health" role="status" aria-live="polite"></p>
-        <div id="br-segments-empty" class="br-segments-empty" role="status" hidden><h2 id="br-segments-empty-title"></h2><p id="br-segments-empty-description"></p></div>
-        <div id="br-segments-cards" class="br-segments-cards"></div>
-      </section>
+  <div id="br-loading" class="br-loading" aria-live="polite">Загружаем приложение…</div>
+  <section id="br-segment-panel" class="br-segment-panel" hidden aria-labelledby="br-segment-editor-title">
+    <div class="br-import-heading"><h2 id="br-segment-editor-title">Добавить сегмент</h2><button id="br-segment-close" type="button" class="br-button">Закрыть</button></div>
+    <form id="br-segment-form" class="br-segment-form">
+      <label id="br-segment-target-label" for="br-segment-target" hidden>Куда добавить базу<select id="br-segment-target"><option value="">Новый сегмент</option></select></label>
+      <label for="br-segment-name">Название сегмента<input id="br-segment-name" type="text" maxlength="100" autocomplete="off" required></label>
+      <p class="br-muted">В сегменте будут две Google Таблицы: «Название: компании» и «Название: ЛПР». Выбранные листы добавляются целиком; исходные базы остаются на месте.</p>
+      <div class="br-segment-source-heading"><h3>Добавить готовые базы <span class="br-muted">необязательно</span></h3><button id="br-segment-refresh-sources" type="button" class="br-button">Обновить список баз</button></div>
+      <p id="br-segment-sources-health" class="br-muted" role="status" aria-live="polite"></p>
+      <div id="br-segment-source-options"></div>
+      <p id="br-segment-selection-summary" class="br-muted"></p>
+      <div id="br-segment-error" class="br-source-message br-error" role="alert" hidden></div>
+      <div class="br-source-actions"><button id="br-segment-submit" type="submit" class="br-button br-primary">Создать сегмент</button><button id="br-segment-reread" type="button" class="br-button" hidden>Обновить сегменты</button></div>
+    </form>
+  </section>
+  <main class="br-main">
       <section id="br-sources-view" class="br-sources-view" hidden aria-labelledby="br-sources-title">
-        <div class="br-segments-heading"><div><h1 id="br-sources-title">Исходные базы</h1><p id="br-sources-count" class="br-muted"></p></div><div class="br-source-heading-actions"><button id="br-import-open" type="button" class="br-button br-primary" disabled>＋ Загрузить базу</button><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div></div>
+        <div class="br-segments-heading"><div><h1 id="br-sources-title">Реестр баз</h1><p id="br-sources-count" class="br-muted"></p></div><div class="br-source-heading-actions"><button id="br-import-open" type="button" class="br-button br-primary" disabled>＋ Загрузить базу</button><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div></div>
         <section id="br-import-panel" class="br-import-panel" hidden aria-labelledby="br-import-title">
           <div class="br-import-heading"><h2 id="br-import-title">Загрузить базу</h2><button id="br-import-cancel" type="button" class="br-button">Закрыть</button></div>
           <nav class="br-import-modes" aria-label="Источник базы"><button id="br-import-mode-file" type="button" class="br-button" aria-pressed="true">Файл</button><button id="br-import-mode-link" type="button" class="br-button" aria-pressed="false">Google Таблица по ссылке</button></nav>
           <form id="br-import-file-form" class="br-import-form">
             <label for="br-upload-name">Название базы<input id="br-upload-name" name="name" type="text" maxlength="100" autocomplete="off" required></label>
-            <div class="br-import-fields"><label for="br-upload-type">Тип базы<select id="br-upload-type" name="baseType"><option value="general">Общая</option><option value="lpr">ЛПР</option></select></label><label for="br-upload-status">Статус обработки<select id="br-upload-status" name="status"><option value="collection">Сбор</option><option value="ready">Готова</option><option value="rework">Доработка</option></select></label></div>
+            <div class="br-import-fields"><fieldset class="br-contents-choice"><legend>Наполнение базы</legend><label><input id="br-upload-companies" type="checkbox" checked>Компании</label><label><input id="br-upload-lpr" type="checkbox">ЛПР</label></fieldset><input id="br-upload-contents" name="contentsJSON" type="hidden" value='["companies"]'><label for="br-upload-status">Статус обработки<select id="br-upload-status" name="status"><option value="collection">Сбор</option><option value="ready">Готова</option><option value="rework">Доработка</option></select></label></div>
             <p id="br-upload-criterion" class="br-source-criterion">1 строка = 1 компания.</p>
             <label for="br-upload-file">Файл<input id="br-upload-file" name="file" type="file" accept=".csv,.tsv,.xls,.xlsx,.ods" required></label>
             <p class="br-muted">CSV, TSV, XLS, XLSX или ODS · до 10 МиБ. Будет создана новая Google Таблица в папке «Исходные базы».</p>
@@ -47,7 +43,7 @@
           </form>
           <form id="br-import-link-form" class="br-import-form" hidden>
             <label for="br-link-name">Название базы<input id="br-link-name" type="text" maxlength="100" autocomplete="off" required></label>
-            <div class="br-import-fields"><label for="br-link-type">Тип базы<select id="br-link-type"><option value="general">Общая</option><option value="lpr">ЛПР</option></select></label><label for="br-link-status">Статус обработки<select id="br-link-status"><option value="collection">Сбор</option><option value="ready">Готова</option><option value="rework">Доработка</option></select></label></div>
+            <div class="br-import-fields"><fieldset class="br-contents-choice"><legend>Наполнение базы</legend><label><input id="br-link-companies" type="checkbox" checked>Компании</label><label><input id="br-link-lpr" type="checkbox">ЛПР</label></fieldset><label for="br-link-status">Статус обработки<select id="br-link-status"><option value="collection">Сбор</option><option value="ready">Готова</option><option value="rework">Доработка</option></select></label></div>
             <p id="br-link-criterion" class="br-source-criterion">1 строка = 1 компания.</p>
             <label for="br-link-url">Ссылка на Google Таблицу<input id="br-link-url" type="url" placeholder="https://docs.google.com/spreadsheets/d/…" autocomplete="off" required></label>
             <fieldset class="br-import-transfer"><legend>Как добавить таблицу</legend><label><input type="radio" name="br-link-transfer" value="copy" checked>Создать копию</label><label><input type="radio" name="br-link-transfer" value="move">Перенести исходную таблицу</label></fieldset>
@@ -57,13 +53,25 @@
           <div id="br-import-message" class="br-source-message" role="status" aria-live="polite" hidden></div>
           <button id="br-import-reread" type="button" class="br-button" hidden>Перечитать список</button>
         </section>
-        <p class="br-segments-rules">Проверка формата — ручная отметка. Статус обработки задаётся отдельно. Автоматическая проверка и добавление в сегмент пока не подключены.</p>
+        <p class="br-segments-rules">Проверка формата — ручная отметка. Наполнение и статус обработки задаются отдельно. В сегмент можно добавлять только готовые базы Google Таблиц.</p>
         <p id="br-sources-health" class="br-segments-health" role="status" aria-live="polite"></p>
         <div id="br-sources-empty" class="br-segments-empty" role="status" hidden><h2 id="br-sources-empty-title"></h2><p id="br-sources-empty-description"></p></div>
         <div id="br-sources-items" class="br-source-items"></div>
       </section>
-    </main>
-  </div>
+    <section id="br-segments-view" class="br-segments-view" hidden aria-labelledby="br-segments-title">
+      <div class="br-segments-heading"><div><h1 id="br-segments-title">Сегменты</h1><p id="br-segments-count" class="br-muted"></p></div><button id="br-add-segment" type="button" class="br-button br-primary">＋ Добавить сегмент</button></div>
+      <p id="br-segments-health" class="br-segments-health" role="status" aria-live="polite"></p>
+      <div id="br-segments-empty" class="br-segments-empty" role="status" hidden><h2 id="br-segments-empty-title"></h2><p id="br-segments-empty-description"></p></div>
+      <div id="br-segments-rows" class="br-segments-rows"></div>
+    </section>
+    <section id="br-mailings-view" class="br-mailings-view" hidden aria-labelledby="br-mailings-title">
+      <button id="br-mailings-back" type="button" class="br-button br-back">← К сегментам</button>
+      <h1 id="br-mailings-title">Рассылки</h1>
+      <p id="br-mailings-health" class="br-segments-health" role="status" aria-live="polite"></p>
+      <div id="br-mailings-totals"></div><div id="br-mailings-services"></div>
+    </section>
+    <section id="br-retarget-view" class="br-retarget-view" hidden aria-labelledby="br-retarget-title"><h1 id="br-retarget-title">Ретаргетинг</h1><p>Структура ещё обсуждается.</p></section>
+  </main>
 </div>
 <?!= include_('Client'); ?>
 </body>

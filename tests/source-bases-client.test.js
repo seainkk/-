@@ -5,11 +5,22 @@ import vm from 'node:vm';
 
 const client = readFileSync(new URL('../src/Client.html', import.meta.url), 'utf8');
 function source(name) {
-  const line = client.split('\n').find(value => value.trimStart().startsWith('function ' + name + '('));
-  assert.ok(line, 'Actual source helper exists: ' + name);
-  return line.trim();
+  const start = client.indexOf('function ' + name + '(');
+  assert.ok(start >= 0, 'Actual source helper exists: ' + name);
+  let depth = 0, quote = null, escaped = false;
+  for (let i = client.indexOf('{', start); i < client.length; i++) {
+    const character = client[i];
+    if (quote) { if (escaped) escaped = false; else if (character === '\\') escaped = true; else if (character === quote) quote = null; continue; }
+    if (character === '"' || character === "'" || character === '`') { quote = character; continue; }
+    if (character === '{') depth++;
+    if (character === '}' && --depth === 0) return client.slice(start, i + 1);
+  }
+  assert.fail('Complete function body is present: ' + name);
 }
-function helper(name) { return vm.runInNewContext(source(name) + ';' + name + ';'); }
+function helper(name) {
+  const dependencies = ['normalizeContents'].filter(value => value !== name && client.includes('function ' + value + '('));
+  return vm.runInNewContext(dependencies.map(source).join('\n') + '\n' + source(name) + ';' + name + ';');
+}
 
 test('source workflow and manual format checks have independent explicit labels', () => {
   const status = helper('sourceStatusLabel'), check = helper('sourceCheckLabel');
@@ -52,7 +63,7 @@ test('missing storage or a missing revision never enables source metadata edits'
 
 test('refresh cannot silently replace the edit revision or add unedited fields', () => {
   const patch = helper('sourcePatch');
-  const refreshedItem = { id: 'source-id', revision: 2, status: 'rework', formatCheck: 'valid' };
+  const refreshedItem = { id: 'source-id', revision: 2, status: 'rework', formatCheck: 'valid', contents: ['companies'] };
   const draft = { expectedRevision: 1, values: { status: 'ready', unexpected: 'ignored' } };
   const pending = patch(refreshedItem, draft, false);
   assert.equal(pending.expectedRevision, 1);
@@ -61,9 +72,9 @@ test('refresh cannot silently replace the edit revision or add unedited fields',
   assert.equal(Object.hasOwn(pending, 'unexpected'), false);
   assert.equal(patch(refreshedItem, draft, true).expectedRevision, 2);
   assert.equal(draft.expectedRevision, 1);
-  const typePatch = patch(refreshedItem, { expectedRevision: 1, values: { baseType: 'lpr', formatCheck: 'unchecked' } }, false);
-  assert.equal(typePatch.baseType, 'lpr');
-  assert.equal(typePatch.formatCheck, 'unchecked');
+  const contentsPatch = patch(refreshedItem, { expectedRevision: 1, values: { contents: ['companies', 'lpr'], formatCheck: 'unchecked' } }, false);
+  assert.deepEqual(Array.from(contentsPatch.contents), ['companies', 'lpr']);
+  assert.equal(contentsPatch.formatCheck, 'unchecked');
 });
 
 test('unknown associations never appear as a confirmed empty segment list', () => {

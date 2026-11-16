@@ -15,7 +15,7 @@ var SOURCE_IMPORT_CONFIG = Object.freeze({
 function uploadSourceBase(form) {
   return api_(function () {
     authorize_();
-    var input = importInput_(form, ['name', 'baseType', 'status', 'requestId', 'file']);
+    var input = importInput_(form, ['name', 'baseType', 'contentsJSON', 'status', 'requestId', 'file']);
     var common = importCommon_(input), blob = input.file;
     if (!blob || typeof blob.getBytes !== 'function' || typeof blob.getName !== 'function' || typeof blob.setContentType !== 'function') fail_('INVALID_UPLOAD', 'Выберите файл CSV, TSV, XLS, XLSX или ODS.');
     var filename = String(blob.getName()), extension = filename.match(/\.([a-zA-Z0-9]+)$/);
@@ -45,7 +45,7 @@ function uploadSourceBase(form) {
 function importSourceBaseLink(request) {
   return api_(function () {
     authorize_();
-    var input = importInput_(request, ['url', 'name', 'baseType', 'status', 'mode', 'requestId']);
+    var input = importInput_(request, ['url', 'name', 'baseType', 'contents', 'status', 'mode', 'requestId']);
     var common = importCommon_(input), link = importSheetLink_(input.url);
     if (input.mode !== 'copy' && input.mode !== 'move') fail_('INVALID_MODE', 'Выберите копирование или перемещение исходной таблицы.');
     common.kind = 'link'; common.mode = input.mode; common.link = link;
@@ -101,10 +101,20 @@ function importInput_(value, allowed) {
 
 function importCommon_(input) {
   var name = itemName_(input.name);
-  if (input.baseType !== 'general' && input.baseType !== 'lpr') fail_('INVALID_BASE_TYPE', 'Выберите тип базы: общая или ЛПР.');
+  var hasContents = Object.prototype.hasOwnProperty.call(input, 'contents');
+  var hasJSON = Object.prototype.hasOwnProperty.call(input, 'contentsJSON');
+  if (hasContents && !Array.isArray(input.contents)) fail_('INVALID_CONTENTS', 'Наполнение базы должно содержать компании и/или ЛПР.');
+  var selected = hasContents ? input.contents : input.baseType;
+  if (hasJSON) {
+    if (typeof input.contentsJSON !== 'string' || input.contentsJSON.length > 100) fail_('INVALID_CONTENTS', 'Выберите наполнение базы: компании и/или ЛПР.');
+    try { selected = JSON.parse(input.contentsJSON); } catch (error) { fail_('INVALID_CONTENTS', 'Не удалось прочитать наполнение базы.'); }
+    if (!Array.isArray(selected)) fail_('INVALID_CONTENTS', 'Наполнение базы должно содержать компании и/или ЛПР.');
+  }
+  var contents = sourceBaseContents_(selected), baseType = sourceBaseLegacyType_(contents);
+  if (input.baseType !== undefined && (hasContents || hasJSON) && input.baseType !== baseType) fail_('INVALID_CONTENTS', 'Наполнение базы не соответствует указанному типу.');
   if (SOURCE_BASES_SCHEMA.statuses.indexOf(input.status) === -1) fail_('INVALID_STATUS', 'Выберите допустимый статус сбора.');
   if (typeof input.requestId !== 'string' || !/^[a-zA-Z0-9_-]{8,128}$/.test(input.requestId)) fail_('INVALID_REQUEST', 'Не удалось определить запрос импорта. Откройте форму заново.');
-  return { name: name, baseType: input.baseType, status: input.status, requestId: input.requestId };
+  return { name: name, baseType: baseType, contents: contents, status: input.status, requestId: input.requestId };
 }
 
 function importUploadMime_(blob, extension) {
@@ -253,10 +263,10 @@ function importFinalize_(preparation, common, key, receipt, recovered) {
   var options, current = database.records[file.id];
   if (!receipt.metadataCommitted && receipt.preActionRevision > 0) options = { expectedRevision: receipt.preActionRevision };
   else if (!receipt.metadataCommitted && receipt.preActionRevision === 0 && current && current.revision === 1 && current.baseType === 'general' && current.status === 'collection' && current.formatCheck === 'unchecked') options = { expectedRevision: 1 };
-  var record = registerImportedSourceBase_(context, storage, database, metadata, common.baseType, common.status, options);
+  var record = registerImportedSourceBase_(context, storage, database, metadata, common.contents, common.status, options);
   receipt.status = 'done'; receipt.metadataCommitted = true;
   importSaveReceipt_(context, key, receipt, false);
-  return { item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(database.relations)), file: { id: metadata.id, name: metadata.name, url: metadata.url, mimeType: metadata.mimeType }, mode: common.mode, recovered: !!recovered };
+  return { item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(database.relations, context)), file: { id: metadata.id, name: metadata.name, url: metadata.url, mimeType: metadata.mimeType }, mode: common.mode, recovered: !!recovered };
 }
 
 function importReadReceipt_(context, key) {

@@ -698,3 +698,61 @@ test('viewer-only or unknown service-book edit capability blocks every import be
     assert.ok(f.calls.drive.some(call => call.kind === 'advancedGet' && call.id === STORAGE && call.params.fields === 'capabilities(canEdit)'));
   }
 });
+
+test('canonical mixed contents persist for file conversion and linked copy or move', () => {
+  for (const mode of ['upload', 'copy', 'move']) {
+    const f = fixture();
+    const result = mode === 'upload'
+      ? itemOf(f.upload({ baseType: undefined, contentsJSON: '["lpr","companies"]', status: 'ready' }))
+      : itemOf(f.link({ baseType: undefined, contents: ['lpr', 'companies'], mode, status: 'ready' }));
+    assert.equal(result.baseType, 'mixed');
+    assert.deepEqual(result.contents, ['companies', 'lpr']);
+    assert.deepEqual(f.records.get(result.id).contents, ['companies', 'lpr']);
+    assert.equal(result.status, 'ready');
+    assert.equal(result.formatCheck, 'unchecked');
+    assert.equal(f.calls.actions.length, 1);
+  }
+});
+
+test('canonical single-content retries share legacy import receipt fingerprints without creating again', () => {
+  for (const [legacy, contents] of [['general', ['companies']], ['lpr', ['lpr']]]) {
+    const f = fixture();
+    const first = itemOf(f.link({ baseType: legacy }));
+    const fingerprint = f.receipts()[0].fingerprint;
+    const replay = itemOf(f.link({ baseType: undefined, contents }));
+    assert.equal(replay.id, first.id);
+    assert.deepEqual(replay.contents, contents);
+    assert.equal(f.receipts()[0].fingerprint, fingerprint);
+    assert.equal(f.calls.actions.length, 1);
+  }
+});
+
+test('changing canonical import contents binds the same request and cannot create a second file', () => {
+  const f = fixture();
+  const first = itemOf(f.upload({ baseType: undefined, contentsJSON: '["companies","lpr"]' }));
+  assert.throws(() => f.upload({ baseType: undefined, contentsJSON: '["lpr"]' }), /REQUEST_REUSED/);
+  const replay = itemOf(f.upload({ baseType: undefined, contentsJSON: '["lpr","companies"]' }));
+  assert.equal(replay.id, first.id);
+  assert.equal(f.calls.actions.length, 1);
+});
+
+test('invalid or conflicting upload and link contents are refused before any Drive mutation', () => {
+  for (const change of [
+    { baseType: undefined, contentsJSON: '[]' },
+    { baseType: undefined, contentsJSON: '["companies","companies"]' },
+    { baseType: undefined, contentsJSON: '["unknown"]' },
+    { baseType: undefined, contentsJSON: '"mixed"' },
+    { baseType: undefined, contentsJSON: '{' },
+    { baseType: 'lpr', contentsJSON: '["companies","lpr"]' },
+  ]) {
+    const f = fixture();
+    assert.throws(() => f.upload(change), /INVALID_/);
+    assert.deepEqual(f.calls.actions, []);
+    assert.deepEqual(f.calls.drive, []);
+  }
+  for (const contents of [[], ['companies', 'companies'], ['unknown'], 'mixed', null]) {
+    const f = fixture();
+    assert.throws(() => f.link({ baseType: undefined, contents }), /INVALID_CONTENTS/);
+    assert.deepEqual(f.calls.actions, []);
+  }
+});

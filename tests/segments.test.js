@@ -139,10 +139,10 @@ test('segments are direct child folders; deeper tables are deduplicated into the
   assert.equal(emptyItem.tableCount, 0);
   assert.deepEqual(emptyItem.files, []);
   assert.equal(emptyItem.companiesInWork, null);
-  for (const channel of Object.values(emptyItem.channels)) assert.deepEqual(channel, { state: 'unknown', inWork: null });
+  for (const channel of Object.values(emptyItem.channels)) assert.deepEqual(channel, { state: 'inactive', inWork: null, configured: false });
 });
 
-test('channel counts and statuses remain unknown even with channel-like table names', () => {
+test('channels stay inactive without launch rules even with channel-like table names', () => {
   const segment = 'segment_a_1234567890';
   const result = fixture().build([folder(SOURCE, 'Аутричи'), folder(segment, 'Активный сегмент', SOURCE)], [
     file('email_sheet_1234567890', 'Email — 100 в работе', segment),
@@ -151,7 +151,7 @@ test('channel counts and statuses remain unknown even with channel-like table na
   const item = result.items[0];
   assert.equal(result.rulesConfigured, false);
   for (const channel of ['email', 'telegram', 'retargeting']) {
-    assert.deepEqual(item.channels[channel], { state: 'unknown', inWork: null });
+    assert.deepEqual(item.channels[channel], { state: 'inactive', inWork: null, configured: false });
     assert.notEqual(item.channels[channel].inWork, 0);
   }
   assert.equal(item.overallStatus, null);
