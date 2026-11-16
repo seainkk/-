@@ -46,8 +46,8 @@ test('ordinary requests carry the bearer in the outer envelope without changing 
 test('the copied link has a fixed app origin and keeps the bearer out of the query string', () => {
   const { sharedUrl } = helpers('sharedUrl');
   const url = new URL(sharedUrl(KEY));
-  assert.equal(url.origin, 'https://script.google.com');
-  assert.equal(url.pathname, '/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec');
+  assert.equal(url.origin, 'https://seainkk.github.io');
+  assert.equal(url.pathname, '/-/');
   assert.equal(url.search, '');
   assert.equal(url.hash, '#access_key=' + KEY);
   assert.throws(() => sharedUrl('https://untrusted.invalid/'));
@@ -110,4 +110,16 @@ test('Google parent URL metadata is used rather than an iframe URL or query toke
   assert.equal(await found, KEY); assert.equal(clearCount, 1);
   const absent = context.readSharedKey(); callback({ hash: '', parameter: { access_key: KEY } });
   assert.equal(await absent, null);
+});
+
+
+test('embedded status messages go only to the fixed entry origin without a credential', () => {
+  const calls = [], outer = { postMessage: (data, origin) => calls.push({ data, origin }) };
+  const context = vm.createContext({ window: { top: outer } });
+  vm.runInContext(source('notifyEntry') + ';notifyEntry("ready");notifyEntry("locked");', context);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    { data: { type: 'bases-registry-ready' }, origin: 'https://seainkk.github.io' },
+    { data: { type: 'bases-registry-locked' }, origin: 'https://seainkk.github.io' },
+  ]);
+  assert.equal(JSON.stringify(calls).includes(KEY), false);
 });

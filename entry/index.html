@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Реестр баз</title>
+  <style>
+    :root{color-scheme:light dark;--bg:light-dark(#fff,#1b211d);--ink:light-dark(#2b3c30,#e0e8df);--muted:light-dark(#71806e,#a7b4a5);--soft:light-dark(#f5f7f3,#232b25);--line:light-dark(#e1e7dd,#3b463c);--green:light-dark(#376845,#a6c89d)}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button{font:inherit;cursor:pointer;border:1px solid var(--line);border-radius:6px;padding:7px 12px;background:var(--bg);color:var(--ink)}button:hover{background:var(--soft)}button:disabled{cursor:default;opacity:.5}[hidden]{display:none!important}
+    .entry-bar{height:44px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 18px;border-bottom:1px solid var(--line);font-size:12px;background:var(--soft)}.entry-brand{font-weight:600;white-space:nowrap}.entry-brand span{color:var(--green);font-size:19px;margin-right:7px;vertical-align:middle}.entry-bar button{font-size:11px;min-height:29px;padding:3px 9px}.entry-copy-status{margin-left:auto;color:var(--muted);overflow-wrap:anywhere}
+    .entry-card{margin:clamp(35px,12vh,120px) auto 30px;max-width:580px;padding:28px;border:1px solid var(--line);border-radius:10px;background:var(--soft)}.entry-card h1{font-size:23px;line-height:1.35;margin:0 0 13px;font-weight:600;letter-spacing:-.4px}.entry-card p{margin:0 0 18px;color:var(--muted)}.entry-help{font-size:12px}.entry-spinner{height:18px;width:18px;display:inline-block;border:2px solid var(--line);border-top-color:var(--green);border-radius:50%;animation:spin 1s linear infinite;margin-bottom:15px}@keyframes spin{to{transform:rotate(360deg)}}
+    #entry-frame-host{height:calc(100dvh - 44px);min-height:400px}#entry-frame-host iframe{display:block;width:100%;height:100%;border:0;background:var(--bg)}.entry-clipboard{position:fixed;left:-9999px;opacity:0;pointer-events:none}
+    @media(max-width:640px){.entry-bar{padding:6px 12px}.entry-card{margin:35px 14px;padding:22px}.entry-card h1{font-size:21px}.entry-copy-status{font-size:10px;max-width:95px}.entry-brand{font-size:11px}}
+    @media(prefers-reduced-motion:reduce){.entry-spinner{animation:none}}
+  </style>
+</head>
+<body data-state="locked">
+  <header class="entry-bar"><div class="entry-brand"><span aria-hidden="true">▦</span>Реестр баз</div><span id="entry-copy-status" class="entry-copy-status" role="status" aria-live="polite"></span><button id="entry-copy" type="button" hidden disabled>Скопировать ссылку</button></header>
+  <main id="entry-card" class="entry-card" aria-labelledby="entry-title">
+    <span id="entry-spinner" class="entry-spinner" aria-hidden="true" hidden></span>
+    <h1 id="entry-title">Для входа нужна закрытая ссылка</h1>
+    <p id="entry-message">Откройте полную ссылку, которую вам передал владелец сервиса.</p>
+    <button id="entry-retry" type="button" hidden>Повторить подключение</button>
+    <noscript><p>Для работы сервиса включите JavaScript в браузере.</p></noscript>
+  </main>
+  <div id="entry-frame-host" hidden></div>
+  <script>
+  (() => {
+    'use strict';
+    const GOOGLE_APP_URL='https://script.google.com/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec';
+    const $=(id)=>document.getElementById(id);
+    let accessKey=null,currentFrame=null,loadingTimer=null,ready=false;
+
+    function keyFromHash(value){const match=typeof value==='string'?value.match(/^#access_key=([A-Za-z0-9_-]{43})$/):null;return match?match[1]:null;}
+    function appUrl(key){if(typeof key!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return GOOGLE_APP_URL+'#access_key='+key;}
+    function entryUrl(key){if(typeof key!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');const url=new URL(window.location.href);url.search='';url.hash='access_key='+key;if(url.pathname.endsWith('/index.html'))url.pathname=url.pathname.slice(0,-10);return url.href;}
+    function googleOrigin(origin){try{const url=new URL(origin);return url.protocol==='https:'&&(url.hostname==='script.google.com'||url.hostname==='script.googleusercontent.com'||/^[a-z0-9-]+-script\.googleusercontent\.com$/.test(url.hostname));}catch(error){return false;}}
+    function frameSource(source){if(!currentFrame||!source)return false;try{let node=source;for(let depth=0;node&&depth<8;depth++){if(node===currentFrame.contentWindow)return true;const parent=node.parent;if(!parent||parent===node)return false;node=parent;}}catch(error){return false;}return false;}
+    function clearFrame(){if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}const old=currentFrame;currentFrame=null;if(old)old.remove();ready=false;$('entry-frame-host').hidden=true;$('entry-copy').hidden=true;$('entry-copy').disabled=true;$('entry-copy-status').textContent='';}
+    function showState(state,title,message,retry){document.body.dataset.state=state;$('entry-card').hidden=false;$('entry-title').textContent=title;$('entry-message').textContent=message;$('entry-spinner').hidden=state!=='loading';$('entry-retry').hidden=!retry;}
+    function openEntry(){
+      clearFrame();accessKey=keyFromHash(window.location.hash);
+      if(!accessKey){showState('locked','Для входа нужна закрытая ссылка','Откройте полную ссылку, которую вам передал владелец сервиса.',false);return;}
+      if(!('credentialless' in HTMLIFrameElement.prototype)){showState('unsupported','Откройте сервис в актуальном Chrome или Edge','Для открытия без переключения Google-аккаунтов нужен браузер, поддерживающий изолированное подключение сервиса. Скопируйте эту же ссылку в актуальный Chrome или Edge.',false);return;}
+      showState('loading','Открываем реестр…','Подключаем сервис. Google-вход для реестра не требуется.',false);
+      const frame=document.createElement('iframe');
+      frame.title='Реестр баз';
+      // Set the isolation flag before navigation. It also isolates all nested Google frames.
+      frame.credentialless=true;frame.setAttribute('credentialless','');frame.referrerPolicy='no-referrer';frame.allow='clipboard-write';frame.setAttribute('allowfullscreen','');
+      frame.addEventListener('error',()=>{if(currentFrame===frame)showState('error','Не удалось подключить сервис','Проверьте подключение к интернету и повторите попытку.',true);});
+      frame.src=appUrl(accessKey);currentFrame=frame;$('entry-frame-host').append(frame);
+      loadingTimer=setTimeout(()=>{if(currentFrame===frame&&!ready)showState('error','Подключение заняло больше времени','Повторите подключение. Если сервис снова не откроется, передайте владельцу этот экран.',true);},45000);
+    }
+    async function copyEntry(){
+      if(!ready||!accessKey)return;
+      const url=entryUrl(accessKey);let copied=false;
+      try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(url);copied=true;}}catch(error){/* Try the user-gesture fallback without showing the credential. */}
+      if(!copied){const field=document.createElement('textarea');field.value=url;field.className='entry-clipboard';field.setAttribute('readonly','');field.setAttribute('aria-hidden','true');document.body.append(field);try{field.select();copied=document.execCommand('copy')===true;}catch(error){/* Do not expose the private URL in an error. */}finally{field.remove();$('entry-copy').focus();}}
+      $('entry-copy-status').textContent=copied?'Ссылка скопирована':'Скопируйте полный адрес из строки браузера.';
+    }
+    window.addEventListener('message',(event)=>{
+      if(!googleOrigin(event.origin)||!frameSource(event.source)||!event.data||typeof event.data!=='object')return;
+      if(event.data.type==='bases-registry-ready'){
+        if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-frame-host').hidden=false;$('entry-copy').hidden=false;$('entry-copy').disabled=false;
+      }else if(event.data.type==='bases-registry-locked'){
+        clearFrame();showState('locked','Нужна действующая закрытая ссылка','Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.',false);
+      }
+    });
+    $('entry-copy').addEventListener('click',copyEntry);$('entry-retry').addEventListener('click',openEntry);window.addEventListener('hashchange',openEntry);window.addEventListener('pagehide',clearFrame);
+    openEntry();
+  })();
+  </script>
+</body>
+</html>

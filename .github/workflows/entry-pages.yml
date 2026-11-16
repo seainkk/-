@@ -1,0 +1,48 @@
+name: Deploy registry entry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'entry/**'
+      - '.github/workflows/entry-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: registry-entry-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure GitHub Pages
+        id: pages
+        uses: actions/configure-pages@v5
+        with:
+          # Initial enablement may require the repository owner's one-time
+          # Settings > Pages > Source > GitHub Actions selection. GitHub's
+          # automatic workflow token cannot grant itself administration rights.
+          enablement: true
+      - name: Explain one-time Pages setup if configuration failed
+        if: ${{ failure() && steps.pages.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo '::error::Open https://github.com/seainkk/-/settings/pages and select Build and deployment > Source > GitHub Actions, then rerun this workflow. The repository workflow token cannot initially enable GitHub Pages by itself.'
+      - name: Upload entry page only
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: entry
+      - name: Publish registry entry
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -15,7 +15,8 @@
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
   function sharedKeyFromHash(hash){const match=typeof hash==='string'?hash.match(/^#?access_key=([A-Za-z0-9_-]{43})$/):null;return match&&match[0]===hash?match[1]:null;}
   function sharedRequest(method,payload,key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Для входа нужна полная закрытая ссылка.');const request={method,accessKey:key};if(payload!==undefined)request.payload=payload;return request;}
-  function sharedUrl(key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return 'https://script.google.com/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec#access_key='+key;}
+  function sharedUrl(key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return 'https://seainkk.github.io/-/#access_key='+key;}
+  function notifyEntry(state){try{if(window.top!==window)window.top.postMessage({type:state==='ready'?'bases-registry-ready':'bases-registry-locked'},'https://seainkk.github.io');}catch(ignored){}}
   function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
   function rpc(name,payload){
     if(!accessKey)return Promise.reject(new Error('Для входа нужна полная закрытая ссылка.'));
@@ -40,11 +41,11 @@
     const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message){
-    accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
+    if(message)notifyEntry('locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
   }
   async function startSharedAccess(){
     if(requesting())return;lockAccess(null);busy=true;renderAccess();updateControls();
-    try{const key=await readSharedKey();if(!key)throw new Error('В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const result=await rpc('getAppBootstrap');if(result?.user?.accessMode!=='link')throw new Error('Не удалось подтвердить режим доступа сервиса. Обновите страницу и повторите попытку.');bootstrap=result;accessReady=true;accessMessage=null;}
+    try{const key=await readSharedKey();if(!key)throw new Error('В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const result=await rpc('getAppBootstrap');if(result?.user?.accessMode!=='link')throw new Error('Не удалось подтвердить режим доступа сервиса. Обновите страницу и повторите попытку.');bootstrap=result;accessReady=true;accessMessage=null;notifyEntry('ready');}
     catch(error){const parsed=failure(error);lockAccess(parsed.code==='LINK_ACCESS_REQUIRED'?'Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.':parsed.message);}
     finally{busy=false;$('br-loading').hidden=true;render();if(accessReady){armViewTimer();pendingView=activeView;flushPendingView();}}
   }
@@ -380,7 +381,7 @@
   $('br-import-file-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('file',event.currentTarget);});$('br-import-link-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('link',event.currentTarget);});
   $('br-import-reread').addEventListener('click',()=>refreshSourceBases({preserveNotice:true}));
   window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving){event.preventDefault();event.returnValue='';}});
-  if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;pendingAccessChange=true;flushPendingView();});
+  try{if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;pendingAccessChange=true;flushPendingView();});}catch(ignored){}
   render();startSharedAccess();
 })();
 </script>

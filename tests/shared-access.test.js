@@ -20,7 +20,8 @@ function fixture() {
     Session: { getActiveUser() { throw new Error('Visitor identity is unavailable'); }, getEffectiveUser() { throw new Error('Identity is not an access credential'); } },
     DriveApp: { getFolderById(id) { calls.folders++; assert.equal(id, ROOT); return root; } },
     HtmlService: {
-      createTemplateFromFile(name) { assert.equal(name, 'Index'); calls.shell++; return { evaluate: () => ({ setTitle: title => ({ staticShell: true, title }) }) }; },
+      XFrameOptionsMode: { ALLOWALL: 'ALLOWALL' },
+      createTemplateFromFile(name) { assert.equal(name, 'Index'); calls.shell++; return { evaluate: () => ({ setTitle: title => ({ setXFrameOptionsMode: frameMode => ({ staticShell: true, title, frameMode }) }) }) }; },
       createHtmlOutput: text => ({ text }),
     },
     Utilities: {
@@ -37,7 +38,7 @@ function fixture() {
 
 test('the public page renders only a static shell without visitor identity, access checks or Drive reads', () => {
   const f = fixture();
-  assert.deepEqual(plain(f.context.doGet({ parameter: { access_key: 'untrusted-query-key' } })), { staticShell: true, title: 'Реестр баз' });
+  assert.deepEqual(plain(f.context.doGet({ parameter: { access_key: 'untrusted-query-key' } })), { staticShell: true, title: 'Реестр баз', frameMode: 'ALLOWALL' });
   assert.equal(f.calls.shell, 1);
   assert.equal(f.calls.folders, 0);
   assert.equal(f.context.SHARED_REQUEST_SCOPE_, null);
