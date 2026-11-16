@@ -97,3 +97,20 @@ test('disconnected mailing services never display invented numeric metrics', () 
   assert.equal(metric(0, true), '0');
   assert.equal(metric(12, true), '12');
 });
+
+test('mutation acknowledgements preserve real file links without inventing analytics', () => {
+  const project = helper('segmentMutationProjection');
+  const previous = { id: 'segment', name: 'Old', files: [{ id: 'companies', name: 'Old: компании' }, { id: 'extra', name: 'Extra' }], overallStatus: 'preparation', companiesInWork: 12, channels: { email: { state: 'active', inWork: 5 } } };
+  const segment = { id: 'segment', name: 'New', files: [{ id: 'companies', name: 'New: компании' }, { id: 'lpr', name: 'New: ЛПР' }] };
+  const renamed = plain(project(previous, segment, false, false));
+  assert.deepEqual(renamed.files.map(file => file.id), ['companies', 'extra', 'lpr']);
+  assert.equal(renamed.files[0].name, 'New: компании');
+  assert.equal(renamed.overallStatus, 'preparation');
+  assert.equal(renamed.companiesInWork, 12);
+  const loaded = plain(project(previous, segment, false, true));
+  assert.equal(loaded.overallStatus, null);
+  assert.equal(loaded.companiesInWork, null);
+  assert.equal(loaded.channels.email.state, 'unknown');
+  assert.equal(project(null, segment, true, false).overallStatus, 'no_contacts');
+  assert.equal(project(null, segment, false, false).overallStatus, null, 'A replay is not proof that tables are still empty');
+});

@@ -16,7 +16,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const iterator = values => { let index = 0; return { hasNext: () => index < values.length, next: () => values[index++] }; };
 
 function fixture(options = {}) {
-  const calls = { folders: [], files: [], opened: [], ranges: [], tracking: [], rootFileScans: 0 };
+  const calls = { folders: [], files: [], opened: [], ranges: [], tracking: [], trackingSnapshots: 0, metadataScans: [], rootFileScans: 0 };
   const propertyValues = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, SEGMENTS_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: SERVICE, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const propertyStore = { getProperty: key => propertyValues.get(key) ?? null };
   const folderRows = [
@@ -33,7 +33,9 @@ function fixture(options = {}) {
     getParents: () => iterator((row.actualParents || row.parents).map(id => folderMap.get(id)).filter(Boolean)),
     getFolders: () => iterator(folderRows.filter(child => child.parents.includes(row.id)).map(child => folderMap.get(child.id))),
     getFilesByType: () => {
+      calls.metadataScans.push(row.id);
       if (row.id === ROOT) { calls.rootFileScans++; throw new Error('Must not enumerate unrelated root/source bases'); }
+      if (options.failMetadataScan) throw new Error('Metadata scan unavailable');
       return iterator(files.filter(file => file.parents.includes(row.id) && (file.mime || MIME) === MIME).map(file => fileMap.get(file.id)));
     },
   });
@@ -70,13 +72,17 @@ function fixture(options = {}) {
       },
     },
   });
-  const sources = ['Config.gs', 'Code.gs', 'Segments.gs', 'SegmentAnalytics.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
+  const sources = ['Config.gs', 'Code.gs', 'Segments.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
   vm.runInContext(sources, context, { filename: 'segment-analytics.gs' });
   installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
-  context.segmentReadTracking_ = (_context, segmentId) => {
-    calls.tracking.push(segmentId);
+  context.segmentReadTrackingSnapshot_ = () => {
+    calls.trackingSnapshots++;
     if (options.trackingThrows) throw new Error('Tracking unavailable');
     return options.tracking || { available: true, tables: [], loads: [] };
+  };
+  context.segmentReadTracking_ = (_context, segmentId, snapshot) => {
+    calls.tracking.push(segmentId);
+    return snapshot || context.segmentReadTrackingSnapshot_();
   };
   if (options.limits) context.REGISTRY_CONFIG = Object.freeze({ ...context.REGISTRY_CONFIG, ...options.limits });
   return { context, calls, dashboard: () => plain(context.getSegmentsDashboard()), mailings: id => plain(context.getSegmentMailings({ segmentId: id ?? SEGMENT })) };
@@ -118,6 +124,32 @@ test('empty folders and physically blank default sheets have no contacts', () =>
     assert.equal(item.contactPresence, 'empty');
     assert.deepEqual(item.analysis, { state: 'ready', hasContacts: false, warnings: [] });
     assert.deepEqual(f.calls.ranges, []);
+  }
+});
+
+test('dashboard shares one journal snapshot across segments and rereads it next request', () => {
+  const second = 'second_segment_1234567890';
+  const f = fixture({ folders: [{ id: second, name: 'Другой сегмент', parents: [SOURCE] }] });
+  assert.equal(f.dashboard().items.length, 2);
+  assert.equal(f.calls.trackingSnapshots, 1);
+  assert.deepEqual([...f.calls.tracking].sort(), [SEGMENT, second].sort());
+  f.dashboard();
+  assert.equal(f.calls.trackingSnapshots, 2);
+});
+
+test('an unavailable journal is attempted only once and never hides lone-row contacts', () => {
+  const second = 'second_segment_1234567890';
+  const f = fixture({
+    trackingThrows: true,
+    folders: [{ id: second, name: 'Другой сегмент', parents: [SOURCE] }],
+    files: [sourceFile(undefined, [{ rows: [['Company or header']] }]), sourceFile('second_file_1234567890', [{ rows: [['Other contact']] }], { parents: [second] })],
+  });
+  const result = f.dashboard();
+  assert.equal(f.calls.trackingSnapshots, 1);
+  for (const item of result.items) {
+    assert.equal(item.overallStatus, null);
+    assert.equal(item.contactPresence, 'unknown');
+    assert.equal(item.analysis.state, 'partial');
   }
 });
 
@@ -193,8 +225,22 @@ test('a moved segment is not read even if its files remain in the registry', () 
   const item = f.dashboard().items[0];
   assert.equal(item.overallStatus, null);
   assert.deepEqual(f.calls.tracking, []);
+  assert.equal(f.calls.trackingSnapshots, 0);
   assert.deepEqual(f.calls.opened, []);
   assert.throws(() => f.mailings(), /OUTSIDE_SEGMENTS/);
+});
+
+test('sharing a journal snapshot never caches segment membership between requests', () => {
+  const folder = { id: SEGMENT, name: 'Сегмент', parents: [SOURCE] };
+  const f = fixture({ folders: [folder], files: [sourceFile(undefined, [{ rows: [['Header'], ['Contact']] }])] });
+  assert.equal(f.dashboard().items[0].overallStatus, 'preparation');
+  folder.actualParents = [ROOT];
+  f.calls.opened.length = 0;
+  f.calls.tracking.length = 0;
+  assert.equal(f.dashboard().items[0].contactPresence, 'unknown');
+  assert.equal(f.calls.trackingSnapshots, 1);
+  assert.deepEqual(f.calls.tracking, []);
+  assert.deepEqual(f.calls.opened, []);
 });
 
 test('a file moved out of its segment is rejected before opening', () => {
@@ -278,8 +324,8 @@ test('sheet and elapsed-time limits also stop reads with an explicit unknown res
   assert.equal(f.calls.opened.length, opened);
 });
 
-test('mailings are disconnected readonly screens with no fabricated campaigns or zeros', () => {
-  const f = fixture({ files: [sourceFile(undefined, [{ rows: [['Never read contacts']] }])] });
+test('mailings validate their folder without scanning unrelated segments or business files', () => {
+  const f = fixture({ failMetadataScan: true, files: [sourceFile(undefined, [{ rows: [['Never read contacts']] }])] });
   const result = f.mailings();
   assert.equal(result.state, 'not_connected');
   assert.equal(result.segment.id, SEGMENT);
@@ -289,8 +335,24 @@ test('mailings are disconnected readonly screens with no fabricated campaigns or
     assert.deepEqual(service.campaigns, []);
     assert.deepEqual(service.totals, { sent: null, replies: null, leads: null });
   }
+  assert.deepEqual(f.calls.metadataScans, []);
   assert.deepEqual(f.calls.opened, []);
+  assert.equal(f.calls.trackingSnapshots, 0);
   assert.throws(() => f.mailings('outside_segment_1234567890'), /SEGMENT_NOT_FOUND/);
+});
+
+test('mailings reject nested, trashed and outside-root folders before reading workbooks', () => {
+  const candidate = 'invalid_segment_1234567890';
+  for (const entry of [
+    { parents: [SEGMENT] },
+    { parents: [SOURCE], trashed: true },
+    { parents: [] },
+  ]) {
+    const f = fixture({ folders: [{ id: candidate, name: 'Недоступный сегмент', ...entry }] });
+    assert.throws(() => f.mailings(candidate), /OUTSIDE_SEGMENTS|SEGMENT_NOT_FOUND/);
+    assert.deepEqual(f.calls.metadataScans, []);
+    assert.deepEqual(f.calls.opened, []);
+  }
 });
 
 test('future mailing aggregation handles multiple campaigns and independently unknown metrics', () => {

@@ -25,15 +25,15 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const iterator = values => { let i = 0; return { hasNext: () => i < values.length, next: () => values[i++] }; };
 
 function fixture(options = {}) {
-  const calls = { creates: [], copies: [], opens: [], writes: [], flushes: 0, locks: 0, events: [], lists: [] };
+  const calls = { creates: [], copies: [], opens: [], reads: [], writes: [], flushes: 0, locks: 0, events: [], lists: [], fileGets: [], folderGets: [], fileListings: [], propertyWrites: [] };
   const folders = new Map(), files = new Map(), books = new Map();
   const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, SEGMENTS_FOLDER_ID: OUTREACH, SOURCE_BASES_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: STORAGE, ALLOWED_EMAILS: EMAIL }));
-  let sequence = 1000, failedCreate = false, failedCopy = false, failedName = false, failedTracking = false, failedInsert = false;
+  let sequence = 1000, failedCreate = false, failedCopy = false, failedName = false, failedTracking = false, failedInsert = false, failedTableWrite = false;
   function folder(id, name, parent) {
     const item = { id, name, parent, trashed: false,
       getId: () => id, getName: () => item.name, setName: name => { item.name = name; return item; },
       isTrashed: () => item.trashed, getParents: () => iterator(item.parent ? [folders.get(item.parent)] : []),
-      getFilesByType: mime => iterator([...files.values()].filter(file => file.parent === id && file.mime === mime && !(options.hideNewLpr && file.role === 'lpr'))),
+      getFilesByType: mime => { calls.fileListings.push(id); return iterator([...files.values()].filter(file => file.parent === id && file.mime === mime && !(options.hideNewLpr && file.role === 'lpr'))); },
       getFolders: () => iterator([...folders.values()].filter(child => child.parent === id)),
     };
     folders.set(id, item); return item;
@@ -41,7 +41,7 @@ function fixture(options = {}) {
   function file(id, name, parent, mime = MIME) {
     const item = { id, name, parent, mime, trashed: false,
       getId: () => id, getName: () => item.name, setName: name => {
-        if (options.failRenameRole === item.role && !failedName) { failedName = true; throw new Error('Lost rename response'); }
+        if (options.failRenameRole && options.failRenameRole === item.role && !failedName) { failedName = true; throw new Error('Lost rename response'); }
         item.name = name; return item;
       },
       getMimeType: () => item.mime, isTrashed: () => item.trashed,
@@ -64,7 +64,9 @@ function fixture(options = {}) {
       getRange: (row, col, height = 1, width = 1) => {
         const matrix = transform => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => transform(value(row + r, col + c))));
         const range = {
-          getValues: () => matrix(v => v), getDisplayValues: () => matrix(String), getFormulas: () => matrix(() => ''),
+          getValues: () => { calls.reads.push({ owner: state.owner, name: state.name, type: 'values' }); return matrix(v => v); },
+          getDisplayValues: () => matrix(String),
+          getFormulas: () => { calls.reads.push({ owner: state.owner, name: state.name, type: 'formulas' }); return matrix(() => ''); },
           setValues: values => {
             if (options.failCopiedTrackingWrite && state.name === 'SegmentLoads' && values[0]?.[8] === 'copied' && !failedTracking) { failedTracking = true; throw new Error('Service write unavailable'); }
             calls.writes.push({ owner: state.owner, name: state.name, row, col, values: structuredClone(values), locked: calls.locks > 0 });
@@ -73,6 +75,7 @@ function fixture(options = {}) {
               while (state.rows.length < row + r) state.rows.push([]);
               const v = values[r][c]; state.rows[row + r - 1][col + c - 1] = typeof v === 'string' && v.startsWith("'") ? v.slice(1) : v;
             }
+            if (options.failTableTrackingAfterApply && state.name === 'SegmentTables' && row > 1 && !failedTableWrite) { failedTableWrite = true; throw new Error('Assignment write response lost'); }
             return range;
           },
           setValue: v => range.setValues([[v]]),
@@ -117,7 +120,7 @@ function fixture(options = {}) {
   book(LPR, [sheet('Лист1', [], 41, LPR)]);
   const propertiesStore = {
     getProperty: key => properties.get(key) ?? null,
-    setProperty: (key, value) => { properties.set(key, value); return propertiesStore; },
+    setProperty: (key, value) => { calls.propertyWrites.push(key); properties.set(key, value); return propertiesStore; },
     deleteProperty: key => { properties.delete(key); return propertiesStore; },
   };
   const context = vm.createContext({
@@ -127,8 +130,8 @@ function fixture(options = {}) {
     LockService: { getScriptLock: () => ({ tryLock: () => { calls.locks++; calls.events.push({ type: 'lock' }); return true; }, releaseLock: () => { calls.events.push({ type: 'unlock' }); calls.locks--; } }) },
     Utilities: { DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' }, computeDigest: (_, v) => [...crypto.createHash('sha256').update(v).digest()], base64EncodeWebSafe: bytes => Buffer.from(bytes).toString('base64url') },
     DriveApp: {
-      getFolderById: id => { if (!folders.has(id)) throw new Error('Missing folder'); return folders.get(id); },
-      getFileById: id => { if (!files.has(id)) throw new Error('Missing file'); return files.get(id); },
+      getFolderById: id => { calls.folderGets.push(id); if (!folders.has(id)) throw new Error('Missing folder'); return folders.get(id); },
+      getFileById: id => { calls.fileGets.push(id); if (!files.has(id)) throw new Error('Missing file'); return files.get(id); },
     },
     SpreadsheetApp: {
       openById: id => { calls.opens.push({ id, locked: calls.locks > 0 }); if (!books.has(id)) throw new Error('Missing book'); return books.get(id); },
@@ -147,17 +150,17 @@ function fixture(options = {}) {
         if (options.failCreateRole === created.role && !failedCreate) { failedCreate = true; throw new Error('Create response lost'); }
         return { id };
       },
-      list: options => {
-        calls.lists.push(options);
-        const marker = options.q.match(/key='registrySegmentAction' and value='([^']+)'/)[1];
-        const role = options.q.match(/key='registrySegmentRole' and value='([^']+)'/)[1];
-        return { files: [...folders.values(), ...files.values()].filter(item => item.tags?.registrySegmentAction === marker && item.tags?.registrySegmentRole === role).map(item => ({ id: item.id, mimeType: item.mime || FOLDER_MIME, parents: [item.parent], trashed: item.trashed, appProperties: item.tags })) };
+      list: listOptions => {
+        calls.lists.push(listOptions);
+        const marker = listOptions.q.match(/key='registrySegmentAction' and value='([^']+)'/)[1];
+        const role = listOptions.q.match(/key='registrySegmentRole' and value='([^']+)'/)[1];
+        return { files: [...folders.values(), ...files.values()].filter(item => role !== options.hideMarkerRole && item.tags?.registrySegmentAction === marker && item.tags?.registrySegmentRole === role).map(item => ({ id: item.id, mimeType: item.mime || FOLDER_MIME, parents: [item.parent], trashed: item.trashed, appProperties: item.tags })) };
       },
     } },
   });
   for (const name of ['Config.gs','Code.gs','Segments.gs','SourceBases.gs','SegmentActions.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
-  return { context, calls, folders, files, books, properties, sources, relations, records, book, sheet };
+  return { context, calls, folders, files, books, properties, sources, relations, records, book, sheet, folder };
 }
 
 const loads = (sourceId = MIXED) => [{ sourceId, expectedRevision: 1, sheets: sourceId === MIXED ? [{ sheetId: 11, target: 'companies', hasHeader: true }, { sheetId: 12, target: 'lpr', hasHeader: false }] : [{ sheetId: 21, target: 'companies', hasHeader: true }] }];
@@ -199,6 +202,36 @@ test('empty creation always creates folder plus two native tables directly insid
   for (const file of result.segment.files) assert.equal(f.files.get(file.id).parent, result.segment.id);
   assert.equal(f.calls.creates.length, 3); assert.equal(f.calls.copies.length, 0);
   assert.ok(f.calls.creates.every(metadata => metadata.parents.length === 1 && metadata.appProperties.registrySegmentAction));
+});
+
+test('empty creation has bounded service calls and reads only the two tracking tabs', () => {
+  const f = fixture();
+  f.context.createSegment({ name: 'Без контактов', requestId: 'empty_budget_12345678' });
+  assert.deepEqual(f.calls.opens.map(call => call.id), [STORAGE]);
+  // Previously this path read 12 whole ranges, listed markers four times,
+  // fetched files nine times and wrote ScriptProperties fourteen times.
+  assert.deepEqual(f.calls.reads.map(read => [read.name, read.type]), [
+    ['SegmentTables','formulas'], ['SegmentTables','values'],
+    ['SegmentLoads','formulas'], ['SegmentLoads','values'],
+  ]);
+  assert.equal(f.calls.lists.length, 3);
+  assert.equal(f.calls.fileListings.length, 1);
+  assert.ok(f.calls.fileGets.length <= 7);
+  assert.ok(f.calls.propertyWrites.length <= 10);
+  assert.equal(f.calls.flushes, 2);
+  assert.equal(f.calls.writes.filter(write => write.name === 'SegmentTables' && write.row > 1).length, 1);
+  assert.equal(f.properties.has('SEGMENT_TRACKING_INIT_' + STORAGE), false);
+});
+
+test('name-only changes do not open source records or repeat marker and folder listings', () => {
+  const f = fixture();
+  f.context.updateSegment(request({ name: 'Новое имя', loads: undefined }));
+  assert.deepEqual(f.calls.opens.map(call => call.id), [STORAGE]);
+  assert.ok(f.calls.reads.every(read => ['SegmentTables','SegmentLoads'].includes(read.name)));
+  assert.equal(f.calls.reads.length, 4);
+  assert.equal(f.calls.fileListings.length, 1);
+  assert.equal(f.calls.lists.length, 0);
+  assert.ok(f.calls.fileGets.length <= 7);
 });
 
 test('mixed source copies whole selected worksheets into separate tables preserving original data and header choices', () => {
@@ -258,6 +291,26 @@ test('readiness is checked again on replay even when previous copies completed',
   assert.equal(f.calls.copies.length, 2);
 });
 
+test('each leaf rechecks current readiness after a preceding copy changed the source status', () => {
+  const f = fixture();
+  const first = f.books.get(MIXED).getSheets()[0], copyTo = first.copyTo;
+  first.copyTo = target => { const copied = copyTo(target); f.sources.state.rows[1][5] = 'rework'; return copied; };
+  assert.throws(() => f.context.updateSegment(request()), /SOURCE_NOT_READY/);
+  assert.equal(f.calls.copies.length, 1);
+  assert.equal(f.relations.state.rows.length, 1);
+  // One initial source snapshot and one fresh snapshot per attempted leaf.
+  assert.equal(f.calls.reads.filter(read => read.name === 'SourceBases' && read.type === 'values').length, 3);
+});
+
+test('each leaf checks actual destination membership even after a preceding successful copy', () => {
+  const f = fixture();
+  const first = f.books.get(MIXED).getSheets()[0], copyTo = first.copyTo;
+  first.copyTo = target => { const copied = copyTo(target); f.files.get(LPR).parent = SOURCE; return copied; };
+  assert.throws(() => f.context.updateSegment(request()), /OUTSIDE_SEGMENTS/);
+  assert.equal(f.calls.copies.length, 1);
+  assert.equal(f.relations.state.rows.length, 1);
+});
+
 test('unknown copy outcome retains pending receipt, adds no relation and blocks both old and new request IDs', () => {
   const f = fixture({ failCopyAfterApply: true });
   assert.throws(() => f.context.updateSegment(request()), /SEGMENT_RECOVERY_REQUIRED/);
@@ -276,6 +329,18 @@ test('known returned copy ID survives tracking write failure and retry resumes w
   const result = plain(f.context.updateSegment(request()));
   assert.equal(result.loadedSheets.length, 2); assert.equal(f.calls.copies.length, 2);
   assert.equal(f.relations.state.rows.length, 2);
+});
+
+test('lost batched assignment response recovers both roles without creating duplicate files', () => {
+  const f = fixture({ failTableTrackingAfterApply: true });
+  const input = { name: 'Новый', requestId: 'lost_assignment_12345' };
+  assert.throws(() => f.context.createSegment(input), /SEGMENT_RECOVERY_REQUIRED/);
+  assert.equal(f.calls.creates.length, 3);
+  const result = plain(f.context.createSegment(input));
+  assert.equal(f.calls.creates.length, 3);
+  const rows = f.books.get(STORAGE).getSheetByName('SegmentTables').state.rows.slice(1);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map(row => row[2]), result.segment.files.map(file => file.id));
 });
 
 test('interrupted tracking initialization recovers only its own blank tabs before business creation', () => {
@@ -306,6 +371,19 @@ test('lost LPR create response survives companies revisit and hidden name listin
   assert.equal(f.calls.creates.filter(call => call.appProperties.registrySegmentRole === 'lpr').length, 1);
   assert.equal(f.calls.creates.length, 3); assert.equal(result.segment.files.length, 2);
   assert.ok(f.calls.lists.some(options => /registrySegmentRole.*lpr/.test(options.q)));
+});
+
+test('an uncertain create redoes marker lookup in the next invocation and blocks on a missing marker', () => {
+  for (const role of ['folder','lpr']) {
+    const options = { failCreateRole: role }, f = fixture(options);
+    const input = { name: 'Новый', requestId: 'pending_creation_' + role + '_12345' };
+    assert.throws(() => f.context.createSegment(input), /SEGMENT_RECOVERY_REQUIRED/);
+    const creates = f.calls.creates.length, markerReads = f.calls.lists.length;
+    options.hideMarkerRole = role;
+    assert.throws(() => f.context.createSegment(input), /SEGMENT_RECOVERY_REQUIRED/);
+    assert.equal(f.calls.creates.length, creates);
+    assert.ok(f.calls.lists.length > markerReads);
+  }
 });
 
 test('Drive operation markers recover creations even after bounded receipt eviction', () => {
@@ -381,6 +459,40 @@ test('readonly tracking handles legacy absence, active receipts and partial sche
   const writes = g.calls.writes.length;
   assert.equal(runShared(g.context, () => g.context.segmentReadTracking_(g.context.authorize_(), SEGMENT)).available, false);
   assert.equal(g.calls.writes.length, writes);
+});
+
+test('the real dashboard opens and validates tracking once for ten segments, fresh on every request', () => {
+  const f = fixture();
+  for (let index = 0; index < 9; index++) f.folder('dashboard_segment_' + index + '_12345', 'Пустой ' + index, OUTREACH);
+  f.books.get(STORAGE).sheets.push(f.sheet('SegmentTables', [TABLES], 3, STORAGE), f.sheet('SegmentLoads', [LOADS], 4, STORAGE));
+  const first = plain(f.context.getSegmentsDashboard());
+  assert.equal(first.items.length, 10);
+  assert.equal(f.calls.opens.filter(call => call.id === STORAGE).length, 1);
+  assert.equal(f.calls.reads.filter(read => read.owner === STORAGE).length, 4);
+  assert.equal(f.calls.writes.length, 0);
+  f.books.get(STORAGE).getSheetByName('SegmentTables').state.rows[0][0] = 'changed';
+  const second = plain(f.context.getSegmentsDashboard());
+  assert.equal(second.items.length, 10);
+  assert.equal(f.calls.opens.filter(call => call.id === STORAGE).length, 2);
+  assert.ok(second.items.every(item => item.analysis.state === 'partial'));
+  assert.equal(f.calls.writes.length, 0);
+});
+
+test('shared tracking snapshots validate all records before filtering segment-specific public fields', () => {
+  const f = fixture(); f.context.updateSegment(request());
+  runShared(f.context, () => {
+    const context = f.context.authorize_(), snapshot = f.context.segmentReadTrackingSnapshot_(context);
+    const opens = f.calls.opens.length;
+    const selected = plain(f.context.segmentReadTracking_(context, SEGMENT, snapshot));
+    const absent = plain(f.context.segmentReadTracking_(context, 'other_segment_12345678', snapshot));
+    assert.equal(f.calls.opens.length, opens);
+    assert.ok(selected.tables.every(table => Object.keys(table).sort().join() === 'fileId,kind'));
+    assert.ok(selected.loads.every(load => !Object.hasOwn(load, 'row') && !Object.hasOwn(load, 'requestId')));
+    assert.deepEqual(absent, { available: true, tables: [], loads: [] });
+    f.books.get(STORAGE).getSheetByName('SegmentTables').state.rows.push(['other_segment_12345678','invalid',GENERAL]);
+    const invalid = f.context.segmentReadTrackingSnapshot_(context);
+    assert.equal(f.context.segmentReadTracking_(context, SEGMENT, invalid).available, false);
+  });
 });
 
 test('invalid mapping and unknown caller fields fail before mutation', () => {

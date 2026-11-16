@@ -4,13 +4,14 @@
   const root=document.getElementById('bases-registry-app');
   const $=(id)=>document.getElementById(id);
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,pendingView=null,formMode=null;
-  let sourceData=null,sourceTimer=null,lastSourceAttempt=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
+  let sourceData=null,sourceTimer=null,lastSourceAttempt=0,lastSourceLoaded=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
   let importOpen=false,importMode='file',importing=false,importFileSelection=0;
   let accessKey='',accessReady=false,accessMessage=null,pendingAccessChange=false;
-  let dashboard=null,dashboardLoading=false,dashboardError=null,lastDashboardAttempt=0,renderedDashboardKey=null;
-  let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0;
+  let dashboard=null,dashboardLoading=false,dashboardError=null,lastDashboardAttempt=0,lastDashboardLoaded=0,renderedDashboardKey=null;
+  let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0,lastMailingsLoaded=0;
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
   const sourceDrafts=new Map(),sourceMessages=new Map(),importRequests=new Map(),segmentRequests=new Map();
+  const pendingSyncViews=new Set();let syncTimer=null;
   const sourceFilters={query:'',contents:'',onlyUnassigned:false};
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
   function sharedKeyFromHash(hash){const match=typeof hash==='string'?hash.match(/^#?access_key=([A-Za-z0-9_-]{43})$/):null;return match&&match[0]===hash?match[1]:null;}
@@ -41,6 +42,7 @@
     const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message){
+    pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;
     if(message)notifyEntry('locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
   }
   async function startSharedAccess(){
@@ -101,6 +103,8 @@
   function folderRecoveryId(message){const match=String(message).match(/https:\/\/drive\.google\.com\/drive\/folders\/([A-Za-z0-9_-]{10,200})(?=\/|\?|#|\s|$)/);return match?match[1]:null;}
   function mailingMetric(value,connected){return connected?metricNumber(value):'—';}
   function requesting(){return networkPending>0||busy||sourceLoading||!!sourceSaving||importing||dashboardLoading||mailingsLoading||segmentSaving||segmentPreviewLoading;}
+  // Reading a list must not prevent opening a cached form or typing into it.
+  function editingBlocked(){return !accessReady||busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading;}
   function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0;}
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
   function sourceFocused(){return !!document.activeElement?.closest?.('.br-source-fields');}
@@ -164,7 +168,7 @@
     if(requesting())return;
     if(options.automatic&&(activeView!=='sources'||document.hidden||formMode||sourceDrafts.size||sourceFocused()||importOpen||!options.opening&&Date.now()-lastSourceAttempt<15000))return;
     sourceLoading=true;lastSourceAttempt=Date.now();updateControls();if(!sourceData&&activeView==='sources')renderSources();renderSourcesHealth();
-    try{const result=await rpc('getSourceBases');const previous=sourceData;sourceData=result;sourceRefreshError=null;
+    try{const result=await rpc('getSourceBases');const previous=sourceData;sourceData=result;sourceRefreshError=null;lastSourceLoaded=Date.now();
       for(const [id,draft] of sourceDrafts){if(!sourceData.items.some((item)=>item.id===id)){const old=previous?.items.find((item)=>item.id===id);if(old)sourceData.items.push(Object.assign({},old,{present:false}));}}
       for(const [id,message] of sourceMessages)if(!message.error)sourceMessages.delete(id);
       if(activeView==='sources')renderSources();if(!options.automatic&&!options.preserveNotice)notice(null);
@@ -208,7 +212,7 @@
   async function refreshSegments(options={}){
     if(requesting())return;if(options.automatic&&(activeView!=='segments'||document.hidden||formIsOpen()||Date.now()-lastDashboardAttempt<15000))return;
     dashboardLoading=true;lastDashboardAttempt=Date.now();updateControls();renderSegmentsHealth();
-    try{dashboard=await rpc('getSegmentsDashboard');dashboardError=null;if(activeView==='segments')renderSegments();if(segmentEditor)renderSegmentEditor();}
+    try{dashboard=await rpc('getSegmentsDashboard');dashboardError=null;lastDashboardLoaded=Date.now();if(activeView==='segments')renderSegments();if(segmentEditor)renderSegmentEditor();}
     catch(error){dashboardError=failure(error).message;}
     finally{dashboardLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();}
   }
@@ -226,7 +230,7 @@
   async function refreshMailings(options={}){
     if(requesting()||!mailingSegmentId)return;if(options.automatic&&(activeView!=='mailings'||document.hidden||formIsOpen()||Date.now()-lastMailingsAttempt<15000))return;
     mailingsLoading=true;lastMailingsAttempt=Date.now();updateControls();renderMailings();const id=mailingSegmentId;
-    try{const result=await rpc('getSegmentMailings',{segmentId:id});if(mailingSegmentId===id){mailings=result;mailingsError=null;}}
+    try{const result=await rpc('getSegmentMailings',{segmentId:id});if(mailingSegmentId===id){mailings=result;mailingsError=null;lastMailingsLoaded=Date.now();}}
     catch(error){if(mailingSegmentId===id)mailingsError=failure(error).message;}
     finally{mailingsLoading=false;updateControls();if(activeView==='mailings')renderMailings();flushPendingView();}
   }
@@ -265,13 +269,21 @@
   }
   function updateSegmentSummary(count){if(!segmentEditor)return;const selected=count===undefined?Array.from(segmentEditor.selected.values()).reduce((sum,entry)=>sum+entry.sheets.filter((leaf)=>leaf.included).length,0):count;$('br-segment-selection-summary').textContent='Выбрано листов: '+selected+'. Неотмеченные листы не добавляются.';}
   async function openSegmentEditor(options={}){
-    if(requesting()||importOpen||segmentEditor)return;
+    if(editingBlocked()||importOpen||segmentEditor)return;
     if(options.sourceId){const item=sourceItem(options.sourceId);if(!readySource(item)||sourceDrafts.has(item.id)){notice('Добавлять можно только готовые базы Google Таблиц без несохранённых изменений.','error');return;}}
     const existing=options.segmentId?segmentById(options.segmentId):null;if(options.segmentId&&!existing)return;
-    const epoch=++segmentEditorEpoch;segmentEditor={epoch,id:existing?.id||null,baselineName:existing?.name||'',fromCatalog:options.fromCatalog===true,selected:new Map(),loadingLists:true};formMode='segment';segmentError=null;$('br-segment-name').value=existing?.name||'';renderSegmentEditor();$('br-segment-name').focus();
-    if(!dashboard)await refreshSegments({forEditor:true});if(segmentEditor?.epoch!==epoch)return;
-    await refreshSourceBases({forEditor:true,preserveNotice:true});if(segmentEditor?.epoch!==epoch)return;
-    segmentEditor.loadingLists=false;renderSegmentEditor();if(options.sourceId)await chooseSegmentSource(options.sourceId,true);
+    const epoch=++segmentEditorEpoch;segmentEditor={epoch,id:existing?.id||null,baselineName:existing?.name||'',fromCatalog:options.fromCatalog===true,selected:new Map(),loadingLists:!sourceData||options.fromCatalog===true&&!dashboard,pendingSourceId:options.sourceId||null,readingLists:false};formMode='segment';segmentError=null;$('br-segment-name').value=existing?.name||'';renderSegmentEditor();$('br-segment-name').focus();
+    flushPendingView();
+  }
+  async function loadSegmentEditorLists(){
+    const editor=segmentEditor;if(!editor||!editor.loadingLists||editor.readingLists||requesting())return;editor.readingLists=true;
+    try{
+      // A regular empty segment needs no dashboard scan. The catalog entry point
+      // needs segment destinations only when they have never been loaded.
+      if(editor.fromCatalog&&!dashboard)await refreshSegments({forEditor:true});if(segmentEditor!==editor)return;
+      if(!sourceData)await refreshSourceBases({forEditor:true,preserveNotice:true});if(segmentEditor!==editor)return;
+      editor.loadingLists=false;renderSegmentEditor();
+    }finally{editor.readingLists=false;flushPendingView();}
   }
   async function chooseSegmentSource(id,checked){
     if(!segmentEditor||requesting()||segmentRecoveryLocked())return;
@@ -289,12 +301,44 @@
     finally{entry.loading=false;segmentPreviewLoading=false;if(segmentEditor===editor)renderSegmentSources();updateControls();flushPendingView();}
   }
   function showSegmentResult(message,error,segment){notice(message,error?'error':'info');if(segment?.id){const link=document.createElement('a');link.href=folderUrl(segment.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent='Открыть сегмент';$('br-notice').append(link);}}
+  function segmentMutationProjection(previous,segment,isNew,hasLoads){
+    const item=Object.assign({},previous||{},segment),files=new Map((previous?.files||[]).map((file)=>[file.id,file]));
+    for(const file of segment.files||[])files.set(file.id,file);item.files=Array.from(files.values());item.tableCount=item.files.length;
+    if(!previous||hasLoads){
+      item.overallStatus=isNew&&!hasLoads?'no_contacts':null;item.companiesInWork=null;
+      item.channels={};for(const kind of ['email','telegram','retargeting'])item.channels[kind]={state:hasLoads||!isNew?'unknown':'inactive',inWork:null};
+      item.analysis={warnings:hasLoads?['Листы добавлены. Статус и показатели обновляются.']:[]};
+    }
+    return item;
+  }
+  function cacheSegmentResult(result,editor,loads){
+    const segment=result.segment;if(!segment?.id)return;
+    if(dashboard?.state==='ready'){
+      const index=dashboard.items.findIndex((item)=>item.id===segment.id),item=segmentMutationProjection(index>=0?dashboard.items[index]:null,segment,!editor.id&&!result.recovered,loads.length>0);
+      if(index>=0)dashboard.items[index]=item;else dashboard.items.push(item);
+    }
+    const loadedSources=new Set((result.loadedSheets||[]).map((leaf)=>leaf.sourceId));
+    for(const item of sourceData?.items||[]){
+      if(!sourceAssociationsKnown(sourceData,item))continue;
+      const association=item.segments.find((entry)=>entry.id===segment.id);
+      if(association)association.name=segment.name;
+      else if(loadedSources.has(item.id))item.segments.push({id:segment.id,name:segment.name});
+    }
+    if(mailings?.segment?.id===segment.id)mailings.segment.name=segment.name;
+    lastDashboardLoaded=0;pendingSyncViews.add('segments');
+    if(loads.length||editor.id){lastSourceLoaded=0;pendingSyncViews.add('sources');}
+    if(activeView==='segments')renderSegments();if(activeView==='sources')renderSources();
+  }
+  function scheduleViewSync(){
+    // Let the acknowledged result paint before a potentially slow Drive scan.
+    if(syncTimer!==null)clearTimeout(syncTimer);syncTimer=setTimeout(()=>{syncTimer=null;flushPendingView();},300);
+  }
   async function submitSegment(){
     if(!segmentEditor||requesting()||segmentEditor.loadingLists)return;const editor=segmentEditor,name=$('br-segment-name').value.trim();if(!name||name.length>100){segmentError={message:'Введите название сегмента от 1 до 100 символов.'};renderSegmentError();return;}
     let loads;try{const entries=[];for(const [id,entry] of editor.selected){if(entry.loading||entry.error||!entry.preview||!readySource(sourceItem(id))||sourceDrafts.has(id))throw new Error('Проверьте готовность и список листов каждой отмеченной базы.');entries.push({sourceId:id,revision:entry.preview.revision,contents:entry.preview.contents,sheets:entry.sheets});}loads=buildSegmentLoads(entries);if(editor.id&&name===editor.baselineName&&!loads.length)throw new Error('Измените название или выберите листы для добавления.');}catch(error){segmentError={message:error.message};renderSegmentError();return;}
     const payload=editor.id?{id:editor.id,loads}: {name,loads};if(editor.id&&name!==editor.baselineName)payload.name=name;const fingerprint=JSON.stringify({operation:editor.id?'update':'create',payload});let requestId=segmentRequests.get(fingerprint);if(!requestId){requestId=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);segmentRequests.set(fingerprint,requestId);}payload.requestId=requestId;
     segmentSaving=true;segmentError=null;renderSegmentError();updateControls();
-    try{const result=await rpc(editor.id?'updateSegment':'createSegment',payload);segmentEditor=null;formMode=null;segmentRequests.clear();segmentSaving=false;renderSegmentEditor();if(activeView==='segments')await refreshSegments();if(activeView==='sources')await refreshSourceBases({preserveNotice:true});const refreshError=activeView==='segments'?dashboardError:activeView==='sources'?sourceRefreshError:null;showSegmentResult((editor.id?'Сегмент обновлён.':'Сегмент создан.')+' Добавлено листов: '+(result.loadedSheets?.length||0)+(refreshError?' Обновить список не удалось: '+refreshError:''),!!refreshError,result.segment);}
+    try{const result=await rpc(editor.id?'updateSegment':'createSegment',payload);cacheSegmentResult(result,editor,loads);segmentEditor=null;formMode=null;segmentRequests.clear();segmentSaving=false;renderSegmentEditor();showSegmentResult((editor.id?'Сегмент обновлён.':'Сегмент создан.')+' Добавлено листов: '+(result.loadedSheets?.length||0),false,result.segment);scheduleViewSync();}
     catch(error){segmentError=failure(error);renderSegmentError();}
     finally{segmentSaving=false;updateControls();if(segmentEditor)renderSegmentSources();flushPendingView();}
   }
@@ -329,9 +373,8 @@
       const result=await pending,item=result.item,fileId=result.file?.id||item.id;
       if(sourceData&&item){const index=sourceData.items.findIndex((entry)=>entry.id===item.id);if(index>=0)sourceData.items[index]=item;else sourceData.items.push(item);}
       importOpen=false;importing=false;importRequests.clear();$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);updateImportView();if(activeView==='sources')renderSources();
-      await refreshSourceBases({preserveNotice:true});
       const success=result.recovered?'Результат предыдущей операции найден. База доступна в «Исходных базах».':result.mode==='move'?'Таблица перенесена в «Исходные базы».':result.mode==='copy'?'Копия Google Таблицы создана в «Исходных базах».':'База загружена как новая Google Таблица в «Исходные базы».';
-      notice(success+(sourceRefreshError?' Обновить список не удалось: '+sourceRefreshError:''),sourceRefreshError?'error':'info',{id:fileId,label:'Открыть таблицу'});
+      notice(success,'info',{id:fileId,label:'Открыть таблицу'});lastSourceLoaded=0;pendingSyncViews.add('sources');scheduleViewSync();
     }catch(error){const parsed=failure(error),recoveryId=importRecoveryId(parsed.message);let text=parsed.code==='CREATION_UNCERTAIN'?'Результат операции не подтверждён. Проверьте таблицу и перечитайте список перед повторной отправкой. '+parsed.message:parsed.message;if(parsed.code==='DRIVE_SETUP_REQUIRED')text+=' Администратору нужно включить сервис Drive v3 в Apps Script, а для стандартного Cloud-проекта — Google Drive API.';showImportMessage(text,true,recoveryId,true);}
     finally{importing=false;updateControls();renderSourcesHealth();flushPendingView();}
   }
@@ -341,11 +384,12 @@
     root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderAccess();updateControls();
   }
   function updateControls(){
-    const waiting=requesting()||!accessReady;$('br-refresh').disabled=waiting;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady;
+    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady;
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
-    $('br-import-open').disabled=importOpen||waiting||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
-    $('br-add-segment').disabled=waiting||importOpen||!!segmentEditor||dashboard&&dashboard.state!=='ready';
-    for(const edit of root.querySelectorAll('[data-edit-segment]'))edit.disabled=waiting||importOpen||!!segmentEditor;
+    for(const add of root.querySelectorAll('[data-add-source]')){const item=sourceItem(add.dataset.addSource);add.disabled=!readySource(item)||sourceDrafts.has(item.id)||editing||importOpen||!!segmentEditor;}
+    $('br-import-open').disabled=importOpen||editing||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
+    $('br-add-segment').disabled=editing||importOpen||!!segmentEditor||dashboard&&dashboard.state!=='ready';
+    for(const edit of root.querySelectorAll('[data-edit-segment]'))edit.disabled=editing||importOpen||!!segmentEditor;
     $('br-segment-close').disabled=segmentSaving;$('br-segment-name').disabled=segmentSaving||segmentRecoveryLocked();$('br-segment-target').disabled=waiting||segmentRecoveryLocked();$('br-segment-refresh-sources').disabled=waiting||segmentRecoveryLocked();$('br-segment-submit').disabled=waiting||!!segmentEditor?.loadingLists;$('br-segment-submit').textContent=segmentSaving?'Сохраняем…':segmentRecoveryLocked()?'Повторить запрос':segmentEditor?.id?'Сохранить изменения':'Создать сегмент';$('br-segment-reread').disabled=waiting;
     for(const control of root.querySelectorAll('#br-segment-source-options input,#br-segment-source-options select,#br-segment-source-options button')){if(waiting||segmentRecoveryLocked())control.disabled=true;}
   }
@@ -355,11 +399,19 @@
     if(!accessReady)return;
     if(requesting()){if(options.opening)pendingView=activeView;return;}
     if(options.automatic&&(document.hidden||formIsOpen()))return;
+    const loadedAt=activeView==='sources'?sourceData&&lastSourceLoaded:activeView==='segments'?dashboard&&lastDashboardLoaded:mailings?.segment?.id===mailingSegmentId&&lastMailingsLoaded;
+    if(options.opening&&!pendingSyncViews.has(activeView)&&loadedAt&&Date.now()-loadedAt<30000)return;
+    pendingSyncViews.delete(activeView);
     if(activeView==='sources')return refreshSourceBases(Object.assign({},options,{preserveNotice:!options.manual}));
     if(activeView==='segments')return refreshSegments(options);
     if(activeView==='mailings')return refreshMailings(options);
   }
-  function flushPendingView(){if(requesting())return;if(pendingAccessChange){pendingAccessChange=false;startSharedAccess();return;}if(!accessReady)return;if(segmentEditor)renderSegmentSources();updateControls();if(!pendingView)return;const view=pendingView;pendingView=null;if(view===activeView)refreshActiveView({opening:true,preserveNotice:true});}
+  function flushPendingView(){
+    if(requesting())return;if(pendingAccessChange){pendingAccessChange=false;startSharedAccess();return;}if(!accessReady)return;
+    if(segmentEditor){renderSegmentSources();updateControls();if(segmentEditor.readingLists)return;if(segmentEditor.loadingLists){loadSegmentEditorLists();return;}if(segmentEditor.pendingSourceId){const id=segmentEditor.pendingSourceId;segmentEditor.pendingSourceId=null;chooseSegmentSource(id,true);return;}}
+    updateControls();if(pendingView){const view=pendingView;pendingView=null;if(view===activeView){refreshActiveView({opening:true,preserveNotice:true});return;}}
+    if(syncTimer===null&&pendingSyncViews.has(activeView)&&!formIsOpen()&&!sourceFocused())refreshActiveView({sync:true,preserveNotice:true});
+  }
   function setView(view,options={}){activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});}
   $('br-access-retry').addEventListener('click',startSharedAccess);$('br-share-copy').addEventListener('click',copySharedLink);
   $('br-source-search').addEventListener('input',updateSourceFilters);$('br-source-contents-filter').addEventListener('change',updateSourceFilters);$('br-source-unassigned-filter').addEventListener('change',updateSourceFilters);$('br-source-filters-reset').addEventListener('click',resetSourceFilters);
@@ -367,13 +419,13 @@
   $('br-refresh').addEventListener('click',()=>refreshActiveView({manual:true}));
   $('br-mailings-back').addEventListener('click',()=>{setView('segments',{cached:true});setTimeout(()=>{window.scrollTo(0,segmentBackScroll);Array.from(root.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===mailingSegmentId+'/mailings')?.focus({preventScroll:true});},0);});
   $('br-add-segment').addEventListener('click',()=>openSegmentEditor());
-  $('br-segment-close').addEventListener('click',()=>{if(segmentSaving)return;segmentEditor=null;formMode=null;segmentError=null;segmentEditorEpoch++;renderSegmentEditor();updateControls();});
+  $('br-segment-close').addEventListener('click',()=>{if(segmentSaving)return;segmentEditor=null;formMode=null;segmentError=null;segmentEditorEpoch++;renderSegmentEditor();updateControls();flushPendingView();});
   $('br-segment-target').addEventListener('change',()=>{if(!segmentEditor)return;const item=segmentById($('br-segment-target').value);segmentEditor.id=item?.id||null;segmentEditor.baselineName=item?.name||'';$('br-segment-name').value=item?.name||'';renderSegmentEditor();});
   $('br-segment-refresh-sources').addEventListener('click',()=>refreshSourceBases({forEditor:true,preserveNotice:true}));
   $('br-segment-reread').addEventListener('click',()=>refreshSegments({forEditor:true}));
   $('br-segment-form').addEventListener('submit',(event)=>{event.preventDefault();submitSegment();});
-  $('br-import-open').addEventListener('click',()=>{if(requesting()||segmentEditor)return;importOpen=true;updateControls();renderSourcesHealth();$('br-'+(importMode==='file'?'upload':'link')+'-name').focus();});
-  $('br-import-cancel').addEventListener('click',()=>{if(importing)return;importOpen=false;updateControls();renderSourcesHealth();$('br-import-open').focus();});
+  $('br-import-open').addEventListener('click',()=>{if(editingBlocked()||segmentEditor)return;importOpen=true;updateControls();renderSourcesHealth();$('br-'+(importMode==='file'?'upload':'link')+'-name').focus();});
+  $('br-import-cancel').addEventListener('click',()=>{if(importing)return;importOpen=false;updateControls();renderSourcesHealth();$('br-import-open').focus();flushPendingView();});
   $('br-import-mode-file').addEventListener('click',()=>switchImportMode('file'));$('br-import-mode-link').addEventListener('click',()=>switchImportMode('link'));
   for(const prefix of ['upload','link'])for(const kind of ['companies','lpr'])$('br-'+prefix+'-'+kind).addEventListener('change',updateImportView);
   for(const radio of $('br-import-link-form').querySelectorAll('input[type="radio"]'))radio.addEventListener('change',updateImportView);

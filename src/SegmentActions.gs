@@ -48,7 +48,10 @@ function segmentMutation_(kind, request) {
       var context = authorize_(), parent = segmentSourceFolder_(context);
       var storage = sourceBasesStorage_(context);
       segmentRequireStorageWrite_(storage);
-      var database = sourceBasesReadDatabase_(storage);
+      // Empty segments and name-only changes do not consume source records or
+      // relationships. The fixed service file and tracking schemas are still
+      // checked below; source readiness is checked whenever loads are present.
+      var database = loads.length ? sourceBasesReadDatabase_(storage) : { relations: [] };
       // Every source is revalidated before any folder, workbook or worksheet
       // mutation, including retries whose copies were already acknowledged.
       var plans = segmentPrepareLoads_(context, storage, database, loads);
@@ -80,7 +83,8 @@ function segmentMutation_(kind, request) {
           var desiredFileName = segmentTableName_(desiredName, targetKind);
           if (target.getName() !== desiredFileName) target.setName(desiredFileName);
         });
-        tracking = segmentTrackingStorage_(context, storage, true);
+        // The locked action has not changed either tracking tab yet. Reuse its
+        // validated snapshot instead of reading both complete journals again.
         segmentRememberTables_(tracking, folder.getId(), tables);
         var loaded = segmentCopyPlans_(context, storage, database, tracking, folder, tables, plans, requestId, journal);
         journal.value.stage = 'done';
@@ -254,16 +258,21 @@ function segmentCreateArtifact_(context, parent, role, name, journal, lookupOnly
   if (!journal.value.creating) journal.value.creating = {};
   // Drive markers outlive the bounded ScriptProperties receipt history, so an
   // old request can still recover its original artifacts after receipt expiry.
-  var found = [], pageToken;
+  var found = [], pageToken, lookupKey = role + '|' + parent.getId();
+  // A create request first checks for recovery before its capacity preflight.
+  // Its confirmed miss can be reused only in this invocation, before any
+  // attempt to create this role; it is never stored in ScriptProperties.
   try {
-    do {
-      var options = { q: "appProperties has { key='registrySegmentAction' and value='" + marker + "' } and appProperties has { key='registrySegmentRole' and value='" + role + "' }", fields: 'files(id,mimeType,trashed,parents,appProperties),nextPageToken', pageSize: 100, spaces: 'drive', includeItemsFromAllDrives: true, supportsAllDrives: true };
-      if (pageToken) options.pageToken = pageToken;
-      var page = Drive.Files.list(options);
-      found = found.concat(page.files || []);
-      pageToken = page.nextPageToken;
-      if (found.length > 1) break;
-    } while (pageToken);
+    if (!journal.lookupMisses || !journal.lookupMisses[lookupKey]) {
+      do {
+        var options = { q: "appProperties has { key='registrySegmentAction' and value='" + marker + "' } and appProperties has { key='registrySegmentRole' and value='" + role + "' }", fields: 'files(id,mimeType,trashed,parents,appProperties),nextPageToken', pageSize: 100, spaces: 'drive', includeItemsFromAllDrives: true, supportsAllDrives: true };
+        if (pageToken) options.pageToken = pageToken;
+        var page = Drive.Files.list(options);
+        found = found.concat(page.files || []);
+        pageToken = page.nextPageToken;
+        if (found.length > 1) break;
+      } while (pageToken);
+    }
   } catch (error) { segmentRecovery_(parent, 'Не удалось проверить результат предыдущего создания.'); }
   if (found.length) {
     if (found.length !== 1 || found[0].trashed || found[0].mimeType !== mimeType || (found[0].parents || []).indexOf(parent.getId()) === -1) segmentRecovery_(parent, 'Предыдущее создание ещё не подтверждено либо объект перемещён.');
@@ -271,7 +280,12 @@ function segmentCreateArtifact_(context, parent, role, name, journal, lookupOnly
     return id_(found[0].id);
   }
   if (journal.value.creating[role]) segmentRecovery_(parent, 'Предыдущее создание ещё не найдено в Google Диске.');
-  if (lookupOnly) return null;
+  if (lookupOnly) {
+    if (!journal.lookupMisses) journal.lookupMisses = Object.create(null);
+    journal.lookupMisses[lookupKey] = true;
+    return null;
+  }
+  if (journal.lookupMisses) delete journal.lookupMisses[lookupKey];
   journal.value.stage = stage;
   journal.value.creating[role] = true;
   segmentSaveJournal_(context, journal);
@@ -286,40 +300,45 @@ function segmentCreateArtifact_(context, parent, role, name, journal, lookupOnly
 function segmentTableName_(name, kind) { return name + (kind === 'companies' ? ': компании' : ': ЛПР'); }
 
 function segmentEnsureTables_(context, folder, desiredName, storage, tracking, journal) {
-  var tables = {}, tracked = tracking.tables.filter(function (table) { return table.segmentId === folder.getId(); });
+  var tables = {}, candidatesByKind = null, tracked = tracking.tables.filter(function (table) { return table.segmentId === folder.getId(); });
   SEGMENT_ACTIONS_SCHEMA.kinds.forEach(function (kind) {
     var existing = tracked.filter(function (table) { return table.kind === kind; })[0];
     var fileId = journal.value.files[kind] || (existing ? existing.fileId : null);
     if (!fileId && !(journal.value.creating && journal.value.creating[kind])) {
-      var candidates = [], iterator = folder.getFilesByType(REGISTRY_CONFIG.spreadsheetMime);
-      var oldName = segmentTableName_(folder.getName(), kind), newName = segmentTableName_(desiredName, kind);
-      while (iterator.hasNext()) {
-        var candidate = iterator.next();
-        if (!candidate.isTrashed() && (candidate.getName() === oldName || candidate.getName() === newName)) candidates.push(candidate);
+      if (!candidatesByKind) {
+        candidatesByKind = { companies: [], lpr: [] };
+        var iterator = folder.getFilesByType(REGISTRY_CONFIG.spreadsheetMime), folderName = folder.getName();
+        while (iterator.hasNext()) {
+          var candidate = iterator.next();
+          if (candidate.isTrashed()) continue;
+          var candidateName = candidate.getName();
+          SEGMENT_ACTIONS_SCHEMA.kinds.forEach(function (candidateKind) {
+            if (candidateName === segmentTableName_(folderName, candidateKind) || candidateName === segmentTableName_(desiredName, candidateKind)) candidatesByKind[candidateKind].push(candidate);
+          });
+        }
       }
+      var candidates = candidatesByKind[kind];
       if (candidates.length > 1) fail_('SEGMENT_TABLE_AMBIGUOUS', 'В сегменте несколько таблиц с одинаковым назначением. Проверьте их в Google Диске.');
       if (candidates.length) fileId = candidates[0].getId();
     }
     if (!fileId) {
       fileId = segmentCreateArtifact_(context, folder, kind, segmentTableName_(desiredName, kind), journal);
-      journal.value.files[kind] = fileId;
       delete journal.value.creating[kind];
-      journal.value.stage = 'tables_pending';
-      segmentSaveJournal_(context, journal);
     }
     // Store adopted identities before the first rename so retries do not rely
     // on names that may already have changed during a partial rename.
     journal.value.files[kind] = fileId;
+    journal.value.stage = 'tables_pending';
     segmentSaveJournal_(context, journal);
     var file;
     try { file = DriveApp.getFileById(id_(fileId)); }
     catch (error) { segmentRecovery_(folder, 'Созданная или связанная таблица сейчас недоступна.'); }
     if (file.isTrashed() || file.getMimeType() !== REGISTRY_CONFIG.spreadsheetMime) fail_('SEGMENT_TABLE_CHANGED', 'Вложенная таблица недоступна или её тип изменился.');
     if (!segmentDirectParent_(file, folder.getId())) fail_('OUTSIDE_SEGMENTS', 'Вложенная таблица была перемещена за пределы своего сегмента.');
-    segmentTargetFile_(context, folder, fileId);
+    // Validate the object just retrieved, including actual root ancestry.
+    // Fetching it again through registryFile_ would repeat the same Drive GET.
+    if (!insideRegistry_(file, context.rootId)) fail_('OUTSIDE_REGISTRY', 'Эта таблица не относится к выбранному реестру.');
     tables[kind] = fileId;
-    journal.value.stage = 'tables_pending';
-    segmentSaveJournal_(context, journal);
   });
   if (tables.companies === tables.lpr) fail_('STORAGE_SCHEMA', 'Компании и ЛПР должны храниться в разных вложенных таблицах.');
   return tables;
@@ -345,7 +364,7 @@ function segmentTrackingStorage_(context, storage, create) {
   if ((!tablesSheet || !loadsSheet) && !create) fail_('STORAGE_SCHEMA', 'Не все служебные листы сегментов доступны.');
   if (create && (!tablesSheet || !loadsSheet || pending)) {
     if ((tablesSheet || loadsSheet) && !pending) fail_('STORAGE_SCHEMA', 'Служебные листы сегментов созданы не полностью. Требуется проверка администратора.');
-    if (!pending) context.properties.setProperty(initKey, 'pending');
+    if (!pending) { context.properties.setProperty(initKey, 'pending'); pending = true; }
     try {
       if (!tablesSheet) tablesSheet = book.insertSheet(SEGMENT_ACTIONS_SCHEMA.tablesTab);
       if (tablesSheet.getLastRow() === 0) tablesSheet.getRange(1, 1, 1, SEGMENT_ACTIONS_SCHEMA.tablesHeaders.length).setValues([SEGMENT_ACTIONS_SCHEMA.tablesHeaders]);
@@ -385,17 +404,24 @@ function segmentTrackingStorage_(context, storage, create) {
 }
 
 /** Read-only analytics contract: absence of both tabs means legacy, never init. */
-function segmentReadTracking_(context, segmentId) {
+function segmentReadTrackingSnapshot_(context) {
   try {
     var tracking = segmentTrackingStorage_(context, sourceBasesStorage_(context), false);
-    return {
-      available: true,
-      tables: tracking.tables.filter(function (table) { return table.segmentId === segmentId; }).map(function (table) { return { fileId: table.fileId, kind: table.kind }; }),
-      loads: tracking.loads.filter(function (load) { return load.segmentId === segmentId; }).map(function (load) {
-        return { sourceId: load.sourceId, sourceSheetId: load.sourceSheetId, targetFileId: load.targetFileId, targetSheetId: load.targetSheetId, hasHeader: load.hasHeader, stage: load.stage };
-      })
-    };
+    return { available: true, tables: tracking.tables, loads: tracking.loads };
   } catch (error) { return { available: false, tables: [], loads: [], warnings: ['Журнал листов сегмента недоступен. Проверка количества контактов ограничена.'] }; }
+}
+
+/** A dashboard can share one validated, invocation-local journal snapshot. */
+function segmentReadTracking_(context, segmentId, snapshot) {
+  var tracking = snapshot || segmentReadTrackingSnapshot_(context);
+  if (!tracking.available) return { available: false, tables: [], loads: [], warnings: tracking.warnings.slice() };
+  return {
+    available: true,
+    tables: tracking.tables.filter(function (table) { return table.segmentId === segmentId; }).map(function (table) { return { fileId: table.fileId, kind: table.kind }; }),
+    loads: tracking.loads.filter(function (load) { return load.segmentId === segmentId; }).map(function (load) {
+      return { sourceId: load.sourceId, sourceSheetId: load.sourceSheetId, targetFileId: load.targetFileId, targetSheetId: load.targetSheetId, hasHeader: load.hasHeader, stage: load.stage };
+    })
+  };
 }
 
 function segmentWriteTrackingRow_(sheet, headers, record) {
@@ -427,16 +453,29 @@ function segmentPreflight_(storage, database, tracking, segmentId, plans, reques
 }
 
 function segmentRememberTables_(tracking, segmentId, tables) {
+  var additions = [], nextRow = tracking.tablesLastRow;
   SEGMENT_ACTIONS_SCHEMA.kinds.forEach(function (kind) {
     var old = tracking.tables.filter(function (table) { return table.segmentId === segmentId && table.kind === kind; })[0];
     if (old) {
       if (old.fileId !== tables[kind]) fail_('STORAGE_SCHEMA', 'Назначение вложенной таблицы изменилось.');
       return;
     }
-    var record = { segmentId: segmentId, kind: kind, fileId: tables[kind], row: ++tracking.tablesLastRow };
-    segmentWriteTrackingRow_(tracking.tablesSheet, SEGMENT_ACTIONS_SCHEMA.tablesHeaders, record);
-    tracking.tables.push(record);
+    additions.push({ segmentId: segmentId, kind: kind, fileId: tables[kind], row: ++nextRow });
   });
+  if (!additions.length) return;
+  if (nextRow > REGISTRY_CONFIG.maxSourceBaseRows + 1) fail_('STORAGE_LIMIT', 'Журнал сегментов превышает лимит 5000 строк.');
+  // Both canonical assignments are adjacent, so persist them in one write and
+  // one flush before any worksheet copy can begin. Per-leaf copy stages still
+  // use their individual durable writes.
+  try {
+    var capacity = tracking.tablesSheet.getMaxRows();
+    if (nextRow > capacity) tracking.tablesSheet.insertRowsAfter(capacity, nextRow - capacity);
+    tracking.tablesSheet.getRange(additions[0].row, 1, additions.length, SEGMENT_ACTIONS_SCHEMA.tablesHeaders.length).setValues(additions.map(function (record) {
+      return SEGMENT_ACTIONS_SCHEMA.tablesHeaders.map(function (key) { return record[key]; });
+    }));
+  } finally { SpreadsheetApp.flush(); }
+  tracking.tablesLastRow = nextRow;
+  tracking.tables = tracking.tables.concat(additions);
 }
 
 function segmentCopyPlans_(context, storage, database, tracking, folder, tables, plans, requestId, journal) {
@@ -450,8 +489,6 @@ function segmentCopyPlans_(context, storage, database, tracking, folder, tables,
     if (old.requestId !== requestId && old.stage !== 'complete' && old.stage !== 'copied') segmentRecovery_(folder, 'Предыдущая загрузка этого листа ещё не подтверждена.');
   }); });
   plans.forEach(function (plan) {
-    var freshDatabase = sourceBasesReadDatabase_(storage);
-    requireReadySourceBase_(context, storage, freshDatabase, plan.sourceId, plan.expectedRevision);
     plan.sheets.forEach(function (choice) {
       requireReadySourceBase_(context, storage, sourceBasesReadDatabase_(storage), plan.sourceId, plan.expectedRevision);
       var targetFileId = tables[choice.target], leafKey = plan.sourceId + '|' + choice.sheetId;

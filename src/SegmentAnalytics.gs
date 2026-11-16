@@ -10,9 +10,9 @@ function getSegmentsDashboard_() {
     var context = authorize_();
     var projection = getSegmentsMetadata_(context);
     if (projection.state !== 'ready') return projection;
-    var budget = segmentAnalysisBudget_();
+    var budget = segmentAnalysisBudget_(), trackingRequest = { loaded: false, snapshot: null };
     projection.items = projection.items.map(function (item) {
-      return segmentAnalyzeItem_(context, projection.source, item, budget);
+      return segmentAnalyzeItem_(context, projection.source, item, budget, trackingRequest);
     });
     projection.generatedAt = new Date().toISOString();
     return projection;
@@ -22,13 +22,15 @@ function getSegmentsDashboard_() {
 function getSegmentMailings_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request), segmentId = id_(input.segmentId);
-    var projection = getSegmentsMetadata_(context);
-    var item = projection.state === 'ready' ? projection.items.filter(function (candidate) { return candidate.id === segmentId; })[0] : null;
-    if (!item) fail_('SEGMENT_NOT_FOUND', 'Сегмент недоступен. Обновите список сегментов.');
-    segmentAnalyticsFolder_(context, projection.source, item);
+    var parent = segmentSourceFolder_(context), folder;
+    try { folder = segmentFolder_(context, parent, segmentId); }
+    catch (error) {
+      if (error.registryCode === 'OUTSIDE_SEGMENTS') throw error;
+      fail_('SEGMENT_NOT_FOUND', 'Сегмент недоступен. Обновите список сегментов.');
+    }
     return {
       state: 'not_connected',
-      segment: { id: item.id, name: item.name, url: item.url },
+      segment: { id: folder.getId(), name: folder.getName(), url: segmentFolderUrl_(folder.getId()) },
       services: [
         segmentDisconnectedMailings_('coldy', 'Coldy', 'email'),
         segmentDisconnectedMailings_('nsa', 'NSA', 'telegram')
@@ -39,7 +41,7 @@ function getSegmentMailings_(request) {
   });
 }
 
-function segmentAnalyzeItem_(context, source, item, budget) {
+function segmentAnalyzeItem_(context, source, item, budget, trackingRequest) {
   var warnings = [], hasContacts = false, unknown = false, tracking;
   var launch = segmentLaunchStatus_();
   item.channels = launch.channels;
@@ -53,7 +55,15 @@ function segmentAnalyzeItem_(context, source, item, budget) {
     return item;
   }
   try {
-    tracking = segmentReadTracking_(context, item.id);
+    // One validated service-book snapshot belongs only to this dashboard call.
+    // Load it after checking the first accessible segment, and remember failure
+    // too so a broken journal is not reopened once for every segment.
+    if (trackingRequest && !trackingRequest.loaded) {
+      trackingRequest.loaded = true;
+      trackingRequest.snapshot = { available: false, tables: [], loads: [], warnings: [] };
+      trackingRequest.snapshot = segmentReadTrackingSnapshot_(context);
+    }
+    tracking = segmentReadTracking_(context, item.id, trackingRequest ? trackingRequest.snapshot : undefined);
   } catch (error) {
     tracking = { available: false, tables: [], loads: [] };
     segmentAnalysisWarn_(warnings, 'Не удалось проверить папку сегмента или сведения о заголовках.');
