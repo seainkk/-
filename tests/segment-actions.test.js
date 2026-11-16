@@ -1,3 +1,4 @@
+import { TEST_ACCESS_KEY, TEST_ACCESS_HASH, SHARED_ACTOR, installSharedApi, runShared } from './helpers/shared-link.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -26,7 +27,7 @@ const iterator = values => { let i = 0; return { hasNext: () => i < values.lengt
 function fixture(options = {}) {
   const calls = { creates: [], copies: [], opens: [], writes: [], flushes: 0, locks: 0, events: [], lists: [] };
   const folders = new Map(), files = new Map(), books = new Map();
-  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SEGMENTS_FOLDER_ID: OUTREACH, SOURCE_BASES_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: STORAGE, ALLOWED_EMAILS: EMAIL }));
+  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, SEGMENTS_FOLDER_ID: OUTREACH, SOURCE_BASES_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: STORAGE, ALLOWED_EMAILS: EMAIL }));
   let sequence = 1000, failedCreate = false, failedCopy = false, failedName = false, failedTracking = false, failedInsert = false;
   function folder(id, name, parent) {
     const item = { id, name, parent, trashed: false,
@@ -155,6 +156,7 @@ function fixture(options = {}) {
     } },
   });
   for (const name of ['Config.gs','Code.gs','Segments.gs','SourceBases.gs','SegmentActions.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
+  installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
   return { context, calls, folders, files, books, properties, sources, relations, records, book, sheet };
 }
 
@@ -368,16 +370,16 @@ test('ambiguous canonical names and malformed tracking fail before new business 
 
 test('readonly tracking handles legacy absence, active receipts and partial schemas without mutations', () => {
   const f = fixture();
-  const absent = plain(f.context.segmentReadTracking_(f.context.authorize_(), SEGMENT));
+  const absent = plain(runShared(f.context, () => f.context.segmentReadTracking_(f.context.authorize_(), SEGMENT)));
   assert.deepEqual(absent, { available: true, tables: [], loads: [] });
   assert.equal(f.calls.writes.length, 0);
   f.context.updateSegment(request());
-  const loaded = plain(f.context.segmentReadTracking_(f.context.authorize_(), SEGMENT));
+  const loaded = plain(runShared(f.context, () => f.context.segmentReadTracking_(f.context.authorize_(), SEGMENT)));
   assert.equal(loaded.available, true); assert.equal(loaded.tables.length, 2);
   assert.deepEqual(loaded.loads.map(load => load.hasHeader), [true,false]);
   const g = fixture(); g.books.get(STORAGE).insertSheet('SegmentTables').getRange(1,1,1,TABLES.length).setValues([TABLES]);
   const writes = g.calls.writes.length;
-  assert.equal(g.context.segmentReadTracking_(g.context.authorize_(), SEGMENT).available, false);
+  assert.equal(runShared(g.context, () => g.context.segmentReadTracking_(g.context.authorize_(), SEGMENT)).available, false);
   assert.equal(g.calls.writes.length, writes);
 });
 

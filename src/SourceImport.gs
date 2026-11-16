@@ -12,7 +12,7 @@ var SOURCE_IMPORT_CONFIG = Object.freeze({
   }
 });
 
-function uploadSourceBase(form) {
+function uploadSourceBase_(form) {
   return api_(function () {
     authorize_();
     var input = importInput_(form, ['name', 'baseType', 'contentsJSON', 'status', 'requestId', 'file']);
@@ -43,7 +43,7 @@ function uploadSourceBase(form) {
   });
 }
 
-function importSourceBaseLink(request) {
+function importSourceBaseLink_(request) {
   return api_(function () {
     authorize_();
     var input = importInput_(request, ['url', 'name', 'baseType', 'contents', 'status', 'mode', 'requestId']);
@@ -55,8 +55,7 @@ function importSourceBaseLink(request) {
       var preparation = importPrepare_();
       importProtectOriginal_(link.id, preparation);
       return importExecute_(preparation, common, function (receipt, key, fingerprint, beginMutation) {
-        var original = importGetFile_(link.id, link.resourceKey);
-        importNativeSheet_(original);
+        var original = importScopedOriginal_(preparation, link, common.mode);
         if (!receipt.original) {
           receipt.original = { id: original.id, name: String(original.name || ''), parents: (original.parents || []).slice().sort() };
           if (receipt.original.name.length > 2000) fail_('INVALID_NAME', 'Слишком длинное исходное название таблицы. Сначала сократите его в Google Диске.');
@@ -184,6 +183,34 @@ function importProtectOriginal_(fileId, preparation) {
   if (protectedIds.indexOf(fileId) !== -1) fail_('PROTECTED_FILE', 'Служебную таблицу и папки реестра нельзя использовать как исходную базу.');
 }
 
+/** The public owner-mode app may never use the owner's unrelated Drive files. */
+function importScopedOriginal_(preparation, link, mode) {
+  try {
+  importProtectOriginal_(link.id, preparation);
+  var original = importNativeSheet_(importGetFile_(link.id, link.resourceKey));
+  if (original.id !== link.id || !Array.isArray(original.parents) || !original.parents.length) fail_('SOURCE_SCOPE_REQUIRED', 'По ссылке можно добавить только таблицу, уже находящуюся в папке реестра. Внешнюю таблицу сначала добавьте в реестр через Google Диск или загрузите файлом.');
+  var insideRoot = false, allInsideSource = true;
+  original.parents.forEach(function (parentId) {
+    var parent, inRoot = false, inSource = false;
+    try {
+      parent = DriveApp.getFolderById(id_(parentId));
+      if (!parent.isTrashed()) {
+        inRoot = insideRegistry_(parent, preparation.context.rootId);
+        inSource = inRoot && insideRegistry_(parent, preparation.binding.source.id);
+      }
+    } catch (error) { /* An inaccessible or malformed ancestry is not permission. */ }
+    insideRoot = insideRoot || inRoot;
+    allInsideSource = allInsideSource && inSource;
+  });
+  if (!insideRoot) fail_('SOURCE_SCOPE_REQUIRED', 'По ссылке можно добавить только таблицу, уже находящуюся в папке реестра. Внешнюю таблицу сначала добавьте в реестр через Google Диск или загрузите файлом.');
+  if (mode === 'move' && !allInsideSource) fail_('SOURCE_MOVE_SCOPE', 'Перенос по ссылке разрешён только внутри папки «Исходные базы» и её подпапок. Для таблицы из другого раздела реестра выберите «Создать копию».');
+  return original;
+  } catch (scopeError) {
+    scopeError.importScopeFailure = true;
+    throw scopeError;
+  }
+}
+
 function importExecute_(preparation, common, action) {
   var context = preparation.context, destination = preparation.binding.source.id;
   var key = 'IMPORT_' + digest_(context.email + '|' + common.kind + '|' + common.requestId).slice(0, 32);
@@ -198,6 +225,15 @@ function importExecute_(preparation, common, action) {
   var recovered = existed;
   var mutationStartedThisInvocation = false;
   var previousMutationUncertain = !!receipt.attempted && receipt.status !== 'retryable';
+  // Scope denial must not fall through to artifact recovery/finalization. Even
+  // a completed or uncertain earlier request needs an in-scope original now.
+  if (common.kind === 'link') {
+    try { importScopedOriginal_(preparation, common.link, common.mode); }
+    catch (scopeError) {
+      if (!receipt.attempted && !receipt.fileId) { receipt.status = 'retryable'; importSaveReceipt_(context, key, receipt, false); }
+      throw scopeError;
+    }
+  }
   try {
     if (!receipt.fileId) {
       var found = importRecoverFile_(key, fingerprint);
@@ -216,8 +252,7 @@ function importExecute_(preparation, common, action) {
     if (!receipt.fileId) {
       // For a move the explicit original ID allows an exact recovery check.
       if (common.mode === 'move' && receipt.original) {
-        var moved = importGetFile_(common.link.id, common.link.resourceKey);
-        importNativeSheet_(moved);
+        var moved = importScopedOriginal_(preparation, common.link, common.mode);
         if (moved.appProperties && moved.appProperties[SOURCE_IMPORT_CONFIG.keyProperty] === key && moved.appProperties[SOURCE_IMPORT_CONFIG.fingerprintProperty] === fingerprint) {
           receipt.fileId = moved.id;
           receipt.status = 'file_ready';
@@ -228,8 +263,7 @@ function importExecute_(preparation, common, action) {
       if (!receipt.fileId) {
         // Capture the original move snapshot durably before the API action.
         if (common.mode === 'move' && !receipt.original) {
-          var original = importGetFile_(common.link.id, common.link.resourceKey);
-          importNativeSheet_(original);
+          var original = importScopedOriginal_(preparation, common.link, common.mode);
           receipt.original = { id: original.id, name: String(original.name || ''), parents: (original.parents || []).slice().sort() };
           if (receipt.original.name.length > 2000) fail_('INVALID_NAME', 'Слишком длинное исходное название таблицы. Сначала сократите его в Google Диске.');
           receipt.preActionRevision = preparation.database.records[original.id] ? preparation.database.records[original.id].revision : 0;
@@ -251,6 +285,7 @@ function importExecute_(preparation, common, action) {
     }
     return importFinalize_(preparation, common, key, receipt, recovered);
   } catch (error) {
+    if (error.importScopeFailure) throw error;
     if (!receipt.attempted && !receipt.fileId) {
       receipt.status = 'retryable';
       importSaveReceipt_(context, key, receipt, false);

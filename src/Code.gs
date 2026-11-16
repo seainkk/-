@@ -1,18 +1,14 @@
 /**
- * Standalone Apps Script web app. Every remote operation verifies the signed-in
- * user and the item's actual Drive ancestry. The catalog stores workflow data
+ * Standalone Apps Script web app. Every remote operation verifies the shared
+ * link credential and the item's actual Drive ancestry. The catalog stores workflow data
  * in a fixed, root-validated service book. Segment actions copy selected sheets
  * from ready source files; analytics reads bounded contact-presence data only.
  * There is no in-app cell editor, and source worksheets are never modified.
  */
 function doGet() {
-  try {
-    authorize_();
-    return HtmlService.createTemplateFromFile('Index').evaluate().setTitle(REGISTRY_CONFIG.title);
-  } catch (error) {
-    var message = error && error.registryCode ? error.message.replace(/^\[[A-Z_]+\]\s*/, '') : 'Не удалось открыть приложение. Обратитесь к администратору.';
-    return HtmlService.createHtmlOutput('<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Реестр баз</title><body style="font:16px/1.6 system-ui;margin:40px;max-width:650px"><h1>Реестр баз</h1><p>' + escapeHtml_(message) + '</p></body></html>');
-  }
+  // Only a static shell is public. The fragment credential is checked by every RPC.
+  try { return HtmlService.createTemplateFromFile('Index').evaluate().setTitle(REGISTRY_CONFIG.title); }
+  catch (error) { return HtmlService.createHtmlOutput('<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Реестр баз</title><body style="font:16px/1.6 system-ui;margin:40px;max-width:650px"><h1>Реестр баз</h1><p>Не удалось открыть интерфейс. Обратитесь к владельцу реестра.</p></body></html>'); }
 }
 
 function include_(name) {
@@ -21,17 +17,17 @@ function include_(name) {
 }
 
 /** Minimal app startup: the former Drive-tree screen is no longer rendered. */
-function getAppBootstrap() {
+function getAppBootstrap_() {
   return api_(function () {
     var context = authorize_(), root = registryRoot_(context);
     return {
-      user: { email: context.email, isAdmin: context.isAdmin },
+      user: { email: '', isAdmin: false, accessMode: 'link' },
       registry: { id: root.getId(), name: root.getName() }
     };
   });
 }
 
-function getBootstrap() {
+function getBootstrap_() {
   return api_(function () {
     var context = authorize_();
     var root = registryRoot_(context);
@@ -63,11 +59,11 @@ function getBootstrap() {
     folders.sort(byName_);
     files.sort(byName_);
     var registry = { id: root.getId(), name: root.getName() };
-    return { user: { email: context.email, isAdmin: context.isAdmin }, registry: registry, folders: folders, files: files, segments: buildSegments_(context, registry, folders, files) };
+    return { user: { email: '', isAdmin: false, accessMode: 'link' }, registry: registry, folders: folders, files: files, segments: buildSegments_(context, registry, folders, files) };
   });
 }
 
-function createBase(request) {
+function createBase_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request), name = itemName_(input.name);
     return locked_(function () {
@@ -90,7 +86,7 @@ function createBase(request) {
   });
 }
 
-function createFolder(request) {
+function createFolder_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request), name = itemName_(input.name);
     return locked_(function () {
@@ -103,7 +99,7 @@ function createFolder(request) {
   });
 }
 
-function renameItem(request) {
+function renameItem_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request), name = itemName_(input.name);
     if (input.kind !== 'file' && input.kind !== 'folder') fail_('INVALID_REQUEST', 'Неизвестный тип объекта.');
@@ -117,16 +113,12 @@ function renameItem(request) {
 }
 
 function authorize_() {
+  if (typeof SHARED_REQUEST_SCOPE_ === 'undefined' || !SHARED_REQUEST_SCOPE_) fail_('LINK_ACCESS_REQUIRED', sharedAccessMessage_());
   var properties = PropertiesService.getScriptProperties();
-  var allowedRaw = properties.getProperty('ALLOWED_EMAILS');
-  if (!allowedRaw) fail_('SETUP_REQUIRED', 'Приложение ещё не настроено. Обратитесь к администратору.');
-  var email = normalizeEmail_(Session.getActiveUser().getEmail());
-  var effective = normalizeEmail_(Session.getEffectiveUser().getEmail());
-  if (!email || email !== effective) fail_('AUTH_REQUIRED', 'Войдите в разрешённый Google-аккаунт. Приложение должно выполняться от имени вошедшего пользователя.');
-  if (emailList_(allowedRaw).indexOf(email) === -1) fail_('ACCESS_DENIED', 'У этого Google-аккаунта нет доступа к реестру. Обратитесь к администратору.');
+  if (!sharedHashEqual_(SHARED_REQUEST_SCOPE_.keyHash, sharedConfiguredHash_(properties))) fail_('LINK_ACCESS_REQUIRED', sharedAccessMessage_());
   var rootId = properties.getProperty('ROOT_FOLDER_ID') || REGISTRY_CONFIG.defaultRootFolderId;
   id_(rootId);
-  return { email: email, rootId: rootId, isAdmin: emailList_(properties.getProperty('ADMIN_EMAILS') || '').indexOf(email) !== -1, properties: properties };
+  return { email: 'shared-link', rootId: rootId, isAdmin: false, accessMode: 'link', properties: properties };
 }
 
 function registryRoot_(context) {

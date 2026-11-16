@@ -11,7 +11,7 @@ var SEGMENT_ACTIONS_SCHEMA = Object.freeze({
   receiptLimit: 80
 });
 
-function getSourceSheets(request) {
+function getSourceSheets_(request) {
   return api_(function () {
     authorize_();
     var input = segmentInput_(request, ['sourceId', 'expectedRevision']);
@@ -33,8 +33,8 @@ function getSourceSheets(request) {
   });
 }
 
-function createSegment(request) { return segmentMutation_('create', request); }
-function updateSegment(request) { return segmentMutation_('update', request); }
+function createSegment_(request) { return segmentMutation_('create', request); }
+function updateSegment_(request) { return segmentMutation_('update', request); }
 
 function segmentMutation_(kind, request) {
   return api_(function () {

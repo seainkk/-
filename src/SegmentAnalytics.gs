@@ -5,7 +5,7 @@
  * row is ambiguous, so it never proves a segment empty. Launch detection and
  * Coldy/NSA integrations are not configured.
  */
-function getSegmentsDashboard() {
+function getSegmentsDashboard_() {
   return api_(function () {
     var context = authorize_();
     var projection = getSegmentsMetadata_(context);
@@ -19,7 +19,7 @@ function getSegmentsDashboard() {
   });
 }
 
-function getSegmentMailings(request) {
+function getSegmentMailings_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request), segmentId = id_(input.segmentId);
     var projection = getSegmentsMetadata_(context);

@@ -4,13 +4,16 @@ import vm from 'node:vm';
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { TEST_ACCESS_KEY, TEST_ACCESS_HASH, installSharedApi } from './helpers/shared-link.js';
 
 const sourceDir = fileURLToPath(new URL('../src/', import.meta.url));
 const ROOT = '1WKcvDDKqYBo94eXsYc5vKp6OPtOzv6Wh';
 const SOURCE = '1deuP0ovOC70PrElQKZjSjuvSMgPF0J7r';
 const STORAGE = '1lzbjoPNnrVn5-8GoAhaLZPS_S8J0lfcaoO8Ybxw396M';
 const OTHER = 'external_folder_1234567890';
-const ORIGINAL = 'external_native_1234567890';
+const ORIGINAL = 'registered_native_1234567890';
+const SOURCE_CHILD = 'source_child_folder_1234567890';
+const REGISTERED = 'registry_other_folder_1234567890';
 const MEMBER = 'member@example.com';
 const SHEET_MIME = 'application/vnd.google-apps.spreadsheet';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -31,10 +34,10 @@ function blob(name = 'companies.csv', mime = 'text/csv', bytes = [65,44,66,10,49
 }
 
 function fixture(options = {}) {
-  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
+  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const resources = new Map(), records = new Map();
   const calls = { drive: [], serviceOpens: [], metadataReads: 0, registrations: [], actions: [], lists: [], fetches: [], events: [], lockDepth: 0, trashes: [], warnings: [] };
-  let nextId = 0;
+  let nextId = 0, originalReadCount = 0;
   const store = {
     getProperty: key => properties.get(key) ?? null,
     setProperty: (key, value) => { properties.set(key, String(value)); return store; },
@@ -51,8 +54,10 @@ function fixture(options = {}) {
   resource(ROOT, 'Реестр баз', FOLDER_MIME);
   resource(SOURCE, 'Исходные базы', FOLDER_MIME, [ROOT]);
   resource(OTHER, 'Внешняя папка', FOLDER_MIME);
+  resource(SOURCE_CHILD, 'Вложенные исходные', FOLDER_MIME, [SOURCE]);
+  resource(REGISTERED, 'Другая папка реестра', FOLDER_MIME, [ROOT]);
   resource(STORAGE, 'Служебный реестр', SHEET_MIME, [options.storageParent || ROOT]);
-  resource(ORIGINAL, 'Оригинал', SHEET_MIME, [OTHER]);
+  resource(ORIGINAL, 'Оригинал', SHEET_MIME, [options.originalParent || SOURCE_CHILD]);
   function driveObject(id) {
     const item = resources.get(id);
     if (!item) throw new Error('File not found');
@@ -72,6 +77,7 @@ function fixture(options = {}) {
   function getResource(id, withKey = false) {
     const item = resources.get(id);
     if (!item) throw new Error('File not found');
+    if (id === ORIGINAL && typeof options.onOriginalRead === 'function') options.onOriginalRead(item, ++originalReadCount);
     if (item.resourceKey && !withKey) throw new Error('Resource key required');
     return plain(item);
   }
@@ -215,6 +221,7 @@ function fixture(options = {}) {
     if (options.metadataFailures > 0) { options.metadataFailures--; throw context.registryError_('STORAGE_WRITE', 'Service metadata write failed'); }
     for (const record of changed) records.set(record.fileId, plain(record));
   };
+  installSharedApi(context, { accessKey: () => options.accessKey === undefined ? TEST_ACCESS_KEY : options.accessKey });
   const upload = (changes = {}) => plain(context.uploadSourceBase({ name: 'Новая база', baseType: 'general', status: 'collection', requestId: 'upload_request_1234567890', file: blob(), ...changes }));
   const link = (changes = {}) => plain(context.importSourceBaseLink({ url: `https://docs.google.com/spreadsheets/d/${ORIGINAL}/edit`, name: 'Импортированная база', baseType: 'general', status: 'collection', mode: 'copy', requestId: 'link_request_1234567890', ...changes }));
   const imported = () => [...resources.values()].filter(item => item.id.startsWith('imported_native_'));
@@ -229,6 +236,68 @@ function fixture(options = {}) {
 function itemOf(result) { return result.item || result; }
 function capture(callback) { try { return { value: callback() }; } catch (error) { return { error }; } }
 function driveRejection(reason, status = 403) { return Object.assign(new Error('Provider detail must not be returned: private-file-name'), { details: { error: { code: status, errors: [{ reason }] } } }); }
+
+test('owner-mode link imports cannot copy or move any external file, including resource-key links', () => {
+  for (const mode of ['copy', 'move']) for (const resourceKey of ['', 'rk_external_1234567890']) {
+    const f = fixture({ originalParent: OTHER });
+    const original = f.resources.get(ORIGINAL);
+    if (resourceKey) original.resourceKey = resourceKey;
+    const before = plain(original);
+    const url = `https://docs.google.com/spreadsheets/d/${ORIGINAL}/edit` + (resourceKey ? `?resourcekey=${resourceKey}` : '');
+    assert.throws(() => f.link({ mode, url }), /SOURCE_SCOPE_REQUIRED/);
+    assert.deepEqual(f.calls.actions, []);
+    assert.deepEqual(f.calls.registrations, []);
+    assert.deepEqual(original, before);
+    assert.equal(f.calls.fetches.some(call => ['post', 'patch'].includes(call.settings.method)), false);
+    assert.ok(f.calls.serviceOpens.every(id => id === STORAGE));
+  }
+});
+
+test('registry tables outside source bases may be copied but never moved out of their section', () => {
+  const copy = fixture({ originalParent: REGISTERED });
+  const before = plain(copy.resources.get(ORIGINAL));
+  assert.notEqual(itemOf(copy.link()).id, ORIGINAL);
+  assert.deepEqual(copy.resources.get(ORIGINAL), before);
+  const move = fixture({ originalParent: REGISTERED });
+  assert.throws(() => move.link({ mode: 'move' }), /SOURCE_MOVE_SCOPE/);
+  assert.deepEqual(move.calls.actions, []);
+  assert.deepEqual(move.calls.registrations, []);
+});
+
+test('an unknown or ambiguous source ancestry is never a move permission', () => {
+  for (const parents of [[], ['unknown_folder_1234567890'], [SOURCE_CHILD, OTHER]]) {
+    const f = fixture();
+    f.resources.get(ORIGINAL).parents = parents;
+    assert.throws(() => f.link({ mode: 'move' }), /SOURCE_SCOPE_REQUIRED|SOURCE_MOVE_SCOPE/);
+    assert.deepEqual(f.calls.actions, []);
+  }
+});
+
+test('scope is checked again after preflight immediately before copy or move', () => {
+  for (const mode of ['copy', 'move']) {
+    const f = fixture({ onOriginalRead: (item, count) => { if (count === 2) item.parents = [OTHER]; } });
+    assert.throws(() => f.link({ mode }), /SOURCE_SCOPE_REQUIRED/);
+    assert.deepEqual(f.calls.actions, []);
+    assert.deepEqual(f.calls.registrations, []);
+  }
+});
+
+test('scope denial precedes pending artifact recovery and completed replay finalization', () => {
+  for (const pending of [false, true]) {
+    const options = pending ? { loseCopyResponse: true, hideRecovery: true } : {};
+    const f = fixture(options);
+    if (pending) assert.throws(() => f.link(), /UNCERTAIN/);
+    else f.link();
+    const registrations = f.calls.registrations.length;
+    options.hideRecovery = false;
+    f.resources.get(ORIGINAL).parents = [OTHER];
+    const beforeLists = f.calls.lists.length;
+    assert.throws(() => f.link(), /SOURCE_SCOPE_REQUIRED/);
+    assert.equal(f.calls.actions.filter(action => action.kind === 'copy').length, 1);
+    assert.equal(f.calls.registrations.length, registrations);
+    assert.equal(f.calls.lists.length, beforeLists, 'out-of-scope original cannot enter recovery listing');
+  }
+});
 
 test('explicit copy and move capability denials stop before writes without an ownership requirement', () => {
   const cases = [
@@ -304,7 +373,7 @@ test('absent capabilities stay unknown and positive capabilities do not override
   assert.equal(f.calls.actions[0].kind, 'update');
   assert.equal(f.receipts()[0].status, 'retryable');
   assert.equal(f.receipts()[0].attempted, false);
-  assert.deepEqual(f.resources.get(ORIGINAL).parents, [OTHER]);
+  assert.deepEqual(f.resources.get(ORIGINAL).parents, [SOURCE_CHILD]);
   assert.equal(f.imported().length, 0, 'a refused move never silently copies the source');
 });
 
@@ -347,7 +416,7 @@ test('structured quota, policy, OAuth and 403 rate errors are distinguished with
     assert.throws(() => f.link({ mode: 'move' }), new RegExp(code));
     assert.equal(f.receipts()[0].status, 'retryable');
     assert.equal(f.receipts()[0].attempted, false);
-    assert.deepEqual(f.resources.get(ORIGINAL).parents, [OTHER]);
+    assert.deepEqual(f.resources.get(ORIGINAL).parents, [SOURCE_CHILD]);
     options.rejectUpdateError = null;
     f.link({ mode: 'move' });
     assert.equal(f.calls.actions.filter(action => action.kind === 'update').length, 2);
@@ -362,7 +431,7 @@ test('resource-key REST moves preserve contextual quota and access errors withou
     assert.throws(() => f.link({ mode: 'move', url: 'https://docs.google.com/spreadsheets/d/' + ORIGINAL + '/edit?resourcekey=rk_access_1234567890' }), new RegExp(code));
     assert.equal(f.receipts()[0].status, 'retryable');
     assert.equal(f.receipts()[0].attempted, false);
-    assert.deepEqual(f.resources.get(ORIGINAL).parents, [OTHER]);
+    assert.deepEqual(f.resources.get(ORIGINAL).parents, [SOURCE_CHILD]);
     assert.deepEqual(f.calls.actions, []);
   }
 });
@@ -386,8 +455,8 @@ test('loading the module performs no Drive action or spreadsheet access', () => 
   assert.deepEqual(f.calls.serviceOpens, []);
 });
 
-test('both import APIs authorize the real caller before inspecting Drive or service storage', () => {
-  for (const options of [{ properties: { ALLOWED_EMAILS: '' } }, { activeEmail: 'outsider@example.com' }, { activeEmail: '', effectiveEmail: MEMBER }]) {
+test('both import APIs require the shared key before inspecting Drive or service storage', () => {
+  for (const options of [{ accessKey: '' }, { accessKey: 'wrong' }, { accessKey: null }]) {
     const f = fixture(options);
     assert.throws(() => f.upload());
     assert.throws(() => f.link());
@@ -453,7 +522,7 @@ test('service storage outside the registry root blocks every import before it is
   assert.deepEqual(f.calls.actions, []);
 });
 
-test('copy explicitly imports an outside native Sheet into the fixed destination without changing the original', () => {
+test('copy imports an in-registry native Sheet into the fixed destination without changing the original', () => {
   const f = fixture();
   const original = plain(f.resources.get(ORIGINAL));
   const result = itemOf(f.link());
@@ -477,7 +546,7 @@ test('move preserves the original ID and applies destination, title and receipt 
   const updates = f.calls.actions.filter(action => action.kind === 'update');
   assert.equal(updates.length, 1);
   assert.equal(updates[0].params.addParents, SOURCE);
-  assert.ok(String(updates[0].params.removeParents).includes(OTHER));
+  assert.ok(String(updates[0].params.removeParents).includes(SOURCE_CHILD));
   assert.ok(updates[0].metadata.appProperties.registryImportKey);
   assert.equal(f.calls.actions.filter(action => action.kind === 'create' || action.kind === 'copy').length, 0);
   assert.deepEqual(f.calls.trashes, []);
@@ -657,7 +726,7 @@ test('retrying a pending move refuses an externally changed original without mov
   assert.throws(() => f.link({ mode: 'move' }));
   assert.equal(f.calls.actions.filter(action => action.kind === 'update').length, 1);
   assert.equal(f.resources.get(ORIGINAL).name, 'Изменено другим участником');
-  assert.deepEqual(f.resources.get(ORIGINAL).parents, [OTHER]);
+  assert.deepEqual(f.resources.get(ORIGINAL).parents, [SOURCE_CHILD]);
   assert.deepEqual(f.calls.trashes, []);
 });
 
@@ -678,15 +747,15 @@ test('a pending request with no confirmed recovery match never blindly sends a s
   assert.equal(f.calls.actions.filter(action => action.kind === 'create').length, 1);
 });
 
-test('idempotency receipts are isolated by the server-side caller identity', () => {
+test('shared-link requests deduplicate the same action independently of Google account identities', () => {
   const options = {};
   const f = fixture(options);
   const first = itemOf(f.upload());
   options.activeEmail = 'second@example.com';
-  f.properties.set('ALLOWED_EMAILS', `${MEMBER},second@example.com`);
+  f.properties.set('ALLOWED_EMAILS', '');
   const second = itemOf(f.upload());
-  assert.notEqual(first.id || first.fileId, second.id || second.fileId);
-  assert.equal(f.calls.actions.filter(action => action.kind === 'create').length, 2);
+  assert.equal(first.id || first.fileId, second.id || second.fileId);
+  assert.equal(f.calls.actions.filter(action => action.kind === 'create').length, 1);
 });
 
 test('generic browser MIME types are normalized to the explicit conversion MIME by extension', () => {
@@ -829,7 +898,7 @@ test('a failed recovery GET preserves a pending move snapshot and later human ch
   f.resources.get(ORIGINAL).name = 'Переименовано человеком после неопределённого перемещения';
   assert.throws(() => f.link({ mode: 'move' }));
   assert.equal(f.calls.actions.filter(action => action.kind === 'update').length, 1);
-  assert.deepEqual(f.resources.get(ORIGINAL).parents, [OTHER]);
+  assert.deepEqual(f.resources.get(ORIGINAL).parents, [SOURCE_CHILD]);
   assert.deepEqual(f.calls.trashes, []);
   assert.equal(f.calls.registrations.length, 0);
 });

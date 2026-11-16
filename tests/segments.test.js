@@ -1,3 +1,4 @@
+import { TEST_ACCESS_KEY, TEST_ACCESS_HASH, SHARED_ACTOR, installSharedApi, runShared } from './helpers/shared-link.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -15,7 +16,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const emptyIterator = () => ({ hasNext: () => false, next: () => { throw new Error('Empty iterator'); } });
 
 function fixture(options = {}) {
-  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
+  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const driveCalls = [];
   const propertyStore = { getProperty: key => properties.get(key) ?? null };
   const rootFolder = {
@@ -41,6 +42,7 @@ function fixture(options = {}) {
   });
   const sources = ['Config.gs', 'Code.gs', 'Segments.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
   vm.runInContext(sources, context, { filename: 'segments-backend.gs' });
+  installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
   return {
     context, driveCalls,
     build: (folders = [], files = []) => plain(context.buildSegments_({ properties: propertyStore }, registry, folders, files)),
@@ -173,9 +175,9 @@ test('segment payloads have serializable timestamps and metadata-only links', ()
 
 test('bootstrap authorizes the caller before any Drive lookup, including a configured outside source', () => {
   for (const options of [
-    { properties: { ALLOWED_EMAILS: '', SEGMENTS_FOLDER_ID: 'outside_source_1234567890' } },
-    { activeEmail: 'outsider@example.com', properties: { SEGMENTS_FOLDER_ID: 'outside_source_1234567890' } },
-    { activeEmail: '', effectiveEmail: MEMBER, properties: { SEGMENTS_FOLDER_ID: 'outside_source_1234567890' } },
+    { accessKey: null, properties: { SEGMENTS_FOLDER_ID: 'outside_source_1234567890' } },
+    { accessKey: 'wrong', properties: { SEGMENTS_FOLDER_ID: 'outside_source_1234567890' } },
+    { accessKey: 'a'.repeat(43), properties: { SEGMENTS_FOLDER_ID: 'outside_source_1234567890' } },
   ]) {
     const f = fixture(options);
     assert.throws(() => f.context.getBootstrap());

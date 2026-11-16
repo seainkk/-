@@ -14,7 +14,7 @@ var SOURCE_BASES_SCHEMA = Object.freeze({
   contents: ['companies', 'lpr']
 });
 
-function getSourceBases() {
+function getSourceBases_() {
   return api_(function () {
     authorize_();
     return locked_(function () {
@@ -51,7 +51,7 @@ function getSourceBases() {
   });
 }
 
-function updateSourceBase(request) {
+function updateSourceBase_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request);
     var allowedKeys = ['id', 'status', 'formatCheck', 'baseType', 'contents', 'expectedRevision'];

@@ -1,3 +1,4 @@
+import { TEST_ACCESS_KEY, TEST_ACCESS_HASH, SHARED_ACTOR, installSharedApi, runShared } from './helpers/shared-link.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -15,7 +16,7 @@ const OTHER = 'outside_folder_1234567890';
 const MEMBER = 'member@example.com';
 const SHEET_MIME = 'application/vnd.google-apps.spreadsheet';
 const navigationCode = () => ['Config.gs', 'Code.gs', 'Segments.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
-const code = () => `${navigationCode()}\n${['SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'TeamAccess.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n')}`;
+const code = () => `${navigationCode()}\n${['SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'Access.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n')}`;
 
 function iterator(items) {
   let position = 0;
@@ -24,7 +25,7 @@ function iterator(items) {
 
 function fixture(options = {}) {
   const calls = { folder: 0, file: 0, open: 0, creates: 0, moves: 0, renames: 0, trashed: [], released: 0 };
-  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
+  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const cache = new Map(), folders = new Map(), files = new Map();
   function folder(id, name, parent = null, trashed = false) {
     const item = {
@@ -124,6 +125,7 @@ function fixture(options = {}) {
     },
   });
   vm.runInContext(code(), context, { filename: 'AppsScript-backend.gs' });
+  installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
   return { context, calls, properties, files, folders };
 }
 
@@ -134,31 +136,39 @@ test('the app exposes catalog and segment APIs without arbitrary spreadsheet cel
   assert.equal(typeof f.context.loadTable, 'undefined');
   assert.equal(typeof f.context.writeCell, 'undefined');
   const publicFunctions = [...code().matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map(match => match[1]).filter(name => !name.endsWith('_')).sort();
-  assert.deepEqual(publicFunctions, ['addTeamMember', 'createBase', 'createFolder', 'createSegment', 'doGet', 'getAppBootstrap', 'getBootstrap', 'getSegmentMailings', 'getSegmentsDashboard', 'getSourceBases', 'getSourceSheets', 'getTeamAccess', 'importSourceBaseLink', 'renameItem', 'updateSegment', 'updateSourceBase', 'uploadSourceBase']);
+  assert.deepEqual(publicFunctions, ['callApp', 'doGet', 'uploadSourceBase']);
   assert.doesNotMatch(navigationCode(), /SpreadsheetApp\.openById|\.getRange\s*\(|\.getValues\s*\(|\.setValue\s*\(/);
 });
 
-test('missing allowlist denies requests before Drive or Sheets access', () => {
-  const f = fixture({ properties: { ALLOWED_EMAILS: '' } });
+test('a missing shared key denies requests before Drive or Sheets access', () => {
+  const f = fixture({ accessKey: null });
   assert.throws(() => f.context.getBootstrap());
   assert.equal(f.calls.folder + f.calls.file + f.calls.open, 0);
 });
 
-test('blank identity and client-provided identities cannot authorize the caller', () => {
-  for (const activeEmail of ['', 'outsider@example.com']) {
-    const f = fixture({ activeEmail, effectiveEmail: MEMBER });
+test('a client-provided identity cannot replace a valid shared key', () => {
+  for (const accessKey of ['', 'invalid-key', 'a'.repeat(43)]) {
+    const f = fixture({ accessKey, activeEmail: MEMBER, effectiveEmail: MEMBER });
     assert.throws(() => f.context.getBootstrap({ email: MEMBER }));
     assert.equal(f.calls.folder + f.calls.file + f.calls.open, 0);
   }
 });
 
-test('all mutating APIs verify the current server-side identity', () => {
-  const f = fixture({ activeEmail: 'outsider@example.com' });
+test('a valid shared key works independently of visitor Google identity and old role lists', () => {
+  for (const [activeEmail, effectiveEmail] of [['', MEMBER], ['other@example.com', MEMBER], ['', '']]) {
+    const f = fixture({ activeEmail, effectiveEmail, properties: { ALLOWED_EMAILS: '', ADMIN_EMAILS: '' } });
+    const result = plain(f.context.getAppBootstrap());
+    assert.deepEqual(result.user, { email: '', isAdmin: false, accessMode: 'link' });
+    assert.equal(result.registry.id, ROOT);
+  }
+});
+
+test('all mutating APIs require the verified shared request scope', () => {
+  const f = fixture({ accessKey: null });
   const methods = [
     ['createBase', { parentId: ROOT, name: 'Новая база', requestId: 'create_base_request_12345' }],
     ['createFolder', { parentId: ROOT, name: 'Продажи', requestId: 'create_folder_request_12345' }],
     ['renameItem', { id: INSIDE, kind: 'file', name: 'Новое имя' }],
-    ['addTeamMember', { email: 'second@example.com', role: 'admin' }],
   ];
   for (const [method, payload] of methods) assert.throws(() => f.context[method](payload), method);
   assert.equal(f.calls.creates + f.calls.renames + f.calls.moves, 0);
@@ -180,10 +190,11 @@ test('registry tree includes nested Sheets metadata and excludes other roots, no
 test('metadata payloads are JSON-compatible and never include an access token', () => {
   const f = fixture();
   const result = plain(f.context.getBootstrap());
-  assert.equal(result.user.email, MEMBER);
-  assert.equal(result.user.isAdmin, true);
+  assert.deepEqual(result.user, { email: '', isAdmin: false, accessMode: 'link' });
+  assert.equal(result.user.isAdmin, false);
   assert.equal(typeof result.registry.name, 'string');
   assert.doesNotMatch(JSON.stringify(result), /access_token|refresh_token|Bearer/i);
+  assert.equal(JSON.stringify(result).includes(TEST_ACCESS_KEY), false);
   assert.equal(f.calls.open, 0);
 });
 
@@ -282,11 +293,11 @@ test('retrying a rolled-back creation keeps one receipt and then deduplicates su
   assert.equal(f.files.get(created.file.id).parent, ROOT);
 });
 
-test('editor-only setup seeds the owner allowlist without putting account data in source', () => {
+test('editor-only setup validates the shared service without creating user roles', () => {
   const f = fixture({ properties: { ALLOWED_EMAILS: '', ADMIN_EMAILS: '' } });
   const result = f.context.setupRegistry_();
-  assert.equal(result.folderId, ROOT);
-  assert.equal(f.properties.get('ALLOWED_EMAILS'), MEMBER);
-  assert.equal(f.properties.get('ADMIN_EMAILS'), MEMBER);
-  assert.ok(!code().includes(MEMBER));
+  assert.deepEqual(plain(result), { folderId: ROOT, folderName: 'Реестр баз', accessMode: 'link' });
+  assert.equal(f.properties.get('ROOT_FOLDER_ID'), ROOT);
+  assert.equal(f.properties.get('ALLOWED_EMAILS'), '');
+  assert.equal(f.properties.get('ADMIN_EMAILS'), '');
 });

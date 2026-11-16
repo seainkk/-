@@ -23,10 +23,8 @@ for (const name of files) {
 }
 const manifest = JSON.parse(readFileSync(path.join(source, 'appsscript.json'), 'utf8'));
 if (manifest.runtimeVersion !== 'V8') throw new Error('V8 runtime required.');
-if (manifest.webapp?.executeAs !== 'USER_ACCESSING') throw new Error('Run as accessing user required.');
-if (manifest.webapp?.access !== 'ANYONE' && manifest.webapp?.access !== 'DOMAIN') {
-  throw new Error('Signed-in access required.');
-}
+if (manifest.webapp?.executeAs !== 'USER_DEPLOYING') throw new Error('Shared-link access must run as the deploying owner.');
+if (manifest.webapp?.access !== 'ANYONE_ANONYMOUS') throw new Error('Shared-link access must allow opening without a Google login.');
 const driveService = manifest.dependencies?.enabledAdvancedServices?.find(item => item.userSymbol === 'Drive');
 if (driveService?.serviceId !== 'drive' || driveService?.version !== 'v3') {
   throw new Error('Source imports require the Advanced Drive v3 service.');
@@ -36,7 +34,8 @@ for (const scope of ['https://www.googleapis.com/auth/drive', 'https://www.googl
 }
 const mapping = JSON.parse(readFileSync('.clasp.json', 'utf8'));
 if (mapping.rootDir !== 'src' || !mapping.scriptId) throw new Error('Apps Script project mapping missing.');
-for (const required of ['Index.html', 'Styles.html', 'Client.html', 'Code.gs', 'Config.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'TeamAccess.gs']) {
+for (const required of ['Index.html', 'Styles.html', 'Client.html', 'Code.gs', 'Config.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'Access.gs']) {
   if (!files.includes(required)) throw new Error(`Missing ${required}.`);
 }
+if (files.includes('TeamAccess.gs')) throw new Error('Role-based team administration must not ship in shared-link mode.');
 console.log(`Validated ${scripts} scripts, HTML assets and Apps Script manifest.`);

@@ -1,6 +1,7 @@
-/** Public identifiers only. Credentials and team addresses belong in Script Properties. */
+/** Public identifiers and a verifier only. The random shared-link credential is never in source. */
 var REGISTRY_CONFIG = Object.freeze({
   title: 'Реестр баз',
+  sharedAccessKeyHash: 'yiKUzWNsQOzwMnF4Fw2_f-9Esxm9ooCyyptJsjYeBG0',
   defaultRootFolderId: '1WKcvDDKqYBo94eXsYc5vKp6OPtOzv6Wh',
   defaultSegmentsFolderId: '1sQ8WrTgdEOPTPYLIwoBwHb6gL_ULT4yu',
   segmentsFolderName: 'Аутричи',
@@ -22,21 +23,13 @@ var REGISTRY_CONFIG = Object.freeze({
   creationReceiptLimit: 80
 });
 
-/**
- * Run ONCE from the Apps Script editor before deploying. The trailing underscore
- * makes this function unavailable to google.script.run callers.
- * Later add members from the admin-only team panel, or maintain the private
- * ALLOWED_EMAILS / ADMIN_EMAILS in Project Settings > Script Properties.
- */
+/** Editor-only setup. Email lists from the previous mode are deliberately untouched. */
 function setupRegistry_() {
-  var owner = normalizeEmail_(Session.getEffectiveUser().getEmail());
-  if (!owner) fail_('AUTH_REQUIRED', 'Не удалось определить аккаунт владельца. Запустите настройку из редактора Apps Script.');
   var properties = PropertiesService.getScriptProperties();
+  sharedConfiguredHash_(properties);
   var folderId = properties.getProperty('ROOT_FOLDER_ID') || REGISTRY_CONFIG.defaultRootFolderId;
   var folder = folderById_(folderId);
   if (folder.isTrashed()) fail_('NOT_FOUND', 'Папка реестра находится в корзине.');
   properties.setProperty('ROOT_FOLDER_ID', folderId);
-  if (!properties.getProperty('ALLOWED_EMAILS')) properties.setProperty('ALLOWED_EMAILS', owner);
-  if (!properties.getProperty('ADMIN_EMAILS')) properties.setProperty('ADMIN_EMAILS', owner);
-  return { folderId: folderId, folderName: folder.getName(), owner: owner };
+  return { folderId: folderId, folderName: folder.getName(), accessMode: 'link' };
 }

@@ -1,3 +1,4 @@
+import { TEST_ACCESS_KEY, TEST_ACCESS_HASH, SHARED_ACTOR, installSharedApi, runShared } from './helpers/shared-link.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -31,7 +32,7 @@ const rowFor = (id, overrides = {}) => HEADERS.map(key => ({
 })[key]);
 
 function fixture(options = {}) {
-  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
+  const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const calls = { drive: [], opens: [], writes: [], reads: [], grows: [], events: [], flushes: 0, lockDepth: 0 };
   const folders = new Map(), files = new Map();
   const propertiesStore = {
@@ -195,6 +196,7 @@ function fixture(options = {}) {
   });
   const source = ['Config.gs','Code.gs','Segments.gs','SourceBases.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
   vm.runInContext(source, context, { filename: 'source-bases-backend.gs' });
+  installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
   const list = () => plain(context.getSourceBases());
   const patch = payload => plain(context.updateSourceBase(payload));
   const record = id => {
@@ -206,9 +208,9 @@ function fixture(options = {}) {
 
 test('source-base APIs authorize before Drive or service storage access', () => {
   for (const options of [
-    { properties: { ALLOWED_EMAILS: '' } },
-    { activeEmail: 'outsider@example.com' },
-    { activeEmail: '', effectiveEmail: MEMBER },
+    { accessKey: null },
+    { accessKey: 'wrong' },
+    { accessKey: 'a'.repeat(43) },
   ]) {
     const f = fixture(options);
     assert.throws(() => f.list());
@@ -565,17 +567,17 @@ test('a service write error still flushes once while locked before releasing the
 const legacyHeaders = HEADERS.slice(0, 11);
 const typeMigrationKey = 'SOURCE_BASES_TYPE_MIGRATION_' + STORAGE;
 const contentsMigrationKey = 'SOURCE_BASES_CONTENTS_MIGRATION_' + STORAGE;
-const readServiceDatabase = f => plain(f.context.locked_(() => {
+const readServiceDatabase = f => plain(runShared(f.context, () => f.context.locked_(() => {
   const context = f.context.authorize_();
   return f.context.sourceBasesReadDatabase_(f.context.sourceBasesStorage_(context));
-}));
-const registerSource = (f, id, type, status, options) => plain(f.context.locked_(() => {
+})));
+const registerSource = (f, id, type, status, options) => plain(runShared(f.context, () => f.context.locked_(() => {
   const context = f.context.authorize_();
   const storage = f.context.sourceBasesStorage_(context);
   const database = f.context.sourceBasesReadDatabase_(storage);
   const file = f.context.sourceBaseMetadata_(f.files.get(id));
   return f.context.registerImportedSourceBase_(context, storage, database, file, type, status, options);
-}));
+})));
 
 test('legacy eleven-column storage gains the type column without altering its states, revisions or relations', () => {
   const historical = rowFor(CSV, { status: 'ready', formatCheck: 'valid', revision: 9, present: false }).slice(0, 11);
@@ -822,12 +824,12 @@ test('an interrupted contents migration resumes appended cells and preserves com
   assert.equal(f.properties.has(contentsMigrationKey), false);
 });
 
-const readySource = (f, id, revision) => plain(f.context.locked_(() => {
+const readySource = (f, id, revision) => plain(runShared(f.context, () => f.context.locked_(() => {
   const context = f.context.authorize_(), storage = f.context.sourceBasesStorage_(context);
   const database = f.context.sourceBasesReadDatabase_(storage);
   const result = f.context.requireReadySourceBase_(context, storage, database, id, revision);
   return { metadata: result.metadata, record: result.record, contents: result.contents };
-}));
+})));
 
 test('only a currently ready native source inside the bound folder may expose sheets to segment code', () => {
   const f = fixture();
@@ -854,7 +856,7 @@ test('source associations resolve only outreach metadata without scanning the fu
   let lookups = 0;
   f.context.getBootstrap = () => { throw new Error('Full registry tree must not be consulted'); };
   f.context.getSegmentsMetadata_ = context => {
-    assert.equal(context.email, MEMBER);
+    assert.equal(context.email, SHARED_ACTOR);
     lookups++;
     return { state: 'ready', items: [{ id: segmentId, name: 'Действующий сегмент', url: 'https://drive.google.com/drive/folders/' + segmentId }] };
   };

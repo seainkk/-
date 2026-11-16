@@ -6,14 +6,54 @@
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,pendingView=null,formMode=null;
   let sourceData=null,sourceTimer=null,lastSourceAttempt=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
   let importOpen=false,importMode='file',importing=false,importFileSelection=0;
-  let teamOpen=false,teamLoading=false,teamSaving=false,teamData=null,teamError=null,teamMessage=null;
+  let accessKey='',accessReady=false,accessMessage=null,pendingAccessChange=false;
   let dashboard=null,dashboardLoading=false,dashboardError=null,lastDashboardAttempt=0,renderedDashboardKey=null;
   let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0;
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
   const sourceDrafts=new Map(),sourceMessages=new Map(),importRequests=new Map(),segmentRequests=new Map();
   const sourceFilters={query:'',contents:'',onlyUnassigned:false};
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
-  function rpc(name,payload){networkPending++;return new Promise((resolve,reject)=>{if(!globalThis.google?.script?.run){reject(new Error('Нет соединения с сервером Google. Откройте опубликованное веб-приложение Apps Script.'));return;}const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);payload===undefined?runner[name]():runner[name](payload);}).finally(()=>{networkPending--;setTimeout(flushPendingView,0);});}
+  function sharedKeyFromHash(hash){const match=typeof hash==='string'?hash.match(/^#?access_key=([A-Za-z0-9_-]{43})$/):null;return match&&match[0]===hash?match[1]:null;}
+  function sharedRequest(method,payload,key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Для входа нужна полная закрытая ссылка.');const request={method,accessKey:key};if(payload!==undefined)request.payload=payload;return request;}
+  function sharedUrl(key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return 'https://script.google.com/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec#access_key='+key;}
+  function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
+  function rpc(name,payload){
+    if(!accessKey)return Promise.reject(new Error('Для входа нужна полная закрытая ссылка.'));
+    networkPending++;
+    return new Promise((resolve,reject)=>{
+      if(!globalThis.google?.script?.run){reject(new Error('Нет соединения с сервером Google. Откройте опубликованное веб-приложение Apps Script.'));return;}
+      const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler((error)=>{const parsed=failure(error);if(accessFailure(parsed.code))lockAccess(parsed.code==='LINK_SETUP_REQUIRED'?parsed.message:'Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.');reject(error);});
+      if(name==='uploadSourceBase'){$('br-upload-access').value=accessKey;runner.uploadSourceBase(payload);}
+      else runner.callApp(sharedRequest(name,payload,accessKey));
+    }).finally(()=>{networkPending--;setTimeout(flushPendingView,0);});
+  }
+  function readSharedKey(){
+    return new Promise((resolve,reject)=>{
+      if(!globalThis.google?.script?.url?.getLocation){reject(new Error('Не удалось прочитать ссылку. Откройте опубликованный адрес сервиса.'));return;}
+      let finished=false;const timeout=setTimeout(()=>{if(!finished){finished=true;reject(new Error('Не удалось прочитать ссылку. Обновите страницу и повторите попытку.'));}},15000);
+      try{google.script.url.getLocation((location)=>{if(finished)return;finished=true;clearTimeout(timeout);resolve(sharedKeyFromHash(location?.hash));});}
+      catch(error){if(!finished){finished=true;clearTimeout(timeout);reject(new Error('Не удалось прочитать ссылку. Обновите страницу и повторите попытку.'));}}
+    });
+  }
+  function renderAccess(){
+    $('br-access-panel').hidden=accessReady;$('br-access-title').textContent=busy?'Открываем реестр…':'Для входа нужна закрытая ссылка';$('br-access-message').textContent=accessMessage||(busy?'Проверяем ссылку…':'Откройте полную ссылку, которую вам передал владелец сервиса.');$('br-access-retry').disabled=busy||networkPending>0;
+    const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
+  }
+  function lockAccess(message){
+    accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
+  }
+  async function startSharedAccess(){
+    if(requesting())return;lockAccess(null);busy=true;renderAccess();updateControls();
+    try{const key=await readSharedKey();if(!key)throw new Error('В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const result=await rpc('getAppBootstrap');if(result?.user?.accessMode!=='link')throw new Error('Не удалось подтвердить режим доступа сервиса. Обновите страницу и повторите попытку.');bootstrap=result;accessReady=true;accessMessage=null;}
+    catch(error){const parsed=failure(error);lockAccess(parsed.code==='LINK_ACCESS_REQUIRED'?'Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.':parsed.message);}
+    finally{busy=false;$('br-loading').hidden=true;render();if(accessReady){armViewTimer();pendingView=activeView;flushPendingView();}}
+  }
+  async function copySharedLink(){
+    if(!accessReady||!accessKey)return;
+    const value=sharedUrl(accessKey);
+    try{if(!navigator.clipboard?.writeText)throw new Error('Clipboard unavailable');await navigator.clipboard.writeText(value);notice('Закрытая ссылка скопирована.');}
+    catch(error){const field=document.createElement('textarea');field.value=value;field.readOnly=true;field.style.position='fixed';field.style.opacity='0';document.body.append(field);field.select();let copied=false;try{copied=document.execCommand('copy');}catch(ignored){}field.remove();notice(copied?'Закрытая ссылка скопирована.':'Не удалось скопировать ссылку. Скопируйте полный адрес страницы из адресной строки браузера.',copied?'info':'error');}
+  }
   function nativeUrl(id,sheetId){return 'https://docs.google.com/spreadsheets/d/'+encodeURIComponent(id)+'/edit'+(sheetId===undefined?'':'#gid='+encodeURIComponent(sheetId));}
   function notice(message,kind='info',link=null){const node=$('br-notice');node.hidden=!message;node.className='br-notice'+(kind==='error'?' br-error':'');node.replaceChildren();if(message)node.append(document.createTextNode(message));if(link){const anchor=document.createElement('a');anchor.href=nativeUrl(link.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent=link.label||'Открыть созданную базу';node.append(anchor);}}
   function folderUrl(id){return 'https://drive.google.com/drive/folders/'+encodeURIComponent(id);}
@@ -59,8 +99,8 @@
   function importRecoveryId(message){const match=String(message).match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/([A-Za-z0-9_-]{10,200})(?=\/|\?|#|\s|$)/);return match?match[1]:null;}
   function folderRecoveryId(message){const match=String(message).match(/https:\/\/drive\.google\.com\/drive\/folders\/([A-Za-z0-9_-]{10,200})(?=\/|\?|#|\s|$)/);return match?match[1]:null;}
   function mailingMetric(value,connected){return connected?metricNumber(value):'—';}
-  function requesting(){return networkPending>0||busy||sourceLoading||!!sourceSaving||importing||dashboardLoading||mailingsLoading||segmentSaving||segmentPreviewLoading||teamLoading||teamSaving;}
-  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0||teamOpen;}
+  function requesting(){return networkPending>0||busy||sourceLoading||!!sourceSaving||importing||dashboardLoading||mailingsLoading||segmentSaving||segmentPreviewLoading;}
+  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0;}
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
   function sourceFocused(){return !!document.activeElement?.closest?.('.br-source-fields');}
   function renderSourcesHealth(){
@@ -294,46 +334,13 @@
     }catch(error){const parsed=failure(error),recoveryId=importRecoveryId(parsed.message);let text=parsed.code==='CREATION_UNCERTAIN'?'Результат операции не подтверждён. Проверьте таблицу и перечитайте список перед повторной отправкой. '+parsed.message:parsed.message;if(parsed.code==='DRIVE_SETUP_REQUIRED')text+=' Администратору нужно включить сервис Drive v3 в Apps Script, а для стандартного Cloud-проекта — Google Drive API.';showImportMessage(text,true,recoveryId,true);}
     finally{importing=false;updateControls();renderSourcesHealth();flushPendingView();}
   }
-  function teamRoleLabel(role){return role==='admin'?'Администратор':role==='member'?'Сотрудник':'Роль не определена';}
-  function teamCanSubmit(){return bootstrap?.user?.isAdmin===true&&teamData?.canManage===true&&Array.isArray(teamData.members);}
-  function renderTeamAccess(){
-    $('br-team-open').hidden=bootstrap?.user?.isAdmin!==true;$('br-team-panel').hidden=!teamOpen;
-    const main=root.querySelector('.br-main');if(main)main.inert=teamOpen;
-    if(!teamOpen)return;
-    const status=$('br-team-status');status.classList.toggle('br-error',!!teamError);status.textContent=teamError||teamMessage||(teamLoading?'Проверяем доступ команды…':'');
-    const list=$('br-team-members');list.replaceChildren();
-    for(const member of teamData?.members||[]){const row=document.createElement('li'),email=document.createElement('span'),role=document.createElement('span');email.textContent=String(member.email||'');role.textContent=teamRoleLabel(member.role);row.append(email,role);list.append(row);}
-    $('br-team-members-section').hidden=!teamData;
-  }
-  async function refreshTeamAccess(){
-    if(!teamOpen||bootstrap?.user?.isAdmin!==true||requesting())return;
-    teamLoading=true;teamError=null;renderTeamAccess();updateControls();
-    try{const result=await rpc('getTeamAccess');if(result?.canManage!==true||!Array.isArray(result.members))throw new Error('Не удалось подтвердить права управления доступом.');teamData=result;}
-    catch(error){teamError=failure(error).message;}
-    finally{teamLoading=false;renderTeamAccess();updateControls();flushPendingView();}
-  }
-  async function openTeamAccess(){
-    if(bootstrap?.user?.isAdmin!==true||requesting()||formIsOpen())return;
-    teamOpen=true;teamData=null;teamError=null;teamMessage=null;formMode='team';renderTeamAccess();await refreshTeamAccess();if(teamOpen)$('br-team-email').focus();
-  }
-  async function submitTeamMember(){
-    if(!teamOpen||requesting()||!teamCanSubmit())return;
-    const email=$('br-team-email').value.trim(),role=$('br-team-role').value;if(!email){teamError='Укажите email Google-аккаунта.';renderTeamAccess();return;}
-    teamSaving=true;teamError=null;teamMessage=null;renderTeamAccess();updateControls();
-    try{const result=await rpc('addTeamMember',{email,role});const current=teamData.members.find((item)=>item.email===result.email);if(current)current.role=result.role;else teamData.members.push({email:result.email,role:result.role});teamData.members.sort((a,b)=>a.email.localeCompare(b.email));teamMessage=(result.alreadyAllowed?'Доступ проверен и обновлён: ':'Доступ добавлен: ')+result.email+' · '+teamRoleLabel(result.role)+'.';}
-    catch(error){teamError=failure(error).message;}
-    finally{teamSaving=false;renderTeamAccess();updateControls();flushPendingView();}
-  }
   function render(){
     $('br-sources-view').hidden=activeView!=='sources';$('br-segments-view').hidden=activeView!=='segments';$('br-mailings-view').hidden=activeView!=='mailings';$('br-retarget-view').hidden=activeView!=='retarget';
     for(const view of ['sources','segments','retarget'])$('br-view-'+view).setAttribute('aria-pressed',String(activeView===view||view==='segments'&&activeView==='mailings'));
-    root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderTeamAccess();updateControls();
+    root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderAccess();updateControls();
   }
   function updateControls(){
-    const waiting=requesting();$('br-refresh').disabled=waiting||teamOpen;
-    $('br-team-open').hidden=bootstrap?.user?.isAdmin!==true;$('br-team-open').disabled=waiting||formIsOpen();$('br-team-open').title=formIsOpen()&&!teamOpen?'Сначала сохраните или отмените текущие изменения.':'';
-    for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=teamOpen;
-    $('br-team-close').disabled=teamSaving;$('br-team-refresh').disabled=waiting;$('br-team-email').disabled=waiting;$('br-team-role').disabled=waiting;$('br-team-submit').disabled=waiting||!teamCanSubmit();$('br-team-submit').textContent=teamSaving?'Добавляем…':'Добавить доступ';$('br-refresh').hidden=activeView==='retarget';
+    const waiting=requesting()||!accessReady;$('br-refresh').disabled=waiting;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady;
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
     $('br-import-open').disabled=importOpen||waiting||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
     $('br-add-segment').disabled=waiting||importOpen||!!segmentEditor||dashboard&&dashboard.state!=='ready';
@@ -342,17 +349,18 @@
     for(const control of root.querySelectorAll('#br-segment-source-options input,#br-segment-source-options select,#br-segment-source-options button')){if(waiting||segmentRecoveryLocked())control.disabled=true;}
   }
   function clearViewTimer(){if(viewTimer!==null){clearInterval(viewTimer);viewTimer=null;}}
-  function armViewTimer(){clearViewTimer();if(!document.hidden&&['sources','segments','mailings'].includes(activeView))viewTimer=setInterval(()=>refreshActiveView({automatic:true}),60000);}
+  function armViewTimer(){clearViewTimer();if(accessReady&&!document.hidden&&['sources','segments','mailings'].includes(activeView))viewTimer=setInterval(()=>refreshActiveView({automatic:true}),60000);}
   async function refreshActiveView(options={}){
+    if(!accessReady)return;
     if(requesting()){if(options.opening)pendingView=activeView;return;}
     if(options.automatic&&(document.hidden||formIsOpen()))return;
     if(activeView==='sources')return refreshSourceBases(Object.assign({},options,{preserveNotice:!options.manual}));
     if(activeView==='segments')return refreshSegments(options);
     if(activeView==='mailings')return refreshMailings(options);
   }
-  function flushPendingView(){if(requesting())return;if(segmentEditor)renderSegmentSources();updateControls();if(!pendingView)return;const view=pendingView;pendingView=null;if(view===activeView)refreshActiveView({opening:true,preserveNotice:true});}
+  function flushPendingView(){if(requesting())return;if(pendingAccessChange){pendingAccessChange=false;startSharedAccess();return;}if(!accessReady)return;if(segmentEditor)renderSegmentSources();updateControls();if(!pendingView)return;const view=pendingView;pendingView=null;if(view===activeView)refreshActiveView({opening:true,preserveNotice:true});}
   function setView(view,options={}){activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});}
-  $('br-team-open').addEventListener('click',openTeamAccess);$('br-team-refresh').addEventListener('click',refreshTeamAccess);$('br-team-form').addEventListener('submit',(event)=>{event.preventDefault();submitTeamMember();});$('br-team-close').addEventListener('click',()=>{if(teamSaving)return;teamOpen=false;formMode=null;teamError=null;teamMessage=null;renderTeamAccess();updateControls();$('br-team-open').focus();flushPendingView();});
+  $('br-access-retry').addEventListener('click',startSharedAccess);$('br-share-copy').addEventListener('click',copySharedLink);
   $('br-source-search').addEventListener('input',updateSourceFilters);$('br-source-contents-filter').addEventListener('change',updateSourceFilters);$('br-source-unassigned-filter').addEventListener('change',updateSourceFilters);$('br-source-filters-reset').addEventListener('click',resetSourceFilters);
   $('br-view-sources').addEventListener('click',()=>setView('sources'));$('br-view-segments').addEventListener('click',()=>setView('segments'));$('br-view-retarget').addEventListener('click',()=>setView('retarget'));
   $('br-refresh').addEventListener('click',()=>refreshActiveView({manual:true}));
@@ -371,8 +379,8 @@
   $('br-upload-file').addEventListener('change',()=>{importFileSelection++;});
   $('br-import-file-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('file',event.currentTarget);});$('br-import-link-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('link',event.currentTarget);});
   $('br-import-reread').addEventListener('click',()=>refreshSourceBases({preserveNotice:true}));
-  window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving||teamSaving){event.preventDefault();event.returnValue='';}});
-  render();armViewTimer();
-  (async()=>{busy=true;updateControls();try{bootstrap=await rpc('getAppBootstrap');$('br-user').textContent=bootstrap.user.email||'';}catch(error){notice(failure(error).message,'error');}finally{busy=false;$('br-loading').hidden=true;renderTeamAccess();updateControls();pendingView=activeView;flushPendingView();}})();
+  window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving){event.preventDefault();event.returnValue='';}});
+  if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;pendingAccessChange=true;flushPendingView();});
+  render();startSharedAccess();
 })();
 </script>

@@ -1,3 +1,4 @@
+import { TEST_ACCESS_KEY, TEST_ACCESS_HASH, SHARED_ACTOR, installSharedApi, runShared } from './helpers/shared-link.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -16,7 +17,7 @@ const iterator = values => { let index = 0; return { hasNext: () => index < valu
 
 function fixture(options = {}) {
   const calls = { folders: [], files: [], opened: [], ranges: [], tracking: [], rootFileScans: 0 };
-  const propertyValues = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SEGMENTS_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: SERVICE, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
+  const propertyValues = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, SEGMENTS_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: SERVICE, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const propertyStore = { getProperty: key => propertyValues.get(key) ?? null };
   const folderRows = [
     { id: ROOT, name: 'Реестр баз', parents: [] },
@@ -71,6 +72,7 @@ function fixture(options = {}) {
   });
   const sources = ['Config.gs', 'Code.gs', 'Segments.gs', 'SegmentAnalytics.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
   vm.runInContext(sources, context, { filename: 'segment-analytics.gs' });
+  installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
   context.segmentReadTracking_ = (_context, segmentId) => {
     calls.tracking.push(segmentId);
     if (options.trackingThrows) throw new Error('Tracking unavailable');
@@ -89,7 +91,7 @@ function headers(fileId, sheetId, hasHeader, extra = {}) {
 }
 
 test('dashboard and mailings authorize before Drive or spreadsheet reads', () => {
-  for (const options of [{ properties: { ALLOWED_EMAILS: '' } }, { activeEmail: 'outsider@example.com' }, { activeEmail: '', effectiveEmail: MEMBER }]) {
+  for (const options of [{ accessKey: null }, { accessKey: 'wrong' }, { accessKey: 'a'.repeat(43) }]) {
     const f = fixture(options);
     assert.throws(() => f.context.getSegmentsDashboard());
     assert.throws(() => f.context.getSegmentMailings({ segmentId: SEGMENT }));
@@ -100,7 +102,7 @@ test('dashboard and mailings authorize before Drive or spreadsheet reads', () =>
 
 test('outreach metadata excludes the unrelated root/source catalog and service book', () => {
   const f = fixture({ files: [sourceFile(SERVICE), sourceFile('business_sheet_1234567890')], folders: [{ id: 'catalog_folder_1234567890', name: 'Исходные базы', parents: [ROOT] }] });
-  const metadata = plain(f.context.getSegmentsMetadata_());
+  const metadata = plain(runShared(f.context, () => f.context.getSegmentsMetadata_()));
   assert.equal(metadata.items.length, 1);
   assert.equal(metadata.items[0].tableCount, 1);
   assert.equal(metadata.items[0].files[0].id, 'business_sheet_1234567890');
@@ -203,8 +205,7 @@ test('a file moved out of its segment is rejected before opening', () => {
 
 test('service-book protection also holds for the private scan helper', () => {
   const f = fixture({ files: [sourceFile(SERVICE, [{ rows: [['metadata']] }])] });
-  const context = f.context.authorize_();
-  const result = plain(f.context.segmentAnalyzeFile_(context, SEGMENT, SERVICE, {}, f.context.segmentAnalysisBudget_()));
+  const result = plain(runShared(f.context, () => f.context.segmentAnalyzeFile_(f.context.authorize_(), SEGMENT, SERVICE, {}, f.context.segmentAnalysisBudget_())));
   assert.equal(result.state, 'partial');
   assert.deepEqual(f.calls.files, []);
   assert.deepEqual(f.calls.opened, []);
@@ -272,7 +273,7 @@ test('sheet and elapsed-time limits also stop reads with an explicit unknown res
   const budget = f.context.segmentAnalysisBudget_();
   budget.startedAt = 0;
   const opened = f.calls.opened.length;
-  const result = plain(f.context.segmentAnalyzeFile_(f.context.authorize_(), SEGMENT, file.id, {}, budget));
+  const result = plain(runShared(f.context, () => f.context.segmentAnalyzeFile_(f.context.authorize_(), SEGMENT, file.id, {}, budget)));
   assert.equal(result.state, 'partial');
   assert.equal(f.calls.opened.length, opened);
 });
@@ -308,9 +309,9 @@ test('future positive launch adapter can express in_work without deriving it fro
   assert.equal(f.context.segmentOverallStatus_(null, { configured: false, hasLaunchedContacts: null }), null);
 });
 
-test('analytics exposes only the two authenticated readonly RPCs', () => {
+test('analytics handlers stay private behind the shared dispatcher', () => {
   const source = readFileSync(`${sourceDir}SegmentAnalytics.gs`, 'utf8');
   const publicFunctions = [...source.matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map(match => match[1]).filter(name => !name.endsWith('_'));
-  assert.deepEqual(publicFunctions, ['getSegmentsDashboard', 'getSegmentMailings']);
+  assert.deepEqual(publicFunctions, []);
   assert.doesNotMatch(source, /UrlFetchApp|\.setValue\s*\(|\.setValues\s*\(|\.clear\s*\(|\.appendRow\s*\(/);
 });

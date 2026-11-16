@@ -88,15 +88,3 @@ test('reset clears only the filters and reveals retained edits', () => {
   assert.equal(drafts.get('draft').expectedRevision, 2);
 });
 
-test('team entry requires both an administrator session and a confirmed server result', () => {
-  const teamContext = vm.createContext({ bootstrap: { user: { isAdmin: true } }, teamData: { canManage: true, members: [] } });
-  vm.runInContext(source('teamCanSubmit') + ';', teamContext);
-  assert.equal(teamContext.teamCanSubmit(), true);
-  teamContext.bootstrap.user.isAdmin = false;
-  assert.equal(teamContext.teamCanSubmit(), false);
-  teamContext.bootstrap.user.isAdmin = true;
-  teamContext.teamData = null;
-  assert.equal(teamContext.teamCanSubmit(), false);
-  teamContext.teamData = { canManage: false, members: [] };
-  assert.equal(teamContext.teamCanSubmit(), false);
-});
