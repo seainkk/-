@@ -75,4 +75,16 @@ notepad "%USERPROFILE%\.clasprc.json"
 
 После подключения CI редактируйте код в GitHub/локальной копии и публикуйте через него: прямые изменения в редакторе Apps Script будут заменены следующей загрузкой из `main`.
 
-Официальные инструкции: [clasp и GitHub Actions](https://developers.google.com/apps-script/guides/clasp), [версии и постоянный URL](https://developers.google.com/apps-script/concepts/deployments), [права web app](https://developers.google.com/apps-script/guides/web).
+## Google Drive API для загрузки баз
+
+В манифесте приложения подключён Advanced Drive API v3. Он преобразует загруженный файл в Google Таблицу и создаёт копии таблиц в папке исходных баз. Google Таблицы, добавленные по ссылке, доступны только с правами вошедшего сотрудника; принадлежность папки назначения и служебной таблицы реестру проверяет приложение.
+
+Если Apps Script использует автоматически созданный Cloud-проект, Google включает API при подключении advanced service. Если владелец привязал стандартный Google Cloud-проект, в нём нужно один раз открыть **APIs & Services → Library → Google Drive API → Enable**. Сам факт публикации кода ещё не подтверждает, что API включён в отдельно настроенном Cloud-проекте. При соответствующей ошибке загрузки проверяется именно проект, связанный с Apps Script, а не произвольный проект Google Cloud.
+
+После добавления разрешения `script.external_request` Google может запросить повторное согласие пользователей. Это разрешение используется только сервером для фиксированных Google Drive API endpoint при ссылках с resource key. OAuth-токены не передаются в интерфейс и не выводятся в сообщения об ошибках.
+
+Файлы принимаются формой HTML Service: форма — единственный аргумент `google.script.run`, а file input поступает на сервер как Blob. Ограничение 10 МиБ установлено приложением. Преобразование выполняет Google, без собственного редактора ячеек. В режиме копирования оригинал остаётся на месте; в режиме переноса исходная таблица перемещается и переименовывается.
+
+Автоматические тесты импорта подменяют Google API. Первую реальную загрузку файла, копирование и перенос нужно проверить под разрешённым Google-аккаунтом после публикации; проверки с макетами не заменяют эту проверку прав и настроек Cloud-проекта.
+
+Официальные инструкции: [clasp и GitHub Actions](https://developers.google.com/apps-script/guides/clasp), [версии и постоянный URL](https://developers.google.com/apps-script/concepts/deployments), [права web app](https://developers.google.com/apps-script/guides/web), [Advanced Drive](https://developers.google.com/apps-script/advanced/drive), [включение advanced services](https://developers.google.com/apps-script/guides/services/advanced), [форма с Blob](https://developers.google.com/apps-script/guides/html/communication).

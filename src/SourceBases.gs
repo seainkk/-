@@ -5,11 +5,12 @@
  */
 var SOURCE_BASES_SCHEMA = Object.freeze({
   basesTab: 'SourceBases',
-  basesHeaders: ['fileId', 'fileName', 'mimeType', 'url', 'format', 'status', 'formatCheck', 'revision', 'present', 'updatedAt', 'updatedBy'],
+  basesHeaders: ['fileId', 'fileName', 'mimeType', 'url', 'format', 'status', 'formatCheck', 'revision', 'present', 'updatedAt', 'updatedBy', 'baseType'],
   relationsTab: 'SourceBaseSegments',
   relationsHeaders: ['fileId', 'segmentId', 'createdAt', 'createdBy'],
   statuses: ['collection', 'ready', 'rework'],
-  checks: ['unchecked', 'valid', 'invalid']
+  checks: ['unchecked', 'valid', 'invalid'],
+  baseTypes: ['general', 'lpr']
 });
 
 function getSourceBases() {
@@ -52,15 +53,17 @@ function getSourceBases() {
 function updateSourceBase(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request);
-    var allowedKeys = ['id', 'status', 'formatCheck', 'expectedRevision'];
-    if (Object.keys(input).some(function (key) { return allowedKeys.indexOf(key) === -1; })) fail_('INVALID_REQUEST', 'Можно изменить только статус сбора и ручную проверку формата.');
+    var allowedKeys = ['id', 'status', 'formatCheck', 'baseType', 'expectedRevision'];
+    if (Object.keys(input).some(function (key) { return allowedKeys.indexOf(key) === -1; })) fail_('INVALID_REQUEST', 'Можно изменить только тип базы, статус сбора и ручную проверку формата.');
     var fileId = id_(input.id);
     if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) fail_('INVALID_REQUEST', 'Сначала обновите сохранённое состояние базы.');
     var hasStatus = Object.prototype.hasOwnProperty.call(input, 'status');
     var hasCheck = Object.prototype.hasOwnProperty.call(input, 'formatCheck');
-    if (!hasStatus && !hasCheck) fail_('INVALID_REQUEST', 'Не выбрано изменение базы.');
+    var hasType = Object.prototype.hasOwnProperty.call(input, 'baseType');
+    if (!hasStatus && !hasCheck && !hasType) fail_('INVALID_REQUEST', 'Не выбрано изменение базы.');
     if (hasStatus && SOURCE_BASES_SCHEMA.statuses.indexOf(input.status) === -1) fail_('INVALID_STATUS', 'Неизвестный статус сбора.');
     if (hasCheck && SOURCE_BASES_SCHEMA.checks.indexOf(input.formatCheck) === -1) fail_('INVALID_FORMAT_CHECK', 'Неизвестный результат ручной проверки формата.');
+    if (hasType && SOURCE_BASES_SCHEMA.baseTypes.indexOf(input.baseType) === -1) fail_('INVALID_BASE_TYPE', 'Неизвестный тип базы.');
     return locked_(function () {
       var current = authorize_();
       var binding = sourceBasesSource_(current);
@@ -74,6 +77,10 @@ function updateSourceBase(request) {
       var record = sourceBaseCopyRecord_(stored);
       sourceBaseApplyMetadata_(record, file);
       if (hasStatus) record.status = input.status;
+      if (hasType && record.baseType !== input.baseType) {
+        record.baseType = input.baseType;
+        if (!hasCheck) record.formatCheck = 'unchecked';
+      }
       if (hasCheck) record.formatCheck = input.formatCheck;
       if (sourceBaseChanged_(stored, record)) {
         sourceBaseBump_(record, current.email);
@@ -187,29 +194,41 @@ function sourceBasesStorage_(context) {
   }
 }
 
-function sourceBasesReadRows_(sheet, headers) {
+function sourceBasesReadRows_(sheet, headers, allowLegacyType, migrationPending) {
   var lastRow = sheet.getLastRow(), lastColumn = sheet.getLastColumn();
-  if (lastRow < 1 || lastColumn !== headers.length) fail_('STORAGE_SCHEMA', 'Структура служебного реестра отличается от ожидаемой. Требуется проверка администратора.');
+  var legacy = !!allowLegacyType && lastColumn === headers.length - 1;
+  if (lastRow < 1 || (!legacy && lastColumn !== headers.length)) fail_('STORAGE_SCHEMA', 'Структура служебного реестра отличается от ожидаемой. Требуется проверка администратора.');
   if (lastRow > REGISTRY_CONFIG.maxSourceBaseRows + 1) fail_('STORAGE_LIMIT', 'Служебный реестр превышает лимит 5000 строк. Данные не были перезаписаны.');
-  var range = sheet.getRange(1, 1, lastRow, headers.length);
+  var range = sheet.getRange(1, 1, lastRow, lastColumn);
   var formulas = range.getFormulas();
   if (formulas.some(function (row) { return row.some(function (formula) { return !!formula; }); })) fail_('STORAGE_SCHEMA', 'В служебном реестре обнаружены формулы. Требуется проверка администратора.');
   var values = range.getValues();
-  if (headers.some(function (header, index) { return values[0][index] !== header; })) fail_('STORAGE_SCHEMA', 'Заголовки служебного реестра изменены. Данные не были перезаписаны.');
-  return { rows: values.slice(1), lastRow: lastRow };
+  var expected = legacy ? headers.slice(0, -1) : headers;
+  if (!legacy && allowLegacyType && migrationPending && values[0][headers.length - 1] === '') {
+    legacy = true;
+    expected = headers.slice(0, -1);
+  }
+  if (expected.some(function (header, index) { return values[0][index] !== header; })) fail_('STORAGE_SCHEMA', 'Заголовки служебного реестра изменены. Данные не были перезаписаны.');
+  return { rows: values.slice(1), lastRow: lastRow, legacy: legacy };
 }
 
 function sourceBasesReadDatabase_(storage) {
   try {
-    var bases = sourceBasesReadRows_(storage.basesSheet, SOURCE_BASES_SCHEMA.basesHeaders);
+    var properties = PropertiesService.getScriptProperties();
+    var migrationKey = 'SOURCE_BASES_TYPE_MIGRATION_' + storage.public.id;
+    var migrationPending = properties.getProperty(migrationKey) === 'pending';
+    var bases = sourceBasesReadRows_(storage.basesSheet, SOURCE_BASES_SCHEMA.basesHeaders, true, migrationPending);
     var links = sourceBasesReadRows_(storage.relationsSheet, SOURCE_BASES_SCHEMA.relationsHeaders);
-    var records = Object.create(null), relations = [], seenLinks = Object.create(null);
+    var records = Object.create(null), relations = [], seenLinks = Object.create(null), missingTypes = [];
     bases.rows.forEach(function (row, index) {
       if (row.every(function (value) { return value === ''; })) return;
       var fileId = id_(row[0]);
       if (records[fileId]) fail_('STORAGE_DUPLICATE', 'В служебном реестре повторяется ID базы. Требуется проверка администратора.');
       if (SOURCE_BASES_SCHEMA.statuses.indexOf(row[5]) === -1 || SOURCE_BASES_SCHEMA.checks.indexOf(row[6]) === -1 || !Number.isSafeInteger(row[7]) || row[7] < 1 || typeof row[8] !== 'boolean') fail_('STORAGE_SCHEMA', 'Сохранённые статусы или версии базы некорректны. Требуется проверка администратора.');
-      records[fileId] = { fileId: fileId, fileName: sourceBaseText_(row[1]), mimeType: sourceBaseText_(row[2]), url: sourceBaseText_(row[3]), format: sourceBaseText_(row[4]), status: row[5], formatCheck: row[6], revision: row[7], present: row[8], updatedAt: sourceBaseText_(row[9]), updatedBy: sourceBaseText_(row[10]), row: index + 2 };
+      var missingType = row[11] === undefined || row[11] === '';
+      if ((missingType && !bases.legacy && !migrationPending) || (!missingType && SOURCE_BASES_SCHEMA.baseTypes.indexOf(row[11]) === -1)) fail_('STORAGE_SCHEMA', 'Сохранённый тип базы некорректен. Требуется проверка администратора.');
+      records[fileId] = { fileId: fileId, fileName: sourceBaseText_(row[1]), mimeType: sourceBaseText_(row[2]), url: sourceBaseText_(row[3]), format: sourceBaseText_(row[4]), status: row[5], formatCheck: row[6], revision: row[7], present: row[8], updatedAt: sourceBaseText_(row[9]), updatedBy: sourceBaseText_(row[10]), baseType: missingType ? 'general' : row[11], row: index + 2 };
+      if (missingType) missingTypes.push(records[fileId]);
     });
     links.rows.forEach(function (row) {
       if (row.every(function (value) { return value === ''; })) return;
@@ -218,6 +237,9 @@ function sourceBasesReadDatabase_(storage) {
       seenLinks[key] = true;
       relations.push({ fileId: fileId, segmentId: segmentId });
     });
+    // Migration is deliberately after both tabs and every record have passed
+    // validation. It touches only the appended type column, never A:K or links.
+    if (bases.legacy || missingTypes.length || migrationPending) sourceBasesMigrateTypes_(storage, bases.legacy, missingTypes, properties, migrationKey, migrationPending);
     return { records: records, relations: relations, lastRow: bases.lastRow };
   } catch (error) {
     var failure = error.registryCode && /^STORAGE_/.test(error.registryCode) ? error : registryError_('STORAGE_SCHEMA', 'Служебный реестр содержит некорректные данные. Требуется проверка администратора.');
@@ -226,13 +248,35 @@ function sourceBasesReadDatabase_(storage) {
   }
 }
 
+function sourceBasesMigrateTypes_(storage, legacyHeader, missingTypes, properties, key, pending) {
+  var sheet = storage.basesSheet, column = SOURCE_BASES_SCHEMA.basesHeaders.length;
+  if (!pending) properties.setProperty(key, 'pending');
+  if (legacyHeader || missingTypes.length) {
+    try {
+      var capacity = sheet.getMaxColumns();
+      if (capacity < column) sheet.insertColumnsAfter(capacity, column - capacity);
+      if (legacyHeader) sheet.getRange(1, column).setValue('baseType');
+      var groups = [];
+      missingTypes.slice().sort(function (a, b) { return a.row - b.row; }).forEach(function (record) {
+        var group = groups[groups.length - 1];
+        if (!group || group[group.length - 1].row + 1 !== record.row) { group = []; groups.push(group); }
+        group.push(record);
+      });
+      groups.forEach(function (group) {
+        sheet.getRange(group[0].row, column, group.length, 1).setValues(group.map(function (record) { return [record.baseType]; }));
+      });
+    } finally { SpreadsheetApp.flush(); }
+  }
+  properties.deleteProperty(key);
+}
+
 function sourceBasesSync_(context, storage, database, discovered) {
   var records = database.records, changes = [], present = Object.create(null), nextRow = database.lastRow + 1;
   discovered.forEach(function (file) {
     present[file.id] = true;
     var old = records[file.id], record;
     if (!old) {
-      record = { fileId: file.id, fileName: file.fileName, mimeType: file.mimeType, url: file.url, format: file.format, status: 'collection', formatCheck: 'unchecked', revision: 1, present: true, updatedAt: new Date().toISOString(), updatedBy: context.email, row: nextRow++ };
+      record = { fileId: file.id, fileName: file.fileName, mimeType: file.mimeType, url: file.url, format: file.format, status: 'collection', formatCheck: 'unchecked', revision: 1, present: true, updatedAt: new Date().toISOString(), updatedBy: context.email, baseType: 'general', row: nextRow++ };
       records[file.id] = record;
       changes.push(record);
     } else {
@@ -259,6 +303,40 @@ function sourceBasesSync_(context, storage, database, discovered) {
   if (nextRow > REGISTRY_CONFIG.maxSourceBaseRows + 2) fail_('STORAGE_LIMIT', 'В служебном реестре нет места для всех исходных баз. Частичный список не был сохранён.');
   sourceBaseWriteRecords_(storage.basesSheet, changes);
   return records;
+}
+
+/** Caller owns ScriptLock and has validated destination and service storage. */
+function registerImportedSourceBase_(context, storage, database, file, baseType, status, options) {
+  var fileId = id_(file.id);
+  if (SOURCE_BASES_SCHEMA.baseTypes.indexOf(baseType) === -1) fail_('INVALID_BASE_TYPE', 'Неизвестный тип базы.');
+  if (SOURCE_BASES_SCHEMA.statuses.indexOf(status) === -1) fail_('INVALID_STATUS', 'Неизвестный статус сбора.');
+  if (file.mimeType !== REGISTRY_CONFIG.spreadsheetMime) fail_('INVALID_FILE_TYPE', 'После загрузки должна быть создана Google Таблица.');
+  var stored = database.records[fileId], record;
+  if (stored) {
+    record = sourceBaseCopyRecord_(stored);
+    sourceBaseApplyMetadata_(record, file);
+    record.present = true;
+    // Replayed imports must not overwrite a teammate's later manual edits.
+    // A fresh move of an already-known file may explicitly bind the pre-action
+    // revision in its durable receipt to apply the selected initial fields once.
+    if (options && Number.isSafeInteger(options.expectedRevision) && options.expectedRevision === stored.revision) {
+      record.baseType = baseType;
+      record.status = status;
+      record.formatCheck = 'unchecked';
+    }
+    if (!sourceBaseChanged_(stored, record)) return stored;
+    sourceBaseBump_(record, context.email);
+  } else {
+    var row = database.lastRow + 1;
+    if (row > REGISTRY_CONFIG.maxSourceBaseRows + 1) fail_('STORAGE_LIMIT', 'В служебном реестре нет места для новой базы.');
+    record = { fileId: fileId, fileName: file.fileName, mimeType: file.mimeType, url: file.url, format: file.format,
+      baseType: baseType, status: status, formatCheck: 'unchecked', revision: 1, present: true,
+      updatedAt: new Date().toISOString(), updatedBy: context.email, row: row };
+  }
+  sourceBaseWriteRecords_(storage.basesSheet, [record]);
+  database.records[fileId] = record;
+  database.lastRow = Math.max(database.lastRow, record.row);
+  return record;
 }
 
 function sourceBaseWriteRecords_(sheet, records) {
@@ -322,7 +400,7 @@ function sourceBaseNeedsLiteral_(value) { return /^(?:'|\s*[=+\-@])/.test(value)
 function sourceBaseText_(value) { return Object.prototype.toString.call(value) === '[object Date]' ? value.toISOString() : String(value === null || value === undefined ? '' : value); }
 function sourceBaseCopyRecord_(record) { var copy = {}; Object.keys(record).forEach(function (key) { copy[key] = record[key]; }); return copy; }
 function sourceBaseApplyMetadata_(record, file) { ['fileName', 'mimeType', 'url', 'format'].forEach(function (key) { record[key] = file[key]; }); }
-function sourceBaseChanged_(before, after) { return ['fileName', 'mimeType', 'url', 'format', 'status', 'formatCheck', 'present'].some(function (key) { return before[key] !== after[key]; }); }
+function sourceBaseChanged_(before, after) { return ['fileName', 'mimeType', 'url', 'format', 'status', 'formatCheck', 'present', 'baseType'].some(function (key) { return before[key] !== after[key]; }); }
 function sourceBaseBump_(record, email) { if (record.revision >= Number.MAX_SAFE_INTEGER) fail_('STORAGE_LIMIT', 'Достигнут предел версии записи. Требуется проверка администратора.'); record.revision++; record.updatedAt = new Date().toISOString(); record.updatedBy = email; }
 
 function sourceBasesAssociations_(relations) {
@@ -336,7 +414,7 @@ function sourceBasesAssociations_(relations) {
 }
 
 function sourceBaseItem_(file, record, associations) {
-  var item = { id: file.id, name: file.name, fileName: file.fileName, mimeType: file.mimeType, url: file.url, format: file.format, status: record ? record.status : null, formatCheck: record ? record.formatCheck : null, revision: record ? record.revision : null, present: true, segments: associations ? [] : null, associationsAvailable: !!associations };
+  var item = { id: file.id, name: file.name, fileName: file.fileName, mimeType: file.mimeType, url: file.url, format: file.format, status: record ? record.status : null, formatCheck: record ? record.formatCheck : null, baseType: record ? record.baseType : null, revision: record ? record.revision : null, present: true, segments: associations ? [] : null, associationsAvailable: !!associations };
   if (record) { item.updatedAt = record.updatedAt; item.updatedBy = record.updatedBy; }
   if (associations) associations.relations.forEach(function (relation) {
     if (relation.fileId !== file.id) return;

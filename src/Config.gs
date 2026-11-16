@@ -9,6 +9,7 @@ var REGISTRY_CONFIG = Object.freeze({
   defaultSourceBasesStorageId: '1lzbjoPNnrVn5-8GoAhaLZPS_S8J0lfcaoO8Ybxw396M',
   maxSourceBaseRows: 5000,
   maxSourceFolders: 500,
+  importMaxBytes: 10 * 1024 * 1024,
   spreadsheetMime: 'application/vnd.google-apps.spreadsheet',
   maxTreeEntries: 500,
   maxTreeDepth: 10,

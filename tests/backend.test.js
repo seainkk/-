@@ -15,7 +15,7 @@ const OTHER = 'outside_folder_1234567890';
 const MEMBER = 'member@example.com';
 const SHEET_MIME = 'application/vnd.google-apps.spreadsheet';
 const navigationCode = () => ['Config.gs', 'Code.gs', 'Segments.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
-const code = () => `${navigationCode()}\n${readFileSync(`${sourceDir}SourceBases.gs`, 'utf8')}`;
+const code = () => `${navigationCode()}\n${readFileSync(`${sourceDir}SourceBases.gs`, 'utf8')}\n${readFileSync(`${sourceDir}SourceImport.gs`, 'utf8')}`;
 
 function iterator(items) {
   let position = 0;
@@ -129,12 +129,12 @@ function fixture(options = {}) {
 
 function plain(value) { return JSON.parse(JSON.stringify(value)); }
 
-test('the app exposes metadata operations only and has no spreadsheet cell RPCs', () => {
+test('the app exposes registry and import operations without arbitrary spreadsheet cell RPCs', () => {
   const f = fixture();
   assert.equal(typeof f.context.loadTable, 'undefined');
   assert.equal(typeof f.context.writeCell, 'undefined');
   const publicFunctions = [...code().matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map(match => match[1]).filter(name => !name.endsWith('_')).sort();
-  assert.deepEqual(publicFunctions, ['createBase', 'createFolder', 'doGet', 'getBootstrap', 'getSourceBases', 'renameItem', 'updateSourceBase']);
+  assert.deepEqual(publicFunctions, ['createBase', 'createFolder', 'doGet', 'getBootstrap', 'getSourceBases', 'importSourceBaseLink', 'renameItem', 'updateSourceBase', 'uploadSourceBase']);
   assert.doesNotMatch(navigationCode(), /SpreadsheetApp\.openById|\.getRange\s*\(|\.getValues\s*\(|\.setValue\s*\(/);
 });
 

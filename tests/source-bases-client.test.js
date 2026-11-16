@@ -61,6 +61,9 @@ test('refresh cannot silently replace the edit revision or add unedited fields',
   assert.equal(Object.hasOwn(pending, 'unexpected'), false);
   assert.equal(patch(refreshedItem, draft, true).expectedRevision, 2);
   assert.equal(draft.expectedRevision, 1);
+  const typePatch = patch(refreshedItem, { expectedRevision: 1, values: { baseType: 'lpr', formatCheck: 'unchecked' } }, false);
+  assert.equal(typePatch.baseType, 'lpr');
+  assert.equal(typePatch.formatCheck, 'unchecked');
 });
 
 test('unknown associations never appear as a confirmed empty segment list', () => {

@@ -27,9 +27,16 @@ if (manifest.webapp?.executeAs !== 'USER_ACCESSING') throw new Error('Run as acc
 if (manifest.webapp?.access !== 'ANYONE' && manifest.webapp?.access !== 'DOMAIN') {
   throw new Error('Signed-in access required.');
 }
+const driveService = manifest.dependencies?.enabledAdvancedServices?.find(item => item.userSymbol === 'Drive');
+if (driveService?.serviceId !== 'drive' || driveService?.version !== 'v3') {
+  throw new Error('Source imports require the Advanced Drive v3 service.');
+}
+for (const scope of ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/script.external_request']) {
+  if (!manifest.oauthScopes?.includes(scope)) throw new Error('Missing source import scope: ' + scope);
+}
 const mapping = JSON.parse(readFileSync('.clasp.json', 'utf8'));
 if (mapping.rootDir !== 'src' || !mapping.scriptId) throw new Error('Apps Script project mapping missing.');
-for (const required of ['Index.html', 'Styles.html', 'Client.html', 'Code.gs', 'Config.gs', 'Segments.gs', 'SourceBases.gs']) {
+for (const required of ['Index.html', 'Styles.html', 'Client.html', 'Code.gs', 'Config.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs']) {
   if (!files.includes(required)) throw new Error(`Missing ${required}.`);
 }
 console.log(`Validated ${scripts} scripts, HTML assets and Apps Script manifest.`);

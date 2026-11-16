@@ -32,7 +32,31 @@
         <div id="br-segments-cards" class="br-segments-cards"></div>
       </section>
       <section id="br-sources-view" class="br-sources-view" hidden aria-labelledby="br-sources-title">
-        <div class="br-segments-heading"><div><h1 id="br-sources-title">Исходные базы</h1><p id="br-sources-count" class="br-muted"></p></div><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div>
+        <div class="br-segments-heading"><div><h1 id="br-sources-title">Исходные базы</h1><p id="br-sources-count" class="br-muted"></p></div><div class="br-source-heading-actions"><button id="br-import-open" type="button" class="br-button br-primary" disabled>＋ Загрузить базу</button><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div></div>
+        <section id="br-import-panel" class="br-import-panel" hidden aria-labelledby="br-import-title">
+          <div class="br-import-heading"><h2 id="br-import-title">Загрузить базу</h2><button id="br-import-cancel" type="button" class="br-button">Закрыть</button></div>
+          <nav class="br-import-modes" aria-label="Источник базы"><button id="br-import-mode-file" type="button" class="br-button" aria-pressed="true">Файл</button><button id="br-import-mode-link" type="button" class="br-button" aria-pressed="false">Google Таблица по ссылке</button></nav>
+          <form id="br-import-file-form" class="br-import-form">
+            <label for="br-upload-name">Название базы<input id="br-upload-name" name="name" type="text" maxlength="100" autocomplete="off" required></label>
+            <div class="br-import-fields"><label for="br-upload-type">Тип базы<select id="br-upload-type" name="baseType"><option value="general">Общая</option><option value="lpr">ЛПР</option></select></label><label for="br-upload-status">Статус обработки<select id="br-upload-status" name="status"><option value="collection">Сбор</option><option value="ready">Готова</option><option value="rework">Доработка</option></select></label></div>
+            <p id="br-upload-criterion" class="br-source-criterion">1 строка = 1 компания.</p>
+            <label for="br-upload-file">Файл<input id="br-upload-file" name="file" type="file" accept=".csv,.tsv,.xls,.xlsx,.ods" required></label>
+            <p class="br-muted">CSV, TSV, XLS, XLSX или ODS · до 10 МиБ. Будет создана новая Google Таблица в папке «Исходные базы».</p>
+            <input id="br-upload-request" name="requestId" type="hidden">
+            <button id="br-upload-submit" type="submit" class="br-button br-primary">Загрузить базу</button>
+          </form>
+          <form id="br-import-link-form" class="br-import-form" hidden>
+            <label for="br-link-name">Название базы<input id="br-link-name" type="text" maxlength="100" autocomplete="off" required></label>
+            <div class="br-import-fields"><label for="br-link-type">Тип базы<select id="br-link-type"><option value="general">Общая</option><option value="lpr">ЛПР</option></select></label><label for="br-link-status">Статус обработки<select id="br-link-status"><option value="collection">Сбор</option><option value="ready">Готова</option><option value="rework">Доработка</option></select></label></div>
+            <p id="br-link-criterion" class="br-source-criterion">1 строка = 1 компания.</p>
+            <label for="br-link-url">Ссылка на Google Таблицу<input id="br-link-url" type="url" placeholder="https://docs.google.com/spreadsheets/d/…" autocomplete="off" required></label>
+            <fieldset class="br-import-transfer"><legend>Как добавить таблицу</legend><label><input type="radio" name="br-link-transfer" value="copy" checked>Создать копию</label><label><input type="radio" name="br-link-transfer" value="move">Перенести исходную таблицу</label></fieldset>
+            <p id="br-link-move-help" class="br-import-move-help" hidden>Исходная таблица будет перемещена из текущей папки в «Исходные базы» и переименована.</p>
+            <button id="br-link-submit" type="submit" class="br-button br-primary">Создать копию</button>
+          </form>
+          <div id="br-import-message" class="br-source-message" role="status" aria-live="polite" hidden></div>
+          <button id="br-import-reread" type="button" class="br-button" hidden>Перечитать список</button>
+        </section>
         <p class="br-segments-rules">Проверка формата — ручная отметка. Статус обработки задаётся отдельно. Автоматическая проверка и добавление в сегмент пока не подключены.</p>
         <p id="br-sources-health" class="br-segments-health" role="status" aria-live="polite"></p>
         <div id="br-sources-empty" class="br-segments-empty" role="status" hidden><h2 id="br-sources-empty-title"></h2><p id="br-sources-empty-description"></p></div>

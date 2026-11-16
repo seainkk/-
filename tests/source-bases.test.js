@@ -17,7 +17,7 @@ const XLSX = 'source_xlsx_1234567890';
 const PDF = 'source_pdf_1234567890';
 const MEMBER = 'member@example.com';
 const SHEET_MIME = 'application/vnd.google-apps.spreadsheet';
-const HEADERS = ['fileId','fileName','mimeType','url','format','status','formatCheck','revision','present','updatedAt','updatedBy'];
+const HEADERS = ['fileId','fileName','mimeType','url','format','status','formatCheck','revision','present','updatedAt','updatedBy','baseType'];
 const RELATION_HEADERS = ['fileId','segmentId','createdAt','createdBy'];
 const plain = value => JSON.parse(JSON.stringify(value));
 const iterator = items => {
@@ -27,7 +27,7 @@ const iterator = items => {
 const rowFor = (id, overrides = {}) => HEADERS.map(key => ({
   fileId: id, fileName: 'Сохранённое имя.csv', mimeType: 'text/csv', url: `https://drive.google.com/file/d/${id}/view`,
   format: 'CSV', status: 'collection', formatCheck: 'unchecked', revision: 1, present: true,
-  updatedAt: '2026-11-15T10:00:00.000Z', updatedBy: MEMBER, ...overrides,
+  updatedAt: '2026-11-15T10:00:00.000Z', updatedBy: MEMBER, baseType: 'general', ...overrides,
 })[key]);
 
 function fixture(options = {}) {
@@ -231,7 +231,7 @@ test('discovery returns all nested file formats and the actual Drive URLs withou
   assert.match(String(result.items.find(item => item.id === XLSX).format), /xls|excel/i);
   assert.ok(result.items.every(item => item.id !== STORAGE));
   assert.equal(result.canEdit, true);
-  assert.ok(result.items.every(item => item.status === 'collection' && item.formatCheck === 'unchecked' && Number.isSafeInteger(item.revision))); 
+  assert.ok(result.items.every(item => item.status === 'collection' && item.formatCheck === 'unchecked' && item.baseType === 'general' && Number.isSafeInteger(item.revision))); 
   assert.ok(f.calls.opens.every(id => id === STORAGE));
   for (const item of result.items) assert.equal(item.url, f.files.get(item.id).url);
 });
@@ -243,7 +243,7 @@ test('a service spreadsheet outside the direct registry root is rejected before 
   assert.deepEqual(f.calls.opens, []);
   assert.equal(result.items.length, 4);
   assert.equal(result.canEdit, false);
-  assert.ok(result.items.every(item => item.revision === null && item.status === null && item.formatCheck === null && item.segments === null));
+  assert.ok(result.items.every(item => item.revision === null && item.status === null && item.formatCheck === null && item.baseType === null && item.segments === null));
   assert.equal(f.calls.writes.length, 0);
 });
 
@@ -257,7 +257,7 @@ test('corrupt service headers produce a read-only list and are never overwritten
     const result = f.list();
     assert.equal(result.state, 'storage_unavailable');
     assert.equal(result.canEdit, false);
-  assert.ok(result.items.every(item => item.revision === null && item.status === null && item.formatCheck === null && item.segments === null));
+  assert.ok(result.items.every(item => item.revision === null && item.status === null && item.formatCheck === null && item.baseType === null && item.segments === null));
     assert.equal(f.calls.writes.length, 0);
     assert.equal(JSON.stringify([f.sourceSheet.state.rows, f.relationSheet.state.rows]), before);
   }
@@ -275,10 +275,11 @@ test('status and format checks persist by file ID when Drive renames the file', 
   const relation = [CSV, 'segment_a_1234567890', '2026-11-15T10:00:00Z', MEMBER];
   const f = fixture({ relationRows: [RELATION_HEADERS, relation] });
   const first = f.list().items.find(item => item.id === CSV);
-  f.patch({ id: CSV, status: 'ready', formatCheck: 'valid', expectedRevision: first.revision });
+  f.patch({ id: CSV, baseType: 'lpr', status: 'ready', formatCheck: 'valid', expectedRevision: first.revision });
   f.files.get(CSV).name = 'Переименованная база.csv';
   const result = f.list().items.find(item => item.id === CSV);
   assert.equal(result.status, 'ready');
+  assert.equal(result.baseType, 'lpr');
   assert.equal(result.formatCheck, 'valid');
   assert.equal(result.id, CSV);
   assert.equal(result.name || result.fileName, 'Переименованная база.csv');
@@ -297,13 +298,14 @@ test('repeated synchronization of unchanged metadata does not rewrite rows or ch
 test('removed sources are retained with present=false and regain their manual status when restored by ID', () => {
   const f = fixture();
   const first = f.list().items.find(item => item.id === CSV);
-  f.patch({ id: CSV, status: 'rework', formatCheck: 'invalid', expectedRevision: first.revision });
+  f.patch({ id: CSV, baseType: 'lpr', status: 'rework', formatCheck: 'invalid', expectedRevision: first.revision });
   f.files.get(CSV).parent = OTHER;
   assert.ok(f.list().items.every(item => item.id !== CSV));
   assert.equal(f.record(CSV).present, false);
   f.files.get(CSV).parent = SOURCE;
   const restored = f.list().items.find(item => item.id === CSV);
   assert.equal(restored.status, 'rework');
+  assert.equal(restored.baseType, 'lpr');
   assert.equal(restored.formatCheck, 'invalid');
   assert.equal(f.record(CSV).present, true);
 });
@@ -329,6 +331,7 @@ test('invalid enums and attempts to assign segments are rejected without service
   const before = f.calls.writes.length;
   assert.throws(() => f.patch({ id: CSV, status: 'invented', expectedRevision: initial.revision }));
   assert.throws(() => f.patch({ id: CSV, formatCheck: 'guessed-from-name', expectedRevision: initial.revision }));
+  assert.throws(() => f.patch({ id: CSV, baseType: 'guessed-from-name', expectedRevision: initial.revision }));
   assert.throws(() => f.patch({ id: CSV, segmentId: 'segment_a_1234567890', expectedRevision: initial.revision }));
   assert.throws(() => f.patch({ id: CSV, status: 'ready' }));
   assert.equal(f.calls.writes.length, before);
@@ -556,4 +559,179 @@ test('a service write error still flushes once while locked before releasing the
   options.failWriteAfterApply = false;
   assert.equal(f.list().state, 'ready');
   assert.equal(f.sourceSheet.state.rows.length, rowsAfterWrite);
+});
+
+
+const legacyHeaders = HEADERS.slice(0, -1);
+const typeMigrationKey = 'SOURCE_BASES_TYPE_MIGRATION_' + STORAGE;
+const readServiceDatabase = f => plain(f.context.locked_(() => {
+  const context = f.context.authorize_();
+  return f.context.sourceBasesReadDatabase_(f.context.sourceBasesStorage_(context));
+}));
+const registerSource = (f, id, type, status, options) => plain(f.context.locked_(() => {
+  const context = f.context.authorize_();
+  const storage = f.context.sourceBasesStorage_(context);
+  const database = f.context.sourceBasesReadDatabase_(storage);
+  const file = f.context.sourceBaseMetadata_(f.files.get(id));
+  return f.context.registerImportedSourceBase_(context, storage, database, file, type, status, options);
+}));
+
+test('legacy eleven-column storage gains the type column without altering its states, revisions or relations', () => {
+  const historical = rowFor(CSV, { status: 'ready', formatCheck: 'valid', revision: 9, present: false }).slice(0, -1);
+  const relation = [CSV, 'segment_a_1234567890', '2026-11-15T10:00:00Z', MEMBER];
+  const f = fixture({ sourceRows: [legacyHeaders, historical], relationRows: [RELATION_HEADERS, relation] });
+  const priorRelations = structuredClone(f.relationSheet.state.rows);
+  const database = readServiceDatabase(f);
+  assert.equal(database.records[CSV].baseType, 'general');
+  assert.deepEqual(f.sourceSheet.state.rows[0], HEADERS);
+  assert.deepEqual(f.sourceSheet.state.rows[1].slice(0, 11), historical);
+  assert.equal(f.sourceSheet.state.rows[1][11], 'general');
+  assert.deepEqual(f.relationSheet.state.rows, priorRelations);
+  assert.ok(f.calls.writes.length > 0);
+  assert.ok(f.calls.writes.every(write => write.sheet === 'SourceBases' && write.column === 12 && write.locked));
+  assert.equal(f.calls.lockDepth, 0);
+  const lastWrite = f.calls.events.findLastIndex(event => event.kind === 'write');
+  const flush = f.calls.events.findLastIndex(event => event.kind === 'flush');
+  const unlock = f.calls.events.findLastIndex(event => event.kind === 'unlock');
+  assert.ok(lastWrite >= 0 && lastWrite < flush && flush < unlock);
+  assert.ok(f.calls.events[flush].locked);
+  const writeCount = f.calls.writes.length;
+  const flushCount = f.calls.flushes;
+  readServiceDatabase(f);
+  assert.equal(f.calls.writes.length, writeCount);
+  assert.equal(f.calls.flushes, flushCount);
+});
+
+test('an interrupted type-column migration completes blank legacy cells and keeps explicit LPR types', () => {
+  const missing = rowFor(CSV, { baseType: '', status: 'rework', formatCheck: 'invalid', revision: 7 });
+  const lpr = rowFor(NATIVE, { baseType: 'lpr', status: 'ready', revision: 4 });
+  const f = fixture({ sourceRows: [HEADERS, missing, lpr], properties: { [typeMigrationKey]: 'pending' } });
+  const database = readServiceDatabase(f);
+  assert.equal(database.records[CSV].baseType, 'general');
+  assert.equal(database.records[NATIVE].baseType, 'lpr');
+  assert.deepEqual(f.sourceSheet.state.rows[1].slice(0, 11), missing.slice(0, 11));
+  assert.deepEqual(f.sourceSheet.state.rows[2], lpr);
+  assert.equal(f.properties.has(typeMigrationKey), false);
+  assert.ok(f.calls.writes.every(write => write.column === 12 && write.locked));
+});
+
+test('invalid legacy records or relations prevent all type-migration writes', () => {
+  for (const settings of [
+    { sourceRows: [legacyHeaders, rowFor(CSV, { status: 'invented' }).slice(0, -1)] },
+    { sourceRows: [legacyHeaders, rowFor(CSV).slice(0, -1)], relationRows: [['broken-relations']] },
+    { sourceRows: [HEADERS, rowFor(CSV, { baseType: '' }), rowFor(NATIVE, { baseType: 'invented' })], properties: { [typeMigrationKey]: 'pending' } },
+    { sourceRows: [HEADERS, rowFor(CSV, { baseType: '' })] },
+  ]) {
+    const f = fixture(settings);
+    const previous = JSON.stringify([f.sourceSheet.state.rows, f.relationSheet.state.rows]);
+    const propertiesBefore = [...f.properties.entries()];
+    assert.throws(() => readServiceDatabase(f), /STORAGE_/);
+    assert.equal(f.calls.writes.length, 0);
+    assert.equal(JSON.stringify([f.sourceSheet.state.rows, f.relationSheet.state.rows]), previous);
+    assert.deepEqual([...f.properties.entries()], propertiesBefore);
+    assert.equal(f.calls.lockDepth, 0);
+  }
+});
+
+test('changing base type invalidates a previous manual check unless the caller explicitly checks the new criterion', () => {
+  const f = fixture();
+  const initial = f.list().items.find(item => item.id === CSV);
+  const validated = f.patch({ id: CSV, formatCheck: 'valid', expectedRevision: initial.revision }).item;
+  const changed = f.patch({ id: CSV, baseType: 'lpr', expectedRevision: validated.revision }).item;
+  assert.equal(changed.baseType, 'lpr');
+  assert.equal(changed.formatCheck, 'unchecked');
+  assert.equal(changed.revision, validated.revision + 1);
+  const checked = f.patch({ id: CSV, baseType: 'general', formatCheck: 'valid', expectedRevision: changed.revision }).item;
+  assert.equal(checked.baseType, 'general');
+  assert.equal(checked.formatCheck, 'valid');
+  assert.equal(f.record(CSV).baseType, 'general');
+  assert.equal(f.record(CSV).formatCheck, 'valid');
+  const staleWrites = f.calls.writes.length;
+  assert.throws(() => f.patch({ id: CSV, baseType: 'lpr', expectedRevision: changed.revision }), /CONFLICT/);
+  assert.equal(f.calls.writes.length, staleWrites);
+});
+
+test('import registration stores the selected type and status and an unchecked manual validation', () => {
+  const f = fixture();
+  const record = registerSource(f, NATIVE, 'lpr', 'rework');
+  assert.equal(record.baseType, 'lpr');
+  assert.equal(record.status, 'rework');
+  assert.equal(record.formatCheck, 'unchecked');
+  assert.equal(record.revision, 1);
+  assert.equal(f.record(NATIVE).baseType, 'lpr');
+  assert.equal(f.record(NATIVE).status, 'rework');
+  assert.deepEqual(f.relationSheet.state.rows, [RELATION_HEADERS]);
+  assert.ok(f.calls.writes.every(write => write.locked));
+  assert.ok(f.calls.opens.every(id => id === STORAGE));
+});
+
+test('retrying import registration preserves later manual decisions and does not add a duplicate', () => {
+  const f = fixture();
+  const first = registerSource(f, NATIVE, 'lpr', 'rework');
+  const manual = f.patch({ id: NATIVE, baseType: 'general', status: 'ready', formatCheck: 'valid', expectedRevision: first.revision }).item;
+  const writes = f.calls.writes.length;
+  const retried = registerSource(f, NATIVE, 'lpr', 'rework');
+  assert.equal(retried.baseType, 'general');
+  assert.equal(retried.status, 'ready');
+  assert.equal(retried.formatCheck, 'valid');
+  assert.equal(retried.revision, manual.revision);
+  assert.equal(f.calls.writes.length, writes);
+  assert.equal(f.sourceSheet.state.rows.filter(row => row[0] === NATIVE).length, 1);
+});
+
+
+test('a partially committed legacy migration resumes only from its stored marker and removes it after flush', () => {
+  const historical = rowFor(CSV, { status: 'ready', formatCheck: 'valid', revision: 6 }).slice(0, -1);
+  const settings = { sourceRows: [legacyHeaders, historical], failWriteAfterApply: true };
+  const f = fixture(settings);
+  assert.throws(() => readServiceDatabase(f));
+  assert.equal(f.properties.get(typeMigrationKey), 'pending');
+  assert.deepEqual(f.sourceSheet.state.rows[1].slice(0, 11), historical);
+  const failureFlush = f.calls.events.findLastIndex(event => event.kind === 'flush');
+  const failureUnlock = f.calls.events.findLastIndex(event => event.kind === 'unlock');
+  assert.ok(failureFlush >= 0 && failureFlush < failureUnlock);
+  settings.failWriteAfterApply = false;
+  const recovered = readServiceDatabase(f);
+  assert.equal(recovered.records[CSV].baseType, 'general');
+  assert.equal(recovered.records[CSV].revision, 6);
+  assert.deepEqual(f.sourceSheet.state.rows[1].slice(0, 11), historical);
+  assert.equal(f.properties.has(typeMigrationKey), false);
+});
+
+
+test('legacy type migration does not create records in empty rows or an empty source register', () => {
+  const empty = fixture({ sourceRows: [legacyHeaders] });
+  const emptyResult = readServiceDatabase(empty);
+  assert.deepEqual(Object.keys(emptyResult.records), []);
+  assert.equal(empty.sourceSheet.state.rows.length, 1);
+  assert.deepEqual(empty.sourceSheet.state.rows[0], HEADERS);
+  assert.ok(empty.calls.writes.every(write => write.column === 12 && write.row === 1));
+
+  const historical = rowFor(CSV, { status: 'ready', revision: 3 }).slice(0, -1);
+  const sparse = fixture({ sourceRows: [legacyHeaders, [], historical] });
+  const result = readServiceDatabase(sparse);
+  assert.deepEqual(Object.keys(result.records), [CSV]);
+  assert.equal(result.records[CSV].row, 3);
+  assert.deepEqual(sparse.sourceSheet.state.rows[1], []);
+  assert.deepEqual(sparse.sourceSheet.state.rows[2].slice(0, 11), historical);
+  assert.equal(sparse.sourceSheet.state.rows[2][11], 'general');
+});
+
+
+test('a deliberate move can replace a known metadata revision once while retries preserve newer decisions', () => {
+  const f = fixture();
+  const initial = registerSource(f, NATIVE, 'general', 'collection');
+  const validated = f.patch({ id: NATIVE, formatCheck: 'valid', expectedRevision: initial.revision }).item;
+  const selected = registerSource(f, NATIVE, 'lpr', 'ready', { expectedRevision: validated.revision });
+  assert.equal(selected.baseType, 'lpr');
+  assert.equal(selected.status, 'ready');
+  assert.equal(selected.formatCheck, 'unchecked');
+  assert.equal(selected.revision, validated.revision + 1);
+  const manual = f.patch({ id: NATIVE, status: 'rework', formatCheck: 'invalid', expectedRevision: selected.revision }).item;
+  const writes = f.calls.writes.length;
+  const retried = registerSource(f, NATIVE, 'lpr', 'ready', { expectedRevision: validated.revision });
+  assert.equal(retried.status, 'rework');
+  assert.equal(retried.formatCheck, 'invalid');
+  assert.equal(retried.revision, manual.revision);
+  assert.equal(f.calls.writes.length, writes);
 });
