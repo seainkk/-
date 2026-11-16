@@ -8,6 +8,8 @@ var REGISTRY_CONFIG = Object.freeze({
   defaultSourceBasesFolderId: '1deuP0ovOC70PrElQKZjSjuvSMgPF0J7r',
   sourceBasesFolderName: 'Исходные базы',
   defaultSourceBasesStorageId: '1lzbjoPNnrVn5-8GoAhaLZPS_S8J0lfcaoO8Ybxw396M',
+  defaultContactCenterId: '1BZj1HUp6eZnzeG-0hESOMNLyg2E0NobRwdxhj_MMmSw',
+  defaultContactCenterFolderId: '1Jv7GxuPDN0IOvL3yIYywVZzm7RGFLQwa',
   maxSourceBaseRows: 5000,
   maxSourceFolders: 500,
   segmentAnalysisMaxFiles: 80,

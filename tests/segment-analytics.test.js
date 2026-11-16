@@ -61,6 +61,7 @@ function fixture(options = {}) {
         if (!file || file.unreadable) throw new Error('Cannot open');
         return { getSheets: () => (file.sheets || []).map((sheet, index) => ({
           getSheetId: () => sheet.id ?? index,
+          getName: () => sheet.name ?? 'Лист ' + (index + 1),
           getLastRow: () => sheet.lastRow ?? sheet.rows?.length ?? 0,
           getLastColumn: () => sheet.lastColumn ?? Math.max(0, ...(sheet.rows || []).map(row => row.length)),
           getRange: (row, column, rowCount, columnCount) => {
@@ -167,6 +168,75 @@ test('an unmanaged lone first row stays unknown instead of hiding a possible con
   assert.equal(item.contactPresence, 'unknown');
   assert.equal(item.analysis.state, 'partial');
   assert.match(item.analysis.warnings.join(' '), /заголовок/);
+});
+
+const CENTER = 'contact_center_1234567890';
+function centerSheets() {
+  const code = readFileSync(`${sourceDir}ContactTarget.gs`, 'utf8');
+  const context = vm.createContext({});
+  vm.runInContext(code, context);
+  return ['base', 'email', 'telegram'].map((kind, index) => ({ id: index + 100, name: ['База', 'Email', 'Telegram'][index], rows: [plain(context.CONTACT_TARGET_HEADERS[kind])] }));
+}
+
+test('the configured Center exact header-only working tabs are empty without import tracking', () => {
+  const f = fixture({ files: [sourceFile(CENTER, centerSheets())], properties: { CONTACT_CENTER_ID: CENTER } });
+  const item = f.dashboard().items[0];
+  assert.equal(item.overallStatus, 'no_contacts');
+  assert.equal(item.contactPresence, 'empty');
+  assert.equal(item.analysis.state, 'ready');
+  assert.deepEqual(f.calls.opened, [CENTER]);
+  assert.equal(f.calls.ranges.length, 3);
+  assert.ok(f.calls.ranges.every(range => range.row === 1 && range.rowCount === 1));
+});
+
+test('the default configured Center also recognizes exact headers and reads body contacts', () => {
+  const tabs = centerSheets(); tabs[1].rows.push(['contact-1', 'company-1', 'Компания', 'someone@example.test']);
+  const f = fixture({ files: [sourceFile(CENTER, tabs)], limits: { defaultContactCenterId: CENTER } });
+  const item = f.dashboard().items[0];
+  assert.equal(item.overallStatus, 'preparation');
+  assert.equal(item.analysis.hasContacts, true);
+  assert.ok(f.calls.ranges.some(range => range.sheetId === 101 && range.row === 2));
+  assert.equal(JSON.stringify(item).includes('someone@example.test'), false);
+});
+
+test('changed Center headers, extra header cells and unrelated matching headers stay unknown', () => {
+  const changed = centerSheets(); changed[0].rows[0][0] = 'Possible first contact';
+  const extra = centerSheets(); extra[0].rows[0].push('Possible first contact');
+  for (const tabs of [changed, extra]) {
+    const item = fixture({ files: [sourceFile(CENTER, tabs)], properties: { CONTACT_CENTER_ID: CENTER } }).dashboard().items[0];
+    assert.equal(item.overallStatus, null);
+    assert.equal(item.contactPresence, 'unknown');
+  }
+  const other = 'other_center_1234567890';
+  const item = fixture({ files: [sourceFile(other, centerSheets())], properties: { CONTACT_CENTER_ID: CENTER } }).dashboard().items[0];
+  assert.equal(item.overallStatus, null);
+  assert.equal(item.contactPresence, 'unknown');
+});
+
+test('explicit contradictory tracking does not get replaced by Center header inference', () => {
+  const tabs = centerSheets(), tracking = headers(CENTER, tabs[0].id, false);
+  tracking.loads.push({ ...tracking.loads[0], hasHeader: true });
+  const item = fixture({ files: [sourceFile(CENTER, tabs)], properties: { CONTACT_CENTER_ID: CENTER }, tracking }).dashboard().items[0];
+  assert.equal(item.overallStatus, null);
+  assert.equal(item.analysis.state, 'partial');
+});
+
+test('Center header inference respects scan budgets and cannot open a moved file', () => {
+  const f = fixture({ files: [sourceFile(CENTER, centerSheets())], properties: { CONTACT_CENTER_ID: CENTER }, limits: { segmentAnalysisMaxCells: 10, segmentAnalysisChunkCells: 3 } });
+  assert.equal(f.dashboard().items[0].overallStatus, null);
+  assert.ok(f.calls.ranges.every(range => range.rowCount * range.columnCount <= 3));
+  assert.ok(f.calls.ranges.reduce((sum, range) => sum + range.rowCount * range.columnCount, 0) <= 10);
+  const moved = fixture({ files: [sourceFile(CENTER, centerSheets(), { actualParents: [ROOT] })], properties: { CONTACT_CENTER_ID: CENTER } });
+  assert.equal(moved.dashboard().items[0].overallStatus, null);
+  assert.deepEqual(moved.calls.opened, []);
+  assert.deepEqual(moved.calls.ranges, []);
+});
+
+test('recognizing configured Center headers never bypasses shared-link authorization', () => {
+  const f = fixture({ files: [sourceFile(CENTER, centerSheets())], properties: { CONTACT_CENTER_ID: CENTER }, accessKey: 'wrong' });
+  assert.throws(() => f.dashboard(), /LINK_ACCESS_REQUIRED/);
+  assert.deepEqual(f.calls.opened, []);
+  assert.deepEqual(f.calls.ranges, []);
 });
 
 test('an explicit no-header choice counts a first-row contact', () => {

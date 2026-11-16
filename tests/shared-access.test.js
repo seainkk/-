@@ -30,7 +30,7 @@ function fixture() {
       base64EncodeWebSafe: value => Buffer.from(value).toString('base64url'),
     },
   });
-  for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'Access.gs']) {
+  for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'ContactPreview.gs', 'ContactTarget.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'Access.gs']) {
     vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   }
   return { context, properties, calls, call: (method, accessKey = TEST_ACCESS_KEY, payload) => context.callApp({ method, accessKey, ...(payload === undefined ? {} : { payload }) }) };
@@ -42,6 +42,24 @@ test('the public page renders only a static shell without visitor identity, acce
   assert.equal(f.calls.shell, 1);
   assert.equal(f.calls.folders, 0);
   assert.equal(f.context.SHARED_REQUEST_SCOPE_, null);
+});
+
+test('contact analysis uses the same verified transport and clears its access scope', () => {
+  const f = fixture();
+  let previews = 0;
+  f.context.previewSourceBaseContacts_ = request => {
+    previews++;
+    assert.equal(f.context.authorize_().rootId, ROOT);
+    return { id: request.id, state: 'ready' };
+  };
+  assert.throws(() => f.call('previewSourceBaseContacts', 'Z'.repeat(43), { id: 'source_file_1234567890' }), /LINK_ACCESS_REQUIRED/);
+  assert.equal(previews, 0);
+  assert.deepEqual(plain(f.call('previewSourceBaseContacts', TEST_ACCESS_KEY, { id: 'source_file_1234567890' })), { id: 'source_file_1234567890', state: 'ready' });
+  assert.equal(previews, 1);
+  assert.equal(f.context.SHARED_REQUEST_SCOPE_, null);
+  f.properties.set('SHARED_ACCESS_KEY_SHA256', hash('rotated-key'));
+  assert.throws(() => f.call('previewSourceBaseContacts', TEST_ACCESS_KEY, { id: 'source_file_1234567890' }), /LINK_ACCESS_REQUIRED/);
+  assert.equal(previews, 1);
 });
 
 test('missing, malformed and incorrect keys cannot reach data or mutation handlers', () => {

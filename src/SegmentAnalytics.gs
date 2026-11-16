@@ -153,7 +153,7 @@ function segmentAnalyzeFile_(context, segmentId, fileId, headers, budget) {
       if (!segmentAnalysisTime_(budget) || budget.sheets >= budget.maxSheets) return segmentAnalysisPartial_('Достигнут лимит проверки листов. Пустой сегмент пока не подтверждён.');
       budget.sheets++;
       var sheet = sheets[index], key = fileId + '|' + String(sheet.getSheetId());
-      var hasHeader = Object.prototype.hasOwnProperty.call(headers, key) ? headers[key] : null;
+      var hasHeader = Object.prototype.hasOwnProperty.call(headers, key) ? headers[key] : segmentCenterHeader_(context, fileId, sheet, budget);
       var result = segmentAnalyzeSheet_(sheet, hasHeader, budget);
       if (result.hasContacts) return result;
       if (result.state !== 'ready') partial = result;
@@ -162,6 +162,24 @@ function segmentAnalyzeFile_(context, segmentId, fileId, headers, budget) {
   } catch (error) {
     return segmentAnalysisPartial_('Не удалось прочитать одну из таблиц. Проверьте права доступа и обновите данные.');
   }
+}
+
+/** Only the explicitly configured Center can infer its exact, packaged headers. */
+function segmentCenterHeader_(context, fileId, sheet, budget) {
+  var centerId = context.properties.getProperty('CONTACT_CENTER_ID') || REGISTRY_CONFIG.defaultContactCenterId;
+  if (fileId !== centerId || typeof CONTACT_TARGET_HEADERS === 'undefined' || typeof sheet.getName !== 'function') return null;
+  var kind = { 'База': 'base', 'Email': 'email', 'Telegram': 'telegram' }[sheet.getName()];
+  var expected = kind && CONTACT_TARGET_HEADERS[kind];
+  if (!expected || sheet.getLastRow() < 1 || sheet.getLastColumn() !== expected.length) return null;
+  for (var column = 1; column <= expected.length; column += budget.chunkCells) {
+    var count = Math.min(budget.chunkCells, expected.length - column + 1);
+    if (!segmentAnalysisTime_(budget) || budget.cells + count > budget.maxCells) return null;
+    budget.cells += count;
+    var first = sheet.getRange(1, column, 1, count).getDisplayValues();
+    if (!first || first.length !== 1 || first[0].length !== count) return null;
+    for (var index = 0; index < count; index++) if (first[0][index] !== expected[column - 1 + index]) return null;
+  }
+  return true;
 }
 
 function segmentAnalyzeSheet_(sheet, hasHeader, budget) {

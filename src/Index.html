@@ -59,6 +59,25 @@
           <div id="br-import-message" class="br-source-message" role="status" aria-live="polite" hidden></div>
           <button id="br-import-reread" type="button" class="br-button" hidden>Перечитать список</button>
         </section>
+        <section id="br-contact-preview" class="br-contact-preview" hidden aria-labelledby="br-contact-preview-title">
+          <div class="br-import-heading"><h2 id="br-contact-preview-title">Состав базы</h2><div class="br-contact-preview-actions"><button id="br-contact-preview-refresh" type="button" class="br-button">Пересчитать</button><button id="br-contact-preview-close" type="button" class="br-button">Закрыть</button></div></div>
+          <p id="br-contact-preview-health" class="br-muted" role="status" aria-live="polite"></p>
+          <p id="br-contact-preview-scope" class="br-contact-preview-scope">Предварительный состав базы. Перенос отдельных контактов в «Центр баз» ещё не подключён. Подсчёт не заменяет валидацию контактов.</p>
+          <div id="br-contact-preview-result" hidden>
+            <dl id="br-contact-preview-metrics" class="br-contact-preview-metrics"></dl>
+            <div id="br-contact-preview-target" class="br-contact-preview-target"><p id="br-contact-preview-target-label"></p><div class="br-contact-preview-table-wrap"><table class="br-contact-preview-table"><thead><tr><th scope="col">Данные</th><th scope="col">Уже есть</th><th scope="col">Новых</th><th scope="col">Новых без спорной связи</th></tr></thead><tbody id="br-contact-preview-target-rows"></tbody></table></div></div>
+            <p id="br-contact-preview-coverage" class="br-muted"></p>
+            <ul id="br-contact-preview-warnings" class="br-contact-preview-warnings" hidden></ul>
+            <details id="br-contact-preview-columns"><summary>Какие листы и столбцы учтены</summary><div id="br-contact-preview-sheet-list"></div></details>
+            <section id="br-contact-preview-conflicts" hidden aria-labelledby="br-contact-preview-conflicts-title">
+              <h3 id="br-contact-preview-conflicts-title">Требуют ручной проверки</h3>
+              <p class="br-muted">Принадлежность этих контактов нужно проверить вручную. Компании автоматически не объединяются.</p>
+              <p id="br-contact-preview-conflicts-note" class="br-muted"></p>
+              <ol id="br-contact-preview-conflict-list" class="br-contact-preview-conflict-list"></ol>
+              <div id="br-contact-preview-pagination" class="br-contact-preview-pagination" hidden><button id="br-contact-preview-prev" type="button" class="br-button">← Назад</button><span id="br-contact-preview-page" class="br-muted"></span><button id="br-contact-preview-next" type="button" class="br-button">Далее →</button></div>
+            </section>
+          </div>
+        </section>
         <div class="br-source-filters" role="group" aria-label="Поиск и фильтры реестра">
           <label class="br-source-search-label" for="br-source-search">Поиск по названию<input id="br-source-search" type="search" placeholder="Название базы" autocomplete="off"></label>
           <label for="br-source-contents-filter">Наполнение<select id="br-source-contents-filter"><option value="">Любое</option><option value="companies">Компании</option><option value="lpr">ЛПР</option></select></label>

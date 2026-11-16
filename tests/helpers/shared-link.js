@@ -10,10 +10,12 @@ const modules = [
   ['Segments.gs', 'getSegmentsMetadata_'],
   ['SourceBases.gs', 'getSourceBases_'],
   ['SourceImport.gs', 'importSourceBaseLink_'],
+  ['ContactPreview.gs', 'previewSourceBaseContacts_'],
+  ['ContactTarget.gs', 'contactPreviewCompareTarget_'],
   ['SegmentActions.gs', 'createSegment_'],
   ['SegmentAnalytics.gs', 'getSegmentsDashboard_'],
 ];
-const methods = ['getAppBootstrap', 'getBootstrap', 'createBase', 'createFolder', 'renameItem', 'getSourceBases', 'updateSourceBase', 'importSourceBaseLink', 'getSourceSheets', 'createSegment', 'updateSegment', 'getSegmentsDashboard', 'getSegmentMailings'];
+const methods = ['getAppBootstrap', 'getBootstrap', 'createBase', 'createFolder', 'renameItem', 'getSourceBases', 'updateSourceBase', 'importSourceBaseLink', 'getSourceSheets', 'createSegment', 'updateSegment', 'getSegmentsDashboard', 'getSegmentMailings', 'previewSourceBaseContacts'];
 
 /** Real dispatcher proxies for fixtures; convenience names are never deployed RPCs. */
 export function installSharedApi(context, { accessKey = () => TEST_ACCESS_KEY } = {}) {

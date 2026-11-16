@@ -10,6 +10,7 @@ function callApp(request) {
         getAppBootstrap: getAppBootstrap_, getBootstrap: getBootstrap_,
         createBase: createBase_, createFolder: createFolder_, renameItem: renameItem_,
         getSourceBases: getSourceBases_, updateSourceBase: updateSourceBase_,
+        previewSourceBaseContacts: previewSourceBaseContacts_,
         importSourceBaseLink: importSourceBaseLink_, getSourceSheets: getSourceSheets_,
         createSegment: createSegment_, updateSegment: updateSegment_,
         getSegmentsDashboard: getSegmentsDashboard_, getSegmentMailings: getSegmentMailings_

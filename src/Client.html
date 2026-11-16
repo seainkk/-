@@ -12,6 +12,7 @@
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
   const sourceDrafts=new Map(),sourceMessages=new Map(),importRequests=new Map(),segmentRequests=new Map();
   const pendingSyncViews=new Set();let syncTimer=null;
+  let contactPreview=null,contactPreviewEpoch=0;
   const sourceFilters={query:'',contents:'',onlyUnassigned:false};
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
   function sharedKeyFromHash(hash){const match=typeof hash==='string'?hash.match(/^#?access_key=([A-Za-z0-9_-]{43})$/):null;return match&&match[0]===hash?match[1]:null;}
@@ -42,6 +43,7 @@
     const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message){
+    contactPreview=null;contactPreviewEpoch++;renderContactPreview();
     pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;
     if(message)notifyEntry('locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
   }
@@ -108,6 +110,47 @@
   function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0;}
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
   function sourceFocused(){return !!document.activeElement?.closest?.('.br-source-fields');}
+  function canPreviewContacts(item){return !!item&&item.present!==false&&item.mimeType==='application/vnd.google-apps.spreadsheet';}
+  function contactPreviewCount(counts,combined,fallback){const value=counts?.[combined];return Number.isSafeInteger(value)&&value>=0?value:counts?.[fallback];}
+  function contactPreviewSourceUrl(id,source){const fileId=typeof source?.fileId==='string'&&/^[A-Za-z0-9_-]{10,200}$/.test(source.fileId)?source.fileId:id;const sheetId=String(source?.sheetId??'');if(!/^\d+$/.test(sheetId))return nativeUrl(fileId);const row=source?.row;return nativeUrl(fileId,sheetId)+(Number.isSafeInteger(row)&&row>0?'&range=A'+row:'');}
+  function queueContactPreview(item,options={}){
+    if(!accessReady||!canPreviewContacts(item)||editingBlocked()||importOpen||segmentEditor)return;
+    if(contactPreview?.source.id===item.id&&(contactPreview.loading||contactPreview.queued))return;
+    contactPreview={epoch:++contactPreviewEpoch,source:{id:item.id,name:item.name||item.fileName||'База'},queued:true,loading:false,data:null,error:null,page:0};renderContactPreview();updateControls();
+    if(options.scroll)$('br-contact-preview').scrollIntoView({block:'start',behavior:'smooth'});
+    if(!options.defer)flushPendingView();
+  }
+  async function runContactPreview(){
+    const current=contactPreview;if(!current?.queued||requesting()||!accessReady)return;
+    current.queued=false;current.loading=true;renderContactPreview();updateControls();
+    try{const result=await rpc('previewSourceBaseContacts',{id:current.source.id});if(accessReady&&contactPreview===current&&current.epoch===contactPreviewEpoch){current.data=result;current.error=null;}}
+    catch(error){if(accessReady&&contactPreview===current&&current.epoch===contactPreviewEpoch)current.error=failure(error).message;}
+    finally{current.loading=false;if(contactPreview===current)renderContactPreview();updateControls();flushPendingView();}
+  }
+  function renderContactPreview(){
+    const panel=$('br-contact-preview');panel.hidden=!contactPreview;if(!contactPreview){$('br-contact-preview-title').textContent='Состав базы';$('br-contact-preview-health').textContent='';$('br-contact-preview-metrics').replaceChildren();$('br-contact-preview-target-label').replaceChildren();$('br-contact-preview-target-rows').replaceChildren();$('br-contact-preview-scope').textContent='Предварительный состав базы. Подсчёт не заменяет валидацию контактов.';$('br-contact-preview-coverage').textContent='';$('br-contact-preview-warnings').replaceChildren();$('br-contact-preview-sheet-list').replaceChildren();$('br-contact-preview-conflict-list').replaceChildren();$('br-contact-preview-conflicts-note').textContent='';$('br-contact-preview-page').textContent='';$('br-contact-preview-result').hidden=true;return;}
+    const current=contactPreview,data=current.data,health=$('br-contact-preview-health');$('br-contact-preview-title').textContent='Состав базы: '+current.source.name;panel.setAttribute('aria-busy',String(current.loading||current.queued));
+    health.classList.toggle('br-error',!!current.error);health.textContent=current.error?'Подсчёт не завершён: '+current.error:current.loading?'Считаем компании, email и телефоны…':current.queued?'Подсчёт запланирован. Откройте реестр; он начнётся после текущей операции и закрытия форм.':data?.state==='ready'?'Подсчёт найденных контактов завершён.':data?.state==='mapping_required'?'Нужно уточнить названия или назначение столбцов. Итоговые количества пока не определены.':data?'Анализ неполный. Показанные количества предварительные.':'';
+    $('br-contact-preview-refresh').disabled=current.loading||current.queued||editingBlocked()||importOpen||!!segmentEditor;
+    $('br-contact-preview-result').hidden=!data;if(!data)return;
+    const metrics=$('br-contact-preview-metrics');metrics.replaceChildren();
+    for(const [label,value] of [['Компании по ID/ИНН',data.companies?.unique],['Уникальных email',data.emails?.unique],['Уникальных телефонов',data.phones?.unique],['Из них мобильных',data.phones?.mobiles],['Email у нескольких компаний',contactPreviewCount(data.emails,'multiCompanyCombined','multiCompany')],['Телефонов у нескольких компаний',contactPreviewCount(data.phones,'multiCompanyCombined','multiCompany')]]){const box=document.createElement('div'),dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=metricNumber(value);box.append(dt,dd);metrics.append(box);}
+    const targetReady=data.target?.state==='ready',targetLabel=$('br-contact-preview-target-label'),targetRows=$('br-contact-preview-target-rows');targetLabel.replaceChildren();targetRows.replaceChildren();
+    $('br-contact-preview-scope').textContent=targetReady?'Предварительный расчёт. Контакты ещё не перенесены; пригодность для рассылки проверяется отдельно.':'Предварительный состав базы. Сравнение с «Центром баз» недоступно: количество новых контактов пока не определено. Подсчёт не заменяет валидацию.';
+    if(targetReady){targetLabel.append(document.createTextNode('Сравнение с '));const link=document.createElement('a');link.href=nativeUrl(data.target.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent=String(data.target.name||'Центром баз');targetLabel.append(link);}else targetLabel.textContent='Сравнение с «Центром баз» недоступно. Показаны количества в исходном файле.';
+    for(const [label,counts] of [['Компании по ID/ИНН',data.companies],['Email',data.emails],['Телефоны',data.phones]]){const row=document.createElement('tr'),name=document.createElement('th');name.scope='row';name.textContent=label;row.append(name);for(const field of ['existingInTarget','newUnique','newUnambiguous']){const cell=document.createElement('td');cell.textContent=metricNumber(targetReady?counts?.[field]:null);row.append(cell);}targetRows.append(row);}
+    $('br-contact-preview-coverage').textContent='Просмотрено строк: '+metricNumber(data.scannedRows)+'. Найдено вхождений: email — '+metricNumber(data.emails?.occurrences)+', телефонов — '+metricNumber(data.phones?.occurrences)+'. Без данных о компании в исходнике: '+metricNumber(data.companies?.unresolvedRows)+' строк. Контакты с неопределённой принадлежностью'+(targetReady?' с учётом Центра баз':'')+': email — '+metricNumber(contactPreviewCount(data.emails,'unresolvedCombined','unresolved'))+', телефонов — '+metricNumber(contactPreviewCount(data.phones,'unresolvedCombined','unresolved'))+'. Наличие мобильного номера ещё не подтверждает наличие Telegram.';
+    const warnings=$('br-contact-preview-warnings');warnings.replaceChildren();for(const value of Array.isArray(data.warnings)?data.warnings:[]){const li=document.createElement('li');li.textContent=String(value);warnings.append(li);}warnings.hidden=!warnings.children.length;
+    const sheets=$('br-contact-preview-sheet-list');sheets.replaceChildren();for(const sheet of Array.isArray(data.sheets)?data.sheets:[]){const block=document.createElement('div'),title=document.createElement('strong');title.textContent=String(sheet.name||'Лист');const fields=document.createElement('p');fields.textContent='Строк учтено: '+metricNumber(sheet.rowsScanned)+'. '+[['Компания',sheet.companyColumns],['Email',sheet.emailColumns],['Телефоны',sheet.phoneColumns]].map(([label,columns])=>label+': '+(Array.isArray(columns)&&columns.length?columns.map(column=>String(column.label||'')).join(', '):'не распознаны')).join(' · ');block.append(title,fields);if(sheet.reason){const reason=document.createElement('p');reason.textContent=String(sheet.reason);block.append(reason);}sheets.append(block);}
+    renderContactConflicts();
+  }
+  function renderContactConflicts(){
+    const data=contactPreview?.data,conflicts=data?.conflicts||{},items=Array.isArray(conflicts.items)?conflicts.items:[],total=contactPreviewCount(conflicts,'totalCombined','total'),list=$('br-contact-preview-conflict-list'),count=items.length,pageSize=20;
+    $('br-contact-preview-conflicts').hidden=!total&&!count;list.replaceChildren();if(!contactPreview)return;
+    contactPreview.page=Math.max(0,Math.min(contactPreview.page,Math.max(0,Math.ceil(count/pageSize)-1)));const start=contactPreview.page*pageSize;
+    for(const conflict of items.slice(start,start+pageSize)){const li=document.createElement('li'),value=document.createElement('strong'),owners=document.createElement('p'),reason=document.createElement('p');reason.className='br-contact-preview-conflict-reason';reason.textContent=conflict.reason==='unknown_owner'?'Не определена компания':'У нескольких компаний';value.textContent=(conflict.type==='phone'?'Телефон: ':'Email: ')+String(conflict.value||'');owners.textContent='Компании: '+(Array.isArray(conflict.companies)?conflict.companies.map(company=>String(company.label||company.key||'Не определена')).join(' · '):'Не определены');if(!owners.textContent.replace('Компании: ','').trim())owners.textContent='Компания не определена';li.append(value,reason,owners);const links=document.createElement('div');links.className='br-contact-preview-source-links';for(const source of Array.isArray(conflict.sources)?conflict.sources:[]){const link=document.createElement('a');link.href=contactPreviewSourceUrl(contactPreview.source.id,source);link.target='_blank';link.rel='noopener noreferrer';link.textContent=(source.fileId&&source.fileId!==contactPreview.source.id?'Центр баз / ':'')+String(source.sheetName||'Лист')+(Number.isSafeInteger(source.row)&&source.row>0?', строка '+source.row:'');links.append(link);}li.append(links);list.append(li);}
+    list.start=start+1;$('br-contact-preview-conflicts-note').textContent='Всего контактов для ручной проверки: '+metricNumber(total)+'.'+(conflicts.truncated?' Часть сведений о спорных связях показана не полностью. Подробности проверяйте в исходной таблице.':'');$('br-contact-preview-pagination').hidden=count<=pageSize;$('br-contact-preview-page').textContent=count?(start+1)+'–'+Math.min(start+pageSize,count)+' из '+count:'';$('br-contact-preview-prev').disabled=start===0;$('br-contact-preview-next').disabled=start+pageSize>=count;
+  }
   function renderSourcesHealth(){
     const node=$('br-sources-health');node.classList.toggle('br-error',!!sourceRefreshError);
     if(sourceRefreshError){node.textContent=(sourceData?'Не удалось обновить список. Показаны последние данные. ':'Не удалось загрузить исходные базы. ')+sourceRefreshError;return;}
@@ -134,6 +177,7 @@
       const heading=document.createElement('h2');heading.textContent=item.name;row.append(heading);
       if(selection.pinnedIds.includes(item.id)&&item.present!==false){const pinned=document.createElement('p');pinned.className='br-source-filter-pinned';pinned.textContent='База показана вне фильтров, чтобы вы могли сохранить или отменить изменения.';row.append(pinned);}
       const link=document.createElement('a');link.className='br-source-file';link.href=sourceFileUrl(item);link.target='_blank';link.rel='noopener noreferrer';link.textContent=(item.fileName||item.name)+' · '+sourceFormatLabel(item);link.dataset.sourceFocus=item.id+'/file';row.append(link);
+      if(canPreviewContacts(item)){const actions=document.createElement('div');actions.className='br-source-preview-actions';const analyze=button('','Проверить состав');analyze.dataset.previewSource=item.id;analyze.dataset.sourceFocus=item.id+'/preview';analyze.disabled=editingBlocked()||importOpen||!!segmentEditor;analyze.addEventListener('click',()=>queueContactPreview(sourceItem(item.id),{scroll:true}));actions.append(analyze);row.append(actions);}
       const draft=sourceDrafts.get(item.id),editable=sourceCanEdit(data,item),changedElsewhere=!!draft&&Number.isSafeInteger(item.revision)&&draft.expectedRevision!==item.revision;
       const contentValue=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')?draft.values.contents:item.contents;const type=document.createElement('div');const badge=document.createElement('span');badge.className='br-source-type';badge.textContent='Наполнение: '+contentsLabel(contentValue);type.append(badge);row.append(type);const criterion=document.createElement('p');criterion.className='br-source-criterion';criterion.textContent=contentsCriterion(contentValue);row.append(criterion);
       const fields=document.createElement('div');fields.className='br-source-fields';
@@ -374,19 +418,21 @@
       if(sourceData&&item){const index=sourceData.items.findIndex((entry)=>entry.id===item.id);if(index>=0)sourceData.items[index]=item;else sourceData.items.push(item);}
       importOpen=false;importing=false;importRequests.clear();$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);updateImportView();if(activeView==='sources')renderSources();
       const success=result.recovered?'Результат предыдущей операции найден. База доступна в «Исходных базах».':result.mode==='move'?'Таблица перенесена в «Исходные базы».':result.mode==='copy'?'Копия Google Таблицы создана в «Исходных базах».':'База загружена как новая Google Таблица в «Исходные базы».';
-      notice(success,'info',{id:fileId,label:'Открыть таблицу'});lastSourceLoaded=0;pendingSyncViews.add('sources');scheduleViewSync();
+      notice(success,'info',{id:fileId,label:'Открыть таблицу'});lastSourceLoaded=0;pendingSyncViews.add('sources');queueContactPreview(item||{id:fileId,name:fields.name,mimeType:'application/vnd.google-apps.spreadsheet'},{defer:true});scheduleViewSync();
     }catch(error){const parsed=failure(error),recoveryId=importRecoveryId(parsed.message);let text=parsed.code==='CREATION_UNCERTAIN'?'Результат операции не подтверждён. Проверьте таблицу и перечитайте список перед повторной отправкой. '+parsed.message:parsed.message;if(parsed.code==='DRIVE_SETUP_REQUIRED')text+=' Администратору нужно включить сервис Drive v3 в Apps Script, а для стандартного Cloud-проекта — Google Drive API.';showImportMessage(text,true,recoveryId,true);}
     finally{importing=false;updateControls();renderSourcesHealth();flushPendingView();}
   }
   function render(){
     $('br-sources-view').hidden=activeView!=='sources';$('br-segments-view').hidden=activeView!=='segments';$('br-mailings-view').hidden=activeView!=='mailings';$('br-retarget-view').hidden=activeView!=='retarget';
     for(const view of ['sources','segments','retarget'])$('br-view-'+view).setAttribute('aria-pressed',String(activeView===view||view==='segments'&&activeView==='mailings'));
-    root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderAccess();updateControls();
+    root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderContactPreview();renderAccess();updateControls();
   }
   function updateControls(){
     const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady;
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
     for(const add of root.querySelectorAll('[data-add-source]')){const item=sourceItem(add.dataset.addSource);add.disabled=!readySource(item)||sourceDrafts.has(item.id)||editing||importOpen||!!segmentEditor;}
+    for(const analyze of root.querySelectorAll('[data-preview-source]'))analyze.disabled=editing||importOpen||!!segmentEditor;
+    $('br-contact-preview-refresh').disabled=!contactPreview||!!contactPreview.loading||!!contactPreview.queued||editing||importOpen||!!segmentEditor;
     $('br-import-open').disabled=importOpen||editing||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
     $('br-add-segment').disabled=editing||importOpen||!!segmentEditor||dashboard&&dashboard.state!=='ready';
     for(const edit of root.querySelectorAll('[data-edit-segment]'))edit.disabled=editing||importOpen||!!segmentEditor;
@@ -409,6 +455,7 @@
   function flushPendingView(){
     if(requesting())return;if(pendingAccessChange){pendingAccessChange=false;startSharedAccess();return;}if(!accessReady)return;
     if(segmentEditor){renderSegmentSources();updateControls();if(segmentEditor.readingLists)return;if(segmentEditor.loadingLists){loadSegmentEditorLists();return;}if(segmentEditor.pendingSourceId){const id=segmentEditor.pendingSourceId;segmentEditor.pendingSourceId=null;chooseSegmentSource(id,true);return;}}
+    if(contactPreview?.queued&&activeView==='sources'&&syncTimer===null&&!formIsOpen()&&!sourceFocused()){runContactPreview();return;}
     updateControls();if(pendingView){const view=pendingView;pendingView=null;if(view===activeView){refreshActiveView({opening:true,preserveNotice:true});return;}}
     if(syncTimer===null&&pendingSyncViews.has(activeView)&&!formIsOpen()&&!sourceFocused())refreshActiveView({sync:true,preserveNotice:true});
   }
@@ -432,6 +479,9 @@
   $('br-upload-file').addEventListener('change',()=>{importFileSelection++;});
   $('br-import-file-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('file',event.currentTarget);});$('br-import-link-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('link',event.currentTarget);});
   $('br-import-reread').addEventListener('click',()=>refreshSourceBases({preserveNotice:true}));
+  $('br-contact-preview-close').addEventListener('click',()=>{contactPreview=null;contactPreviewEpoch++;renderContactPreview();updateControls();flushPendingView();});
+  $('br-contact-preview-refresh').addEventListener('click',()=>{if(contactPreview)queueContactPreview(Object.assign({mimeType:'application/vnd.google-apps.spreadsheet'},contactPreview.source));});
+  $('br-contact-preview-prev').addEventListener('click',()=>{if(contactPreview){contactPreview.page--;renderContactConflicts();}});$('br-contact-preview-next').addEventListener('click',()=>{if(contactPreview){contactPreview.page++;renderContactConflicts();}});
   window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving){event.preventDefault();event.returnValue='';}});
   try{if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;pendingAccessChange=true;flushPendingView();});}catch(ignored){}
   render();startSharedAccess();
