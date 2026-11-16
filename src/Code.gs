@@ -1,8 +1,9 @@
 /**
  * Standalone Apps Script web app. Every remote operation verifies the signed-in
- * user and the item's actual Drive ancestry. Existing spreadsheets are opened
- * only by their Google Sheets links; this app never reads or edits cell data.
- * Drive/Sheets scopes are needed for file metadata and creating blank bases.
+ * user and the item's actual Drive ancestry. Business/source spreadsheets are
+ * opened only by their original links; their cell data is never read or edited.
+ * SourceBases.gs alone reads/writes metadata in the fixed, root-validated service
+ * book. Drive/Sheets scopes also cover file metadata and creating blank bases.
  */
 function doGet() {
   try {
@@ -23,6 +24,7 @@ function getBootstrap() {
   return api_(function () {
     var context = authorize_();
     var root = registryRoot_(context);
+    var serviceId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
     var folders = [], files = [], visited = {}, count = 0;
     function visit(folder, depth) {
       if (visited[folder.getId()]) return;
@@ -31,7 +33,7 @@ function getBootstrap() {
       var fileIterator = folder.getFilesByType(REGISTRY_CONFIG.spreadsheetMime);
       while (fileIterator.hasNext()) {
         var file = fileIterator.next();
-        if (file.isTrashed()) continue;
+        if (file.isTrashed() || file.getId() === serviceId) continue;
         count++;
         if (count > REGISTRY_CONFIG.maxTreeEntries) fail_('REGISTRY_LIMIT', 'Реестр превышает лимит первой версии: 500 папок и баз.');
         files.push({ id: file.getId(), name: file.getName(), parentId: folder.getId(), url: spreadsheetUrl_(file.getId()) });

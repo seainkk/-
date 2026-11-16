@@ -14,7 +14,8 @@ const OUTSIDE = 'outside_sheet_1234567890';
 const OTHER = 'outside_folder_1234567890';
 const MEMBER = 'member@example.com';
 const SHEET_MIME = 'application/vnd.google-apps.spreadsheet';
-const code = () => ['Config.gs', 'Code.gs', 'Segments.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
+const navigationCode = () => ['Config.gs', 'Code.gs', 'Segments.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
+const code = () => `${navigationCode()}\n${readFileSync(`${sourceDir}SourceBases.gs`, 'utf8')}`;
 
 function iterator(items) {
   let position = 0;
@@ -133,8 +134,8 @@ test('the app exposes metadata operations only and has no spreadsheet cell RPCs'
   assert.equal(typeof f.context.loadTable, 'undefined');
   assert.equal(typeof f.context.writeCell, 'undefined');
   const publicFunctions = [...code().matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map(match => match[1]).filter(name => !name.endsWith('_')).sort();
-  assert.deepEqual(publicFunctions, ['createBase', 'createFolder', 'doGet', 'getBootstrap', 'renameItem']);
-  assert.doesNotMatch(code(), /SpreadsheetApp\.openById|\.getRange\s*\(|\.getValues\s*\(|\.setValue\s*\(/);
+  assert.deepEqual(publicFunctions, ['createBase', 'createFolder', 'doGet', 'getBootstrap', 'getSourceBases', 'renameItem', 'updateSourceBase']);
+  assert.doesNotMatch(navigationCode(), /SpreadsheetApp\.openById|\.getRange\s*\(|\.getValues\s*\(|\.setValue\s*\(/);
 });
 
 test('missing allowlist denies requests before Drive or Sheets access', () => {

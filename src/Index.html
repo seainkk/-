@@ -9,7 +9,7 @@
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span aria-hidden="true">▦</span><strong>Реестр баз</strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-registry" type="button" class="br-button" aria-pressed="true">Реестр</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span aria-hidden="true">▦</span><strong>Реестр баз</strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-registry" type="button" class="br-button" aria-pressed="true">Реестр</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-sources" type="button" class="br-button" aria-pressed="false">Исходные базы</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
   <div id="br-notice" class="br-notice" role="status" aria-live="polite" hidden></div>
   <div class="br-layout">
     <aside class="br-sidebar" aria-label="Папки и таблицы">
@@ -30,6 +30,13 @@
         <p id="br-segments-health" class="br-segments-health" role="status" aria-live="polite"></p>
         <div id="br-segments-empty" class="br-segments-empty" role="status" hidden><h2 id="br-segments-empty-title"></h2><p id="br-segments-empty-description"></p></div>
         <div id="br-segments-cards" class="br-segments-cards"></div>
+      </section>
+      <section id="br-sources-view" class="br-sources-view" hidden aria-labelledby="br-sources-title">
+        <div class="br-segments-heading"><div><h1 id="br-sources-title">Исходные базы</h1><p id="br-sources-count" class="br-muted"></p></div><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div>
+        <p class="br-segments-rules">Проверка формата — ручная отметка. Статус обработки задаётся отдельно. Автоматическая проверка и добавление в сегмент пока не подключены.</p>
+        <p id="br-sources-health" class="br-segments-health" role="status" aria-live="polite"></p>
+        <div id="br-sources-empty" class="br-segments-empty" role="status" hidden><h2 id="br-sources-empty-title"></h2><p id="br-sources-empty-description"></p></div>
+        <div id="br-sources-items" class="br-source-items"></div>
       </section>
     </main>
   </div>
