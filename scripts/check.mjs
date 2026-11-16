@@ -36,7 +36,7 @@ for (const scope of ['https://www.googleapis.com/auth/drive', 'https://www.googl
 }
 const mapping = JSON.parse(readFileSync('.clasp.json', 'utf8'));
 if (mapping.rootDir !== 'src' || !mapping.scriptId) throw new Error('Apps Script project mapping missing.');
-for (const required of ['Index.html', 'Styles.html', 'Client.html', 'Code.gs', 'Config.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs']) {
+for (const required of ['Index.html', 'Styles.html', 'Client.html', 'Code.gs', 'Config.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'TeamAccess.gs']) {
   if (!files.includes(required)) throw new Error(`Missing ${required}.`);
 }
 console.log(`Validated ${scripts} scripts, HTML assets and Apps Script manifest.`);

@@ -6,10 +6,12 @@
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,pendingView=null,formMode=null;
   let sourceData=null,sourceTimer=null,lastSourceAttempt=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
   let importOpen=false,importMode='file',importing=false,importFileSelection=0;
+  let teamOpen=false,teamLoading=false,teamSaving=false,teamData=null,teamError=null,teamMessage=null;
   let dashboard=null,dashboardLoading=false,dashboardError=null,lastDashboardAttempt=0,renderedDashboardKey=null;
   let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0;
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
   const sourceDrafts=new Map(),sourceMessages=new Map(),importRequests=new Map(),segmentRequests=new Map();
+  const sourceFilters={query:'',contents:'',onlyUnassigned:false};
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
   function rpc(name,payload){networkPending++;return new Promise((resolve,reject)=>{if(!globalThis.google?.script?.run){reject(new Error('Нет соединения с сервером Google. Откройте опубликованное веб-приложение Apps Script.'));return;}const runner=google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);payload===undefined?runner[name]():runner[name](payload);}).finally(()=>{networkPending--;setTimeout(flushPendingView,0);});}
   function nativeUrl(id,sheetId){return 'https://docs.google.com/spreadsheets/d/'+encodeURIComponent(id)+'/edit'+(sheetId===undefined?'':'#gid='+encodeURIComponent(sheetId));}
@@ -33,6 +35,23 @@
   function sourceFileUrl(item){try{const url=new URL(item.url),match=url.pathname.match(/^\/(?:file|spreadsheets|document|presentation|forms|drawings)\/d\/([^/]+)/);if(url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&['docs.google.com','drive.google.com'].includes(url.hostname)&&match&&decodeURIComponent(match[1])===item.id)return url.href;}catch(error){}return item.mimeType==='application/vnd.google-apps.spreadsheet'?nativeUrl(item.id):'https://drive.google.com/file/d/'+encodeURIComponent(item.id)+'/view';}
   function sourceCanEdit(data,item){return data?.canEdit===true&&item?.canEdit!==false&&item?.present!==false&&Number.isSafeInteger(item?.revision)&&item.revision>=0;}
   function sourceAssociationsKnown(data,item){return data?.associationsAvailable!==false&&item?.associationsAvailable!==false&&Array.isArray(item?.segments);}
+  function sourceSearchText(value){return String(value||'').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g,'е').trim();}
+  function sourceFiltersActive(filters){return !!sourceSearchText(filters?.query)||!!filters?.contents||filters?.onlyUnassigned===true;}
+  function sourceMatchesFilters(data,item,filters){
+    if(item?.present===false)return false;
+    const query=sourceSearchText(filters?.query),contents=filters?.contents||'';
+    if(query&&!sourceSearchText(item?.name).includes(query))return false;
+    if(contents&&!normalizeContents(item?.contents).includes(contents))return false;
+    return filters?.onlyUnassigned!==true||sourceAssociationsKnown(data,item)&&item.segments.length===0;
+  }
+  function sourceFilterSelection(data,filters,draftIds){
+    const items=Array.isArray(data?.items)?data.items:[],drafts=new Set(draftIds||[]),matched=items.filter((item)=>sourceMatchesFilters(data,item,filters));
+    const matches=new Set(matched.map((item)=>item.id)),pinned=items.filter((item)=>drafts.has(item.id)&&!matches.has(item.id));
+    const withoutAssociations=Object.assign({},filters,{onlyUnassigned:false});
+    return {items:items.filter((item)=>matches.has(item.id)||drafts.has(item.id)),matchedCount:matched.length,totalCount:items.filter((item)=>item.present!==false).length,pinnedIds:pinned.map((item)=>item.id),unknownAssociations:filters?.onlyUnassigned===true?items.filter((item)=>sourceMatchesFilters(data,item,withoutAssociations)&&!sourceAssociationsKnown(data,item)).length:0};
+  }
+  function updateSourceFilters(){sourceFilters.query=$('br-source-search').value;sourceFilters.contents=$('br-source-contents-filter').value;sourceFilters.onlyUnassigned=$('br-source-unassigned-filter').checked;renderSources();updateControls();}
+  function resetSourceFilters(){sourceFilters.query='';sourceFilters.contents='';sourceFilters.onlyUnassigned=false;$('br-source-search').value='';$('br-source-contents-filter').value='';$('br-source-unassigned-filter').checked=false;renderSources();updateControls();$('br-source-search').focus();}
   function sourcePatch(item,draft,reviewed){const patch={id:item.id,expectedRevision:reviewed?item.revision:draft.expectedRevision};for(const field of ['contents','status','formatCheck'])if(Object.prototype.hasOwnProperty.call(draft.values,field))patch[field]=draft.values[field];return patch;}
   function importFileError(file){if(!file)return 'Выберите файл базы.';if(!/\.(csv|tsv|xls|xlsx|ods)$/i.test(file.name))return 'Поддерживаются файлы CSV, TSV, XLS, XLSX и ODS.';if(!Number.isFinite(file.size)||file.size<=0)return 'Выберите непустой файл.';if(file.size>10*1024*1024)return 'Размер файла не должен превышать 10 МиБ.';return null;}
   function importLinkId(value){try{const url=new URL(value.trim()),match=url.pathname.match(/^\/spreadsheets\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{10,200})(?:\/|$)/);return url.protocol==='https:'&&url.hostname==='docs.google.com'&&!url.username&&!url.password&&!url.port&&match?match[1]:null;}catch(error){return null;}}
@@ -40,8 +59,8 @@
   function importRecoveryId(message){const match=String(message).match(/https:\/\/docs\.google\.com\/spreadsheets\/d\/([A-Za-z0-9_-]{10,200})(?=\/|\?|#|\s|$)/);return match?match[1]:null;}
   function folderRecoveryId(message){const match=String(message).match(/https:\/\/drive\.google\.com\/drive\/folders\/([A-Za-z0-9_-]{10,200})(?=\/|\?|#|\s|$)/);return match?match[1]:null;}
   function mailingMetric(value,connected){return connected?metricNumber(value):'—';}
-  function requesting(){return networkPending>0||busy||sourceLoading||!!sourceSaving||importing||dashboardLoading||mailingsLoading||segmentSaving||segmentPreviewLoading;}
-  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0;}
+  function requesting(){return networkPending>0||busy||sourceLoading||!!sourceSaving||importing||dashboardLoading||mailingsLoading||segmentSaving||segmentPreviewLoading||teamLoading||teamSaving;}
+  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0||teamOpen;}
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
   function sourceFocused(){return !!document.activeElement?.closest?.('.br-source-fields');}
   function renderSourcesHealth(){
@@ -55,18 +74,20 @@
   }
   function renderSources(){
     $('br-sources-view').hidden=activeView!=='sources';if(activeView!=='sources')return;
-    const data=sourceData,items=Array.isArray(data?.items)?data.items:[];
-    $('br-sources-count').textContent=data?.source?'Файлов: '+items.filter((item)=>item.present!==false).length:data?'Список недоступен':'Загружаем список…';
+    const data=sourceData,selection=sourceFilterSelection(data,sourceFilters,sourceDrafts.keys()),items=selection.items,filtered=sourceFiltersActive(sourceFilters);
+    $('br-sources-count').textContent=data?.source?'Показано: '+selection.matchedCount+' из '+selection.totalCount+(selection.pinnedIds.length?' · Дополнительно с несохранёнными изменениями: '+selection.pinnedIds.length:''):data?'Список недоступен':'Загружаем список…';
+    $('br-source-filters-reset').disabled=!filtered;const filterNote=$('br-source-filters-note');filterNote.hidden=!selection.unknownAssociations;filterNote.textContent=selection.unknownAssociations?'Связи с сегментами недоступны для '+selection.unknownAssociations+' баз. Они не включены в фильтр «Без сегмента».':'';
     const folder=$('br-sources-folder');folder.hidden=!data?.source?.id;if(data?.source?.id)folder.href=folderUrl(data.source.id);
     renderSourcesHealth();
-    const key=JSON.stringify({state:data?.state,source:data?.source,storage:data?.storage,canEdit:data?.canEdit,associationsAvailable:data?.associationsAvailable,items,drafts:Array.from(sourceDrafts),messages:Array.from(sourceMessages),saving:sourceSaving,initial:!data?(sourceLoading?'loading':sourceRefreshError?'error':'empty'):''});if(key===renderedSourceKey)return;renderedSourceKey=key;
+    const key=JSON.stringify({state:data?.state,source:data?.source,storage:data?.storage,canEdit:data?.canEdit,associationsAvailable:data?.associationsAvailable,filters:sourceFilters,items,drafts:Array.from(sourceDrafts),messages:Array.from(sourceMessages),saving:sourceSaving,initial:!data?(sourceLoading?'loading':sourceRefreshError?'error':'empty'):''});if(key===renderedSourceKey)return;renderedSourceKey=key;
     const target=$('br-sources-items'),focusKey=document.activeElement?.dataset?.sourceFocus,oldX=window.scrollX,oldY=window.scrollY;target.replaceChildren();
     const empty=$('br-sources-empty');empty.hidden=items.length>0;
     const states={source_missing:['Папка «Исходные базы» не найдена','Проверьте привязку папки у администратора. Реестр и сегменты остаются доступны.'],source_ambiguous:['Найдено несколько папок «Исходные базы»','Администратору нужно уточнить привязку папки.'],source_outside_registry:['Папка «Исходные базы» недоступна в реестре','Проверьте права доступа и привязку папки.']};
-    const emptyText=states[data?.state]||[data?'В папке пока нет файлов':sourceLoading?'Загружаем исходные базы…':'Список ещё не загружен',data?'Добавьте исходные файлы в папку «Исходные базы» и обновите список.':'Нажмите «Обновить», чтобы повторить загрузку.'];$('br-sources-empty-title').textContent=emptyText[0];$('br-sources-empty-description').textContent=emptyText[1];
+    const emptyText=states[data?.state]||(filtered&&data?.source&&selection.totalCount>0?['По фильтрам ничего не найдено','Измените название, наполнение или фильтр сегмента. Кнопка «Сбросить» покажет все базы.']:[data?'В папке пока нет файлов':sourceLoading?'Загружаем исходные базы…':'Список ещё не загружен',data?'Добавьте исходные файлы в папку «Исходные базы» и обновите список.':'Нажмите «Обновить», чтобы повторить загрузку.']);$('br-sources-empty-title').textContent=emptyText[0];$('br-sources-empty-description').textContent=emptyText[1];
     for(const item of items){
       const row=document.createElement('article');row.className='br-source-item';row.dataset.sourceId=item.id;
       const heading=document.createElement('h2');heading.textContent=item.name;row.append(heading);
+      if(selection.pinnedIds.includes(item.id)&&item.present!==false){const pinned=document.createElement('p');pinned.className='br-source-filter-pinned';pinned.textContent='База показана вне фильтров, чтобы вы могли сохранить или отменить изменения.';row.append(pinned);}
       const link=document.createElement('a');link.className='br-source-file';link.href=sourceFileUrl(item);link.target='_blank';link.rel='noopener noreferrer';link.textContent=(item.fileName||item.name)+' · '+sourceFormatLabel(item);link.dataset.sourceFocus=item.id+'/file';row.append(link);
       const draft=sourceDrafts.get(item.id),editable=sourceCanEdit(data,item),changedElsewhere=!!draft&&Number.isSafeInteger(item.revision)&&draft.expectedRevision!==item.revision;
       const contentValue=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')?draft.values.contents:item.contents;const type=document.createElement('div');const badge=document.createElement('span');badge.className='br-source-type';badge.textContent='Наполнение: '+contentsLabel(contentValue);type.append(badge);row.append(type);const criterion=document.createElement('p');criterion.className='br-source-criterion';criterion.textContent=contentsCriterion(contentValue);row.append(criterion);
@@ -273,13 +294,46 @@
     }catch(error){const parsed=failure(error),recoveryId=importRecoveryId(parsed.message);let text=parsed.code==='CREATION_UNCERTAIN'?'Результат операции не подтверждён. Проверьте таблицу и перечитайте список перед повторной отправкой. '+parsed.message:parsed.message;if(parsed.code==='DRIVE_SETUP_REQUIRED')text+=' Администратору нужно включить сервис Drive v3 в Apps Script, а для стандартного Cloud-проекта — Google Drive API.';showImportMessage(text,true,recoveryId,true);}
     finally{importing=false;updateControls();renderSourcesHealth();flushPendingView();}
   }
+  function teamRoleLabel(role){return role==='admin'?'Администратор':role==='member'?'Сотрудник':'Роль не определена';}
+  function teamCanSubmit(){return bootstrap?.user?.isAdmin===true&&teamData?.canManage===true&&Array.isArray(teamData.members);}
+  function renderTeamAccess(){
+    $('br-team-open').hidden=bootstrap?.user?.isAdmin!==true;$('br-team-panel').hidden=!teamOpen;
+    const main=root.querySelector('.br-main');if(main)main.inert=teamOpen;
+    if(!teamOpen)return;
+    const status=$('br-team-status');status.classList.toggle('br-error',!!teamError);status.textContent=teamError||teamMessage||(teamLoading?'Проверяем доступ команды…':'');
+    const list=$('br-team-members');list.replaceChildren();
+    for(const member of teamData?.members||[]){const row=document.createElement('li'),email=document.createElement('span'),role=document.createElement('span');email.textContent=String(member.email||'');role.textContent=teamRoleLabel(member.role);row.append(email,role);list.append(row);}
+    $('br-team-members-section').hidden=!teamData;
+  }
+  async function refreshTeamAccess(){
+    if(!teamOpen||bootstrap?.user?.isAdmin!==true||requesting())return;
+    teamLoading=true;teamError=null;renderTeamAccess();updateControls();
+    try{const result=await rpc('getTeamAccess');if(result?.canManage!==true||!Array.isArray(result.members))throw new Error('Не удалось подтвердить права управления доступом.');teamData=result;}
+    catch(error){teamError=failure(error).message;}
+    finally{teamLoading=false;renderTeamAccess();updateControls();flushPendingView();}
+  }
+  async function openTeamAccess(){
+    if(bootstrap?.user?.isAdmin!==true||requesting()||formIsOpen())return;
+    teamOpen=true;teamData=null;teamError=null;teamMessage=null;formMode='team';renderTeamAccess();await refreshTeamAccess();if(teamOpen)$('br-team-email').focus();
+  }
+  async function submitTeamMember(){
+    if(!teamOpen||requesting()||!teamCanSubmit())return;
+    const email=$('br-team-email').value.trim(),role=$('br-team-role').value;if(!email){teamError='Укажите email Google-аккаунта.';renderTeamAccess();return;}
+    teamSaving=true;teamError=null;teamMessage=null;renderTeamAccess();updateControls();
+    try{const result=await rpc('addTeamMember',{email,role});const current=teamData.members.find((item)=>item.email===result.email);if(current)current.role=result.role;else teamData.members.push({email:result.email,role:result.role});teamData.members.sort((a,b)=>a.email.localeCompare(b.email));teamMessage=(result.alreadyAllowed?'Доступ проверен и обновлён: ':'Доступ добавлен: ')+result.email+' · '+teamRoleLabel(result.role)+'.';}
+    catch(error){teamError=failure(error).message;}
+    finally{teamSaving=false;renderTeamAccess();updateControls();flushPendingView();}
+  }
   function render(){
     $('br-sources-view').hidden=activeView!=='sources';$('br-segments-view').hidden=activeView!=='segments';$('br-mailings-view').hidden=activeView!=='mailings';$('br-retarget-view').hidden=activeView!=='retarget';
     for(const view of ['sources','segments','retarget'])$('br-view-'+view).setAttribute('aria-pressed',String(activeView===view||view==='segments'&&activeView==='mailings'));
-    root.dataset.view=activeView;renderSources();renderSegments();renderMailings();updateControls();
+    root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderTeamAccess();updateControls();
   }
   function updateControls(){
-    const waiting=requesting();$('br-refresh').disabled=waiting;$('br-refresh').hidden=activeView==='retarget';
+    const waiting=requesting();$('br-refresh').disabled=waiting||teamOpen;
+    $('br-team-open').hidden=bootstrap?.user?.isAdmin!==true;$('br-team-open').disabled=waiting||formIsOpen();$('br-team-open').title=formIsOpen()&&!teamOpen?'Сначала сохраните или отмените текущие изменения.':'';
+    for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=teamOpen;
+    $('br-team-close').disabled=teamSaving;$('br-team-refresh').disabled=waiting;$('br-team-email').disabled=waiting;$('br-team-role').disabled=waiting;$('br-team-submit').disabled=waiting||!teamCanSubmit();$('br-team-submit').textContent=teamSaving?'Добавляем…':'Добавить доступ';$('br-refresh').hidden=activeView==='retarget';
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
     $('br-import-open').disabled=importOpen||waiting||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
     $('br-add-segment').disabled=waiting||importOpen||!!segmentEditor||dashboard&&dashboard.state!=='ready';
@@ -298,6 +352,8 @@
   }
   function flushPendingView(){if(requesting())return;if(segmentEditor)renderSegmentSources();updateControls();if(!pendingView)return;const view=pendingView;pendingView=null;if(view===activeView)refreshActiveView({opening:true,preserveNotice:true});}
   function setView(view,options={}){activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});}
+  $('br-team-open').addEventListener('click',openTeamAccess);$('br-team-refresh').addEventListener('click',refreshTeamAccess);$('br-team-form').addEventListener('submit',(event)=>{event.preventDefault();submitTeamMember();});$('br-team-close').addEventListener('click',()=>{if(teamSaving)return;teamOpen=false;formMode=null;teamError=null;teamMessage=null;renderTeamAccess();updateControls();$('br-team-open').focus();flushPendingView();});
+  $('br-source-search').addEventListener('input',updateSourceFilters);$('br-source-contents-filter').addEventListener('change',updateSourceFilters);$('br-source-unassigned-filter').addEventListener('change',updateSourceFilters);$('br-source-filters-reset').addEventListener('click',resetSourceFilters);
   $('br-view-sources').addEventListener('click',()=>setView('sources'));$('br-view-segments').addEventListener('click',()=>setView('segments'));$('br-view-retarget').addEventListener('click',()=>setView('retarget'));
   $('br-refresh').addEventListener('click',()=>refreshActiveView({manual:true}));
   $('br-mailings-back').addEventListener('click',()=>{setView('segments',{cached:true});setTimeout(()=>{window.scrollTo(0,segmentBackScroll);Array.from(root.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===mailingSegmentId+'/mailings')?.focus({preventScroll:true});},0);});
@@ -315,8 +371,8 @@
   $('br-upload-file').addEventListener('change',()=>{importFileSelection++;});
   $('br-import-file-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('file',event.currentTarget);});$('br-import-link-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('link',event.currentTarget);});
   $('br-import-reread').addEventListener('click',()=>refreshSourceBases({preserveNotice:true}));
-  window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving){event.preventDefault();event.returnValue='';}});
+  window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving||teamSaving){event.preventDefault();event.returnValue='';}});
   render();armViewTimer();
-  (async()=>{busy=true;updateControls();try{bootstrap=await rpc('getAppBootstrap');$('br-user').textContent=bootstrap.user.email||'';}catch(error){notice(failure(error).message,'error');}finally{busy=false;$('br-loading').hidden=true;updateControls();pendingView=activeView;flushPendingView();}})();
+  (async()=>{busy=true;updateControls();try{bootstrap=await rpc('getAppBootstrap');$('br-user').textContent=bootstrap.user.email||'';}catch(error){notice(failure(error).message,'error');}finally{busy=false;$('br-loading').hidden=true;renderTeamAccess();updateControls();pendingView=activeView;flushPendingView();}})();
 })();
 </script>

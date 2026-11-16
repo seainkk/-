@@ -25,7 +25,8 @@ var REGISTRY_CONFIG = Object.freeze({
 /**
  * Run ONCE from the Apps Script editor before deploying. The trailing underscore
  * makes this function unavailable to google.script.run callers.
- * Add team members to ALLOWED_EMAILS in Project Settings > Script Properties.
+ * Later add members from the admin-only team panel, or maintain the private
+ * ALLOWED_EMAILS / ADMIN_EMAILS in Project Settings > Script Properties.
  */
 function setupRegistry_() {
   var owner = normalizeEmail_(Session.getEffectiveUser().getEmail());

@@ -15,7 +15,7 @@ const OTHER = 'outside_folder_1234567890';
 const MEMBER = 'member@example.com';
 const SHEET_MIME = 'application/vnd.google-apps.spreadsheet';
 const navigationCode = () => ['Config.gs', 'Code.gs', 'Segments.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
-const code = () => `${navigationCode()}\n${['SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n')}`;
+const code = () => `${navigationCode()}\n${['SourceBases.gs', 'SourceImport.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'TeamAccess.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n')}`;
 
 function iterator(items) {
   let position = 0;
@@ -134,7 +134,7 @@ test('the app exposes catalog and segment APIs without arbitrary spreadsheet cel
   assert.equal(typeof f.context.loadTable, 'undefined');
   assert.equal(typeof f.context.writeCell, 'undefined');
   const publicFunctions = [...code().matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map(match => match[1]).filter(name => !name.endsWith('_')).sort();
-  assert.deepEqual(publicFunctions, ['createBase', 'createFolder', 'createSegment', 'doGet', 'getAppBootstrap', 'getBootstrap', 'getSegmentMailings', 'getSegmentsDashboard', 'getSourceBases', 'getSourceSheets', 'importSourceBaseLink', 'renameItem', 'updateSegment', 'updateSourceBase', 'uploadSourceBase']);
+  assert.deepEqual(publicFunctions, ['addTeamMember', 'createBase', 'createFolder', 'createSegment', 'doGet', 'getAppBootstrap', 'getBootstrap', 'getSegmentMailings', 'getSegmentsDashboard', 'getSourceBases', 'getSourceSheets', 'getTeamAccess', 'importSourceBaseLink', 'renameItem', 'updateSegment', 'updateSourceBase', 'uploadSourceBase']);
   assert.doesNotMatch(navigationCode(), /SpreadsheetApp\.openById|\.getRange\s*\(|\.getValues\s*\(|\.setValue\s*\(/);
 });
 
@@ -158,6 +158,7 @@ test('all mutating APIs verify the current server-side identity', () => {
     ['createBase', { parentId: ROOT, name: 'Новая база', requestId: 'create_base_request_12345' }],
     ['createFolder', { parentId: ROOT, name: 'Продажи', requestId: 'create_folder_request_12345' }],
     ['renameItem', { id: INSIDE, kind: 'file', name: 'Новое имя' }],
+    ['addTeamMember', { email: 'second@example.com', role: 'admin' }],
   ];
   for (const [method, payload] of methods) assert.throws(() => f.context[method](payload), method);
   assert.equal(f.calls.creates + f.calls.renames + f.calls.moves, 0);
