@@ -1,7 +1,7 @@
 /** Explicit, authenticated imports into the bound source folder. No source cells are read. */
 var SOURCE_IMPORT_CONFIG = Object.freeze({
   receiptLimit: 80,
-  fields: 'id,name,mimeType,parents,webViewLink,trashed,appProperties',
+  fields: 'id,name,mimeType,parents,webViewLink,trashed,appProperties,driveId,capabilities(canCopy,canEdit,canRename,canMoveItemWithinDrive,canMoveItemOutOfDrive)',
   keyProperty: 'registryImportKey',
   fingerprintProperty: 'registryImportFingerprint',
   uploadTypes: {
@@ -33,10 +33,11 @@ function uploadSourceBase(form) {
       common.fingerprintParts = [hash, bytes.length, extension, mimeType];
       return importExecute_(preparation, common, function (receipt, key, fingerprint, beginMutation) {
         blob.setContentType(mimeType);
+        importDestinationWritable_(preparation);
         beginMutation();
         return importDriveCall_(function () {
           return Drive.Files.create({ name: common.name, mimeType: REGISTRY_CONFIG.spreadsheetMime, parents: [preparation.binding.source.id], appProperties: importTags_(null, key, fingerprint) }, blob, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true });
-        });
+        }, 'upload');
       });
     });
   });
@@ -62,6 +63,8 @@ function importSourceBaseLink(request) {
           receipt.preActionRevision = common.mode === 'move' && preparation.database.records[original.id] ? preparation.database.records[original.id].revision : 0;
         }
         if (common.mode === 'copy') {
+          if (original.capabilities && original.capabilities.canCopy === false) fail_('COPY_ACCESS_REQUIRED', 'Google Диск запрещает копирование исходной таблицы для текущего аккаунта. Попросите владельца разрешить копирование или предоставить подходящий доступ.');
+          importDestinationWritable_(preparation);
           beginMutation();
           return importCopyFile_(link, { name: common.name, parents: [preparation.binding.source.id], appProperties: importTags_(null, key, fingerprint) });
         }
@@ -72,6 +75,7 @@ function importSourceBaseLink(request) {
           // since the first attempt, even if the caller still has Drive access.
           fail_('CREATION_UNCERTAIN', 'Состояние исходной таблицы изменилось. Проверьте файл перед повторным перемещением: ' + spreadsheetUrl_(original.id));
         }
+        importMoveWritable_(preparation, original, common.name);
         beginMutation();
         return importMoveFile_(link, original, preparation.binding.source.id, common.name, key, fingerprint);
       });
@@ -86,11 +90,36 @@ function importPrepare_() {
   // Validate the fixed service book BEFORE inspecting its writable schema.
   var storage = sourceBasesStorage_(context);
   if (typeof Drive === 'undefined' || !Drive.Files || ['create', 'copy', 'update', 'get', 'list'].some(function (name) { return typeof Drive.Files[name] !== 'function'; })) fail_('DRIVE_SETUP_REQUIRED', 'В проекте Apps Script нужно включить Google Drive API v3. Обратитесь к администратору.');
-  var capability = importDriveCall_(function () { return Drive.Files.get(storage.public.id, { fields: 'capabilities(canEdit)', supportsAllDrives: true }); });
+  var capability = importDriveCall_(function () { return Drive.Files.get(storage.public.id, { fields: 'capabilities(canEdit)', supportsAllDrives: true }); }, 'storage');
   if (!capability || !capability.capabilities || capability.capabilities.canEdit !== true) fail_('STORAGE_WRITE_REQUIRED', 'Для добавления базы нужны права редактора на служебную таблицу. Обратитесь к администратору.');
   // Schema migration may write metadata; it also requires confirmed edit rights.
   var database = sourceBasesReadDatabase_(storage);
-  return { context: context, binding: binding, storage: storage, database: database };
+  var destination = importDriveCall_(function () { return Drive.Files.get(binding.source.id, { fields: 'id,mimeType,trashed,driveId,capabilities(canAddChildren)', supportsAllDrives: true }); }, 'destination');
+  if (!destination || destination.id !== binding.source.id || destination.trashed || destination.mimeType !== 'application/vnd.google-apps.folder') fail_('DESTINATION_ACCESS_REQUIRED', 'Папка «Исходные базы» недоступна. Проверьте привязку папки и доступ текущего аккаунта.');
+  return { context: context, binding: binding, storage: storage, database: database, destination: destination };
+}
+
+function importDestinationWritable_(preparation) {
+  // An unknown capability is left to Google's actual write. A read/recovery
+  // path must not require permission to add a file that already exists.
+  if (preparation.destination.capabilities && preparation.destination.capabilities.canAddChildren === false) fail_('DESTINATION_ACCESS_REQUIRED', 'У текущего аккаунта нет права добавлять файлы в папку «Исходные базы». Попросите владельца папки предоставить это право.');
+}
+
+function importMoveWritable_(preparation, original, name) {
+  var capabilities = original.capabilities || {}, changesParent = (original.parents || []).indexOf(preparation.binding.source.id) === -1;
+  var sameDrive = String(original.driveId || '') === String(preparation.destination.driveId || '');
+  var denied = capabilities.canEdit === false || (original.name !== name && capabilities.canRename === false);
+  if (changesParent) {
+    importDestinationWritable_(preparation);
+    denied = denied || (sameDrive ? capabilities.canMoveItemWithinDrive === false : capabilities.canMoveItemOutOfDrive === false);
+  }
+  // Ownership is not a prerequisite by itself. Positive capabilities also do
+  // not guarantee the new-parent operation; Drive remains authoritative.
+  if (denied) fail_('MOVE_ACCESS_REQUIRED', importMoveAccessMessage_());
+}
+
+function importMoveAccessMessage_() {
+  return 'Google Диск не разрешает текущему аккаунту перенос или переименование исходной таблицы. Право редактирования не всегда даёт право переносить файл между папками. Проверьте права на таблицу и папку «Исходные базы» либо явно выберите «Создать копию».';
 }
 
 function importInput_(value, allowed) {
@@ -255,7 +284,7 @@ function importFinalize_(preparation, common, key, receipt, recovered) {
   var context = authorize_(), binding = sourceBasesSource_(context);
   if (binding.state !== 'ready' || binding.source.id !== receipt.destination || context.rootId !== preparation.context.rootId) fail_('SOURCE_CHANGED', 'Папка исходных баз изменилась во время импорта.');
   registryFolder_(context, binding.source.id);
-  var file = importGetFile_(receipt.fileId, common.mode === 'move' && common.link ? common.link.resourceKey : '');
+  var file = importGetFile_(receipt.fileId, common.mode === 'move' && common.link ? common.link.resourceKey : '', 'result');
   importNativeSheet_(file);
   if ((file.parents || []).indexOf(binding.source.id) === -1) fail_('OUTSIDE_REGISTRY', 'Ранее импортированный файл находится в другой папке.');
   var storage = sourceBasesStorage_(context), database = sourceBasesReadDatabase_(storage);
@@ -320,7 +349,7 @@ function importTags_(original, key, fingerprint) {
 function importRecoverFile_(key, fingerprint) {
   var result = importDriveCall_(function () {
     return Drive.Files.list({ q: "appProperties has { key='" + SOURCE_IMPORT_CONFIG.keyProperty + "' and value='" + key + "' }", fields: 'files(' + SOURCE_IMPORT_CONFIG.fields + '),nextPageToken', pageSize: 100, supportsAllDrives: true, includeItemsFromAllDrives: true });
-  });
+  }, 'recovery');
   var files = result.files || [];
   if (files.length > 1 || result.nextPageToken) fail_('CREATION_UNCERTAIN', 'Найдено несколько результатов предыдущего импорта. Требуется проверка администратора.');
   if (!files.length) return null;
@@ -335,15 +364,15 @@ function importNativeSheet_(file) {
   return file;
 }
 
-function importGetFile_(fileId, resourceKey) {
+function importGetFile_(fileId, resourceKey, stage) {
   id_(fileId);
-  if (resourceKey) return importRest_('get', '/' + fileId, null, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true }, fileId, resourceKey);
-  return importDriveCall_(function () { return Drive.Files.get(fileId, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true }); });
+  if (resourceKey) return importRest_('get', '/' + fileId, null, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true }, fileId, resourceKey, stage || 'source');
+  return importDriveCall_(function () { return Drive.Files.get(fileId, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true }); }, stage || 'source');
 }
 
 function importCopyFile_(link, metadata) {
-  if (link.resourceKey) return importRest_('post', '/' + link.id + '/copy', metadata, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true }, link.id, link.resourceKey);
-  return importDriveCall_(function () { return Drive.Files.copy(metadata, link.id, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true }); });
+  if (link.resourceKey) return importRest_('post', '/' + link.id + '/copy', metadata, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true }, link.id, link.resourceKey, 'copy');
+  return importDriveCall_(function () { return Drive.Files.copy(metadata, link.id, { fields: SOURCE_IMPORT_CONFIG.fields, supportsAllDrives: true }); }, 'copy');
 }
 
 function importMoveFile_(link, original, destination, name, key, fingerprint) {
@@ -351,12 +380,13 @@ function importMoveFile_(link, original, destination, name, key, fingerprint) {
   var parents = original.parents || [], remove = parents.filter(function (parent) { return parent !== destination; });
   if (parents.indexOf(destination) === -1) options.addParents = destination;
   if (remove.length) options.removeParents = remove.join(',');
-  var metadata = { name: name, appProperties: importTags_(original.appProperties, key, fingerprint) };
-  if (link.resourceKey) return importRest_('patch', '/' + link.id, metadata, options, link.id, link.resourceKey);
-  return importDriveCall_(function () { return Drive.Files.update(metadata, link.id, null, options); });
+  var metadata = { appProperties: importTags_(original.appProperties, key, fingerprint) };
+  if (original.name !== name) metadata.name = name;
+  if (link.resourceKey) return importRest_('patch', '/' + link.id, metadata, options, link.id, link.resourceKey, 'move');
+  return importDriveCall_(function () { return Drive.Files.update(metadata, link.id, null, options); }, 'move');
 }
 
-function importRest_(method, path, metadata, query, fileId, resourceKey) {
+function importRest_(method, path, metadata, query, fileId, resourceKey, stage) {
   if (!/^[a-zA-Z0-9_-]{10,200}$/.test(resourceKey) || !/^\/[a-zA-Z0-9_-]{10,200}(?:\/copy)?$/.test(path) || ['get', 'post', 'patch'].indexOf(method) === -1) fail_('INVALID_LINK', 'Некорректные параметры ссылки на таблицу.');
   if (typeof UrlFetchApp === 'undefined' || typeof ScriptApp === 'undefined') fail_('DRIVE_SETUP_REQUIRED', 'Для ссылок с resourcekey нужно обновить разрешения приложения. Обратитесь к администратору.');
   var address = 'https://www.googleapis.com/drive/v3/files' + path + '?' + Object.keys(query).map(function (key) { return encodeURIComponent(key) + '=' + encodeURIComponent(String(query[key])); }).join('&');
@@ -364,25 +394,25 @@ function importRest_(method, path, metadata, query, fileId, resourceKey) {
   if (metadata) { options.contentType = 'application/json'; options.payload = JSON.stringify(metadata); }
   var response;
   try { response = UrlFetchApp.fetch(address, options); }
-  catch (error) { throw importDriveFailure_(0, ''); }
+  catch (error) { throw importDriveFailure_(0, '', stage); }
   var status = response.getResponseCode(), body;
-  try { body = JSON.parse(response.getContentText()); } catch (error) { throw importDriveFailure_(status >= 400 ? status : 0, ''); }
+  try { body = JSON.parse(response.getContentText()); } catch (error) { throw importDriveFailure_(status >= 400 ? status : 0, '', stage); }
   if (status < 200 || status >= 300) {
     var reason = body && body.error && body.error.errors && body.error.errors[0] ? body.error.errors[0].reason : '';
     if (!reason && body && body.error && /SERVICE_DISABLED|accessNotConfigured/.test(JSON.stringify(body.error.details || []))) reason = 'SERVICE_DISABLED';
-    throw importDriveFailure_(status, reason);
+    throw importDriveFailure_(status, reason, stage);
   }
   return body;
 }
 
-function importDriveCall_(callback) {
+function importDriveCall_(callback, stage) {
   try { return callback(); }
   catch (error) {
     if (error.registryCode) throw error;
     var evidence = importDriveEvidence_(error);
     var reason = evidence.reason;
     var status = evidence.status;
-    throw importDriveFailure_(Number.isFinite(status) ? status : 0, reason);
+    throw importDriveFailure_(Number.isFinite(status) ? status : 0, reason, stage);
   }
 }
 
@@ -395,7 +425,7 @@ function importDriveEvidence_(error) {
   var reason = String(error && error.reason || details && details.reason || first && first.reason || '');
   var message = String(error && error.message || '');
   if (/SERVICE_DISABLED|accessNotConfigured|Drive API has not been used|Drive API.*not.*enabled/i.test(message) || reason === 'accessNotConfigured' || reason === 'SERVICE_DISABLED') return { status: 403, reason: 'SERVICE_DISABLED' };
-  var reasons = { insufficientPermissions: 403, insufficientFilePermissions: 403, forbidden: 403, cannotCopyFile: 403, notFound: 404, rateLimitExceeded: 429, userRateLimitExceeded: 429, dailyLimitExceeded: 429, storageQuotaExceeded: 403, badRequest: 400, invalid: 400 };
+  var reasons = { insufficientPermissions: 403, insufficientFilePermissions: 403, forbidden: 403, cannotCopyFile: 403, notFound: 404, rateLimitExceeded: 429, userRateLimitExceeded: 429, dailyLimitExceeded: 429, storageQuotaExceeded: 403, domainPolicy: 403, fileOwnerNotMemberOfTeamDrive: 403, fileWriterTeamDriveMoveInDisabled: 403, teamDriveMembershipRequired: 403, badRequest: 400, invalid: 400 };
   if (!status && reasons[reason]) status = reasons[reason];
   // Apps Script GoogleJsonResponseException often omits numeric fields. Only
   // known Drive API rejection prefixes count as definite failures; transport
@@ -403,20 +433,42 @@ function importDriveEvidence_(error) {
   var rejection = message.match(/^(?:GoogleJsonResponseException:\s*)?API call to drive\.files\.(?:get|list|create|copy|update) failed with error:\s*([\s\S]*)$/i);
   if (!status && rejection) {
     var text = rejection[1];
-    if (/^(?:The user does not have sufficient permissions for this file|Insufficient Permission|Insufficient permissions|You do not have permission to|This file cannot be copied by the user|Copying this file is not allowed)/i.test(text)) status = 403;
-    else if (/^File not found(?::|\.|$)/i.test(text)) status = 404;
-    else if (/^(?:Rate Limit Exceeded|User Rate Limit Exceeded|Quota exceeded|Daily Limit Exceeded|Too Many Requests)/i.test(text)) status = 429;
+    if (/^The user's (?:Drive )?storage quota has been exceeded/i.test(text)) { status = 403; reason = 'storageQuotaExceeded'; }
+    else if (/^Cannot move a file into a shared drive as a writer when the owner of the file is not a member/i.test(text)) { status = 403; reason = 'fileOwnerNotMemberOfTeamDrive'; }
+    else if (/^The domain administrator has not allowed writers to move items into a shared drive/i.test(text)) { status = 403; reason = 'fileWriterTeamDriveMoveInDisabled'; }
+    else if (/^(?:The user does not have sufficient permissions for (?:this file|file)|Insufficient Permission|Insufficient permissions|You do not have permission to|This file cannot be copied by the user|Copying this file is not allowed)/i.test(text)) status = 403;
+    else if (/^File not found(?::|\.|$)/i.test(text)) { status = 404; reason = 'notFound'; }
+    else if (/^(?:Rate Limit Exceeded|User Rate Limit Exceeded|Quota exceeded|Daily Limit Exceeded|Too Many Requests)/i.test(text)) { status = 429; reason = 'rateLimitExceeded'; }
     else if (/^(?:Invalid Value|Invalid argument|Bad Request|Unsupported (?:file|mime|conversion)|Conversion of the uploaded content to the requested output type is not supported|The file is too large|Upload limit exceeded)/i.test(text)) status = 400;
   }
   return { status: Number.isFinite(status) ? status : 0, reason: reason };
 }
 
-function importDriveFailure_(status, reason) {
+function importDriveFailure_(status, reason, stage) {
   var error;
   if (reason === 'SERVICE_DISABLED' || reason === 'accessNotConfigured') error = registryError_('DRIVE_SETUP_REQUIRED', 'В проекте Apps Script нужно включить Google Drive API v3. Обратитесь к администратору.');
   else if (status === 401) error = registryError_('AUTH_REQUIRED', 'Google просит повторно подтвердить доступ к Диску. Откройте приложение заново.');
-  else if (status === 403 || status === 404) error = registryError_('DRIVE_ACCESS_REQUIRED', 'Таблица недоступна или у аккаунта нет прав на выбранное действие. Проверьте доступ Google Диска.');
-  else if (status === 429) error = registryError_('DRIVE_BUSY', 'Google временно ограничил запросы. Повторите импорт позже.');
+  else if (reason === 'insufficientPermissions') error = registryError_('DRIVE_AUTH_REQUIRED', 'Google не предоставил приложению нужные разрешения Диска. Откройте приложение заново и подтвердите доступ; если ошибка повторится, обратитесь к администратору.');
+  else if (reason === 'storageQuotaExceeded') error = registryError_('DRIVE_STORAGE_FULL', 'Google Диск отклонил импорт: закончилось место в хранилище аккаунта. Освободите место или увеличьте объём хранилища.');
+  else if (['domainPolicy', 'fileOwnerNotMemberOfTeamDrive', 'fileWriterTeamDriveMoveInDisabled', 'teamDriveMembershipRequired'].indexOf(reason) !== -1) error = registryError_('DRIVE_POLICY_REQUIRED', 'Google Диск отклонил действие из-за правил организации или общего диска. Попросите администратора проверить участие владельца файла и текущего аккаунта в общем диске и разрешение на перенос.');
+  else if (status === 429 || ['rateLimitExceeded', 'userRateLimitExceeded', 'dailyLimitExceeded', 'sharingRateLimitExceeded'].indexOf(reason) !== -1) error = registryError_('DRIVE_BUSY', 'Google временно ограничил запросы. Повторите импорт позже.');
+  else if (status === 404) {
+    var missing = stage === 'destination' ? ['DESTINATION_NOT_FOUND', 'Google не нашёл папку «Исходные базы» либо она недоступна текущему аккаунту. Проверьте привязку папки и доступ.'] : stage === 'source' || stage === 'copy' || stage === 'move' ? ['SOURCE_NOT_FOUND', stage === 'source' ? 'Google не нашёл исходную таблицу либо она недоступна аккаунту, открывшему приложение. Проверьте ссылку и доступ именно этого Google-аккаунта.' : 'Google не нашёл исходную таблицу или папку назначения либо доступ к ним изменился. Проверьте ссылку, папку «Исходные базы» и доступ текущего аккаунта.'] : ['DRIVE_NOT_FOUND', 'Google не нашёл файл или папку на этапе проверки импорта. Проверьте доступ текущего аккаунта.'];
+    error = registryError_(missing[0], missing[1]);
+  }
+  else if (status === 403) {
+    var denied = {
+      source: ['SOURCE_ACCESS_REQUIRED', 'Исходная таблица недоступна аккаунту, открывшему приложение. Откройте её под тем же Google-аккаунтом и проверьте выданный доступ.'],
+      destination: ['DESTINATION_ACCESS_REQUIRED', 'У текущего аккаунта нет доступа к папке «Исходные базы». Попросите владельца проверить доступ к папке.'],
+      upload: ['DESTINATION_ACCESS_REQUIRED', 'Google Диск запретил создание файла в папке «Исходные базы». Проверьте право текущего аккаунта добавлять туда файлы.'],
+      copy: ['COPY_ACCESS_REQUIRED', 'Google Диск запретил копирование таблицы. Проверьте разрешение на копирование исходника и добавление файлов в папку «Исходные базы».'],
+      move: ['MOVE_ACCESS_REQUIRED', importMoveAccessMessage_()],
+      storage: ['STORAGE_WRITE_REQUIRED', 'Служебная таблица недоступна текущему аккаунту. Попросите администратора проверить права редактора.'],
+      recovery: ['IMPORT_RECOVERY_ACCESS_REQUIRED', 'Google Диск не разрешил проверить результат предыдущего импорта. Повторное создание заблокировано до проверки результата; проверьте доступ текущего аккаунта и повторите тот же запрос.']
+    };
+    var detail = denied[stage] || ['DRIVE_ACCESS_REQUIRED', 'Google Диск не разрешил проверку файла или папки. Проверьте доступ текущего аккаунта.'];
+    error = registryError_(detail[0], detail[1]);
+  }
   else if (status >= 400 && status < 500) error = registryError_('IMPORT_FAILED', 'Google Диск отклонил импорт. Проверьте формат файла и права на таблицу.');
   else error = registryError_('DRIVE_UNCERTAIN', 'Google не подтвердил операцию с файлом. Проверьте предыдущий импорт перед новым запросом.');
   error.driveDefiniteFailure = reason === 'SERVICE_DISABLED' || reason === 'accessNotConfigured' || (status >= 400 && status < 500);

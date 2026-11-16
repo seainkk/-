@@ -137,7 +137,7 @@ function fixture(options = {}) {
   }
   const advanced = {
     Files: {
-      get: (id, params) => { calls.drive.push({ kind: 'advancedGet', id, params: plain(params || {}) }); if (id === ORIGINAL && options.rejectOriginalGetError) throw options.rejectOriginalGetError; return getResource(id); },
+      get: (id, params) => { calls.drive.push({ kind: 'advancedGet', id, params: plain(params || {}) }); if (id === ORIGINAL && options.rejectOriginalGetError) throw options.rejectOriginalGetError; if (id === SOURCE && options.rejectDestinationGetError) throw options.rejectDestinationGetError; return getResource(id); },
       create: createResource, copy: copyResource, update: updateResource, list: listResources,
       remove: id => { calls.actions.push({ kind: 'delete', id }); resources.delete(id); },
     },
@@ -192,6 +192,7 @@ function fixture(options = {}) {
         const withKey = !item?.resourceKey || key === `${id}/${item.resourceKey}`;
         let result;
         const method = String(settings.method || 'get').toLowerCase();
+        if (options.restFailure && method === options.restFailure.method) return { getResponseCode: () => options.restFailure.status, getContentText: () => JSON.stringify({ error: { errors: [{ reason: options.restFailure.reason }] } }) };
         if (method === 'get') result = getResource(id, withKey);
         else if (method === 'post' && match[2]) result = copyResource(JSON.parse(settings.payload), id, Object.fromEntries(url.searchParams), withKey);
         else if (method === 'patch') result = updateResource(JSON.parse(settings.payload), id, null, Object.fromEntries(url.searchParams), withKey);
@@ -227,6 +228,156 @@ function fixture(options = {}) {
 
 function itemOf(result) { return result.item || result; }
 function capture(callback) { try { return { value: callback() }; } catch (error) { return { error }; } }
+function driveRejection(reason, status = 403) { return Object.assign(new Error('Provider detail must not be returned: private-file-name'), { details: { error: { code: status, errors: [{ reason }] } } }); }
+
+test('explicit copy and move capability denials stop before writes without an ownership requirement', () => {
+  const cases = [
+    ['copy', { canCopy: false }, 'COPY_ACCESS_REQUIRED'],
+    ['move', { canEdit: false }, 'MOVE_ACCESS_REQUIRED'],
+    ['move', { canRename: false }, 'MOVE_ACCESS_REQUIRED'],
+    ['move', { canMoveItemWithinDrive: false }, 'MOVE_ACCESS_REQUIRED'],
+  ];
+  for (const [mode, capabilities, code] of cases) {
+    const f = fixture();
+    Object.assign(f.resources.get(ORIGINAL).capabilities, capabilities);
+    const snapshot = plain(f.resources.get(ORIGINAL));
+    const denied = capture(() => f.link({ mode })).error;
+    assert.match(denied.message, new RegExp(code));
+    if (mode === 'move') assert.match(denied.message, /Право редактирования.*Создать копию/s);
+    assert.deepEqual(f.calls.actions, []);
+    assert.deepEqual(f.resources.get(ORIGINAL), snapshot);
+    assert.equal(f.receipts()[0].attempted, false);
+    assert.equal(f.receipts()[0].status, 'retryable');
+  }
+  const f = fixture();
+  f.resources.get(ORIGINAL).ownedByMe = false;
+  Object.assign(f.resources.get(ORIGINAL).capabilities, { canRename: true, canMoveItemWithinDrive: true });
+  assert.equal(itemOf(f.link({ mode: 'move' })).id, ORIGINAL, 'writer may move when Google permits it; ownership alone is not a gate');
+});
+
+test('move capability uses the actual shared-drive boundary and never the add-only or remove-only flags', () => {
+  for (const [sourceDrive, destinationDrive, deniedFlag] of [['', '', 'canMoveItemWithinDrive'], ['shared_drive_a', 'shared_drive_a', 'canMoveItemWithinDrive'], ['', 'shared_drive_b', 'canMoveItemOutOfDrive'], ['shared_drive_a', '', 'canMoveItemOutOfDrive']]) {
+    const f = fixture();
+    f.resources.get(ORIGINAL).driveId = sourceDrive;
+    f.resources.get(SOURCE).driveId = destinationDrive;
+    Object.assign(f.resources.get(ORIGINAL).capabilities, { canMoveItemWithinDrive: true, canMoveItemOutOfDrive: true, [deniedFlag]: false });
+    assert.throws(() => f.link({ mode: 'move' }), /MOVE_ACCESS_REQUIRED/);
+    assert.deepEqual(f.calls.actions, []);
+  }
+  const f = fixture();
+  Object.assign(f.resources.get(ORIGINAL).capabilities, { canMoveItemWithinDrive: true, canMoveItemOutOfDrive: false, canAddMyDriveParent: false, canRemoveMyDriveParent: false });
+  f.link({ mode: 'move' });
+  assert.equal(f.calls.actions.filter(action => action.kind === 'update').length, 1);
+});
+
+test('destination add permission is required for new children but not an existing child metadata update', () => {
+  for (const mode of ['upload', 'copy', 'move']) {
+    const f = fixture();
+    f.resources.get(SOURCE).capabilities.canAddChildren = false;
+    assert.throws(() => mode === 'upload' ? f.upload() : f.link({ mode }), /DESTINATION_ACCESS_REQUIRED/);
+    assert.deepEqual(f.calls.actions, []);
+  }
+  const f = fixture(), original = f.resources.get(ORIGINAL);
+  original.parents = [SOURCE];
+  Object.assign(original.capabilities, { canEdit: true, canRename: false, canMoveItemWithinDrive: false, canMoveItemOutOfDrive: false });
+  f.resources.get(SOURCE).capabilities.canAddChildren = false;
+  f.link({ mode: 'move', name: original.name });
+  assert.equal(f.calls.actions.length, 1);
+  assert.equal(f.calls.actions[0].kind, 'update');
+  assert.equal(f.calls.actions[0].params.addParents, undefined);
+  assert.equal(f.calls.actions[0].params.removeParents, undefined);
+  assert.equal(Object.hasOwn(f.calls.actions[0].metadata, 'name'), false, 'an unchanged title must not request a forbidden rename');
+});
+
+test('absent capabilities stay unknown and positive capabilities do not override an actual Drive rejection', () => {
+  for (const mode of ['upload', 'copy', 'move']) {
+    const f = fixture();
+    delete f.resources.get(SOURCE).capabilities;
+    delete f.resources.get(ORIGINAL).capabilities;
+    mode === 'upload' ? f.upload() : f.link({ mode });
+    assert.equal(f.calls.actions.length, 1);
+  }
+  const f = fixture({ rejectUpdateError: driveRejection('insufficientFilePermissions') });
+  Object.assign(f.resources.get(ORIGINAL).capabilities, { canRename: true, canMoveItemWithinDrive: true, canMoveItemOutOfDrive: true });
+  assert.throws(() => f.link({ mode: 'move' }), /MOVE_ACCESS_REQUIRED/);
+  assert.equal(f.calls.actions.length, 1);
+  assert.equal(f.calls.actions[0].kind, 'update');
+  assert.equal(f.receipts()[0].status, 'retryable');
+  assert.equal(f.receipts()[0].attempted, false);
+  assert.deepEqual(f.resources.get(ORIGINAL).parents, [OTHER]);
+  assert.equal(f.imported().length, 0, 'a refused move never silently copies the source');
+});
+
+test('lost move recovery and completed replay do not require permission to add or mutate an existing result', () => {
+  const options = { loseUpdateResponse: true, hideRecovery: true }, f = fixture(options);
+  assert.throws(() => f.link({ mode: 'move' }), /UNCERTAIN/);
+  assert.equal(f.receipts()[0].attempted, true);
+  options.hideRecovery = false;
+  f.resources.get(SOURCE).capabilities.canAddChildren = false;
+  Object.assign(f.resources.get(ORIGINAL).capabilities, { canEdit: false, canRename: false, canMoveItemWithinDrive: false, canMoveItemOutOfDrive: false });
+  assert.equal(itemOf(f.link({ mode: 'move' })).id, ORIGINAL);
+  assert.equal(itemOf(f.link({ mode: 'move' })).id, ORIGINAL);
+  assert.equal(f.calls.actions.length, 1);
+  assert.equal(f.calls.actions[0].kind, 'update');
+  assert.deepEqual(f.calls.trashes, []);
+});
+
+test('source, destination, copy, move and recovery rejections keep their own safe context', () => {
+  for (const [option, mode, code, status] of [
+    ['rejectOriginalGetError', 'copy', 'SOURCE_ACCESS_REQUIRED', 403],
+    ['rejectOriginalGetError', 'move', 'SOURCE_NOT_FOUND', 404],
+    ['rejectDestinationGetError', 'move', 'DESTINATION_ACCESS_REQUIRED', 403],
+    ['rejectDestinationGetError', 'copy', 'DESTINATION_NOT_FOUND', 404],
+    ['rejectCopyError', 'copy', 'COPY_ACCESS_REQUIRED', 403],
+    ['rejectUpdateError', 'move', 'MOVE_ACCESS_REQUIRED', 403],
+    ['rejectListError', 'move', 'IMPORT_RECOVERY_ACCESS_REQUIRED', 403],
+  ]) {
+    const f = fixture({ [option]: driveRejection(status === 404 ? 'notFound' : 'insufficientFilePermissions', status) });
+    const error = capture(() => f.link({ mode })).error;
+    assert.match(error.message, new RegExp(code));
+    assert.doesNotMatch(error.message, /private-file-name|server-only-oauth-token/);
+    assert.equal(f.imported().length, 0);
+    if (option === 'rejectListError') assert.doesNotMatch(error.message, /MOVE_ACCESS_REQUIRED|право переносить/);
+  }
+});
+
+test('structured quota, policy, OAuth and 403 rate errors are distinguished without weakening retry receipts', () => {
+  for (const [reason, code] of [['storageQuotaExceeded', 'DRIVE_STORAGE_FULL'], ['fileOwnerNotMemberOfTeamDrive', 'DRIVE_POLICY_REQUIRED'], ['fileWriterTeamDriveMoveInDisabled', 'DRIVE_POLICY_REQUIRED'], ['teamDriveMembershipRequired', 'DRIVE_POLICY_REQUIRED'], ['domainPolicy', 'DRIVE_POLICY_REQUIRED'], ['insufficientPermissions', 'DRIVE_AUTH_REQUIRED'], ['userRateLimitExceeded', 'DRIVE_BUSY']]) {
+    const options = { rejectUpdateError: driveRejection(reason) }, f = fixture(options);
+    assert.throws(() => f.link({ mode: 'move' }), new RegExp(code));
+    assert.equal(f.receipts()[0].status, 'retryable');
+    assert.equal(f.receipts()[0].attempted, false);
+    assert.deepEqual(f.resources.get(ORIGINAL).parents, [OTHER]);
+    options.rejectUpdateError = null;
+    f.link({ mode: 'move' });
+    assert.equal(f.calls.actions.filter(action => action.kind === 'update').length, 2);
+    assert.equal(f.calls.actions.filter(action => action.kind === 'copy').length, 0);
+  }
+});
+
+test('resource-key REST moves preserve contextual quota and access errors without leaking provider data', () => {
+  for (const [reason, code] of [['insufficientFilePermissions', 'MOVE_ACCESS_REQUIRED'], ['storageQuotaExceeded', 'DRIVE_STORAGE_FULL'], ['userRateLimitExceeded', 'DRIVE_BUSY']]) {
+    const f = fixture({ restFailure: { method: 'patch', status: 403, reason } });
+    f.resources.get(ORIGINAL).resourceKey = 'rk_access_1234567890';
+    assert.throws(() => f.link({ mode: 'move', url: 'https://docs.google.com/spreadsheets/d/' + ORIGINAL + '/edit?resourcekey=rk_access_1234567890' }), new RegExp(code));
+    assert.equal(f.receipts()[0].status, 'retryable');
+    assert.equal(f.receipts()[0].attempted, false);
+    assert.deepEqual(f.resources.get(ORIGINAL).parents, [OTHER]);
+    assert.deepEqual(f.calls.actions, []);
+  }
+});
+
+test('only anchored provider rejection prefixes classify storage and shared-drive policy failures', () => {
+  for (const [text, code] of [["The user's Drive storage quota has been exceeded.", 'DRIVE_STORAGE_FULL'], ['Cannot move a file into a shared drive as a writer when the owner of the file is not a member of that shared drive.', 'DRIVE_POLICY_REQUIRED']]) {
+    const known = fixture({ rejectUpdateError: new Error('API call to drive.files.update failed with error: ' + text) });
+    assert.throws(() => known.link({ mode: 'move' }), new RegExp(code));
+    assert.equal(known.receipts()[0].status, 'retryable');
+    const unknown = fixture({ rejectUpdateError: new Error('Socket closed after write: ' + text) });
+    assert.throws(() => unknown.link({ mode: 'move' }), /UNCERTAIN/);
+    assert.equal(unknown.receipts()[0].attempted, true);
+    assert.equal(unknown.receipts()[0].status, 'pending');
+  }
+});
 
 test('loading the module performs no Drive action or spreadsheet access', () => {
   const f = fixture();
@@ -552,9 +703,9 @@ test('generic browser MIME types are normalized to the explicit conversion MIME 
 
 test('stable Google API rejection messages are definite failures with retryable receipts', () => {
   const cases = [
-    ['rejectCreateError', 'API call to drive.files.create failed with error: Insufficient Permission', 'DRIVE_ACCESS_REQUIRED', 'upload'],
+    ['rejectCreateError', 'API call to drive.files.create failed with error: Insufficient Permission', 'DESTINATION_ACCESS_REQUIRED', 'upload'],
     ['rejectCreateError', 'API call to drive.files.create failed with error: Conversion of the uploaded content to the requested output type is not supported', 'IMPORT_FAILED', 'upload'],
-    ['rejectCopyError', 'API call to drive.files.copy failed with error: This file cannot be copied by the user', 'DRIVE_ACCESS_REQUIRED', 'copy'],
+    ['rejectCopyError', 'API call to drive.files.copy failed with error: This file cannot be copied by the user', 'COPY_ACCESS_REQUIRED', 'copy'],
     ['rejectUpdateError', 'API call to drive.files.update failed with error: User Rate Limit Exceeded', 'DRIVE_BUSY', 'move'],
   ];
   for (const [key, message, code, mode] of cases) {
@@ -571,7 +722,7 @@ test('stable Google API rejection messages are definite failures with retryable 
 test('pre-action metadata failure leaves a retryable receipt and allows the same request after access is restored', () => {
   const options = { rejectOriginalGetError: new Error('API call to drive.files.get failed with error: File not found: ' + ORIGINAL) };
   const f = fixture(options);
-  assert.throws(() => f.link(), /DRIVE_ACCESS_REQUIRED/);
+  assert.throws(() => f.link(), /SOURCE_NOT_FOUND/);
   assert.deepEqual(f.calls.actions, []);
   assert.equal(f.receipts()[0].status, 'retryable');
   assert.equal(f.receipts()[0].attempted, false);
