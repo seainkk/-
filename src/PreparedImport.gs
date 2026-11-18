@@ -87,14 +87,10 @@ function previewPreparedBase_(request) {
     var input = importInput_(request, ['draftId', 'sheetId']);
     return preparedWithLease_(input.draftId, function (draft, context) {
       if (draft.state !== 'staged') fail_('PREVIEW_LOCKED', 'Подготовка уже начата. Дождитесь результата или продолжите тот же запрос.');
-      var file = preparedDraftFile_(context, draft), sheetId = preparedSheetId_(input.sheetId);
-      var book = SpreadsheetApp.openById(file.id), sheet = preparedSheet_(book, sheetId);
-      var model = preparedDataRead_(sheet, draft.stageFileId, draft.section, { guard: function () { preparedDraftFile_(context, draft); } });
-      var after = preparedDraftFile_(context, draft), beforeVersion = preparedVersion_(file), afterVersion = preparedVersion_(after);
-      if (beforeVersion && afterVersion && beforeVersion !== afterVersion) fail_('PREVIEW_CHANGED', 'Черновик изменился во время чтения. Пересчитайте предпросмотр.');
+      var sheetId = preparedSheetId_(input.sheetId), stable = preparedStableRead_(context, draft, sheetId), model = stable.model;
       var token = digest_(JSON.stringify([draft.draftId, sheetId, draft.name, draft.section, draft.status, model.fingerprint]));
       var response = { draftId: draft.draftId, sheetId: sheetId, previewToken: token, canConfirm: model.complete === true && model.canConfirm === true, counts: model.counts, sheets: model.previewSheets || [], warnings: model.warnings || [] };
-      draft.sheetId = sheetId; draft.previewToken = token; draft.sourceFingerprint = model.fingerprint; draft.sourceVersion = afterVersion;
+      draft.sheetId = sheetId; draft.previewToken = token; draft.sourceFingerprint = model.fingerprint; draft.sourceVersion = stable.version;
       draft.canConfirm = response.canConfirm;
       if (response.canConfirm) {
         var plan = {
@@ -360,12 +356,25 @@ function preparedSheet_(book, sheetId) { var sheets = book.getSheets().filter(fu
 
 function preparedCheckSnapshot_(context, draft) {
   var file = preparedDraftFile_(context, draft), version = preparedVersion_(file);
-  if (draft.sourceVersion && version) { if (draft.sourceVersion !== version) fail_('PREVIEW_CHANGED', 'Исходный лист изменился после предпросмотра. Пересчитайте результат.'); }
-  else {
-    var sheet = preparedSheet_(SpreadsheetApp.openById(file.id), draft.sheetId);
-    var model = preparedDataRead_(sheet, file.id, draft.section, { guard: function () { preparedDraftFile_(context, draft); } });
-    if (!model.complete || !model.canConfirm || model.fingerprint !== draft.sourceFingerprint) fail_('PREVIEW_CHANGED', 'Исходный лист изменился после предпросмотра. Пересчитайте результат.');
+  if (draft.sourceVersion && version && draft.sourceVersion === version) return;
+  // Drive versions also change while an imported workbook finishes initial
+  // calculation. A complete content fingerprint remains authoritative.
+  var stable = preparedStableRead_(context, draft, draft.sheetId, file), model = stable.model;
+  if (!model.complete || !model.canConfirm || model.fingerprint !== draft.sourceFingerprint) fail_('PREVIEW_CHANGED', 'Исходный лист изменился после предпросмотра. Пересчитайте результат.');
+  draft.sourceVersion = stable.version; preparedSave_(context, draft);
+}
+
+function preparedStableRead_(context, draft, sheetId, initialFile) {
+  var file = initialFile || preparedDraftFile_(context, draft), book = SpreadsheetApp.openById(file.id), sheet = preparedSheet_(book, sheetId);
+  for (var attempt = 0; attempt < 2; attempt++) {
+    var before = attempt ? preparedDraftFile_(context, draft) : file;
+    var model = preparedDataRead_(sheet, draft.stageFileId, draft.section, { guard: function () { preparedDraftFile_(context, draft); } });
+    var after = preparedDraftFile_(context, draft), beforeVersion = preparedVersion_(before), afterVersion = preparedVersion_(after);
+    if (!beforeVersion || !afterVersion || beforeVersion === afterVersion) return { model: model, version: afterVersion };
+    // Discard the changing pass. Only a second independently stable full read
+    // can become the preview; continuous changes still fail closed.
   }
+  fail_('PREVIEW_CHANGED', 'Черновик продолжает изменяться во время чтения. Пересчитайте предпросмотр.');
 }
 
 function preparedPlan_(context, draft) {

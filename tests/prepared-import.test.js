@@ -119,7 +119,7 @@ function fixture(options = {}) {
   context.sourceBaseWriteRecords_ = (_sheet, values) => { assert.ok(calls.locks > 0); if (options.registrationFailures > 0) { options.registrationFailures--; throw context.registryError_('STORAGE_WRITE', 'Retry registration'); } for (const value of values) records.set(value.fileId, plain(value)); };
   context.importPrepare_ = () => ({ context: context.authorize_(), binding: context.sourceBasesSource_(context.authorize_()), storage, database: database(), destination: { id: SOURCE, capabilities: { canAddChildren: true } } });
   context.preparedDataRead_ = (source, id, section, settings) => {
-    settings.guard(); const values = source.state.data.map(row => row.slice()); const rows = values.slice(1);
+    settings.guard(); if (typeof options.onModelRead === 'function') options.onModelRead(id, resources.get(id)); const values = source.state.data.map(row => row.slice()); const rows = values.slice(1);
     const emailRows = [...new Set(rows.map(row => row[2]).filter(Boolean))].map(email => [email]);
     const phoneRows = [...new Set(rows.map(row => row[3]).filter(Boolean))].map(phone => [phone]);
     const counts = { sourceRows: rows.length, companies: 1, companyUnknown: 0, emails: emailRows.length, phones: phoneRows.length, mobiles: phoneRows.length, sharedEmails: 0, sharedPhones: 0 };
@@ -168,6 +168,7 @@ test('partial preview and stale source snapshots cannot create a result', () => 
   assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
   const g = fixture(), other = g.stage(), preview = g.preview(other);
   g.resources.get(g.drafts()[0].stageFileId).version = '2';
+  g.books.get(g.drafts()[0].stageFileId).getSheets()[0].state.data[1][2] = 'changed-after-preview@example.test';
   assert.throws(() => g.confirm(other, preview), /PREVIEW_CHANGED/);
   assert.equal(g.calls.actions.some(action => action.role === 'output'), false);
 });
@@ -405,4 +406,26 @@ test('bounded cleanup frees a full index of expired unconfirmed drafts for the n
   assert.equal(JSON.parse(f.properties.get('PREPARED_DRAFT_INDEX')).length, 60);
   assert.equal([...f.resources.values()].filter(item => item.trashed).length, 3, 'one start cleans at most three abandoned input copies');
   assert.equal(f.resources.get(ORIGINAL).trashed, false);
+});
+
+test('preview discards an initial conversion-version bump and accepts only the stable second read', () => {
+  const f = fixture(), draft = f.stage(); let reads = 0;
+  f.options.onModelRead = (_id, file) => { if (++reads === 1) file.version = '2'; };
+  const shown = f.preview(draft);
+  assert.equal(shown.canConfirm, true); assert.equal(reads, 2);
+  assert.equal(f.drafts()[0].sourceVersion, '2'); assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
+});
+
+test('continuous source version changes cannot produce a confirmable preview', () => {
+  const f = fixture(), draft = f.stage(); let reads = 0;
+  f.options.onModelRead = (_id, file) => { reads++; file.version = String(Number(file.version) + 1); };
+  assert.throws(() => f.preview(draft), /PREVIEW_CHANGED/); assert.equal(reads, 2);
+  assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
+});
+
+test('metadata-only version changes require a fresh matching content fingerprint before confirmation', () => {
+  const f = fixture(), draft = f.stage(), shown = f.preview(draft); let reads = 0;
+  f.resources.get(f.drafts()[0].stageFileId).version = '2'; f.options.onModelRead = () => { reads++; };
+  assert.equal(f.confirm(draft, shown).state, 'processing'); assert.equal(reads, 1);
+  assert.equal(f.drafts()[0].sourceVersion, '2');
 });
