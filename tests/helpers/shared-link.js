@@ -12,10 +12,13 @@ const modules = [
   ['SourceImport.gs', 'importSourceBaseLink_'],
   ['ContactPreview.gs', 'previewSourceBaseContacts_'],
   ['ContactTarget.gs', 'contactPreviewCompareTarget_'],
+  ['PreparedData.gs', 'preparedReadSource_'],
+  ['PreparedImport.gs', 'stagePreparedUpload_'],
+  ['SheetEditor.gs', 'getGridWorkbook_'],
   ['SegmentActions.gs', 'createSegment_'],
   ['SegmentAnalytics.gs', 'getSegmentsDashboard_'],
 ];
-const methods = ['getAppBootstrap', 'getBootstrap', 'createBase', 'createFolder', 'renameItem', 'getSourceBases', 'updateSourceBase', 'importSourceBaseLink', 'getSourceSheets', 'createSegment', 'updateSegment', 'getSegmentsDashboard', 'getSegmentMailings', 'previewSourceBaseContacts'];
+const methods = ['getAppBootstrap', 'getBootstrap', 'createBase', 'createFolder', 'renameItem', 'getSourceBases', 'updateSourceBase', 'importSourceBaseLink', 'getSourceSheets', 'createSegment', 'updateSegment', 'getSegmentsDashboard', 'getSegmentMailings', 'previewSourceBaseContacts', 'stagePreparedBaseLink', 'previewPreparedBase', 'confirmPreparedBase', 'continuePreparedBase', 'cancelPreparedBase', 'listPreparedJobs', 'getGridWorkbook', 'getGridRange', 'saveGridRange', 'appendGridRows', 'appendGridColumns'];
 
 /** Real dispatcher proxies for fixtures; convenience names are never deployed RPCs. */
 export function installSharedApi(context, { accessKey = () => TEST_ACCESS_KEY } = {}) {

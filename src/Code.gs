@@ -3,7 +3,8 @@
  * link credential and the item's actual Drive ancestry. The catalog stores workflow data
  * in a fixed, root-validated service book. Segment actions copy selected sheets
  * from ready source files; analytics reads bounded contact-presence data only.
- * There is no in-app cell editor, and source worksheets are never modified.
+ * Prepared imports preserve their inputs. The explicit in-app editor writes
+ * bounded, version-checked ranges only in registered working spreadsheets.
  */
 function doGet() {
   // Only a static shell is public. The fragment credential is checked by every RPC.
@@ -12,7 +13,7 @@ function doGet() {
 }
 
 function include_(name) {
-  if (['Styles', 'Client'].indexOf(name) === -1) fail_('INVALID_REQUEST', 'Неизвестный компонент интерфейса.');
+  if (['Styles', 'Client', 'GridPanel', 'GridStyles', 'GridClient'].indexOf(name) === -1) fail_('INVALID_REQUEST', 'Неизвестный компонент интерфейса.');
   return HtmlService.createHtmlOutputFromFile(name).getContent();
 }
 

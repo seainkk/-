@@ -89,6 +89,7 @@ def main():
         page.locator('[data-preview-source="source-companies"]').click()
         held()
         page.locator('#br-contact-preview-close').click()
+        page.locator('#br-section-lpr').click()
         page.locator('[data-preview-source="source-lpr"]').click()
         assert 'Готовая база ЛПР' in page.locator('#br-contact-preview-title').inner_text()
         assert page.locator('#br-contact-preview-result').is_hidden()
@@ -106,34 +107,38 @@ def main():
         assert page.locator('#br-contact-preview-result').is_visible()
         assert page.evaluate('backend.maxActive') == 1
 
-        # Import ack paints first; analysis runs before full catalog sync, and failures stay separate.
+        # A prepared import is acknowledged before catalog refresh; optional later analysis stays separate.
         reset()
         page.locator('#br-import-open').click()
         page.locator('#br-import-mode-link').click()
         page.locator('#br-link-name').fill('Новая база')
         page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit')
-        page.evaluate("backend.holdMethods=['importSourceBaseLink','previewSourceBaseContacts','getSourceBases'];backend.failContactPreview=true")
+        page.evaluate("backend.holdMethods=['stagePreparedBaseLink'];backend.failContactPreview=true")
         page.locator('#br-link-submit').click()
-        held('importSourceBaseLink')
+        held('stagePreparedBaseLink')
         assert len(page.evaluate("backend.calls.filter(item=>item.name==='previewSourceBaseContacts')")) == 0
-        release('importSourceBaseLink')
+        release('stagePreparedBaseLink')
+        page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3")
+        idle()
+        page.evaluate("backend.holdMethods=['getSourceBases','previewSourceBaseContacts']")
+        page.locator('#br-prepared-confirm').click()
         page.wait_for_selector('#br-import-panel', state='hidden')
-        assert 'Копия Google Таблицы создана' in page.locator('#br-notice').inner_text()
-        assert page.locator('[data-source-id="copied-source-1"]').is_visible()
+        assert 'Таблица создана' in page.locator('#br-notice').inner_text()
+        assert page.locator('[data-source-id="prepared-source-1"]').is_visible()
+        held('getSourceBases')
+        page.locator('[data-preview-source="prepared-source-1"]').click()
+        release('getSourceBases')
         held()
-        assert page.evaluate('backend.sourceGets') == 1
-        assert 'Копия Google Таблицы создана' in page.locator('#br-notice').inner_text()
+        assert 'Таблица создана' in page.locator('#br-notice').inner_text()
         page.locator('#br-import-open').click()
         page.locator('#br-link-name').fill('Следующая база')
         assert page.locator('#br-link-name').is_enabled()
+        page.evaluate('backend.holdMethods=[]')
         release()
         page.wait_for_function("document.getElementById('br-contact-preview-health').textContent.includes('Подсчёт временно недоступен')")
-        assert 'Копия Google Таблицы создана' in page.locator('#br-notice').inner_text()
+        assert 'Таблица создана' in page.locator('#br-notice').inner_text()
         assert page.locator('#br-import-message').is_hidden()
         page.locator('#br-import-cancel').click()
-        held('getSourceBases')
-        page.evaluate('backend.holdMethods=[]')
-        release('getSourceBases')
         idle()
         page.locator('#br-contact-preview-refresh').click()
         page.wait_for_selector('#br-contact-preview-result:not([hidden])')
@@ -156,7 +161,7 @@ def main():
         assert page.evaluate('backend.calls.length') == calls
         assert not errors, errors
         browser.close()
-        print('PASS: automatic post-import preview, separate acknowledgement/failure, sequential reads, stale result cancellation, metrics/columns/conflicts/paging, safe native links, mobile layout and revoked access')
+        print('PASS: explicit prepared import and optional contact preview, separate acknowledgement/failure, sequential reads, stale result cancellation, metrics/columns/conflicts/paging, safe native links, mobile layout and revoked access')
 
 
 if __name__ == '__main__':

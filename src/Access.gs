@@ -11,6 +11,10 @@ function callApp(request) {
         createBase: createBase_, createFolder: createFolder_, renameItem: renameItem_,
         getSourceBases: getSourceBases_, updateSourceBase: updateSourceBase_,
         previewSourceBaseContacts: previewSourceBaseContacts_,
+        stagePreparedBaseLink: stagePreparedBaseLink_, previewPreparedBase: previewPreparedBase_,
+        confirmPreparedBase: confirmPreparedBase_, continuePreparedBase: continuePreparedBase_, cancelPreparedBase: cancelPreparedBase_, listPreparedJobs: listPreparedJobs_,
+        getGridWorkbook: getGridWorkbook_, getGridRange: getGridRange_, saveGridRange: saveGridRange_,
+        appendGridRows: appendGridRows_, appendGridColumns: appendGridColumns_,
         importSourceBaseLink: importSourceBaseLink_, getSourceSheets: getSourceSheets_,
         createSegment: createSegment_, updateSegment: updateSegment_,
         getSegmentsDashboard: getSegmentsDashboard_, getSegmentMailings: getSegmentMailings_
@@ -28,6 +32,7 @@ function uploadSourceBase(form) {
     return withSharedAccess_(input.accessKey, function () {
       var clean = Object.create(null);
       Object.keys(input).forEach(function (name) { if (name !== 'accessKey') clean[name] = input[name]; });
+      if (clean.flow === 'prepared') { delete clean.flow; return stagePreparedUpload_(clean); }
       return uploadSourceBase_(clean);
     });
   });

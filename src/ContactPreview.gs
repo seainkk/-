@@ -8,7 +8,7 @@ function previewSourceBaseContacts_(request) {
     var fileId = id_(input.id), file = contactPreviewFile_(context, fileId);
     var result = { state: 'ready', source: { id: fileId, name: file.getName(), url: spreadsheetUrl_(fileId) }, scannedRows: 0, totalSheets: 0, sheets: [], companies: { unique: 0, unresolvedRows: 0 }, emails: { occurrences: 0, unique: 0, multiCompany: 0, unresolved: 0 }, phones: { occurrences: 0, unique: 0, mobiles: 0, landlines: 0, unknownType: 0, multiCompany: 0, unresolved: 0 }, conflicts: { total: 0, items: [], truncated: false }, warnings: [] };
     var budget = { started: Date.now(), cells: 0, rows: 0, partial: false }, observations = [], unparsed = false;
-    var book = SpreadsheetApp.openById(fileId), sheets = book.getSheets(), mapped = 0, unmapped = 0;
+    var book = SpreadsheetApp.openById(fileId), sheets = contactPreviewSourceSheets_(context, fileId, book.getSheets()), mapped = 0, unmapped = 0;
     result.totalSheets = sheets.length;
     for (var index = 0; index < sheets.length; index++) {
       if (index >= CONTACT_PREVIEW_LIMITS.maxSheets || !contactPreviewTime_(budget)) { budget.partial = true; contactPreviewWarn_(result, 'Достигнут лимит анализа листов или времени. Показаны неполные показатели.'); break; }
@@ -87,6 +87,20 @@ function contactPreviewFile_(context, fileId) {
 }
 
 function contactPreviewHeader_(value) { return String(value || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]/g, ''); }
+
+/** Prepared books contain derived lists; count the source leaf once. */
+function contactPreviewSourceSheets_(context, fileId, sheets) {
+  authorize_();
+  if (typeof Drive === 'undefined' || !Drive.Files || typeof Drive.Files.get !== 'function') return sheets;
+  var metadata = Drive.Files.get(fileId, { fields: 'appProperties', supportsAllDrives: true });
+  var properties = metadata && metadata.appProperties || {};
+  if (properties.registryPreparedVersion !== '1') return sheets;
+  var originalId = properties.registryPreparedOriginalSheetId;
+  if (typeof originalId !== 'string' || !/^\d+$/.test(originalId)) fail_('PREPARED_SCHEMA', 'Не удалось определить исходный лист подготовленной базы.');
+  var original = sheets.filter(function (sheet) { return String(sheet.getSheetId()) === originalId; });
+  if (original.length !== 1) fail_('PREPARED_SCHEMA', 'Исходный лист подготовленной базы недоступен.');
+  return original;
+}
 
 function contactPreviewMapping_(header) {
   var mapping = { companyColumns: [], emailColumns: [], phoneColumns: [], unmappedContactColumns: [] };

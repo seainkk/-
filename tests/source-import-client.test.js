@@ -74,5 +74,8 @@ test('the live file form has only the agreed Blob-transfer field names', () => {
   const form = index.match(/<form\b[^>]*\bid="br-import-file-form"[^>]*>[\s\S]*?<\/form>/);
   assert.ok(form, 'The actual import file form is present');
   const names = Array.from(form[0].matchAll(/\bname="([^"]+)"/g), match => match[1]).sort();
-  assert.deepEqual(names, ['accessKey', 'contentsJSON', 'file', 'name', 'requestId', 'status']);
+  assert.deepEqual([...new Set(names)], ['accessKey', 'file', 'flow', 'name', 'requestId', 'section', 'status']);
+  assert.equal(names.filter(name => name === 'section').length, 2, 'One radio group offers exactly the two sections');
+  assert.match(form[0], /name="flow"[^>]*value="prepared"/);
+  assert.doesNotMatch(form[0], /name="contentsJSON"/);
 });

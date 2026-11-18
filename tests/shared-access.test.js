@@ -30,7 +30,7 @@ function fixture() {
       base64EncodeWebSafe: value => Buffer.from(value).toString('base64url'),
     },
   });
-  for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'ContactPreview.gs', 'ContactTarget.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'Access.gs']) {
+  for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'ContactPreview.gs', 'ContactTarget.gs', 'PreparedData.gs', 'PreparedImport.gs', 'SheetEditor.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'Access.gs']) {
     vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   }
   return { context, properties, calls, call: (method, accessKey = TEST_ACCESS_KEY, payload) => context.callApp({ method, accessKey, ...(payload === undefined ? {} : { payload }) }) };
@@ -112,6 +112,37 @@ test('scope is removed after exceptions and raw provider errors never reveal the
   assert.equal(f.context.SHARED_REQUEST_SCOPE_, null);
   assert.throws(() => f.context.authorize_(), /LINK_ACCESS_REQUIRED/);
   assert.equal(f.calls.warnings.some(value => String(value).includes(TEST_ACCESS_KEY)), false);
+});
+
+test('prepared uploads use the existing verified form transport without leaking the key or flow marker', () => {
+  const f = fixture(), file = { marker: 'blob' };
+  let staged = 0;
+  f.context.stagePreparedUpload_ = input => {
+    staged++;
+    assert.equal(f.context.authorize_().rootId, ROOT);
+    assert.equal(Object.hasOwn(input, 'accessKey'), false);
+    assert.equal(Object.hasOwn(input, 'flow'), false);
+    assert.equal(input.file, file);
+    assert.equal(input.section, 'companies');
+    return { state: 'staged', draftId: 'draft_1234567890' };
+  };
+  f.context.uploadSourceBase_ = () => { throw new Error('Prepared form must not publish through the legacy importer'); };
+  assert.throws(() => f.context.uploadSourceBase({ flow: 'prepared', section: 'companies', file, accessKey: 'Z'.repeat(43) }), /LINK_ACCESS_REQUIRED/);
+  assert.equal(staged, 0);
+  assert.deepEqual(plain(f.context.uploadSourceBase({ flow: 'prepared', section: 'companies', file, accessKey: TEST_ACCESS_KEY })), { state: 'staged', draftId: 'draft_1234567890' });
+  assert.equal(staged, 1);
+  assert.equal(f.context.SHARED_REQUEST_SCOPE_, null);
+});
+
+test('grid reads and writes remain behind the shared-key dispatcher', () => {
+  const f = fixture();
+  let writes = 0;
+  f.context.saveGridRange_ = request => { writes++; assert.equal(f.context.authorize_().rootId, ROOT); return { state: 'saved', requestId: request.requestId }; };
+  assert.throws(() => f.call('saveGridRange', 'Z'.repeat(43), { requestId: 'edit_request_123456' }), /LINK_ACCESS_REQUIRED/);
+  assert.equal(writes, 0);
+  assert.deepEqual(plain(f.call('saveGridRange', TEST_ACCESS_KEY, { requestId: 'edit_request_123456' })), { state: 'saved', requestId: 'edit_request_123456' });
+  assert.equal(writes, 1);
+  assert.equal(f.context.SHARED_REQUEST_SCOPE_, null);
 });
 
 test('rotating the private verifier revokes the old key even inside an existing scope', () => {

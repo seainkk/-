@@ -233,3 +233,25 @@ test('movement or revoked access after header inspection blocks all body reads',
 test('request accepts only source id and never arbitrary target or spreadsheet parameters', () => {
   const f = fixture(); assert.throws(() => f.context.previewSourceBaseContacts({ id: FILE, targetId: FILE }), /INVALID_REQUEST/); assert.equal(f.calls.opened.length, 0);
 });
+
+test('prepared books count only their tagged original leaf rather than counting generated lists twice', () => {
+  const f = fixture({ sheets: [
+    { id: 11, name: 'Исходная база', rows: [['Company_ID', 'Компания', 'Email'], ['one', 'Компания', 'one@example.com']] },
+    { id: 12, name: 'Email', rows: [['Email', 'Компания / ЛПР'], ['one@example.com', 'Компания']] },
+    { id: 13, name: 'Телефоны', rows: [['Телефон'], ['+79991234567']] },
+  ] });
+  f.context.Drive = { Files: { get: () => ({ appProperties: { registryPreparedVersion: '1', registryPreparedOriginalSheetId: '11' } }) } };
+  const result = f.preview();
+  assert.equal(result.totalSheets, 1);
+  assert.equal(result.emails.occurrences, 1);
+  assert.equal(result.emails.unique, 1);
+  assert.equal(result.companies.unresolvedRows, 0);
+  assert.equal(f.calls.ranges.every(range => range.sheet === 'Исходная база'), true);
+});
+
+test('a missing prepared original leaf fails closed before reading any generated contact list', () => {
+  const f = fixture();
+  f.context.Drive = { Files: { get: () => ({ appProperties: { registryPreparedVersion: '1', registryPreparedOriginalSheetId: '999' } }) } };
+  assert.throws(() => f.preview(), /PREPARED_SCHEMA/);
+  assert.equal(f.calls.ranges.length, 0);
+});

@@ -1,0 +1,28 @@
+<section id="rg-grid-panel" class="rg-grid" role="dialog" aria-modal="true" aria-labelledby="rg-grid-title" hidden>
+  <header class="rg-grid-header">
+    <button id="rg-grid-close" class="rg-grid-button" type="button" aria-label="Закрыть таблицу">← К реестру</button>
+    <div class="rg-grid-document"><span class="rg-grid-document-icon" aria-hidden="true">▦</span><div><h1 id="rg-grid-title">Таблица</h1><a id="rg-grid-native" target="_blank" rel="noopener noreferrer">Открыть в Google Таблицах ↗</a></div></div>
+    <span id="rg-grid-status" class="rg-grid-status" role="status" aria-live="polite">Открываем…</span>
+  </header>
+  <div class="rg-grid-toolbar" role="toolbar" aria-label="Работа с таблицей">
+    <button id="rg-grid-undo" class="rg-grid-icon-button" type="button" title="Отменить последнее изменение (Ctrl+Z)" aria-label="Отменить изменение">↶</button>
+    <button id="rg-grid-redo" class="rg-grid-icon-button" type="button" title="Повторить изменение (Ctrl+Y)" aria-label="Повторить изменение">↷</button>
+    <span class="rg-grid-toolbar-divider" aria-hidden="true"></span>
+    <button id="rg-grid-copy" class="rg-grid-button" type="button">Копировать</button>
+    <button id="rg-grid-reload" class="rg-grid-button" type="button">↻ Обновить</button>
+    <span class="rg-grid-toolbar-divider" aria-hidden="true"></span>
+    <button id="rg-grid-add-rows" class="rg-grid-button" type="button">＋ 100 строк</button>
+    <button id="rg-grid-add-columns" class="rg-grid-button" type="button">＋ Столбец</button>
+    <span id="rg-grid-readonly" class="rg-grid-readonly" hidden>Только просмотр</span>
+  </div>
+  <div class="rg-grid-formula-bar">
+    <label class="rg-grid-address-label"><span class="rg-grid-visually-hidden">Перейти к ячейке</span><input id="rg-grid-address" value="A1" autocomplete="off" spellcheck="false" aria-label="Адрес ячейки"></label>
+    <span class="rg-grid-fx" aria-hidden="true">fx</span>
+    <input id="rg-grid-formula" autocomplete="off" spellcheck="false" aria-label="Значение или формула ячейки" placeholder="Значение или формула">
+  </div>
+  <div id="rg-grid-error" class="rg-grid-error" role="alert" hidden><p id="rg-grid-error-text"></p><div class="rg-grid-error-actions"><button id="rg-grid-retry" class="rg-grid-button" type="button">Повторить сохранение</button><button id="rg-grid-copy-draft" class="rg-grid-button" type="button">Скопировать несохранённое</button><button id="rg-grid-discard" class="rg-grid-button" type="button">Отменить несохранённые правки и перечитать</button></div></div>
+  <p id="rg-grid-hint" class="rg-grid-hint" role="status" aria-live="polite"></p>
+  <div id="rg-grid-viewport" class="rg-grid-viewport" tabindex="0" role="grid" aria-label="Ячейки таблицы" aria-multiselectable="true"><table id="rg-grid-table" class="rg-grid-table" aria-label="Данные листа"><colgroup id="rg-grid-colgroup"></colgroup><thead id="rg-grid-head"></thead><tbody id="rg-grid-body"></tbody></table></div>
+  <textarea id="rg-grid-editor" class="rg-grid-editor" aria-label="Редактирование ячейки" spellcheck="false" hidden></textarea>
+  <footer class="rg-grid-footer"><nav id="rg-grid-tabs" class="rg-grid-tabs" aria-label="Листы таблицы"></nav><span id="rg-grid-position" class="rg-grid-position"></span></footer>
+</section>
