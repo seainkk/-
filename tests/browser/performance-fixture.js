@@ -21,10 +21,36 @@ const api={
  importSourceBaseLink(p){if(backend.receipts[p.requestId])return {...clone(backend.receipts[p.requestId]),recovered:true};const item=makeSource(p.mode==='move'?'linked-source-original':'copied-source-'+(++backend.importCount),p.name,p.contents,p.status);backend.sources.push(item);backend.worksheets[item.id]=[{id:0,name:'Лист 1'}];const result={item:clone(item),file:{id:item.id,name:item.name},mode:p.mode,recovered:false};backend.receipts[p.requestId]=result;return result;}
 };
 function completeSegment(segment,p){const loaded=[];for(const load of p.loads||[]){const item=backend.sources.find(x=>x.id===load.sourceId);if(!item.canAddToSegment||item.status!=='ready')throw new Error('[SOURCE_NOT_READY] База уже не готова');if(item.revision!==load.expectedRevision)throw new Error('[CONFLICT] Состояние базы изменилось');for(const leaf of load.sheets){backend.copyCount++;loaded.push({sourceId:load.sourceId,sourceSheetId:leaf.sheetId,targetFileId:segment.id+'-'+leaf.target,targetSheetId:backend.copyCount,target:leaf.target,hasHeader:leaf.hasHeader});}if(load.sheets.length&&!item.segments.some(s=>s.id===segment.id))item.segments.push({id:segment.id,name:segment.name});}const result={segment:clone(segment),loadedSheets:loaded,recovered:false};backend.receipts[p.requestId]=result;if(backend.recoveryOnce){backend.recoveryOnce=false;throw new Error('[SEGMENT_RECOVERY_REQUIRED] Проверьте результат: https://drive.google.com/drive/folders/'+segment.id);}return result;}
-function runner(){let success,fail;const proxy=new Proxy({},{get(_,name){if(name==='withSuccessHandler')return cb=>{success=cb;return proxy;};if(name==='withFailureHandler')return cb=>{fail=cb;return proxy;};return (...args)=>{let p=args[0],method=name,key;
- if(name==='callApp'){key=p.accessKey;method=p.method;p=p.payload;backend.transport.push({name,args:args.length,method,keyMatches:key===MOCK_KEY});}
- else if(name==='uploadSourceBase'){const form=p,fd=new FormData(form),file=fd.get('file');key=fd.get('accessKey');backend.dispatches.push({form:form instanceof HTMLFormElement,args:args.length,keys:[...fd.keys()],file:file instanceof File,fileName:file?.name,contentsJSON:fd.get('contentsJSON'),requestId:fd.get('requestId'),keyMatches:key===MOCK_KEY,keyDisabled:form.querySelector('[name="accessKey"]').disabled});p=Object.fromEntries(fd);delete p.accessKey;p.file={name:file.name,size:file.size,type:file.type};backend.transport.push({name,args:args.length,keyMatches:key===MOCK_KEY});}
- backend.calls.push({name:method,p:clone(p??null)});backend.active++;backend.maxActive=Math.max(backend.maxActive,backend.active);Promise.resolve().then(async()=>{if(backend.holdMethods.includes(method))await new Promise(resolve=>backend.pending.push({method,resolve}));if(backend.revoked||key!==MOCK_KEY)throw new Error('[LINK_ACCESS_REQUIRED] Для входа нужна действующая закрытая ссылка.');if(!['callApp','uploadSourceBase'].includes(name))throw new Error('Unkeyed direct endpoint rejected');return api[method](p);}).then(value=>{backend.active--;success(clone(value));},error=>{backend.active--;fail(error);});};}});return proxy;}
+function runner(){
+ let success,fail;
+ const proxy=new Proxy({},{get(_,name){
+  if(name==='withSuccessHandler')return callback=>{success=callback;return proxy;};
+  if(name==='withFailureHandler')return callback=>{fail=callback;return proxy;};
+  return(...args)=>{
+   let p=args[0],method=name,key;
+   const liveForm=name==='uploadSourceBase'?p:null;
+   if(name==='callApp'){key=p.accessKey;method=p.method;p=p.payload;backend.transport.push({name,args:args.length,method,keyMatches:key===MOCK_KEY});}
+   if(!liveForm)backend.calls.push({name:method,p:clone(p??null)});
+   backend.active++;backend.maxActive=Math.max(backend.maxActive,backend.active);
+   Promise.resolve().then(async()=>{
+    // Match HTML Service's deferred live-form serialization, rather than
+    // hiding disabled-field races with an eager FormData snapshot.
+    if(liveForm){
+     await new Promise(resolve=>setTimeout(resolve,backend.uploadSerializationDelay??10));
+     const fd=new FormData(liveForm),file=fd.get('file');key=fd.get('accessKey');
+     backend.dispatches.push({form:liveForm instanceof HTMLFormElement,args:args.length,keys:[...fd.keys()],file:file instanceof File,fileName:file?.name,contentsJSON:fd.get('contentsJSON'),requestId:fd.get('requestId'),section:fd.get('section'),name:fd.get('name'),status:fd.get('status'),flow:fd.get('flow'),keyMatches:key===MOCK_KEY,keyDisabled:liveForm.querySelector('[name="accessKey"]').disabled,disabledFieldsets:liveForm.querySelectorAll('fieldset[disabled]').length,inertAtSerialization:liveForm.inert});
+     p=Object.fromEntries(fd);delete p.accessKey;p.file=file instanceof File?{name:file.name,size:file.size,type:file.type}:null;
+     backend.transport.push({name,args:args.length,keyMatches:key===MOCK_KEY});backend.calls.push({name:method,p:clone(p??null)});
+    }
+    if(backend.holdMethods.includes(method))await new Promise(resolve=>backend.pending.push({method,resolve}));
+    if(backend.revoked||key!==MOCK_KEY)throw new Error('[LINK_ACCESS_REQUIRED] Для входа нужна действующая закрытая ссылка.');
+    if(!['callApp','uploadSourceBase'].includes(name))throw new Error('Unkeyed direct endpoint rejected');
+    return api[method](p);
+   }).then(value=>{backend.active--;success(clone(value));},error=>{backend.active--;fail(error);});
+  };
+ }});
+ return proxy;
+}
 window.google={script:{get run(){return runner();},url:{getLocation(callback){backend.urlCalls++;setTimeout(()=>callback(clone(backend.location)),0);}},history:{setChangeHandler(callback){backend.historyChanged=callback;}}}};
 
 window.releaseRpc=(method)=>{const index=backend.pending.findIndex(item=>item.method===method);if(index<0)throw new Error('No held RPC: '+method);backend.pending.splice(index,1)[0].resolve();};

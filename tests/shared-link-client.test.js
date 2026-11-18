@@ -76,7 +76,7 @@ test('the live RPC transports ordinary operations only through the keyed dispatc
   assert.equal(f.context.networkPending, 0);
 });
 
-test('the upload still dispatches one live form with its named key populated before fields are disabled', async () => {
+test('the upload dispatches one live form with its named key populated', async () => {
   const f = rpcFixture(), form = { tagName: 'FORM' };
   const pending = f.context.rpc('uploadSourceBase', form);
   assert.equal(f.calls.length, 1);

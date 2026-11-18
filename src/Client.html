@@ -5,7 +5,7 @@
   const $=(id)=>document.getElementById(id);
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,pendingView=null,formMode=null;
   let sourceData=null,sourceTimer=null,lastSourceAttempt=0,lastSourceLoaded=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
-  let importOpen=false,importMode='file',importing=false,importFileSelection=0,registrySection='companies';
+  let importOpen=false,importMode='file',importing=false,importFileSelection=0,registrySection='companies',liveUploadForm=null;
   let preparedImport=null,preparedEpoch=0,preparedPollTimer=null,accessEpoch=0,gridTransportQueue=Promise.resolve();
   let preparedJobs=[],preparedJobsLoaded=false,preparedJobsQueued=false,preparedJobsLoading=false;
   let accessKey='',accessReady=false,accessMessage=null,pendingAccessChange=false;
@@ -416,7 +416,11 @@
     for(const id of ['br-import-mode-file','br-import-mode-link'])$(id).disabled=importing||draft;
     $('br-import-cancel').disabled=importing&&!preparedImport?.confirmationRequested;
     $('br-import-cancel').textContent=preparedImport?.confirmationRequested?'Свернуть':'Закрыть';
-    for(const form of [$('br-import-file-form'),$('br-import-link-form')]){form.setAttribute('aria-busy',String(importing));for(const field of form.elements)field.disabled=importing||draft;}
+    for(const form of [$('br-import-file-form'),$('br-import-link-form')]){form.setAttribute('aria-busy',String(importing));form.inert=importing||draft;
+      // HTML Service may serialize the live form after this event returns.
+      // Keep controls AND their fieldsets enabled until its callback arrives.
+      for(const field of form.elements)field.disabled=form===liveUploadForm?false:importing||draft;
+    }
     for(const id of ['br-upload-submit','br-link-submit'])$(id).disabled=requesting()||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true||draft;
     $('br-import-reread').disabled=importing||sourceLoading||!!sourceSaving||busy;
     renderPreparedPreview();
@@ -461,11 +465,12 @@
     if(!fields.name||fields.name.length>100){showImportMessage('Введите название базы от 1 до 100 символов.',true);return;}if(!['companies','lpr'].includes(section)){showImportMessage('Выберите раздел: Компании или ЛПР.',true);return;}
     const file=kind==='file'?$('br-upload-file').files[0]:null;if(kind==='file'){const invalid=importFileError(file);if(invalid){showImportMessage(invalid,true);return;}}else{fields.url=$('br-link-url').value.trim();fields.mode='copy';if(!importLinkId(fields.url)){showImportMessage('Укажите ссылку на исходную Google Таблицу в docs.google.com.','error');return;}}
     const fingerprint=importFingerprint(kind,fields,file,importFileSelection);let requestId=importRequests.get(fingerprint);if(!requestId){requestId=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);importRequests.set(fingerprint,requestId);}
-    showImportMessage('Подготавливаем предпросмотр…',false);$('br-upload-request').value=requestId;$('br-upload-contents').value=JSON.stringify(fields.contents);$('br-upload-section').value=section;
+    showImportMessage('Подготавливаем предпросмотр…',false);$('br-upload-request').value=requestId;
+    if(kind==='file')liveUploadForm=form;
     const pending=kind==='file'?rpc('uploadSourceBase',form):rpc('stagePreparedBaseLink',{url:fields.url,name:fields.name,section,status:fields.status,requestId});importing=true;updateControls();renderSourcesHealth();const epoch=preparedEpoch;
     try{const result=await pending;if(!accessReady||epoch!==preparedEpoch)return;const sheetId=result.selectedSheetId??result.sheets?.[0]?.id;preparedImport={epoch:++preparedEpoch,draftId:result.draftId,stage:result,section,name:fields.name,status:fields.status,selectedSheetId:Number(sheetId),preview:null,previewTab:0,previewQueued:true,loading:false,confirmationRequested:false,error:null};registrySection=section;showImportMessage(null,false);updateImportView();}
     catch(error){if(accessReady&&epoch===preparedEpoch){const parsed=failure(error);showImportMessage(parsed.message,true,importRecoveryId(parsed.message),true);}}
-    finally{importing=false;updateControls();renderSourcesHealth();flushPendingView();}
+    finally{if(liveUploadForm===form)liveUploadForm=null;importing=false;updateControls();renderSourcesHealth();flushPendingView();}
   }
   async function runPreparedPreview(){
     const current=preparedImport;if(!current?.previewQueued||requesting()||!accessReady)return;current.previewQueued=false;current.loading=true;current.error=null;current.preview=null;showImportMessage(null,false);importing=true;renderPreparedPreview();updateControls();

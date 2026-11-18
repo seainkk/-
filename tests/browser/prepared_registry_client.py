@@ -46,8 +46,14 @@ def main():
   assert page.evaluate('backend.maxActive')==1
   # Blob staging uses the live enabled form and selected single category.
   reset();page.locator('#br-section-lpr').click();page.locator('#br-import-open').click();page.locator('#br-upload-name').fill('ЛПР кухни');page.locator('#br-upload-file').set_input_files({'name':'people.csv','mimeType':'text/csv','buffer':b'name,email\nAlice,a@example.com'})
-  page.locator('#br-upload-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle()
-  dispatch=page.evaluate('backend.dispatches.at(-1)');assert dispatch['form'] and dispatch['args']==1 and dispatch['file'] and dispatch['keyMatches'] and not dispatch['keyDisabled']
+  page.evaluate("backend.uploadSerializationDelay=35;backend.holdMethods=['uploadSourceBase']")
+  page.locator('#br-upload-submit').click();held('uploadSourceBase')
+  dispatch=page.evaluate('backend.dispatches.at(-1)');assert dispatch['form'] and dispatch['args']==1 and dispatch['file'] and dispatch['keyMatches'] and not dispatch['keyDisabled'], 'Deferred native serialization must retain the file and access key'
+  assert dispatch['section']=='lpr' and dispatch['name']=='ЛПР кухни' and dispatch['status']=='collection' and dispatch['flow']=='prepared'
+  assert dispatch['requestId'] and dispatch['disabledFieldsets']==0 and dispatch['inertAtSerialization']
+  assert page.locator('#br-upload-submit').is_disabled()
+  assert page.locator('#br-import-file-form').evaluate('form=>form.inert')
+  page.evaluate('backend.holdMethods=[]');release('uploadSourceBase');page.wait_for_selector('#br-prepared-preview:not([hidden])');idle()
   assert sorted(dispatch['keys'])==['accessKey','file','flow','name','requestId','section','status']
   assert page.evaluate("backend.preparedDrafts[Object.keys(backend.preparedDrafts)[0]].stage.section")=='lpr'
   assert page.evaluate('backend.importCount')==0
