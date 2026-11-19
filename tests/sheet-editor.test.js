@@ -75,14 +75,18 @@ function fixture(options = {}) {
     LockService: { getScriptLock: () => ({ tryLock: () => { if (options.busy) return false; locked = true; return true; }, releaseLock: () => { locked = false; } }) },
     DriveApp: { getFolderById: id => { if (!folders.has(id)) throw new Error('Missing folder'); return folders.get(id); }, getFileById: id => { if (id !== FILE) throw new Error('Missing book'); return file; } },
     Drive: { Files: { get: id => { assert.equal(id, FILE); calls.capabilities++; if (options.capabilityThrows) throw new Error('No capability'); return { appProperties: options.appProperties || {}, ...(options.capabilityMissing ? {} : { capabilities: { canEdit: options.canEdit !== false } }) }; } } },
-    ScriptApp: { getOAuthToken: () => 'synthetic-private-token' },
-    UrlFetchApp: { fetch: (url, request) => {
-      assert.equal(url, `https://sheets.googleapis.com/v4/spreadsheets/${FILE}:batchUpdate`);
-      assert.equal(request.method, 'post'); assert.equal(request.headers.Authorization, 'Bearer synthetic-private-token');
-      const body = JSON.parse(request.payload); calls.rawRequests.push(body);
+    ScriptApp: { getOAuthToken: () => { throw new Error('The literal writer must not request a raw OAuth token'); } },
+    UrlFetchApp: { fetch: () => { throw new Error('The literal writer must not use raw HTTP'); } },
+    Sheets: { Spreadsheets: { batchUpdate: (request, id) => {
+      assert.equal(id, FILE);
+      const body = plain(request); calls.rawRequests.push(body);
       assert.ok(body.requests.every(item => item.updateCells));
       assert.ok(locked || options.directRaw);
-      if (options.rawStatus) return { getResponseCode: () => options.rawStatus, getContentText: () => options.rawBody || 'OAuth secret and private data must not appear in an error' };
+      if (options.rawStatus) {
+        let payload = {}; try { payload = JSON.parse(options.rawBody || '{}'); } catch {}
+        const error = new Error(payload.error?.message || 'OAuth secret and private data must not appear in an error');
+        error.details = { ...payload.error, code: options.rawStatus }; throw error;
+      }
       if (options.rawFault === 'before') throw new Error('RAW response lost before apply');
       for (const item of body.requests) {
         const update = item.updateCells, area = update.range;
@@ -90,8 +94,8 @@ function fixture(options = {}) {
         update.rows.forEach((line, y) => line.values.forEach((cell, x) => { assert.equal(typeof cell.userEnteredValue.stringValue, 'string'); put(area.startRowIndex + y + 1, area.startColumnIndex + x + 1, cell.userEnteredValue.stringValue, true); }));
       }
       if (options.rawFault === 'after') throw new Error('RAW response lost after apply');
-      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ spreadsheetId: options.rawWrongId ? 'wrong' : FILE, replies: body.requests.map(() => ({})) }) };
-    } },
+      return { spreadsheetId: options.rawWrongId ? 'wrong' : FILE, replies: body.requests.map(() => ({})) };
+    } } },
     SpreadsheetApp: { openById: id => { assert.equal(id, FILE); calls.opened.push(id); return { getSheets: () => [sheet] }; }, flush: () => { assert.ok(locked || options.directRaw); calls.flushes++; }, newRichTextValue: () => { let text = ''; return { setText(value) { text = value; return this; }, build() { return { text }; } }; } },
   });
   for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SegmentActions.gs', 'SheetEditor.gs', 'Access.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
@@ -203,6 +207,12 @@ test('controlled RAW diagnostics distinguish API setup, masks and scopes without
     const f = fixture({ directRaw: true, rawStatus: status, rawBody: JSON.stringify(body) });
     assert.throws(() => f.run(() => f.context.sheetWriteRawStrings_(FILE, 0, 4, 2, [['+79990000001']])), error => error.sheetRawDiagnostic === expected && error.message.includes(expected) && !/private-project|OAuth secret|private customer/.test(error.message));
   }
+});
+
+test('a missing Advanced Sheets service fails closed without raw OAuth or HTTP fallback', () => {
+  const f = fixture({ directRaw: true }); delete f.context.Sheets;
+  assert.throws(() => f.run(() => f.context.sheetWriteRawStrings_(FILE, 0, 4, 2, [['+79990000001']])), error => error.sheetRawDiagnostic === 'ADVANCED_SERVICE_UNAVAILABLE');
+  assert.equal(f.calls.rawRequests.length, 0); assert.equal(f.calls.mutations.length, 0);
 });
 
 test('Grid uncertainty exposes only the safe RAW diagnostic and keeps the request pending', () => {

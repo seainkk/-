@@ -448,3 +448,62 @@ test('authoritative RAW strings avoid native RichText =+ corruption without rela
   assert.equal(original.state.data[1][1], '+79990000004'); assert.equal(original.state.formulaMap['2:2'], undefined);
   assert.ok(g.calls.writes.some(write => write.sheet === original.getSheetId() && write.raw && write.links?.[0]?.[0] === 'https://wa.me/79990000004'));
 });
+
+test('live owner lease releases without the unrelated global lock and preserves success or original error', () => {
+  for (const shouldFail of [false, true]) {
+    const f = fixture(), draft = f.stage(), index = f.properties.get('PREPARED_DRAFT_INDEX');
+    let locks = 0;
+    f.context.LockService = { getScriptLock: () => ({ tryLock() { if (++locks > 1) return false; return true; }, releaseLock() {} }) };
+    const original = Error('Original callback failure');
+    const run = () => f.context.withSharedAccess_(KEY, () => f.context.preparedWithLease_(draft.draftId, (current, context) => {
+      current.phase = 'saved-before-return'; f.context.preparedSave_(context, current);
+      if (shouldFail) throw original;
+      return { state: 'processing', durable: true };
+    }));
+    if (shouldFail) assert.throws(run, error => error === original);
+    else assert.deepEqual(plain(run()), { state: 'processing', durable: true });
+    assert.equal(locks, 1, 'cleanup never attempts the globally busy lock for a live owner lease');
+    const saved = f.drafts()[0]; assert.equal(saved.phase, 'saved-before-return');
+    assert.equal(saved.lease, undefined); assert.equal(saved.leaseUntil, undefined);
+    assert.equal(f.properties.get('PREPARED_DRAFT_INDEX'), index);
+  }
+});
+
+test('lease cleanup leaves foreign receipts untouched and expiry fallback cannot mask callback outcomes', () => {
+  for (const kind of ['foreign', 'near', 'expired']) {
+    const f = fixture(), draft = f.stage(); let locks = 0;
+    f.context.LockService = { getScriptLock: () => ({ tryLock() { return ++locks === 1; }, releaseLock() {} }) };
+    const result = f.context.withSharedAccess_(KEY, () => f.context.preparedWithLease_(draft.draftId, current => {
+      const changed = plain(current);
+      changed.leaseUntil = Date.now() + (kind === 'near' ? 1000 : -1000);
+      if (kind === 'foreign') changed.lease = 'another-invocation';
+      f.properties.set('PREPARED_DRAFT_' + draft.draftId, JSON.stringify(changed));
+      return 'callback-result';
+    }));
+    assert.equal(result, 'callback-result');
+    const saved = f.drafts()[0]; assert.ok(saved.lease);
+    if (kind === 'foreign') { assert.equal(saved.lease, 'another-invocation'); assert.equal(locks, 1); }
+    else assert.equal(locks, 2, 'near/expired cleanup tries the lock briefly and retains the receipt when busy');
+  }
+});
+
+test('expiry fallback re-reads ownership under the claim lock before releasing a receipt', () => {
+  for (const replaced of [false, true]) {
+    const f = fixture(), draft = f.stage(); let locks = 0;
+    f.context.LockService = { getScriptLock: () => ({
+      tryLock() {
+        if (++locks === 2 && replaced) {
+          const latest = f.drafts()[0]; latest.lease = 'replacement-owner'; latest.leaseUntil = Date.now() + 600000;
+          f.properties.set('PREPARED_DRAFT_' + draft.draftId, JSON.stringify(latest));
+        }
+        return true;
+      }, releaseLock() {}
+    }) };
+    f.context.withSharedAccess_(KEY, () => f.context.preparedWithLease_(draft.draftId, current => {
+      current.leaseUntil = Date.now() - 1;
+      f.properties.set('PREPARED_DRAFT_' + draft.draftId, JSON.stringify(current));
+    }));
+    assert.equal(locks, 2);
+    assert.equal(f.drafts()[0].lease, replaced ? 'replacement-owner' : undefined);
+  }
+});

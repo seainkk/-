@@ -280,40 +280,37 @@ function sheetWriteRawStrings_(fileId, sheetId, row, column, values, mask, links
     return { updateCells: { range: { sheetId: sheetId, startRowIndex: row - 1 + group.row, endRowIndex: row - 1 + group.row + group.height, startColumnIndex: column - 1 + group.column, endColumnIndex: column - 1 + group.column + group.width }, rows: rows, fields: 'userEnteredValue,textFormatRuns,userEnteredFormat.textFormat.link' } };
   });
   // Make SDK-created sheets/grid sizes visible and prevent queued SDK writes
-  // from overwriting the subsequent REST values.
+  // from overwriting the subsequent explicit Sheets API values.
   SpreadsheetApp.flush(); authorize_();
-  var response;
-  try {
-    response = UrlFetchApp.fetch('https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(fileId) + ':batchUpdate', { method: 'post', contentType: 'application/json', headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, payload: JSON.stringify({ requests: requests }), muteHttpExceptions: true });
-  } catch (error) { sheetRawFailure_('NETWORK_ERROR'); }
-  var code = response.getResponseCode();
-  if (code < 200 || code >= 300) sheetRawFailure_(sheetRawHttpReason_(response, code));
+  if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets || typeof Sheets.Spreadsheets.batchUpdate !== 'function') sheetRawFailure_('ADVANCED_SERVICE_UNAVAILABLE');
   var result;
-  try { result = JSON.parse(response.getContentText()); } catch (error) { sheetRawFailure_('INVALID_RESPONSE'); }
+  try {
+    result = Sheets.Spreadsheets.batchUpdate({ requests: requests }, fileId);
+  } catch (error) { sheetRawFailure_(sheetRawServiceReason_(error)); }
   if (!result || result.spreadsheetId !== fileId || !Array.isArray(result.replies) || result.replies.length !== requests.length) sheetRawFailure_('INCOMPLETE_ACKNOWLEDGEMENT');
   return { spreadsheetId: fileId, requests: requests.length };
 }
 
 /** Return only controlled diagnostic labels; never echo provider text or IDs. */
-function sheetRawHttpReason_(response, status) {
-  var code = Number(status), payload = null;
-  try { payload = JSON.parse(response.getContentText()); } catch (error) { /* A non-JSON provider response is not exposed. */ }
-  var data = payload && payload.error && typeof payload.error === 'object' ? payload.error : {}, labels = [], reason = '';
+function sheetRawServiceReason_(error) {
+  var details = error && error.details && typeof error.details === 'object' ? error.details : {};
+  var data = details.error && typeof details.error === 'object' ? details.error : details;
+  var code = Number(data.code || (error && error.code)), labels = [], reason = '';
   if (Array.isArray(data.details)) data.details.forEach(function (item) { if (item && typeof item.reason === 'string') labels.push(item.reason); });
   if (Array.isArray(data.errors)) data.errors.forEach(function (item) { if (item && typeof item.reason === 'string') labels.push(item.reason); });
   labels.push(typeof data.status === 'string' ? data.status : '');
-  var joined = labels.join('|'), message = typeof data.message === 'string' ? data.message.slice(0, 4096) : '';
+  var joined = labels.join('|'), message = typeof data.message === 'string' ? data.message.slice(0, 4096) : (error && typeof error.message === 'string' ? error.message.slice(0, 4096) : '');
   if (/SERVICE_DISABLED|API_DISABLED|accessNotConfigured/i.test(joined) || /has not been used|api[^.]*is disabled|service[^.]*disabled/i.test(message)) reason = 'SERVICE_DISABLED';
-  else if (/ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficientPermissions|insufficientAuthenticationScopes/i.test(joined) || /insufficient authentication scopes/i.test(message)) reason = 'INSUFFICIENT_SCOPES';
+  else if (/ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficientPermissions|insufficientAuthenticationScopes/i.test(joined) || /insufficient authentication scopes|required permissions|authorization is required|not authorized to call/i.test(message)) reason = 'INSUFFICIENT_SCOPES';
   else if (/RATE_LIMIT|QUOTA_EXCEEDED|rateLimitExceeded|dailyLimitExceeded/i.test(joined) || code === 429) reason = 'RATE_LIMITED';
-  else if (code === 400 && /invalid[^.]{0,120}field|unknown name|cannot find field|field mask/i.test(message)) reason = 'INVALID_FIELD_MASK';
-  else if (code === 400 && /beyond (?:max|the)|exceeds grid limits|out of bounds/i.test(message)) reason = 'GRID_BOUNDS';
+  else if (/invalid[^.]{0,120}field|unknown name|cannot find field|field mask/i.test(message)) reason = 'INVALID_FIELD_MASK';
+  else if (/beyond (?:max|the)|exceeds grid limits|out of bounds/i.test(message)) reason = 'GRID_BOUNDS';
   else if (code === 400 || /INVALID_ARGUMENT/i.test(joined)) reason = 'INVALID_ARGUMENT';
-  else if (code === 403 || /PERMISSION_DENIED|forbidden|accessDenied/i.test(joined)) reason = 'PERMISSION_DENIED';
+  else if (code === 403 || /PERMISSION_DENIED|forbidden|accessDenied/i.test(joined) || /caller does not have permission|permission denied|do not have permission/i.test(message)) reason = 'PERMISSION_DENIED';
   else if (code === 401) reason = 'AUTH_REQUIRED';
   else if (code === 404) reason = 'NOT_FOUND';
   else if (code >= 500) reason = 'GOOGLE_UNAVAILABLE';
-  else reason = 'HTTP_ERROR';
+  else reason = 'ADVANCED_SERVICE_ERROR';
   return (Number.isInteger(code) && code >= 100 && code <= 599 ? 'HTTP ' + code + ', ' : '') + reason;
 }
 

@@ -1,6 +1,6 @@
 /** Preview-first, copy-only preparation. Drafts stay outside the visible catalog. */
 var PREPARED_IMPORT = Object.freeze({
-  version: 1, leaseMillis: 10 * 60 * 1000, ttlMillis: 24 * 60 * 60 * 1000,
+  version: 1, leaseMillis: 10 * 60 * 1000, releaseGuardMillis: 60 * 1000, ttlMillis: 24 * 60 * 60 * 1000,
   maxDrafts: 60, writeRows: 3000, freezeCells: 150,
   folderProperty: 'PREPARED_STAGING_FOLDER_ID', indexProperty: 'PREPARED_DRAFT_INDEX',
   fields: 'id,name,mimeType,parents,trashed,appProperties,modifiedTime,version,capabilities(canCopy,canEdit,canAddChildren)'
@@ -263,12 +263,31 @@ function preparedWithLease_(draftId, callback, allowExpired) {
   });
   if (claim.cancelled) return { state: 'cancelled' };
   try { return callback(claim.draft, claim.context); }
-  finally {
-    locked_(function () {
-      var context = authorize_(), latest = preparedRead_(context, draftId, true);
-      if (latest && latest.lease === claim.lease) { delete latest.lease; delete latest.leaseUntil; preparedSave_(context, latest); }
-    });
+  finally { preparedReleaseLease_(claim); }
+}
+
+/** Releasing a private receipt must not wait for unrelated grid saves or mask results. */
+function preparedReleaseLease_(claim) {
+  function clearOwnLease() {
+    var latest = preparedRead_(claim.context, claim.draft.draftId, true);
+    if (!latest || latest.lease !== claim.lease) return;
+    delete latest.lease; delete latest.leaseUntil; preparedSave_(claim.context, latest);
   }
+  try {
+    var latest = preparedRead_(claim.context, claim.draft.draftId, true);
+    if (!latest || latest.lease !== claim.lease) return;
+    // All claimers refuse a live lease. The ten-minute lease exceeds an Apps
+    // Script invocation; keep an additional minute before any unlocked release.
+    // This updates only the owner's receipt and never the shared draft index.
+    if (Number.isFinite(latest.leaseUntil) && latest.leaseUntil > Date.now() + PREPARED_IMPORT.releaseGuardMillis) {
+      delete latest.lease; delete latest.leaseUntil; preparedSave_(claim.context, latest); return;
+    }
+    // Close to expiry, another invocation may claim the receipt. Re-read while
+    // holding the global claim lock, or leave cleanup to the lease timeout.
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(100)) return;
+    try { clearOwnLease(); } finally { lock.releaseLock(); }
+  } catch (error) { console.warn('Preparation lease could not be safely released.'); }
 }
 
 function preparedEnsureFolder_(context) {
