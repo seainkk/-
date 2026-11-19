@@ -6,9 +6,10 @@
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,pendingView=null,formMode=null;
   let sourceData=null,sourceTimer=null,lastSourceAttempt=0,lastSourceLoaded=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
   let importOpen=false,importMode='file',importing=false,importFileSelection=0,registrySection='companies',liveUploadForm=null;
-  let preparedImport=null,preparedEpoch=0,preparedPollTimer=null,accessEpoch=0,gridTransportQueue=Promise.resolve();
+  let preparedImport=null,preparedEpoch=0,preparedPollTimer=null,accessEpoch=0,workspaceRpcQueue=Promise.resolve();
   let preparedJobs=[],preparedJobsLoaded=false,preparedJobsQueued=false,preparedJobsLoading=false;
   let accessKey='',accessReady=false,accessMessage=null,pendingAccessChange=false;
+  let providerSession=null;
   let dashboard=null,dashboardLoading=false,dashboardError=null,lastDashboardAttempt=0,lastDashboardLoaded=0,renderedDashboardKey=null;
   let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0,lastMailingsLoaded=0;
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
@@ -42,10 +43,10 @@
   }
   function renderAccess(){
     $('br-access-panel').hidden=accessReady;$('br-access-title').textContent=busy?'Открываем реестр…':'Для входа нужна закрытая ссылка';$('br-access-message').textContent=accessMessage||(busy?'Проверяем ссылку…':'Откройте полную ссылку, которую вам передал владелец сервиса.');$('br-access-retry').disabled=busy||networkPending>0;
-    const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
+    const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-provider-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message){
-    accessEpoch++;accessReady=false;accessKey='';preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();gridTransportQueue=Promise.resolve();
+    accessEpoch++;accessReady=false;accessKey='';closeProviderSettings();preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
     contactPreview=null;contactPreviewEpoch++;segmentImportDestination=null;segmentReturnPending=null;renderContactPreview();
     pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;
     if(message)notifyEntry('locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
@@ -61,6 +62,99 @@
     const value=sharedUrl(accessKey);
     try{if(!navigator.clipboard?.writeText)throw new Error('Clipboard unavailable');await navigator.clipboard.writeText(value);notice('Закрытая ссылка скопирована.');}
     catch(error){const field=document.createElement('textarea');field.value=value;field.readOnly=true;field.style.position='fixed';field.style.opacity='0';document.body.append(field);field.select();let copied=false;try{copied=document.execCommand('copy');}catch(ignored){}field.remove();notice(copied?'Закрытая ссылка скопирована.':'Не удалось скопировать ссылку. Скопируйте полный адрес страницы из адресной строки браузера.',copied?'info':'error');}
+  }
+  function closeProviderSettings(){
+    providerSession=null;
+    $('br-provider-form').reset();
+    $('br-provider-key').value='';
+    const dialog=$('br-provider-dialog');
+    if(dialog.open)dialog.close();
+  }
+  function renderProviderSettings(current){
+    $('br-provider-fields').disabled=!!current.pending||!current.settings;
+    $('br-provider-balance').disabled=current.settings?.configured!==true;
+    $('br-provider-automation').disabled=!!current.pending||!current.automation;
+    $('br-provider-close').disabled=['save','automation'].includes(current.pending);
+    $('br-provider-owner').hidden=!current.needsOwnerAuth&&!current.automation?.needsOwnerSetup;
+  }
+  function showProviderValues(current,settings){
+    current.settings=settings;
+    $('br-provider-configured').textContent=settings.configured?'Ключ уже подключён.':'API-ключ ещё не подключён.';
+    $('br-provider-enabled').checked=settings.enabled===true;
+    $('br-provider-limit').value=String(settings.autoPayLimitUsd??0);
+  }
+  function showAutomationState(current,data){
+    current.automation=data;
+    $('br-provider-automation').textContent=data.installed?'Отключить фоновую обработку':'Включить обработку изменений в Google Таблицах';
+    $('br-provider-automation-message').textContent=data.needsOwnerSetup?'Включение требует разрешения владельца.':data.installed?'Фоновая обработка подключённых таблиц включена.':'Фоновая обработка подключённых таблиц выключена.';
+  }
+  async function openProviderSettings(){
+    if(!accessReady||providerSession||gridIsOpen())return;
+    const current={pending:'load',settings:null,automation:null,needsOwnerAuth:false};
+    providerSession=current;
+    $('br-provider-configured').textContent='';
+    $('br-provider-message').textContent='Загружаем настройки…';
+    $('br-provider-automation-message').textContent='';
+    $('br-provider-automation').textContent='Включить обработку изменений в Google Таблицах';
+    renderProviderSettings(current);
+    $('br-provider-dialog').showModal();
+    try{
+      const settings=await workspaceRpc('getPromouserSettings',{});
+      if(providerSession!==current)return;
+      showProviderValues(current,settings);
+      $('br-provider-message').textContent='';
+    }catch(error){if(providerSession===current)$('br-provider-message').textContent=failure(error).message;}
+    if(providerSession!==current)return;
+    try{
+      const automation=await workspaceRpc('getContactAutomationState',{});
+      if(providerSession===current)showAutomationState(current,automation);
+    }catch(error){if(providerSession===current)$('br-provider-automation-message').textContent=failure(error).message;}
+    finally{if(providerSession===current){current.pending=null;renderProviderSettings(current);}}
+  }
+  async function runProviderAction(action,method,payload,onSuccess,messageId='br-provider-message'){
+    const current=providerSession;
+    if(!current||current.pending)return;
+    current.pending=action;
+    const message=$(messageId);
+    message.textContent=action==='save'?'Сохраняем подключение…':action==='balance'?'Проверяем баланс…':'Обновляем настройки фоновой обработки…';
+    renderProviderSettings(current);
+    try{
+      const data=await workspaceRpc(method,payload);
+      if(providerSession===current)onSuccess(current,data,message);
+    }catch(error){
+      if(providerSession===current){
+        const parsed=failure(error);
+        if(parsed.code==='PV_OWNER_AUTH_REQUIRED')current.needsOwnerAuth=true;
+        message.textContent=parsed.message;
+      }
+    }finally{
+      if(action==='save')delete payload.apiKey;
+      if(providerSession===current){current.pending=null;renderProviderSettings(current);}
+    }
+  }
+  function saveProviderSettings(event){
+    event.preventDefault();
+    if(!providerSession?.settings||providerSession.pending)return;
+    const payload={enabled:$('br-provider-enabled').checked,autoPayLimitUsd:$('br-provider-limit').valueAsNumber};
+    const key=$('br-provider-key').value.trim();
+    if(key)payload.apiKey=key;
+    $('br-provider-key').value='';
+    runProviderAction('save','configurePromouser',payload,(current,data,message)=>{
+      showProviderValues(current,data);
+      message.textContent='Подключение сохранено.';
+    });
+  }
+  function showProviderBalance(){
+    if(!providerSession?.settings?.configured)return;
+    runProviderAction('balance','getPromouserBalance',{},(current,data,message)=>{
+      current.needsOwnerAuth=false;
+      message.textContent='Баланс Promouser: $'+String(data.balance);
+    });
+  }
+  function toggleProviderAutomation(){
+    const automation=providerSession?.automation;
+    if(!automation)return;
+    runProviderAction('automation',automation.installed?'disableContactAutomation':'enableContactAutomation',{},showAutomationState,'br-provider-automation-message');
   }
   function nativeUrl(id,sheetId){return 'https://docs.google.com/spreadsheets/d/'+encodeURIComponent(id)+'/edit'+(sheetId===undefined?'':'#gid='+encodeURIComponent(sheetId));}
   function notice(message,kind='info',link=null){const node=$('br-notice');node.hidden=!message;node.className='br-notice'+(kind==='error'?' br-error':'');node.replaceChildren();if(message)node.append(document.createTextNode(message));if(link){const anchor=document.createElement('a');anchor.href=nativeUrl(link.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent=link.label||'Открыть созданную базу';node.append(anchor);}}
@@ -110,17 +204,17 @@
   function requesting(){return networkPending>0||busy||sourceLoading||!!sourceSaving||importing||dashboardLoading||mailingsLoading||segmentSaving||segmentPreviewLoading;}
   // Reading a list must not prevent opening a cached form or typing into it.
   function editingBlocked(){return !accessReady||busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||gridIsOpen();}
-  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0||gridIsOpen();}
+  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0||gridIsOpen()||!!providerSession;}
   function gridIsOpen(){return window.RegistryGrid?.isOpen?.()===true;}
-  function gridTransport(method,payload){
+  function workspaceRpc(method,payload){
     const epoch=accessEpoch;
-    const run=async()=>{while(requesting()){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ к таблице закрыт.');await new Promise(resolve=>setTimeout(resolve,25));}if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ к таблице закрыт.');return rpc(method,payload);};
-    const task=gridTransportQueue.catch(()=>{}).then(run);gridTransportQueue=task.catch(()=>{});return task;
+    const run=async()=>{while(requesting()){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');await new Promise(resolve=>setTimeout(resolve,25));}if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');return rpc(method,payload);};
+    const task=workspaceRpcQueue.catch(()=>{}).then(run);workspaceRpcQueue=task.catch(()=>{});return task;
   }
   function openGridWorkbook(id){
     if(!accessReady||importing||sourceSaving||segmentSaving||segmentEditor)return;
     if(!window.RegistryGrid?.open){notice('Редактор таблиц ещё загружается. Обновите страницу.','error');return;}
-    window.RegistryGrid.open({id,transport:gridTransport,onClose:()=>{render();armViewTimer();flushPendingView();}});updateControls();
+    window.RegistryGrid.open({id,transport:workspaceRpc,onClose:()=>{render();armViewTimer();flushPendingView();}});updateControls();
   }
   function sourceInSection(item,section){const kinds=normalizeContents(item?.contents);return !kinds.length||kinds.includes(section);}
   function renderRegistrySections(){
@@ -491,7 +585,7 @@
     root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderContactPreview();renderRegistrySections();renderAccess();updateControls();
   }
   function updateControls(){
-    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen();$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
+    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen();$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen();for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
     for(const add of root.querySelectorAll('[data-add-source]')){const item=sourceItem(add.dataset.addSource);add.disabled=!readySource(item)||sourceDrafts.has(item.id)||editing||importOpen||!!segmentEditor;}
     for(const analyze of root.querySelectorAll('[data-preview-source]'))analyze.disabled=editing||importOpen||!!segmentEditor;
@@ -529,6 +623,12 @@
   }
   function setView(view,options={}){activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});}
   $('br-access-retry').addEventListener('click',startSharedAccess);$('br-share-copy').addEventListener('click',copySharedLink);
+  $('br-provider-open').addEventListener('click',openProviderSettings);
+  $('br-provider-close').addEventListener('click',()=>{closeProviderSettings();flushPendingView();});
+  $('br-provider-dialog').addEventListener('cancel',(event)=>{event.preventDefault();if(!$('br-provider-close').disabled){closeProviderSettings();flushPendingView();}});
+  $('br-provider-form').addEventListener('submit',saveProviderSettings);
+  $('br-provider-balance').addEventListener('click',showProviderBalance);
+  $('br-provider-automation').addEventListener('click',toggleProviderAutomation);
   $('br-source-search').addEventListener('input',updateSourceFilters);$('br-source-contents-filter').addEventListener('change',updateSourceFilters);$('br-source-unassigned-filter').addEventListener('change',updateSourceFilters);$('br-source-filters-reset').addEventListener('click',resetSourceFilters);
   $('br-view-sources').addEventListener('click',()=>setView('sources'));$('br-view-segments').addEventListener('click',()=>setView('segments'));$('br-view-retarget').addEventListener('click',()=>setView('retarget'));
   $('br-refresh').addEventListener('click',()=>refreshActiveView({manual:true}));

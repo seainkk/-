@@ -11,7 +11,27 @@
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <dialog id="br-provider-dialog" class="br-provider-dialog" aria-labelledby="br-provider-title">
+    <div class="br-import-heading"><h2 id="br-provider-title">Подключение Promouser</h2><button id="br-provider-close" type="button" class="br-button" autofocus>Закрыть</button></div>
+    <p class="br-muted">Настройки действуют для всех таблиц реестра и сегментов.</p>
+    <p id="br-provider-configured" class="br-muted"></p>
+    <form id="br-provider-form" autocomplete="off">
+      <fieldset id="br-provider-fields" class="br-provider-fields" disabled>
+        <label for="br-provider-key">API-ключ<input id="br-provider-key" type="password" autocomplete="new-password" maxlength="512" placeholder="Оставьте пустым, чтобы сохранить текущий"></label>
+        <label class="br-provider-choice"><input id="br-provider-enabled" type="checkbox">Проверять новые контакты через Promouser</label>
+        <label for="br-provider-limit">Лимит автоматической оплаты одного заказа, $<input id="br-provider-limit" type="number" min="0" max="1000" step="0.01" required></label>
+        <p class="br-muted">При лимите 0 каждый заказ требует ручного подтверждения.</p>
+        <div class="br-provider-actions"><button id="br-provider-save" type="submit" class="br-button br-primary">Сохранить подключение</button><button id="br-provider-balance" type="button" class="br-button">Показать баланс</button></div>
+      </fieldset>
+    </form>
+    <p id="br-provider-message" role="status" aria-live="polite"></p>
+    <div class="br-provider-automation">
+      <button id="br-provider-automation" type="button" class="br-button" disabled>Включить обработку изменений в Google Таблицах</button>
+      <p id="br-provider-automation-message" class="br-muted" role="status" aria-live="polite"></p>
+    </div>
+    <p id="br-provider-owner" class="br-muted" hidden>Владельцу нужно один раз запустить <code>setupContactAutomation_</code> в <a href="https://script.google.com/home/projects/1FyQVeeqd4X13NqQ7PtRMVg7U8p60yk-tWvgK-9vmPdpQgK-mQE3sL8aH/edit" target="_blank" rel="noopener noreferrer">редакторе Apps Script</a> и подтвердить доступ. Функция также включает фоновую обработку.</p>
+  </dialog>
   <div id="br-notice" class="br-notice" role="status" aria-live="polite" hidden></div>
   <div id="br-loading" class="br-loading" aria-live="polite" hidden>Загружаем приложение…</div>
   <section id="br-access-panel" class="br-access-panel" aria-labelledby="br-access-title">
