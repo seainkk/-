@@ -19,6 +19,7 @@
       inputs: Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => cell(tab, payload.row + r, payload.column + c).input)),
       versions: Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => 'v' + cell(tab, payload.row + r, payload.column + c).revision)) };
   }
+  function validationDto(){return {configured:state.providerSettings.configured,enabled:state.providerSettings.enabled,state:state.validationState||'complete',canAutoAdvance:state.validationAutoAdvance,nextActionAt:state.validationNextActionAt,counts:{queued:0,processing:0,checked:2,review:0},jobs:state.validationJobs||[],warnings:[]};}
   function execute(method, payload) {
     const next = state.failures[method]?.shift(); if (next) throw new Error('[' + next + '] Проверочная ошибка.');
     if (method === 'getContactWorkspace') return {enrolled:true,canSync:true,targets:{emailSheetId:1,phoneSheetId:2},sourceSheetIds:state.contactsEnabled?[0]:[],role:'registry'};
@@ -27,12 +28,12 @@
       if(method==='continueContactSync'&&state.runningContactRequest&&payload.requestId!==state.runningContactRequest)throw new Error('[REQUEST_REUSED] Нужен UUID активного задания.');
       const previous=state.receipts.get(payload.requestId);if(!previous){state.receipts.set(payload.requestId,structuredClone(payload));state.syncRuns++;}
       if(state.failAfterSync){state.failAfterSync=false;throw new Error('[CONTACT_UNCERTAIN] Ответ потерялся.');}
-      return {state:'complete',requestId:payload.requestId,counts:{addedEmail:1,addedPhone:2,addedTelegram:1,existing:2},warnings:[]};
+      return {state:'complete',requestId:payload.requestId,counts:{addedEmail:1,addedPhone:2,addedTelegram:1,existing:2},warnings:[],...(state.omitValidationDto?{}:{validation:validationDto()})};
     }
     if (['getValidationState','advanceWorkbookValidation','refreshWorkbookValidation','payValidationOrder'].includes(method)) {
       if(['advanceWorkbookValidation','refreshWorkbookValidation','payValidationOrder'].includes(method)&&(!payload||typeof payload.requestId!=='string'||payload.requestId.length<8||payload.requestId.length>120||!/^[A-Za-z0-9_-]+$/.test(payload.requestId)))throw new Error('[INVALID_REQUEST] Нужен идентификатор запроса проверки.');
       if(method==='advanceWorkbookValidation')state.validationRuns++;
-      return {configured:state.providerSettings.configured,enabled:state.providerSettings.enabled,state:state.validationState||'complete',canAutoAdvance:state.validationAutoAdvance,nextActionAt:state.validationNextActionAt,counts:{queued:0,processing:0,checked:2,review:0},jobs:state.validationJobs||[],warnings:[]};
+      return validationDto();
     }
     if (method === 'getPromouserSettings') return {...state.providerSettings};
     if (method === 'configurePromouser') {state.providerSettings={configured:state.providerSettings.configured||!!payload.apiKey,enabled:payload.enabled,autoPayLimitUsd:payload.autoPayLimitUsd,mode:'direct'};return {...state.providerSettings};}

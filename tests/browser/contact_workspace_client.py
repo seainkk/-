@@ -30,7 +30,7 @@ def main():
         # A focused unsaved cell is flushed before scanning. The browser sends
         # only file/receipt identifiers; it never resubmits existing checked rows.
         reset()
-        page.evaluate("gridBackend.holdMethods=['saveGridRange']")
+        page.evaluate("gridBackend.providerSettings={configured:true,enabled:false,autoPayLimitUsd:0,mode:'direct'};gridBackend.holdMethods=['saveGridRange']")
         page.locator('#rg-cell-2-2').dblclick()
         page.locator('#rg-grid-editor').fill('new@example.test')
         page.locator('#rg-grid-new-contacts').click()
@@ -41,12 +41,35 @@ def main():
         calls = page.evaluate('gridBackend.calls')
         save = next(i for i, call in enumerate(calls) if call['method'] == 'saveGridRange')
         sync = next(i for i, call in enumerate(calls) if call['method'] == 'syncWorkbookContacts')
-        validation = next(i for i, call in enumerate(calls) if call['method'] == 'advanceWorkbookValidation')
-        assert save < sync < validation
+        assert save < sync
+        assert not [call for call in calls if call['method'] in ['advanceWorkbookValidation','getValidationState']]
+        assert page.locator('#rg-grid-new-contacts').is_enabled()
         assert set(calls[sync]['payload']) == {'id', 'requestId'}
         assert page.evaluate('gridBackend.checked') == ['valid@example.test', 'invalid@example.test']
         assert 'Уже проверенные' in page.locator('#rg-grid-contact-message').inner_text()
         assert page.evaluate('gridBackend.maxActive') == 1
+
+        # An older/replayed completion receipt can omit its validation DTO.
+        # Its safe fallback reads state and never repeats the mutating scan.
+        reset()
+        page.evaluate('gridBackend.omitValidationDto=true')
+        page.locator('#rg-grid-new-contacts').click()
+        idle()
+        assert page.evaluate("gridBackend.calls.filter(c=>c.method==='getValidationState').length")==1
+        assert page.evaluate("gridBackend.calls.filter(c=>c.method==='advanceWorkbookValidation').length")==0
+        assert page.locator('#rg-grid-new-contacts').is_enabled()
+
+        # Enabled queued work opens its progress drawer and schedules the next
+        # serial provider operation at least 15s later. Extraction settles now.
+        reset()
+        page.evaluate("""()=>{const original=setTimeout;window.scanPollDelays=[];window.setTimeout=(fn,ms,...args)=>{if(ms>=15000)scanPollDelays.push(ms);return original(fn,ms,...args);};gridBackend.providerSettings={configured:true,enabled:true,autoPayLimitUsd:0,mode:'direct'};gridBackend.validationState='pending';gridBackend.validationAutoAdvance=true;gridBackend.validationNextActionAt=Date.now()+1000;gridBackend.validationJobs=[{jobId:'queued',kind:'email',state:'queued',canPay:false}];}""")
+        page.locator('#rg-grid-new-contacts').click()
+        idle()
+        assert page.locator('#rg-grid-new-contacts').is_enabled()
+        assert page.locator('#rg-grid-validation').is_visible()
+        assert page.evaluate('scanPollDelays.length')>=1
+        assert all(delay>=15000 for delay in page.evaluate('scanPollDelays'))
+        assert page.evaluate("gridBackend.calls.filter(c=>['advanceWorkbookValidation','refreshWorkbookValidation'].includes(c.method)).length")==0
 
         # Lost sync acknowledgement resumes the exact UUID, no duplicate append.
         reset()
