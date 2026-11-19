@@ -13,7 +13,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 
 function fixture(options = {}) {
   let serial = 0, sheetSerial = 100;
-  const resources = new Map(), properties = new Map(), calls = { raw: [], model: 0, mutations: [], opened: [], provider: [], locks: 0 };
+  const resources = new Map(), properties = new Map(), calls = { raw: [], reads: [], updates: [], model: 0, mutations: [], opened: [], provider: [], locks: 0, lockAttempts: 0 };
   const store = { getProperty: key => properties.get(key) ?? null, setProperty(key, value) { properties.set(key, String(value)); return store; }, deleteProperty: key => properties.delete(key) };
   function resource(id, name, mimeType, parents, tags = {}) {
     const item = { id, name, mimeType, parents: [...parents], appProperties: { ...tags }, version: '1', trashed: false, capabilities: { canEdit: true, canAddChildren: true }, content: '' };
@@ -50,7 +50,10 @@ function fixture(options = {}) {
         if (row < 1 || column < 1 || row + height - 1 > maxRows || column + width - 1 > maxColumns) throw Error('grid bounds');
         const values = () => Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => data[row + y - 1]?.[column + x - 1] ?? ''));
         return {
-          getValues: values, getDisplayValues: () => values().map(line => line.map(v => v === null || v === undefined ? '' : String(v))),
+          getValues: values, getDisplayValues() {
+            calls.reads.push({ sheetId: id, row, column, height, width }); options.onRead?.({ sheetId: id, row, height });
+            return values().map(line => line.map(v => v === null || v === undefined ? '' : String(v)));
+          },
           getFormulas: () => Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => formulas[(row + y) + ':' + (column + x)] || '')),
           getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null))
         };
@@ -58,14 +61,14 @@ function fixture(options = {}) {
     };
     return api;
   }
-  book.tabs.push(makeSheet(0, options.sourceName || 'Исходная база', options.rows || [['Email', 'Телефон', 'Telegram'], ['one@example.test', '+79990000001', '@person_1']]));
+  book.tabs.push(makeSheet(options.sourceSheetId ?? 0, options.sourceName || 'Исходная база', options.rows || [['Email', 'Телефон', 'Telegram'], ['one@example.test', '+79990000001', '@person_1']]));
   if (options.secondSource) book.tabs.push(makeSheet(9, options.secondName || 'Другой исходник', options.secondSource));
   if (options.legacy) {
     Object.assign(resources.get(FILE).appProperties, { registryPreparedRoot: ROOT, registryPreparedRole: 'output', registryPreparedVersion: '1', registryPreparedOriginalSheetId: '0' });
     book.tabs.push(makeSheet(1, 'Email', options.emailRows || [EMAIL]));
     book.tabs.push(makeSheet(2, 'Телефоны', options.phoneRows || [PHONE.slice(0, 5)]));
   } else {
-    if (options.emailRows) book.tabs.push(makeSheet(1, 'Email', options.emailRows));
+    if (options.emailRows) book.tabs.push(makeSheet(options.emailSheetId ?? 1, 'Email', options.emailRows));
     if (options.phoneRows) book.tabs.push(makeSheet(2, 'Телефоны', options.phoneRows));
   }
   const scope = { rootId: ROOT, properties: store };
@@ -91,7 +94,7 @@ function fixture(options = {}) {
     if (writable && !item.capabilities.canEdit) context.fail_('GRID_READ_ONLY', 'read only');
     return { context: scope, file: { getId: () => id }, canEdit: item.capabilities.canEdit };
   };
-  context.locked_ = fn => { if (options.busy) context.fail_('BUSY', 'busy'); calls.locks++; try { return fn(); } finally { calls.locks--; } };
+  context.locked_ = fn => { calls.lockAttempts++; if (options.busy) context.fail_('BUSY', 'busy'); calls.locks++; try { return fn(); } finally { calls.locks--; } };
   context.LockService = { getScriptLock: () => ({ tryLock: () => !options.busy, releaseLock() {} }) };
   context.SpreadsheetApp = { openById(id) { calls.opened.push(id); if (id !== FILE) throw Error('unexpected book'); return book; }, flush() {} };
   context.Utilities = {
@@ -115,6 +118,7 @@ function fixture(options = {}) {
     },
     update(metadata, id, body) {
       const item = resources.get(id); if (!item) throw Error('missing file');
+      calls.updates.push({ id, body: !!body });
       if (metadata.appProperties) Object.assign(item.appProperties, plain(metadata.appProperties));
       if (metadata.trashed !== undefined) item.trashed = metadata.trashed;
       if (body?.getDataAsString) {
@@ -475,6 +479,17 @@ test('real company-role filtering keeps personal email only for the linked LPR w
   assert.deepEqual(f.book.tabs[0].data, rows);
 });
 
+test('a renamed fixed company master keeps generic contacts general despite an LPR sheet name', () => {
+  const rows = [['Компания', 'Email', 'Телефон'], ['Альфа', 'general@example.test', '+79990000001']];
+  const f = fixture({ realExtractor: true, sourceName: 'ЛПР — пользовательское название', rows });
+  f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies' });
+  const r = f.finish();
+  assert.equal(r.counts.addedEmail, 1); assert.equal(r.counts.addedPhone, 1);
+  assert.deepEqual(f.target('email').data.slice(1).map(row => row[0]), ['general@example.test']);
+  assert.deepEqual(f.target('phone').data.slice(1).map(row => row[0]), ['+79990000001']);
+  assert.deepEqual(f.book.tabs[0].data, rows);
+});
+
 test('real contact-free LPR rows remain in their source while derived lists stay empty', () => {
   const rows = [['Компания', 'ФИО', 'Должность'], ['Альфа', 'Иван Иванов', 'Директор']];
   const f = fixture({ realExtractor: true, rows });
@@ -504,4 +519,88 @@ test('a missing legacy derived list is recreated while the surviving list remain
   f.book.tabs.splice(f.book.tabs.findIndex(tab => tab.getSheetId() === 1), 1);
   const r = f.finish(); assert.equal(r.counts.addedEmail, 1); assert.equal(r.counts.addedPhone, 0); assert.equal(r.counts.addedTelegram, 0);
   assert.equal(f.book.tabs.length, 3); assert.equal(f.target('phone').getSheetId(), 2);
+});
+
+test('unchanged seeded enrollment with GID zero skips leases, writes and contact-row scans', () => {
+  const f = fixture({ sourceSheetId: 9, emailSheetId: 0, emailRows: [EMAIL, ['one@example.test', 'Manual company', 'Manual source', '']], phoneRows: [PHONE.concat(['Статус', 'Дата']), ['+79990000001', '', '', '', '', '', 'Телефон', 'запущен', new Date('2026-01-02')]] });
+  const options = { sourceSheetIds: [9], emailSheetId: 0, phoneSheetId: 2, role: 'segment-companies', section: 'companies', segmentId: 'segment_1234567890', relatedFileId: 'linked_lpr_1234567890', seedExisting: true };
+  f.context.enrollContactWorkbook_(f.scope, FILE, options);
+  f.target('email').data.splice(1, 1);
+  f.target('email').data.push(['manual@example.test', 'Manual addition']);
+  const before = { state: f.state(), raw: f.calls.raw.length, updates: f.calls.updates.length, locks: f.calls.lockAttempts, reads: f.calls.reads.length, phone: f.target('phone').data[1].slice() };
+  f.options.busy = true;
+  const workspace = plain(f.context.enrollContactWorkbook_(f.scope, FILE, options));
+  assert.equal(workspace.enrolled, true); assert.equal(workspace.targets.emailSheetId, 0);
+  assert.equal(f.calls.lockAttempts, before.locks); assert.equal(f.calls.updates.length, before.updates); assert.equal(f.calls.raw.length, before.raw);
+  assert.deepEqual(f.calls.reads.slice(before.reads).map(read => read.row), [1, 1]);
+  assert.deepEqual(f.state(), before.state); assert.deepEqual(f.target('phone').data[1], before.phone);
+  f.options.busy = false;
+  const synced = f.finish('after_fast_enrollment_12345');
+  assert.equal(synced.counts.excluded, 1);
+  assert.deepEqual(f.target('email').data.slice(1).map(row => row[0]), ['manual@example.test']);
+});
+
+test('changed enrollment options retain the leased update path', () => {
+  const cases = [
+    { role: 'segment-lpr' }, { section: 'lpr' }, { segmentId: 'other_segment_1234567890' },
+    { relatedFileId: 'other_related_1234567890' }, { sourceSheetIds: [0, 9] }, { sourceMode: 'all' }
+  ];
+  for (const change of cases) {
+    const f = fixture({ secondSource: [['Email'], ['two@example.test']] });
+    const initial = { sourceSheetIds: [0], role: 'registry', section: 'companies', segmentId: 'segment_1234567890', relatedFileId: 'related_1234567890', seedExisting: true };
+    f.context.enrollContactWorkbook_(f.scope, FILE, initial);
+    const locks = f.calls.lockAttempts, updates = f.calls.updates.length;
+    f.context.enrollContactWorkbook_(f.scope, FILE, { ...initial, ...change });
+    assert.ok(f.calls.lockAttempts > locks, JSON.stringify(change)); assert.ok(f.calls.updates.length > updates, JSON.stringify(change));
+    for (const [key, value] of Object.entries(change)) assert.deepEqual(f.state()[key], value);
+  }
+});
+
+test('unseeded enrollment and a changed access hash cannot use the read-only fast path', () => {
+  for (const change of ['unseeded', 'accessHash']) {
+    const f = fixture(), options = { sourceSheetIds: [0], seedExisting: true };
+    f.context.enrollContactWorkbook_(f.scope, FILE, options);
+    if (change === 'unseeded') { const state = f.state(); state.seeded = false; f.saveState(state); }
+    else f.context.SHARED_REQUEST_SCOPE_.keyHash = 'B'.repeat(43);
+    const locks = f.calls.lockAttempts, updates = f.calls.updates.length;
+    f.context.enrollContactWorkbook_(f.scope, FILE, options);
+    assert.ok(f.calls.lockAttempts > locks); assert.ok(f.calls.updates.length > updates); assert.equal(f.state().seeded, true);
+    const tags = f.resources.get(f.state().stateFileId).appProperties;
+    assert.equal(tags.registryContactAccessHash, f.context.SHARED_REQUEST_SCOPE_.keyHash);
+  }
+});
+
+test('active jobs and outstanding leases retain their original enrollment behavior', () => {
+  const f = fixture(), running = f.start(), locks = f.calls.lockAttempts, raw = f.calls.raw.length;
+  const workspace = plain(f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], seedExisting: true }));
+  assert.ok(f.calls.lockAttempts > locks); assert.equal(workspace.job.jobId, running.jobId); assert.equal(f.calls.raw.length, raw);
+  const state = f.state(); state.job = null; state.lease = { id: 'foreign_lease', until: Date.now() + 500000 }; f.saveState(state);
+  assert.throws(() => f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], seedExisting: true }), /BUSY/);
+  assert.equal(f.state().lease.id, 'foreign_lease');
+});
+
+test('enrolled deleted targets, replaced target IDs and renamed headers fail closed instead of taking the fast path', () => {
+  for (const mode of ['deleted', 'replaced', 'renamed']) {
+    const f = fixture(), options = { sourceSheetIds: [0], seedExisting: true };
+    f.context.enrollContactWorkbook_(f.scope, FILE, options);
+    const locks = f.calls.lockAttempts, raw = f.calls.raw.length;
+    if (mode === 'deleted') f.book.tabs.splice(f.book.tabs.findIndex(tab => tab.getSheetId() === f.state().targets.emailSheetId), 1);
+    if (mode === 'replaced') options.emailSheetId = 0;
+    if (mode === 'renamed') f.target('email').data[0][0] = 'Changed manually';
+    assert.throws(() => f.context.enrollContactWorkbook_(f.scope, FILE, options), /GRID_SHEET_MISSING|CONTACT_SCHEMA_CHANGED/);
+    assert.ok(f.calls.lockAttempts > locks); assert.equal(f.calls.raw.length, raw);
+  }
+});
+
+test('fast enrollment rechecks ancestry and validates its private state rather than trusting cached pointers', () => {
+  const f = fixture(), options = { sourceSheetIds: [0], seedExisting: true };
+  f.context.enrollContactWorkbook_(f.scope, FILE, options);
+  const updates = f.calls.updates.length, locks = f.calls.lockAttempts;
+  f.options.onRead = () => { f.resources.get(FILE).parents = [OUTSIDE]; };
+  assert.throws(() => f.context.enrollContactWorkbook_(f.scope, FILE, options), /OUTSIDE_REGISTRY/);
+  assert.equal(f.calls.updates.length, updates); assert.equal(f.calls.lockAttempts, locks);
+  f.resources.get(FILE).parents = [SOURCES]; f.options.onRead = null;
+  f.resources.get(f.state().stateFileId).parents = [OUTSIDE];
+  assert.throws(() => f.context.enrollContactWorkbook_(f.scope, FILE, options), /OUTSIDE_REGISTRY/);
+  assert.equal(f.calls.updates.length, updates);
 });

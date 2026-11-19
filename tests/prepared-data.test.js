@@ -488,3 +488,38 @@ test('explicit no-header keeps a header-like first data row and validates header
   assert.equal(r.records[0].source.row, 1); assert.equal(r.counts.emails, 1); assert.equal(r.counts.phones, 1);
   for (const settings of [{ hasHeader: 'false' }, { hasHeader: true, headerIndex: -1 }, { hasHeader: true, headerIndex: 2 }, { hasHeader: true, headerIndex: 0.5 }]) assert.throws(() => f.context.preparedDataRead_(f.sheet, FILE, 'companies', settings), /INVALID_REQUEST/);
 });
+
+
+test('mixed company and strongly named LPR leaves retain personal contacts without assigning corporate contacts to people', () => {
+  const companies = fixture([
+    ['Компания', 'ИНН', 'ФИО', 'Должность', 'Email', 'Телефон', 'Telegram'],
+    ['Альфа', INN_A, 'Директор Компании', 'Директор', 'info@alpha.example', '+79990000001', '@alpha_company'],
+  ], { sheetId: 11, name: 'Компании — исходные' });
+  const people = fixture([
+    ['Компания', 'ИНН', 'ФИО', 'Должность', 'Email', 'Телефон', 'Telegram'],
+    ['Альфа', INN_A, 'Пётр Петров', 'Директор', 'petr@alpha.example', '+79990000002', '@petr_person'],
+    ['Альфа', INN_A, 'Анна Иванова', 'Маркетолог', '', '', ''],
+  ], { sheetId: 22, name: 'ЛПР — исходные' });
+  const r = plain(companies.context.preparedDataReadWorkbook_({ getSheets: () => [companies.sheet, people.sheet] }, FILE, 'companies', { guard() {} }));
+  assert.deepEqual(r.models.map(model => model.section), ['companies', 'lpr']);
+  assert.deepEqual(r.sourceSheets.map(sheet => sheet.effectiveSection), ['companies', 'lpr']);
+  const company = r.records.find(record => record.source.sheetId === 11), person = r.records.find(record => record.source.sheetId === 22 && record.people[0].name === 'Пётр Петров');
+  assert.deepEqual(company.general.emails, ['info@alpha.example']); assert.deepEqual(company.people[0].emails, []);
+  assert.deepEqual(person.general, { emails: [], phones: [], telegrams: [] });
+  assert.deepEqual(person.people[0].emails, ['petr@alpha.example']); assert.deepEqual(person.people[0].phones, ['+79990000002']); assert.deepEqual(person.people[0].telegrams, ['@petr_person']);
+  assert.equal(r.records.find(record => record.people[0]?.name === 'Анна Иванова').people[0].emails.length, 0);
+});
+
+test('explicit per-leaf section wins over names and ambiguous names keep the registry fallback', () => {
+  const f = fixture([['Компания', 'ФИО', 'Email'], ['Альфа', 'Пётр Петров', 'info@alpha.example']], { name: 'ЛПР — исходные' });
+  const selected = plain(f.context.preparedDataRead_(f.sheet, FILE, 'companies', { sectionExplicit: true }));
+  assert.equal(selected.section, 'companies'); assert.deepEqual(selected.records[0].general.emails, ['info@alpha.example']); assert.deepEqual(selected.records[0].people[0].emails, []);
+  const global = plain(f.context.preparedDataReadWorkbook_({ getSheets: () => [f.sheet] }, FILE, 'companies', { sectionExplicit: true }));
+  assert.equal(global.models[0].section, 'companies');
+  const section = (name, fallback) => f.context.preparedDataSection_(name, fallback, {});
+  assert.equal(section('decision makers: contacts', 'companies'), 'lpr'); assert.equal(section('Персоны / импорт', 'companies'), 'lpr');
+  assert.equal(section('Общие контакты', 'lpr'), 'companies'); assert.equal(section('Компании', 'lpr'), 'companies');
+  assert.equal(section('Компании и ЛПР', 'companies'), 'companies'); assert.equal(section('Компании и ЛПР', 'lpr'), 'lpr');
+  assert.equal(section('Новые данные', 'companies'), 'companies'); assert.equal(section('Новые данные', 'lpr'), 'lpr');
+  assert.throws(() => f.context.preparedDataSection_('ЛПР', 'companies', { sectionExplicit: 'true' }), /INVALID_REQUEST/);
+});

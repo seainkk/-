@@ -148,6 +148,12 @@ test('source edits after preview stop the job and release its active pointer for
   assert.equal(f.properties.has('SEGMENT_RECORD_ACTIVE_' + SEGMENT), false);
 });
 
+test('renaming a source leaf after preview invalidates a plan even if all cells stay identical', () => {
+  const f = fixture(), shown = f.preview(); f.sourceSheet.setName('ЛПР — исходные'); f.resources.get(SOURCE).version++;
+  assert.throws(() => f.start(shown), /SEGMENT_PREVIEW_CHANGED/);
+  assert.equal(f.master('companies').state.rows.length, 1);
+});
+
 test('source readiness is rechecked between job steps', () => {
   const f = fixture(), state = f.start(f.preview()); f.status.value = 'rework';
   assert.throws(() => f.next(state), /SEGMENT_PREVIEW_CHANGED/);
@@ -168,6 +174,7 @@ test('legacy worksheets and manually added columns remain intact', () => {
 test('manual company edits transfer a new contactless person automatically and do not self-invalidate', () => {
   const f = fixture(); f.finish(f.start(f.preview()));
   const companySheet = f.master('companies'), headers = f.context.SEGMENT_RECORDS_SCHEMA.company, index = key => headers.findIndex(field => field[0] === key);
+  companySheet.setName('ЛПР — пользовательское название');
   companySheet.state.rows[1][index('personName')] = 'Анна Иванова'; companySheet.state.rows[1][index('personRole')] = 'Маркетолог'; companySheet.state.rows[1][index('personEmails')] = ''; companySheet.state.rows[1][index('personPhones')] = '';
   f.resources.get(COMPANIES).version++;
   const result = f.finish(f.context.syncSegmentPeople_({ companyFileId: COMPANIES, requestId: 'manual-people-sync-001' }));
@@ -225,6 +232,22 @@ test('per-sheet person target and header choice are retained through preview and
   assert.equal(noHeader.counts.companiesAdded, 2, 'first physical data row is never consumed as a header');
   g.finish(g.start(noHeader));
   assert.match(g.master('companies').state.rows.map(row => row[6]).join(';'), /only@example\.test/);
+});
+
+test('strong LPR leaf names classify generic contacts personally while an explicit companies target wins', () => {
+  const f = fixture(), lpr = f.sourceBook.insertSheet('ЛПР — исходные');
+  lpr.state.rows = [['Компания', 'ФИО', 'Email', 'Phone'], ['ООО Пример', 'Анна Петрова', 'anna@example.test', '+79990000002']];
+  const shown = f.preview();
+  assert.equal(shown.counts.peopleAdded, 2); assert.equal(shown.counts.peopleWithoutContacts, 1);
+  f.finish(f.start(shown));
+  const anna = f.master('lpr').state.rows.find(row => row[3] === 'Анна Петрова');
+  assert.equal(anna[5], 'anna@example.test'); assert.equal(anna[6], '+79990000002');
+  const g = fixture(), explicit = g.sourceBook.insertSheet('ЛПР — исходные'); explicit.state.rows = structuredClone(lpr.state.rows);
+  const overridden = g.context.previewSegmentRecords_({ segmentId: SEGMENT, loads: [{ sourceId: SOURCE, sheets: [{ sheetId: explicit.getSheetId(), target: 'companies', hasHeader: true }] }] });
+  assert.equal(overridden.counts.peopleWithoutContacts, 1, 'explicit company allocation keeps generic mail on the company');
+  g.finish(g.start(overridden));
+  assert.match(g.master('companies').state.rows[1][6], /anna@example\.test/);
+  assert.equal(g.master('lpr').state.rows[1][5], '');
 });
 
 test('a moved marker column is resolved by its current header instead of a stale numeric pointer', () => {

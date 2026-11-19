@@ -229,14 +229,14 @@ function segmentRecordsModelFingerprint_(model, tags, sheetId, mode, markerColum
   function filtered(matrix) { return matrix.map(function (row) { return row.filter(function (_value, index) { return !excluded[index]; }); }); }
   var links = (model.sourceLinks || []).filter(function (link) { return !excluded[link.column - 1]; });
   var formulas = (model.formulaSnapshots || []).filter(function (cell) { return !excluded[cell.column - 1]; });
-  return digest_(JSON.stringify([filtered(rows), filtered(displays), links, formulas]));
+  return digest_(JSON.stringify([model.source && (model.source.sheetName || model.source.name), model.effectiveSection || model.section || '', model.source && model.source.hasHeader, headerIndex, filtered(rows), filtered(displays), links, formulas]));
 }
 
 function segmentRecordsReadSource_(context, binding, targets) {
   for (var attempt = 0; attempt < 2; attempt++) {
     var before = segmentRecordsSourceMetadata_(context, binding, targets), tags = before.appProperties || {}, book = SpreadsheetApp.openById(binding.id), sheets = segmentRecordsSourceSheets_(book, binding, tags), records = [], warnings = [], models = [];
     sheets.forEach(function (sheet) {
-      var selection = (binding.sheetOptions || []).filter(function (entry) { return entry.sheetId === sheet.getSheetId(); })[0] || {}, options = { guard: function () { segmentRecordsSourceMetadata_(context, binding, targets); } };
+      var selection = (binding.sheetOptions || []).filter(function (entry) { return entry.sheetId === sheet.getSheetId(); })[0] || {}, options = { guard: function () { segmentRecordsSourceMetadata_(context, binding, targets); }, sectionExplicit: selection.section !== undefined || binding.mode === 'segment' };
       if (selection.hasHeader !== undefined) { options.hasHeader = selection.hasHeader; if (selection.hasHeader) options.headerIndex = 0; }
       var model = preparedDataRead_(sheet, binding.id, selection.section || binding.section, options);
       if (!model.complete || model.canConfirm === false) fail_('SOURCE_PARSE_INCOMPLETE', 'Исходный лист прочитан не полностью. Частичный перенос не выполняется.');

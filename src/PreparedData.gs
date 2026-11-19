@@ -24,6 +24,7 @@ function preparedDataRead_(sheet, sourceId, section, options) {
   var warn = function (text) { if (warnings.indexOf(text) === -1) warnings.push(text); };
   guard();
   var lastRow = sheet.getLastRow(), width = sheet.getLastColumn(), sheetId = sheet.getSheetId(), sheetName = sheet.getName();
+  var requestedSection = section; section = preparedDataSection_(sheetName, section, options);
   var values = [], displays = [], formulas = [], links = [], formulaSnapshots = [], unresolvedLinks = [], observed = [], unparsed = 0, cellsRead = 0;
   if (width > limits.maxColumns || lastRow > limits.maxRows || width * lastRow > limits.maxCells) {
     complete = false; warn('Лист превышает лимит полного предпросмотра. Создание таблицы недоступно до уменьшения исходного листа.');
@@ -141,13 +142,27 @@ function preparedDataRead_(sheet, sourceId, section, options) {
   if (normalized.unknownPhones) warn('Часть номеров не имеет однозначного международного формата или типа. Они сохранены без предположения о стране и требуют дальнейшей обработки.');
   guard();
   var counts = { sourceRows: sourceRows, companies: normalized.companies, companyUnknown: normalized.companyUnknown, emails: normalized.emailRows.length, phones: normalized.phoneCount, mobiles: normalized.mobiles, sharedEmails: normalized.sharedEmails, sharedPhones: normalized.sharedPhones, telegrams: normalized.telegrams, sharedTelegrams: normalized.sharedTelegrams };
-  var source = { id: sheetId, sheetId: sheetId, name: sheetName, headers: header, hasHeader: hasHeader, headerIndex: detected.index, rowCount: lastRow, columnCount: width, sample: displays.slice(firstData, firstData + limits.sampleRows) };
+  var source = { id: sheetId, sheetId: sheetId, name: sheetName, section: section, effectiveSection: section, headers: header, hasHeader: hasHeader, headerIndex: detected.index, rowCount: lastRow, columnCount: width, sample: displays.slice(firstData, firstData + limits.sampleRows) };
   var email = { headers: PREPARED_DATA_HEADERS.email.slice(), rows: normalized.emailRows, sample: normalized.emailRows.slice(0, limits.sampleRows) };
   var phone = { headers: PREPARED_DATA_HEADERS.phone.slice(), rows: normalized.phoneRows, sample: normalized.phoneRows.slice(0, limits.sampleRows) };
   var fingerprint = preparedDataDigest_(JSON.stringify({ version: 2, sourceId: sourceId, section: section, headerIndex: detected.index, hasHeader: hasHeader, sheetId: sheetId, sheetName: sheetName, rows: lastRow, columns: width, values: values, display: displays, formulas: formulas, links: links }));
-  var legacyFingerprint = preparedDataDigest_(JSON.stringify({ version: 1, sourceId: sourceId, section: section, sheetId: sheetId, sheetName: sheetName, rows: lastRow, columns: width, values: values, display: displays, formulas: formulas, links: links }));
-  return { complete: complete, canConfirm: complete && lastRow > 0 && width > 0, fingerprint: fingerprint, legacyFingerprint: legacyFingerprint, sourceHash: fingerprint, counts: counts, source: source, sourceRows: lastRow, sourceCols: width, sourceValues: values, sourceDisplayValues: displays, sourceLinks: links, sourceFormulas: formulas, formulas: formulas, formulaSnapshots: formulaSnapshots, email: email, phone: phone, emailHeaders: email.headers, emailRows: email.rows, phoneHeaders: phone.headers, phoneRows: phone.rows, warnings: warnings, cellsRead: cellsRead, records: records, observations: observed, mapping: mapping, cellContacts: cellContacts, contactIndex: normalized.contactIndex,
+  var legacyFingerprint = preparedDataDigest_(JSON.stringify({ version: 1, sourceId: sourceId, section: requestedSection, sheetId: sheetId, sheetName: sheetName, rows: lastRow, columns: width, values: values, display: displays, formulas: formulas, links: links }));
+  return { complete: complete, canConfirm: complete && lastRow > 0 && width > 0, section: section, effectiveSection: section, fingerprint: fingerprint, legacyFingerprint: legacyFingerprint, sourceHash: fingerprint, counts: counts, source: source, sourceRows: lastRow, sourceCols: width, sourceValues: values, sourceDisplayValues: displays, sourceLinks: links, sourceFormulas: formulas, formulas: formulas, formulaSnapshots: formulaSnapshots, email: email, phone: phone, emailHeaders: email.headers, emailRows: email.rows, phoneHeaders: phone.headers, phoneRows: phone.rows, warnings: warnings, cellsRead: cellsRead, records: records, observations: observed, mapping: mapping, cellContacts: cellContacts, contactIndex: normalized.contactIndex,
     previewSheets: [{ name: 'Исходная база', headers: header, sample: source.sample, rowCount: lastRow }, { name: 'Email', headers: email.headers, sample: email.sample, rowCount: email.rows.length + 1 }, { name: 'Телефоны', headers: phone.headers, sample: phone.sample, rowCount: phone.rows.length + 1 }] };
+}
+
+/** A strong leaf name may refine the registry category; explicit operator choice always wins. */
+function preparedDataSection_(sheetName, fallback, options) {
+  options = options || {};
+  if (options.sectionExplicit !== undefined && typeof options.sectionExplicit !== 'boolean') fail_('INVALID_REQUEST', 'Признак явного выбора наполнения листа должен быть логическим значением.');
+  var selected = fallback === 'lpr' ? 'lpr' : 'companies';
+  if (options.sectionExplicit === true) return selected;
+  var words = String(sheetName || '').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  var personal = /(?:^|\s)(?:лпр|lpr|персоны|персона|персоналии|persons|people|decisionmakers)(?:$|\s)/u.test(words) || /(?:^|\s)decision\s+makers(?:$|\s)/.test(words);
+  var company = /(?:^|\s)(?:компании|компаний|companies|company)(?:$|\s)/u.test(words) || /(?:^|\s)(?:общие\s+контакты|общие\s+базы|general\s+contacts|company\s+contacts)(?:$|\s)/u.test(words);
+  if (personal && !company) return 'lpr';
+  if (company && !personal) return 'companies';
+  return selected;
 }
 
 function preparedDataRectangle_(rows, height, width) { return Array.isArray(rows) && rows.length === height && rows.every(function (row) { return Array.isArray(row) && row.length === width; }); }
@@ -475,10 +490,10 @@ function preparedDataReadWorkbook_(book, fileId, section, options) {
     sourceSheets.push({ id: sheet.getSheetId(), sheetId: sheet.getSheetId(), name: sheet.getName(), rowCount: height, columnCount: width });
     if (!complete && models.length < index) return;
     if (index >= 100 || Date.now() >= deadline || cells + height * width > PREPARED_DATA_LIMITS.maxCells || physicalRows + height > PREPARED_DATA_LIMITS.maxRows) { complete = false; warn('Книга превышает общий лимит полного чтения по листам, строкам, ячейкам или времени. Частичные списки нельзя использовать автоматически.'); return; }
-    var model = preparedDataRead_(sheet, fileId, section, { guard: guard, deadline: deadline, resolveLinkReference: resolveReference });
+    var model = preparedDataRead_(sheet, fileId, section, { guard: guard, deadline: deadline, resolveLinkReference: resolveReference, sectionExplicit: options.sectionExplicit });
     models.push(model); cells += model.cellsRead; physicalRows += height;
     observations = observations.concat(model.observations || []); records = records.concat(model.records || []);
-    var descriptor = sourceSheets[sourceSheets.length - 1]; descriptor.hasHeader = model.source.hasHeader; descriptor.headerIndex = model.source.headerIndex; descriptor.headers = model.source.headers;
+    var descriptor = sourceSheets[sourceSheets.length - 1]; descriptor.hasHeader = model.source.hasHeader; descriptor.headerIndex = model.source.headerIndex; descriptor.headers = model.source.headers; descriptor.section = model.section; descriptor.effectiveSection = model.section;
     if (!model.complete) complete = false;
     (model.warnings || []).forEach(warn);
   });

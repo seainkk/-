@@ -64,6 +64,18 @@ function continueContactSync_(request) {
 function enrollContactWorkbook_(context, fileId, options) {
   options = options || {};
   var scope = gridFile_(id_(fileId), true, context && context.rootId);
+  // Segment previews enroll the same books repeatedly. An unchanged, seeded
+  // enrollment needs neither a write lease nor another scan of contact rows.
+  // Keep the private-state and ancestry checks fresh before taking this path.
+  var metadata = contactSyncMetadata_(fileId), inspected = {};
+  var existing = contactSyncReadState_(scope.context, metadata, true, inspected);
+  if (contactSyncEnrollmentMatches_(existing, metadata, inspected.metadata, options)) {
+    var book = SpreadsheetApp.openById(fileId);
+    if (contactSyncEnrollmentSheetsMatch_(existing, book)) {
+      gridFile_(fileId, false, scope.context.rootId);
+      return contactSyncWorkspace_(existing, true, contactSyncVersion_(metadata));
+    }
+  }
   return contactSyncWithLease_(fileId, function (claim) {
     var state = claim.state, changed = false;
     if (state.job) return contactSyncWorkspace_(state, true);
@@ -84,6 +96,47 @@ function enrollContactWorkbook_(context, fileId, options) {
     gridFile_(fileId, false, scope.context.rootId);
     return contactSyncWorkspace_(state, true);
   }, true, options);
+}
+
+function contactSyncEnrollmentMatches_(state, metadata, privateMetadata, options) {
+  if (!state || !state.seeded || state.job || state.lease || !state.targets || !state.schemas || Object.keys(state.targetAttempts || {}).length) return false;
+  var tags = metadata.appProperties || {}, privateTags = privateMetadata && privateMetadata.appProperties || {};
+  var accessHash = typeof SHARED_REQUEST_SCOPE_ !== 'undefined' && SHARED_REQUEST_SCOPE_ ? SHARED_REQUEST_SCOPE_.keyHash : '';
+  if (privateTags.registryContactAccessHash !== accessHash || privateTags.registryContactBookRole !== (state.role || 'registry') ||
+      privateTags.registryContactSection !== (state.section || 'companies') || privateTags.registryContactRelatedFileId !== (state.relatedFileId || '')) return false;
+  if (state.sourceMode !== 'all' && state.sourceMode !== 'fixed') return false;
+  if (options.sourceSheetIds) {
+    if (JSON.stringify(contactSyncSheetIds_(options.sourceSheetIds)) !== JSON.stringify(state.sourceSheetIds) ||
+        state.sourceMode !== (options.sourceMode === 'all' ? 'all' : 'fixed')) return false;
+  }
+  if (['role', 'section', 'segmentId', 'relatedFileId'].some(function (name) {
+    return options[name] !== undefined && contactSyncOption_(name, options[name]) !== state[name];
+  })) return false;
+  return ['email', 'phone'].every(function (kind) {
+    var property = kind + 'SheetId', target = state.targets[property];
+    if (!Number.isSafeInteger(target) || target < 0 || tags['registryContact' + (kind === 'email' ? 'Email' : 'Phone') + 'SheetId'] !== String(target)) return false;
+    return options[property] === undefined || gridSheetId_(options[property]) === target;
+  });
+}
+
+function contactSyncEnrollmentSheetsMatch_(state, book) {
+  var sheets = book.getSheets(), ids = sheets.map(function (sheet) { return sheet.getSheetId(); });
+  var targets = [state.targets.emailSheetId, state.targets.phoneSheetId];
+  if (targets[0] === targets[1] || targets.some(function (id) { return ids.indexOf(id) === -1; }) || !Array.isArray(state.sourceSheetIds) ||
+      state.sourceSheetIds.some(function (id) { return !Number.isSafeInteger(id) || id < 0 || targets.indexOf(id) !== -1; })) return false;
+  var sources = state.sourceMode === 'all' ? ids.filter(function (id) { return targets.indexOf(id) === -1; }) : state.sourceSheetIds;
+  if (!sources.length || sources.some(function (id) { return ids.indexOf(id) === -1; })) return false;
+  return ['email', 'phone'].every(function (kind) {
+    var required = contactSyncHeaders_(kind), schema = state.schemas[kind];
+    if (!schema || !schema.columns || JSON.stringify(schema.headers) !== JSON.stringify(required)) return false;
+    var sheet = sheets[ids.indexOf(state.targets[kind + 'SheetId'])], width = sheet.getLastColumn();
+    if (!width || width > CONTACT_SYNC.maxHeaderColumns) return false;
+    var header = sheet.getRange(1, 1, 1, width).getDisplayValues()[0].map(contactSyncHeaderKey_);
+    return required.every(function (label) {
+      var key = contactSyncHeaderKey_(label), column = schema.columns[label];
+      return Number.isSafeInteger(column) && column >= 0 && header[column] === key && header.indexOf(key) === column && header.lastIndexOf(key) === column;
+    });
+  });
 }
 
 /** Metadata-only enrollment enumeration for the single owner-installed worker. */
@@ -170,7 +223,7 @@ function contactSyncFolder_(context, id) {
   if ((source.state === 'ready' && source.source.id === file.id) || outreach === file.id || file.id === current.rootId) fail_('OUTSIDE_REGISTRY', 'Служебные данные контактов должны храниться отдельно от рабочих баз.');
   return file;
 }
-function contactSyncReadState_(context, bookMetadata, optional) {
+function contactSyncReadState_(context, bookMetadata, optional, inspected) {
   var tags = bookMetadata.appProperties || {}, id = tags[CONTACT_SYNC.stateProperty];
   if (!id) { if (optional) return null; fail_('CONTACT_SYNC_NOT_ENROLLED', 'Сначала запустите проверку новых контактов.'); }
   if (tags.registryContactRoot !== context.rootId) fail_('OUTSIDE_REGISTRY', 'Настройки контактов относятся к другому реестру.');
@@ -183,6 +236,7 @@ function contactSyncReadState_(context, bookMetadata, optional) {
   try { state = JSON.parse(text); } catch (error) { fail_('CONTACT_STORAGE_DAMAGED', 'Журнал контактов повреждён.'); }
   if (!state || state.version !== CONTACT_SYNC.version || state.rootId !== context.rootId || state.fileId !== bookMetadata.id || state.stateFileId !== file.id || !Array.isArray(state.known) || !Array.isArray(state.receipts)) fail_('CONTACT_STORAGE_DAMAGED', 'Журнал контактов не соответствует базе.');
   state.dirty = state.dirty === true || file.appProperties.registryContactDirty === '1';
+  if (inspected) inspected.metadata = file;
   return state;
 }
 function contactSyncSaveState_(context, state, claimingLease) {
@@ -412,7 +466,9 @@ function contactSyncStableModel_(claim) {
   var state = claim.state, ids = contactSyncSources_(state, claim.book), before = contactSyncMetadata_(state.fileId);
   for (var attempt = 0; attempt < 2; attempt++) {
     if (attempt) before = contactSyncMetadata_(state.fileId);
-    var model = preparedDataReadWorkbook_(claim.book, state.fileId, state.section, { sourceSheetIds: ids, managedSheetIds: [state.targets.emailSheetId, state.targets.phoneSheetId], guard: function () { gridFile_(state.fileId, false, state.rootId); } });
+    var model = preparedDataReadWorkbook_(claim.book, state.fileId, state.section, { sourceSheetIds: ids, managedSheetIds: [state.targets.emailSheetId, state.targets.phoneSheetId],
+      sectionExplicit: state.sourceMode === 'fixed' && (state.role === 'segment-companies' || state.role === 'segment-lpr'),
+      guard: function () { gridFile_(state.fileId, false, state.rootId); } });
     var after = contactSyncMetadata_(state.fileId);
     if (!model || model.complete !== true) fail_('CONTACT_SOURCE_INCOMPLETE', 'Исходная база прочитана не полностью. Новые контакты не записывались.');
     if (!contactSyncVersion_(before) || contactSyncVersion_(before) === contactSyncVersion_(after)) return { model: model, version: contactSyncVersion_(after), sourceSheetIds: ids };
