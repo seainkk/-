@@ -26,9 +26,9 @@
   function editAllowed(){return !!session&&session.book?.canEdit===true&&!session.transition&&!!sheet()&&session.cache.has(key(session.active.row,session.active.column));}
   function update(){
     const current=session;if(!current||!panel)return;
-    const pending=hasPending(),error=current.error,readonly=current.book?.canEdit!==true,status=$('rg-grid-status');
-    status.dataset.state=error?(error.code==='GRID_CONFLICT'?'conflict':'error'):pending?'saving':current.loading?'loading':'saved';
-    status.textContent=error?(error.code==='GRID_CONFLICT'?'Конфликт изменений':'Изменения не подтверждены'):pending?'Сохраняем…':current.loading?'Загружаем ячейки…':readonly?'Только просмотр':'Все изменения сохранены';
+    const pending=hasPending(),loading=current.loading||current.transition,error=current.error,readonly=current.book?.canEdit!==true,status=$('rg-grid-status');
+    status.dataset.state=error?(error.code==='GRID_CONFLICT'?'conflict':'error'):pending?'saving':loading?'loading':'saved';
+    status.textContent=error?(error.code==='GRID_CONFLICT'?'Конфликт изменений':'Изменения не подтверждены'):pending?'Сохраняем…':loading?'Загружаем ячейки…':readonly?'Только просмотр':'Все изменения сохранены';
     $('rg-grid-readonly').hidden=!current.book||!readonly;
     $('rg-grid-error').hidden=!error;$('rg-grid-error-text').textContent=error?error.message+(current.dirty.size||dirtyEditor()?' Несохранённые значения остаются в редакторе.':' Перечитайте текущее состояние таблицы.'):'';$('rg-grid-discard').textContent=current.failed?.kind==='append'?'Проверить текущее состояние таблицы':'Отменить несохранённые правки и перечитать';
     $('rg-grid-retry').hidden=!current.failed||error?.code==='GRID_CONFLICT';$('rg-grid-retry').disabled=!!current.inFlight;

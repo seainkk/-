@@ -33,7 +33,7 @@ function fixture(options = {}) {
     const data = rows.map(row => row.slice()); let maxRows = Math.max(1000, data.length), maxColumns = Math.max(26, ...data.map(row => row.length));
     const formulaMap = { ...formulas };
     const api = {
-      state: { data, formulaMap }, getSheetId: () => id, getName: () => name,
+      state: { data, formulaMap }, getSheetId: () => id, getName: () => name, getParent: () => book,
       getLastRow: () => { for (let i = data.length - 1; i >= 0; i--) if (data[i]?.some(value => value !== '' && value !== null && value !== undefined)) return i + 1; return 0; },
       getLastColumn: () => Math.max(0, ...data.map(row => { for (let i = row.length - 1; i >= 0; i--) if (row[i] !== '' && row[i] !== null && row[i] !== undefined) return i + 1; return 0; })),
       getMaxRows: () => maxRows, getMaxColumns: () => maxColumns,
@@ -50,7 +50,7 @@ function fixture(options = {}) {
         const values = () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => data[row - 1 + r]?.[column - 1 + c] ?? ''));
         const write = (rows, rich) => {
           calls.writes.push({ sheet: id, row, column, rows: plain(rows), rich });
-          for (let r = 0; r < height; r++) { while (data.length < row + r) data.push([]); for (let c = 0; c < width; c++) { const value = rows[r][c]; data[row - 1 + r][column - 1 + c] = rich ? value.getText() : value; delete formulaMap[(row + r) + ':' + (column + c)]; } }
+          for (let r = 0; r < height; r++) { while (data.length < row + r) data.push([]); for (let c = 0; c < width; c++) { const value = rows[r][c], text = rich ? value.getText() : value; data[row - 1 + r][column - 1 + c] = rich && options.nativeRichTextPrefix && /^\+/.test(text) ? '=' + text : text; delete formulaMap[(row + r) + ':' + (column + c)]; } }
           if (options.loseWrite) { options.loseWrite = false; throw Error('Lost write reply'); }
         };
         const range = { getValues: values, getDisplayValues: () => values().map(line => line.map(value => value === null || value === undefined ? '' : String(value))), getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null)), getFormulas: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => formulaMap[(row + r) + ':' + (column + c)] || '')), getFormula: () => formulaMap[row + ':' + column] || '', getValue: () => values()[0][0], setNumberFormat: () => range, setValues(rows) { write(rows, false); return range; }, setValue(value) { write([[value]], false); return range; }, setRichTextValues(rows) { write(rows, true); return range; }, setRichTextValue(value) { write([[value]], true); return range; } };
@@ -110,6 +110,13 @@ function fixture(options = {}) {
   context.Drive = { Files: advanced };
   context.LockService = { getScriptLock: () => ({ tryLock: () => { calls.locks++; return true; }, releaseLock: () => { calls.locks--; } }) };
   context.SpreadsheetApp = { openById(id) { calls.opens.push(id); if (!books.has(id)) throw Error('Unexpected book'); return books.get(id); }, flush() {}, newRichTextValue() { let text = '', link = null; const rich = { setText(value) { text = value; return rich; }, setLinkUrl(value) { link = value; return rich; }, build: () => ({ getText: () => text, getLinkUrl: () => link }) }; return rich; } };
+  context.sheetWriteRawStrings_ = (fileId, sheetId, row, column, values, mask, links) => {
+    const target = books.get(fileId)?.tabs.find(sheet => sheet.getSheetId() === sheetId); assert.ok(target, 'RAW string writer receives the owned output book and exact sheet id');
+    assert.ok(Number.isSafeInteger(row) && row >= 1 && Number.isSafeInteger(column) && column >= 1);
+    calls.writes.push({ sheet: sheetId, row, column, rows: plain(values), raw: true, links: links ? plain(links) : null });
+    for (let r = 0; r < values.length; r++) { while (target.state.data.length < row + r) target.state.data.push([]); for (let c = 0; c < values[r].length; c++) { if (mask && !mask[r][c]) continue; assert.equal(typeof values[r][c], 'string'); target.state.data[row - 1 + r][column - 1 + c] = values[r][c]; delete target.state.formulaMap[(row + r) + ':' + (column + c)]; } }
+    if (options.loseWrite) { options.loseWrite = false; throw Error('Lost RAW write reply'); }
+  };
   context.Utilities = { getUuid: () => crypto.randomUUID(), DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' }, computeDigest: (_kind, value) => [...crypto.createHash('sha256').update(typeof value === 'string' ? value : Buffer.from(value)).digest()], base64EncodeWebSafe: value => Buffer.from(value).toString('base64url'), newBlob: (value, type, name) => ({ getBytes: () => [...Buffer.from(value)], getDataAsString: () => String(value), getContentType: () => type, getName: () => name }) };
   for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'PreparedImport.gs', 'Access.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   const storage = { public: { id: SERVICE }, basesSheet: {} };
@@ -266,7 +273,7 @@ test('normalized writes keep phone plus signs literal and never execute formula-
   const phone = f.books.get(result.file.id).getSheetByName('Телефоны');
   assert.equal(phone.state.data[1][0], '+79991112233');
   assert.equal(Object.keys(phone.state.formulaMap).length, 0);
-  assert.ok(f.calls.writes.filter(write => write.sheet === phone.getSheetId()).every(write => write.rich));
+  assert.ok(f.calls.writes.filter(write => write.sheet === phone.getSheetId()).every(write => write.raw));
 });
 
 test('Date formula snapshots freeze to typed dates while preserving the required tab order', () => {
@@ -428,4 +435,16 @@ test('metadata-only version changes require a fresh matching content fingerprint
   f.resources.get(f.drafts()[0].stageFileId).version = '2'; f.options.onModelRead = () => { reads++; };
   assert.equal(f.confirm(draft, shown).state, 'processing'); assert.equal(reads, 1);
   assert.equal(f.drafts()[0].sourceVersion, '2');
+});
+
+test('authoritative RAW strings avoid native RichText =+ corruption without relaxing verification', () => {
+  const f = fixture({ nativeRichTextPrefix: true }), draft = f.stage(), result = f.finish(draft);
+  const phone = f.books.get(result.file.id).getSheetByName('Телефоны');
+  assert.equal(phone.state.data[1][0], '+79991112233'); assert.equal(phone.state.formulaMap['2:1'], undefined);
+  assert.ok(f.calls.writes.filter(write => write.sheet === phone.getSheetId()).every(write => write.raw));
+  const g = fixture({ nativeRichTextPrefix: true, formulaSnapshots: [{ row: 2, column: 2, value: '+79990000004', link: 'https://wa.me/79990000004' }] });
+  const source = g.books.get(ORIGINAL).tabs[0]; source.state.data[1][1] = '+79990000004'; source.state.formulaMap['2:2'] = '=HYPERLINK("https://wa.me/79990000004","+79990000004")';
+  const finished = g.finish(g.stage()), original = g.books.get(finished.file.id).getSheetByName('Исходная база');
+  assert.equal(original.state.data[1][1], '+79990000004'); assert.equal(original.state.formulaMap['2:2'], undefined);
+  assert.ok(g.calls.writes.some(write => write.sheet === original.getSheetId() && write.raw && write.links?.[0]?.[0] === 'https://wa.me/79990000004'));
 });

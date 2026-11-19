@@ -1,5 +1,5 @@
 /** Bounded spreadsheet editing through the same authenticated, root-scoped transport. */
-var GRID_EDITOR_LIMITS = Object.freeze({ readCells: 5000, writeCells: 5000, inputCharacters: 250000, readCharacters: 2000000, append: 1000, gridCells: 10000000, receiptLimit: 80, literalRuns: 50 });
+var GRID_EDITOR_LIMITS = Object.freeze({ readCells: 5000, writeCells: 5000, inputCharacters: 250000, readCharacters: 2000000, append: 1000, gridCells: 10000000, receiptLimit: 80, literalRuns: 1000 });
 
 function getGridWorkbook_(request) {
   return api_(function () {
@@ -46,11 +46,10 @@ function saveGridRange_(request) {
         gridFile_(input.id, true, scope.context.rootId);
         mutationStarted = true;
         sheet.getRange(area.row, area.column, area.rows, area.columns).setValues(prepared.values);
-        prepared.literalRuns.forEach(function (run) {
+        if (prepared.literalRuns.length) {
           gridFile_(input.id, true, scope.context.rootId);
-          var rich = run.values.map(function (line) { return line.map(function (text) { return SpreadsheetApp.newRichTextValue().setText(text).build(); }); });
-          sheet.getRange(area.row + run.row, area.column + run.column, rich.length, rich[0].length).setRichTextValues(rich);
-        });
+          sheetWriteRawStrings_(input.id, sheet.getSheetId(), area.row, area.column, prepared.strings, prepared.stringMask);
+        }
         gridFile_(input.id, false, scope.context.rootId);
         SpreadsheetApp.flush();
         gridDone_(scope.context, receipt);
@@ -193,17 +192,25 @@ function gridExternalFormula_(formula) {
 
 function gridValues_(values) {
   if (!Array.isArray(values) || !values.length || !Array.isArray(values[0]) || !values[0].length) fail_('INVALID_REQUEST', 'Передайте прямоугольный диапазон значений.');
-  var rows = values.length, columns = values[0].length, characters = 0, literals = [], canonical = [];
+  var rows = values.length, columns = values[0].length, characters = 0, literals = [], canonical = [], strings = [], stringMask = [];
   if (rows * columns > GRID_EDITOR_LIMITS.writeCells) fail_('GRID_LIMIT', 'За одно сохранение можно изменить не более 5000 ячеек.');
   var prepared = values.map(function (row, y) {
     if (!Array.isArray(row) || row.length !== columns) fail_('INVALID_REQUEST', 'Диапазон значений должен быть прямоугольным.');
-    canonical[y] = []; var lastRun = null;
+    canonical[y] = []; strings[y] = []; stringMask[y] = []; var lastRun = null;
     return row.map(function (input, x) {
       if (typeof input !== 'string' || input.length > 50000 || /\u0000/.test(input)) fail_('INVALID_REQUEST', 'Ячейка содержит недопустимое значение.');
       if (input.charAt(0) === '=' && gridExternalFormula_(input)) fail_('GRID_FORMULA_UNSUPPORTED', 'Межфайловые подключения настраиваются в Google Таблицах по ссылке.');
       characters += input.length; if (characters > GRID_EDITOR_LIMITS.inputCharacters) fail_('GRID_LIMIT', 'Вставляемый текст слишком большой. Разделите его на меньшие диапазоны.');
       var typed = gridInput_(input); canonical[y][x] = typed.canonical;
-      if (Object.prototype.hasOwnProperty.call(typed, 'literal')) { if (!lastRun || lastRun.column + lastRun.texts.length !== x) { lastRun = { row: y, column: x, texts: [] }; literals.push(lastRun); } lastRun.texts.push(typed.literal); }
+      if (typed.canonical[0] === 'string') {
+        var text = typed.canonical[1]; strings[y][x] = text; stringMask[y][x] = true;
+        if (!lastRun || lastRun.column + lastRun.texts.length !== x) { lastRun = { row: y, column: x, texts: [] }; literals.push(lastRun); }
+        lastRun.texts.push(text);
+        // Protect the first SDK write as well: no string is temporarily parsed
+        // as a formula before the explicit RAW value is applied.
+        return "'" + text;
+      }
+      strings[y][x] = ''; stringMask[y][x] = false;
       return typed.value;
     });
   });
@@ -214,7 +221,76 @@ function gridValues_(values) {
     else { previous = { row: run.row, column: run.column, values: [run.texts] }; lastByShape[key] = previous; groups.push(previous); }
   });
   if (groups.length > GRID_EDITOR_LIMITS.literalRuns) fail_('GRID_LIMIT', 'Слишком много раздельных текстовых диапазонов. Вставляйте меньшими частями.');
-  return { rows: rows, columns: columns, values: prepared, literalRuns: groups, hash: digest_(JSON.stringify(canonical)) };
+  return { rows: rows, columns: columns, values: prepared, strings: strings, stringMask: stringMask, literalRuns: groups, hash: digest_(JSON.stringify(canonical)) };
+}
+
+/**
+ * Shared literal writer for generated tables and the editor. RichText setters
+ * have native coercion for formula-like text; stringValue is unambiguously RAW.
+ * Coordinates are ONE-BASED. False mask cells are never part of an API range.
+ * The caller owns the scope/receipt; this helper never accepts an arbitrary URL.
+ */
+function sheetWriteRawStrings_(fileId, sheetId, row, column, values, mask, links) {
+  authorize_(); id_(fileId); gridSheetId_(sheetId);
+  gridInteger_(row, 1, GRID_EDITOR_LIMITS.gridCells); gridInteger_(column, 1, 18278);
+  if (!Array.isArray(values) || !values.length || !Array.isArray(values[0]) || !values[0].length) fail_('INVALID_REQUEST', 'Некорректный текстовый диапазон.');
+  var height = values.length, width = values[0].length, characters = 0, groups = [], lastByShape = Object.create(null);
+  if (height * width > 50000 || column + width - 1 > 18278) fail_('GRID_LIMIT', 'Текстовый диапазон слишком большой.');
+  if (mask && (!Array.isArray(mask) || mask.length !== height)) fail_('INVALID_REQUEST', 'Некорректная маска текстового диапазона.');
+  if (links && (!Array.isArray(links) || links.length !== height)) fail_('INVALID_REQUEST', 'Некорректные ссылки текстового диапазона.');
+  values.forEach(function (line, y) {
+    if (!Array.isArray(line) || line.length !== width || (mask && (!Array.isArray(mask[y]) || mask[y].length !== width)) || (links && (!Array.isArray(links[y]) || links[y].length !== width))) fail_('INVALID_REQUEST', 'Текстовый диапазон должен быть прямоугольным.');
+    var start = -1;
+    for (var x = 0; x <= width; x++) {
+      var active = x < width && (!mask || mask[y][x] === true);
+      if (x < width && mask && typeof mask[y][x] !== 'boolean') fail_('INVALID_REQUEST', 'Некорректная маска текстового диапазона.');
+      if (active) {
+        if (typeof line[x] !== 'string' || line[x].length > 50000 || /\u0000/.test(line[x])) fail_('INVALID_REQUEST', 'Недопустимое текстовое значение.');
+        characters += line[x].length;
+        if (characters > 5000000) fail_('GRID_LIMIT', 'В текстовом диапазоне слишком много данных.');
+        if (links) {
+          var link = links[y][x];
+          if (typeof link !== 'string' || (link && (link.length > 4000 || /[\u0000-\u001f]/.test(link) || !/^(?:https?:\/\/|mailto:|tel:)/i.test(link)))) fail_('INVALID_REQUEST', 'Недопустимая ссылка ячейки.');
+        }
+        if (start < 0) start = x;
+      }
+      if ((!active || x === width) && start >= 0) {
+        var key = start + ':' + (x - start), previous = lastByShape[key];
+        if (previous && previous.row + previous.height === y) previous.height++;
+        else { previous = { row: y, column: start, height: 1, width: x - start }; groups.push(previous); lastByShape[key] = previous; }
+        start = -1;
+      }
+    }
+  });
+  if (!groups.length) return { spreadsheetId: fileId, requests: 0 };
+  if (groups.length > 1000) fail_('GRID_LIMIT', 'Слишком много раздельных текстовых диапазонов.');
+  var requests = groups.map(function (group) {
+    var rows = [];
+    for (var y = group.row; y < group.row + group.height; y++) {
+      var cells = [];
+      for (var x = group.column; x < group.column + group.width; x++) {
+        var text = values[y][x], uri = links && links[y][x];
+        var cell = { userEnteredValue: { stringValue: text }, textFormatRuns: [], userEnteredFormat: { textFormat: {} } };
+        if (uri && text) cell.textFormatRuns = [{ startIndex: 0, format: { link: { uri: uri } } }];
+        cells.push(cell);
+      }
+      rows.push({ values: cells });
+    }
+    return { updateCells: { range: { sheetId: sheetId, startRowIndex: row - 1 + group.row, endRowIndex: row - 1 + group.row + group.height, startColumnIndex: column - 1 + group.column, endColumnIndex: column - 1 + group.column + group.width }, rows: rows, fields: 'userEnteredValue,textFormatRuns,userEnteredFormat.textFormat.link' } };
+  });
+  // Make SDK-created sheets/grid sizes visible and prevent queued SDK writes
+  // from overwriting the subsequent REST values.
+  SpreadsheetApp.flush(); authorize_();
+  var response;
+  try {
+    response = UrlFetchApp.fetch('https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(fileId) + ':batchUpdate', { method: 'post', contentType: 'application/json', headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, payload: JSON.stringify({ requests: requests }), muteHttpExceptions: true });
+  } catch (error) { fail_('SHEETS_RAW_UNCERTAIN', 'Google не подтвердил точную запись текста. Повторите проверку результата.'); }
+  var code = response.getResponseCode();
+  if (code < 200 || code >= 300) fail_('SHEETS_RAW_UNCERTAIN', 'Google отклонил точную запись текста. Проверьте подключение Google Sheets API и права таблицы.');
+  var result;
+  try { result = JSON.parse(response.getContentText()); } catch (error) { fail_('SHEETS_RAW_UNCERTAIN', 'Google не вернул подтверждение точной записи текста.'); }
+  if (!result || result.spreadsheetId !== fileId || !Array.isArray(result.replies) || result.replies.length !== requests.length) fail_('SHEETS_RAW_UNCERTAIN', 'Google не подтвердил все текстовые диапазоны.');
+  return { spreadsheetId: fileId, requests: requests.length };
 }
 
 function gridExpected_(expected, rows, columns) {

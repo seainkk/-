@@ -463,9 +463,8 @@ function preparedAdvance_(context, draft) {
       var currentFormula = cell.getFormula(), currentValue = cell.getValue();
       if (!currentFormula && JSON.stringify(currentValue) !== JSON.stringify(value)) fail_('PREVIEW_CHANGED', 'Значение результата изменено вручную до завершения подготовки.');
       if (typeof value === 'string') {
-        var rich = SpreadsheetApp.newRichTextValue().setText(value);
-        if (formula.link && /^(?:https?:\/\/|mailto:|tel:)/i.test(formula.link)) rich.setLinkUrl(formula.link);
-        cell.setRichTextValue(rich.build());
+        var link = formula.link && /^(?:https?:\/\/|mailto:|tel:)/i.test(formula.link) ? formula.link : '';
+        sheetWriteRawStrings_(book.getId(), originalSheet.getSheetId(), formula.row, formula.column, [[value]], undefined, [[link]]);
       } else cell.setValue(value);
     }
     SpreadsheetApp.flush(); draft.freezeCursor = end;
@@ -525,9 +524,10 @@ function preparedWriteBlock_(sheet, firstRow, rows, width) {
     if (!Array.isArray(row) || row.length !== width) fail_('PREVIEW_STORAGE', 'План содержит некорректные строки.');
     row.forEach(function (value, j) { var old = String(existing[i][j] || ''); if (formulas[i][j] || (old !== '' && old !== String(value === null || value === undefined ? '' : value))) fail_('PREVIEW_CHANGED', 'Результат изменён вручную до завершения подготовки.'); });
   });
-  // RichText writes literal strings, including +phones and formula-like data.
-  var rich = rows.map(function (row) { return row.map(function (value) { return SpreadsheetApp.newRichTextValue().setText(String(value === null || value === undefined ? '' : value)).build(); }); });
-  range.setNumberFormat('@'); range.setRichTextValues(rich);
+  // Native Apps Script RichText can turn a leading + into a literal =+.
+  // Explicit Sheets API stringValue keeps every character without evaluating it.
+  var text = rows.map(function (row) { return row.map(function (value) { return String(value === null || value === undefined ? '' : value); }); });
+  sheetWriteRawStrings_(sheet.getParent().getId(), sheet.getSheetId(), firstRow, 1, text);
 }
 
 function preparedVerifyResult_(context, book, draft, plan) {

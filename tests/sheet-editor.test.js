@@ -12,7 +12,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const iter = values => { let index = 0; return { hasNext: () => index < values.length, next: () => values[index++] }; };
 
 function fixture(options = {}) {
-  const calls = { opened: [], mutations: [], flushes: 0, capabilities: 0, reads: 0, propertyWrites: 0, digests: 0 };
+  const calls = { opened: [], mutations: [], rawRequests: [], flushes: 0, capabilities: 0, reads: 0, propertyWrites: 0, digests: 0 };
   const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SOURCE_BASES_FOLDER_ID: SOURCES, SEGMENTS_FOLDER_ID: OUTREACH, SOURCE_BASES_STORAGE_ID: SERVICE, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ...options.properties }));
   let locked = false, parents = options.parents || [SOURCES], writeFault = options.writeFault, appendFault = options.appendFault, doneFault = options.doneFault;
   const folders = new Map();
@@ -28,7 +28,8 @@ function fixture(options = {}) {
   function at(row, column) { return cells[row - 1]?.[column - 1] || { value: '', formula: '', display: undefined }; }
   function put(row, column, value, literal = false) {
     cells[row - 1] ||= [];
-    if (!literal && typeof value === 'string' && value.startsWith('=')) cells[row - 1][column - 1] = { value: value === '=1+2' ? 3 : 0, formula: value, display: undefined };
+    if (!literal && typeof value === 'string' && value.startsWith("'")) cells[row - 1][column - 1] = { value: value.slice(1), formula: '', display: undefined };
+    else if (!literal && typeof value === 'string' && value.startsWith('=')) cells[row - 1][column - 1] = { value: value === '=1+2' ? 3 : 0, formula: value, display: undefined };
     else cells[row - 1][column - 1] = { value, formula: '', display: undefined };
   }
   const state = { rows: options.rowCount || 100, columns: options.columnCount || 26 };
@@ -44,14 +45,14 @@ function fixture(options = {}) {
       }
       return {
         getValues: () => read(cell => cell.value), getFormulas: () => read(cell => cell.formula),
-        getDisplayValues: () => read(cell => cell.display ?? (cell.value instanceof Date ? cell.value.toISOString() : String(cell.value))),
+        getDisplayValues: () => read(cell => cell.display ?? (Object.prototype.toString.call(cell.value) === '[object Date]' ? cell.value.toISOString() : String(cell.value))),
         setValues: values => {
           assert.equal(locked, true); calls.mutations.push({ kind: 'values', row, column, rowCount, columnCount });
           if (writeFault === 'before') { writeFault = null; throw new Error('Write lost before apply'); }
           values.forEach((line, y) => line.forEach((value, x) => put(row + y, column + x, value)));
           if (writeFault === 'after') { writeFault = null; throw new Error('Write response lost'); }
         },
-        setRichTextValues: values => { assert.equal(locked, true); calls.mutations.push({ kind: 'rich', row, column, rowCount, columnCount }); values.forEach((line, y) => line.forEach((value, x) => put(row + y, column + x, value.text, true))); },
+        setRichTextValues: values => { assert.equal(locked, true); calls.mutations.push({ kind: 'rich', row, column, rowCount, columnCount }); values.forEach((line, y) => line.forEach((value, x) => { let text = value.text; if (text.startsWith('+')) text = '=' + text; else if (/^\d+$/.test(text)) text = Number(text); put(row + y, column + x, text); })); },
       };
     },
     insertRowsAfter: (after, count) => {
@@ -74,7 +75,24 @@ function fixture(options = {}) {
     LockService: { getScriptLock: () => ({ tryLock: () => { if (options.busy) return false; locked = true; return true; }, releaseLock: () => { locked = false; } }) },
     DriveApp: { getFolderById: id => { if (!folders.has(id)) throw new Error('Missing folder'); return folders.get(id); }, getFileById: id => { if (id !== FILE) throw new Error('Missing book'); return file; } },
     Drive: { Files: { get: id => { assert.equal(id, FILE); calls.capabilities++; if (options.capabilityThrows) throw new Error('No capability'); return { appProperties: options.appProperties || {}, ...(options.capabilityMissing ? {} : { capabilities: { canEdit: options.canEdit !== false } }) }; } } },
-    SpreadsheetApp: { openById: id => { assert.equal(id, FILE); calls.opened.push(id); return { getSheets: () => [sheet] }; }, flush: () => { assert.equal(locked, true); calls.flushes++; }, newRichTextValue: () => { let text = ''; return { setText(value) { text = value; return this; }, build() { return { text }; } }; } },
+    ScriptApp: { getOAuthToken: () => 'synthetic-private-token' },
+    UrlFetchApp: { fetch: (url, request) => {
+      assert.equal(url, `https://sheets.googleapis.com/v4/spreadsheets/${FILE}:batchUpdate`);
+      assert.equal(request.method, 'post'); assert.equal(request.headers.Authorization, 'Bearer synthetic-private-token');
+      const body = JSON.parse(request.payload); calls.rawRequests.push(body);
+      assert.ok(body.requests.every(item => item.updateCells));
+      assert.ok(locked || options.directRaw);
+      if (options.rawStatus) return { getResponseCode: () => options.rawStatus, getContentText: () => 'OAuth secret and private data must not appear in an error' };
+      if (options.rawFault === 'before') throw new Error('RAW response lost before apply');
+      for (const item of body.requests) {
+        const update = item.updateCells, area = update.range;
+        calls.mutations.push({ kind: 'raw', row: area.startRowIndex + 1, column: area.startColumnIndex + 1, rowCount: area.endRowIndex - area.startRowIndex, columnCount: area.endColumnIndex - area.startColumnIndex });
+        update.rows.forEach((line, y) => line.values.forEach((cell, x) => { assert.equal(typeof cell.userEnteredValue.stringValue, 'string'); put(area.startRowIndex + y + 1, area.startColumnIndex + x + 1, cell.userEnteredValue.stringValue, true); }));
+      }
+      if (options.rawFault === 'after') throw new Error('RAW response lost after apply');
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ spreadsheetId: options.rawWrongId ? 'wrong' : FILE, replies: body.requests.map(() => ({})) }) };
+    } },
+    SpreadsheetApp: { openById: id => { assert.equal(id, FILE); calls.opened.push(id); return { getSheets: () => [sheet] }; }, flush: () => { assert.ok(locked || options.directRaw); calls.flushes++; }, newRichTextValue: () => { let text = ''; return { setText(value) { text = value; return this; }, build() { return { text }; } }; } },
   });
   for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SegmentActions.gs', 'SheetEditor.gs', 'Access.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   const run = callback => plain(context.withSharedAccess_(TEST_ACCESS_KEY, callback));
@@ -113,14 +131,14 @@ test('a rectangular paste writes only the explicitly requested cells and returns
   const saved = f.save([['Другая', '8,5']], old);
   assert.equal(saved.state, 'saved'); assert.equal(saved.recovered, false);
   assert.deepEqual(saved.values, [['Другая', '8.5']]); assert.equal(f.cells[1][2].value, '+79991234567');
-  assert.equal(f.calls.mutations.length, 1); assert.equal(f.calls.flushes, 1);
+  assert.equal(f.calls.mutations.length, 2); assert.equal(f.calls.flushes, 2);
   assert.notDeepEqual(saved.versions, old.versions);
 });
 
-test('a 5000-cell paste is one explicit native rectangle and keeps payload limits', () => {
+test('a 5000-cell paste uses an explicit rectangle and one exact RAW batch with payload limits', () => {
   const f = fixture({ rows: [[]], rowCount: 5000 }), old = f.read({ rowCount: 5000, columnCount: 1 });
   const saved = f.save(Array.from({ length: 5000 }, (_, i) => ['contact-' + i]), old);
-  assert.equal(saved.rowCount, 5000); assert.equal(f.calls.mutations.length, 1); assert.equal(f.cells[4999][0].value, 'contact-4999');
+  assert.equal(saved.rowCount, 5000); assert.equal(f.calls.mutations.length, 2); assert.equal(f.cells[4999][0].value, 'contact-4999');
   const g = fixture({ rows: [[]], rowCount: 5000 }), before = g.read({ rowCount: 5000, columnCount: 1 });
   assert.throws(() => g.save(Array.from({ length: 5000 }, () => ['x'.repeat(51)]), before), /GRID_LIMIT/);
   assert.equal(g.calls.mutations.length, 0);
@@ -129,7 +147,7 @@ test('a 5000-cell paste is one explicit native rectangle and keeps payload limit
 test('a long vertical text-number paste groups literal writes and retains strings', () => {
   const f = fixture({ rows: [[]], rowCount: 1000 }), old = f.read({ rowCount: 1000, columnCount: 1 });
   f.save(Array.from({ length: 1000 }, () => ["'123"]), old);
-  assert.equal(f.calls.mutations.length, 2, 'one rectangle plus one vertical RichText rectangle');
+  assert.equal(f.calls.mutations.length, 2, 'one safe SDK rectangle plus one vertical RAW rectangle');
   assert.equal(f.cells[999][0].value, '123');
 });
 
@@ -139,6 +157,49 @@ test('formulas execute only when explicitly entered, while apostrophe literals n
   assert.deepEqual(saved.values, [['3', '=1+2', "'quoted"]]);
   assert.deepEqual(saved.inputs, [['=1+2', "'=1+2", "''quoted"]]);
   assert.equal(f.cells[2][0].formula, '=1+2'); assert.equal(f.cells[2][1].formula, ''); assert.equal(f.cells[2][2].formula, '');
+});
+
+test('the RAW writer preserves exact plus, formula-like, leading-zero and apostrophe strings', () => {
+  const f = fixture({ directRaw: true });
+  const strings = [['+79990000001', '=SUM(1,2)', '00123', "'quoted"]];
+  f.run(() => f.context.sheetWriteRawStrings_(FILE, 0, 6, 3, strings));
+  assert.deepEqual(f.cells[5].slice(2, 6).map(cell => cell.value), strings[0]);
+  assert.ok(f.cells[5].slice(2, 6).every(cell => cell.formula === ''));
+  assert.equal(f.calls.rawRequests.length, 1);
+  const sent = f.calls.rawRequests[0].requests[0].updateCells;
+  assert.equal(sent.range.startRowIndex, 5); assert.equal(sent.range.startColumnIndex, 2);
+  assert.deepEqual(sent.rows[0].values.map(cell => cell.userEnteredValue), strings[0].map(stringValue => ({ stringValue })));
+});
+
+test('mixed checkerboard edits never send false-mask formulas, dates or booleans through RAW', () => {
+  const f = fixture(), old = f.read({ row: 3, column: 1, rowCount: 1, columnCount: 6 });
+  const saved = f.save([['+79990000001', '=1+2', '2026-01-02T00:00:00.000Z', "'00123", 'TRUE', "'=SUM(1,2)"]], old);
+  assert.deepEqual(saved.values[0], ['+79990000001', '3', '2026-01-02T00:00:00.000Z', '00123', 'true', '=SUM(1,2)']);
+  assert.equal(f.cells[2][1].formula, '=1+2'); assert.equal(Object.prototype.toString.call(f.cells[2][2].value), '[object Date]'); assert.equal(f.cells[2][4].value, true);
+  const ranges = f.calls.rawRequests[0].requests.map(request => request.updateCells.range);
+  assert.deepEqual(ranges.map(range => [range.startColumnIndex, range.endColumnIndex]), [[0,1],[3,4],[5,6]]);
+  assert.ok(f.calls.mutations.every(mutation => mutation.kind !== 'rich'));
+});
+
+test('RAW hyperlinks use text runs and provider errors never disclose response bodies or credentials', () => {
+  const f = fixture({ directRaw: true });
+  f.run(() => f.context.sheetWriteRawStrings_(FILE, 0, 4, 2, [['WhatsApp']], undefined, [['https://wa.me/79990000001']]));
+  const cell = f.calls.rawRequests[0].requests[0].updateCells.rows[0].values[0];
+  assert.deepEqual(cell.textFormatRuns, [{ startIndex: 0, format: { link: { uri: 'https://wa.me/79990000001' } } }]);
+  for (const options of [{ rawStatus: 403 }, { rawWrongId: true }, { rawFault: 'after' }]) {
+    const g = fixture({ ...options, directRaw: true });
+    assert.throws(() => g.run(() => g.context.sheetWriteRawStrings_(FILE, 0, 4, 2, [['+79990000001']])), error => /SHEETS_RAW_UNCERTAIN/.test(error.message) && !/synthetic-private-token|OAuth secret|private data/.test(error.message));
+  }
+});
+
+test('the initial SDK pass escapes every string before the RAW batch restores its exact type', () => {
+  const f = fixture(), old = f.read({ row: 3, column: 1, rowCount: 1, columnCount: 4 });
+  const inputs = [['+79990000001', 'text', "'=SUM(1,2)", "'00123"]];
+  const prepared = f.context.gridValues_(inputs);
+  assert.deepEqual(plain(prepared.values), [["'+79990000001", "'text", "'=SUM(1,2)", "'00123"]]);
+  f.save(inputs, old);
+  assert.deepEqual(f.cells[2].map(cell => cell.value), ['+79990000001','text','=SUM(1,2)','00123']);
+  assert.equal(f.cells[2][2].formula, '');
 });
 
 test('long identifiers, phone numbers and leading zeroes remain text, simple locale numbers are typed', () => {
@@ -189,13 +250,13 @@ test('a completed request replay returns later external edits without reapplying
   const f = fixture(), old = f.read({ row: 2, column: 1, rowCount: 1, columnCount: 1 });
   f.save([['Saved']], old); f.put(2, 1, 'Edited later');
   const replay = f.save([['Saved']], old);
-  assert.equal(replay.recovered, true); assert.deepEqual(replay.values, [['Edited later']]); assert.equal(f.calls.mutations.length, 1);
+  assert.equal(replay.recovered, true); assert.deepEqual(replay.values, [['Edited later']]); assert.equal(f.calls.mutations.length, 2);
 });
 
 test('request IDs are bound to the exact payload and cannot overwrite another range', () => {
   const f = fixture(), old = f.read({ row: 2, column: 1, rowCount: 1, columnCount: 1 });
   f.save([['Saved']], old);
-  assert.throws(() => f.save([['Different']], old), /REQUEST_REUSED/); assert.equal(f.calls.mutations.length, 1);
+  assert.throws(() => f.save([['Different']], old), /REQUEST_REUSED/); assert.equal(f.calls.mutations.length, 2);
 });
 
 test('a lost write response is recovered by comparing intended values and does not write twice', () => {
@@ -227,7 +288,7 @@ test('failure to persist the pending receipt prevents every native write', () =>
 test('a lost completion journal update still returns the saved range and can be recovered once', () => {
   const f = fixture({ doneFault: true }), old = f.read({ row: 2, column: 1, rowCount: 1, columnCount: 1 });
   assert.equal(f.save([['Saved']], old).state, 'saved');
-  assert.equal(f.save([['Saved']], old).recovered, true); assert.equal(f.calls.mutations.length, 1);
+  assert.equal(f.save([['Saved']], old).recovered, true); assert.equal(f.calls.mutations.length, 2);
 });
 
 test('root-only private drafts, direct Outreach-root files, outside files and non-native files are not editable', () => {

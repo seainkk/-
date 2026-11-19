@@ -7,7 +7,18 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
-HTML = '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' + (ROOT / 'src/GridStyles.html').read_text() + '</head><body>' + (ROOT / 'src/GridPanel.html').read_text() + '<script>' + Path(__file__).with_name('grid-fixture.js').read_text() + '</script>' + (ROOT / 'src/GridClient.html').read_text() + '</body></html>'
+HTML = (
+    '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + (ROOT / 'src/Styles.html').read_text()
+    + (ROOT / 'src/GridStyles.html').read_text()
+    + '</head><body><main id="bases-registry-app">'
+    '<div hidden><h1 id="registry-style-title">Реестр баз</h1>'
+    '<input id="registry-style-input" aria-label="Проверка стилей реестра"></div>'
+    + (ROOT / 'src/GridPanel.html').read_text()
+    + '</main><script>' + Path(__file__).with_name('grid-fixture.js').read_text()
+    + '</script>' + (ROOT / 'src/GridClient.html').read_text() + '</body></html>'
+)
 
 
 def main():
@@ -39,7 +50,37 @@ def main():
         def release(method):
             page.evaluate('(method)=>releaseGridRpc(method)', method)
 
+        def integrated_styles(width):
+            # Real Index.html loads global Styles before GridStyles and nests
+            # the panel in the app. The isolated editor used to miss collisions.
+            actual = page.evaluate('''()=>{
+                const style=id=>getComputedStyle(document.getElementById(id));
+                const title=style('rg-grid-title');
+                const fields=['rg-grid-address','rg-grid-formula'].map(id=>{
+                    const node=document.getElementById(id), css=style(id);
+                    return {height:node.getBoundingClientRect().height,
+                        radius:css.borderRadius,minHeight:css.minHeight,fontSize:css.fontSize};
+                });
+                return {fontSize:title.fontSize,fontWeight:title.fontWeight,
+                    letterSpacing:title.letterSpacing,fields,
+                    formulaBar:document.querySelector('.rg-grid-formula-bar').getBoundingClientRect().height,
+                    registryTitle:style('registry-style-title').fontSize,
+                    registryRadius:style('registry-style-input').borderRadius,
+                    registryMinHeight:style('registry-style-input').minHeight};
+            }''')
+            assert actual['fontSize'] == ('15px' if width <= 600 else '18px'), actual
+            assert actual['fontWeight'] == '400', actual
+            assert actual['letterSpacing'] == 'normal', actual
+            assert actual['formulaBar'] == 33, actual
+            for field in actual['fields']:
+                assert field == {'height': 32, 'radius': '0px', 'minHeight': '0px', 'fontSize': '13px'}, actual
+            # Overrides stay inside the editor; registry inputs keep their pills.
+            assert actual['registryTitle'] == ('32px' if width <= 640 else '38px'), actual
+            assert actual['registryRadius'] == '100px', actual
+            assert actual['registryMinHeight'] == '46px', actual
+
         reset()
+        integrated_styles(1440)
         assert page.locator('#rg-grid-title').inner_text() == 'Кухни — рабочая база'
         assert page.locator('#rg-grid-native').get_attribute('href') == 'https://docs.google.com/spreadsheets/d/grid_file_1234567890/edit#gid=0'
         assert page.locator('#rg-grid-head th[data-column="1"]').inner_text() == 'A'
@@ -254,6 +295,24 @@ def main():
         assert len(page.evaluate("gridBackend.calls.filter(item=>item.method==='saveGridRange')")) == 1
         assert page.locator('#rg-grid-body').inner_text() == ''
 
+        # Reload must not claim the old DOM is saved while metadata or fresh cells are pending.
+        reset()
+        page.evaluate("gridServerEdit(0,2,1,'Свежие данные из Google');gridBackend.holdMethods=['getGridWorkbook','getGridRange']")
+        page.locator('#rg-grid-reload').click()
+        held('getGridWorkbook')
+        assert page.locator('#rg-grid-status').get_attribute('data-state') == 'loading'
+        assert 'Загружаем' in page.locator('#rg-grid-status').inner_text()
+        assert page.locator('#rg-grid-formula').is_disabled()
+        assert page.locator('#rg-cell-2-1').inner_text() != 'Свежие данные из Google'
+        release('getGridWorkbook')
+        held('getGridRange')
+        assert page.locator('#rg-grid-status').get_attribute('data-state') == 'loading'
+        assert page.locator('#rg-grid-reload').is_disabled()
+        release('getGridRange')
+        page.wait_for_function("document.getElementById('rg-grid-status').dataset.state==='saved'")
+        assert page.locator('#rg-cell-2-1').inner_text() == 'Свежие данные из Google'
+        assert page.locator('#rg-grid-formula').is_enabled()
+
         # A failed read without any edits never traps the user in the editor.
         reset()
         page.evaluate("gridBackend.failures.getGridRange=['GRID_NETWORK']")
@@ -270,6 +329,7 @@ def main():
         page.screenshot(path='/workspace/work/grid-editor-desktop.png')
         for width in [1440, 360, 320]:
             page.set_viewport_size({'width': width, 'height': 900})
+            integrated_styles(width)
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'), ('page overflow', width)
             assert page.locator('#rg-grid-panel').evaluate('node=>node.scrollWidth<=node.clientWidth'), ('panel overflow', width)
             if width == 320:
