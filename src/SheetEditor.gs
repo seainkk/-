@@ -58,7 +58,8 @@ function saveGridRange_(request) {
       } catch (error) {
         if (!mutationStarted && error && error.registryCode === 'GRID_READ_ONLY') throw error;
         if (error && ['LINK_ACCESS_REQUIRED', 'LINK_SETUP_REQUIRED', 'OUTSIDE_REGISTRY', 'GRID_PROTECTED'].indexOf(error.registryCode) !== -1) throw error;
-        fail_('GRID_UNCERTAIN', 'Google не подтвердил сохранение диапазона. Скопируйте правки перед перечитыванием; повторите тот же запрос, чтобы проверить его результат.');
+        var diagnostic = error && error.sheetRawDiagnostic ? ' Причина: ' + error.sheetRawDiagnostic + '.' : '';
+        fail_('GRID_UNCERTAIN', 'Google не подтвердил сохранение диапазона.' + diagnostic + ' Скопируйте правки перед перечитыванием; повторите тот же запрос, чтобы проверить его результат.');
       }
     });
   });
@@ -284,13 +285,42 @@ function sheetWriteRawStrings_(fileId, sheetId, row, column, values, mask, links
   var response;
   try {
     response = UrlFetchApp.fetch('https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(fileId) + ':batchUpdate', { method: 'post', contentType: 'application/json', headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, payload: JSON.stringify({ requests: requests }), muteHttpExceptions: true });
-  } catch (error) { fail_('SHEETS_RAW_UNCERTAIN', 'Google не подтвердил точную запись текста. Повторите проверку результата.'); }
+  } catch (error) { sheetRawFailure_('NETWORK_ERROR'); }
   var code = response.getResponseCode();
-  if (code < 200 || code >= 300) fail_('SHEETS_RAW_UNCERTAIN', 'Google отклонил точную запись текста. Проверьте подключение Google Sheets API и права таблицы.');
+  if (code < 200 || code >= 300) sheetRawFailure_(sheetRawHttpReason_(response, code));
   var result;
-  try { result = JSON.parse(response.getContentText()); } catch (error) { fail_('SHEETS_RAW_UNCERTAIN', 'Google не вернул подтверждение точной записи текста.'); }
-  if (!result || result.spreadsheetId !== fileId || !Array.isArray(result.replies) || result.replies.length !== requests.length) fail_('SHEETS_RAW_UNCERTAIN', 'Google не подтвердил все текстовые диапазоны.');
+  try { result = JSON.parse(response.getContentText()); } catch (error) { sheetRawFailure_('INVALID_RESPONSE'); }
+  if (!result || result.spreadsheetId !== fileId || !Array.isArray(result.replies) || result.replies.length !== requests.length) sheetRawFailure_('INCOMPLETE_ACKNOWLEDGEMENT');
   return { spreadsheetId: fileId, requests: requests.length };
+}
+
+/** Return only controlled diagnostic labels; never echo provider text or IDs. */
+function sheetRawHttpReason_(response, status) {
+  var code = Number(status), payload = null;
+  try { payload = JSON.parse(response.getContentText()); } catch (error) { /* A non-JSON provider response is not exposed. */ }
+  var data = payload && payload.error && typeof payload.error === 'object' ? payload.error : {}, labels = [], reason = '';
+  if (Array.isArray(data.details)) data.details.forEach(function (item) { if (item && typeof item.reason === 'string') labels.push(item.reason); });
+  if (Array.isArray(data.errors)) data.errors.forEach(function (item) { if (item && typeof item.reason === 'string') labels.push(item.reason); });
+  labels.push(typeof data.status === 'string' ? data.status : '');
+  var joined = labels.join('|'), message = typeof data.message === 'string' ? data.message.slice(0, 4096) : '';
+  if (/SERVICE_DISABLED|API_DISABLED|accessNotConfigured/i.test(joined) || /has not been used|api[^.]*is disabled|service[^.]*disabled/i.test(message)) reason = 'SERVICE_DISABLED';
+  else if (/ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficientPermissions|insufficientAuthenticationScopes/i.test(joined) || /insufficient authentication scopes/i.test(message)) reason = 'INSUFFICIENT_SCOPES';
+  else if (/RATE_LIMIT|QUOTA_EXCEEDED|rateLimitExceeded|dailyLimitExceeded/i.test(joined) || code === 429) reason = 'RATE_LIMITED';
+  else if (code === 400 && /invalid[^.]{0,120}field|unknown name|cannot find field|field mask/i.test(message)) reason = 'INVALID_FIELD_MASK';
+  else if (code === 400 && /beyond (?:max|the)|exceeds grid limits|out of bounds/i.test(message)) reason = 'GRID_BOUNDS';
+  else if (code === 400 || /INVALID_ARGUMENT/i.test(joined)) reason = 'INVALID_ARGUMENT';
+  else if (code === 403 || /PERMISSION_DENIED|forbidden|accessDenied/i.test(joined)) reason = 'PERMISSION_DENIED';
+  else if (code === 401) reason = 'AUTH_REQUIRED';
+  else if (code === 404) reason = 'NOT_FOUND';
+  else if (code >= 500) reason = 'GOOGLE_UNAVAILABLE';
+  else reason = 'HTTP_ERROR';
+  return (Number.isInteger(code) && code >= 100 && code <= 599 ? 'HTTP ' + code + ', ' : '') + reason;
+}
+
+function sheetRawFailure_(diagnostic) {
+  var error = registryError_('SHEETS_RAW_UNCERTAIN', 'Google не подтвердил точную запись текста (' + diagnostic + '). Проверьте результат и подключение Google Sheets API.');
+  error.sheetRawDiagnostic = diagnostic;
+  throw error;
 }
 
 function gridExpected_(expected, rows, columns) {

@@ -82,7 +82,7 @@ function fixture(options = {}) {
       const body = JSON.parse(request.payload); calls.rawRequests.push(body);
       assert.ok(body.requests.every(item => item.updateCells));
       assert.ok(locked || options.directRaw);
-      if (options.rawStatus) return { getResponseCode: () => options.rawStatus, getContentText: () => 'OAuth secret and private data must not appear in an error' };
+      if (options.rawStatus) return { getResponseCode: () => options.rawStatus, getContentText: () => options.rawBody || 'OAuth secret and private data must not appear in an error' };
       if (options.rawFault === 'before') throw new Error('RAW response lost before apply');
       for (const item of body.requests) {
         const update = item.updateCells, area = update.range;
@@ -190,6 +190,27 @@ test('RAW hyperlinks use text runs and provider errors never disclose response b
     const g = fixture({ ...options, directRaw: true });
     assert.throws(() => g.run(() => g.context.sheetWriteRawStrings_(FILE, 0, 4, 2, [['+79990000001']])), error => /SHEETS_RAW_UNCERTAIN/.test(error.message) && !/synthetic-private-token|OAuth secret|private data/.test(error.message));
   }
+});
+
+test('controlled RAW diagnostics distinguish API setup, masks and scopes without provider text', () => {
+  const examples = [
+    [403, { error: { status: 'PERMISSION_DENIED', message: 'private-project-998877 and OAuth secret', details: [{ reason: 'SERVICE_DISABLED', metadata: { consumer: 'projects/private-project-998877' } }] } }, 'HTTP 403, SERVICE_DISABLED'],
+    [400, { error: { status: 'INVALID_ARGUMENT', message: 'Invalid field mask userEnteredFormat.textFormat.link; private customer text' } }, 'HTTP 400, INVALID_FIELD_MASK'],
+    [403, { error: { status: 'PERMISSION_DENIED', details: [{ reason: 'ACCESS_TOKEN_SCOPE_INSUFFICIENT' }] } }, 'HTTP 403, INSUFFICIENT_SCOPES'],
+    [429, { error: { message: 'OAuth secret and private customer text' } }, 'HTTP 429, RATE_LIMITED'],
+  ];
+  for (const [status, body, expected] of examples) {
+    const f = fixture({ directRaw: true, rawStatus: status, rawBody: JSON.stringify(body) });
+    assert.throws(() => f.run(() => f.context.sheetWriteRawStrings_(FILE, 0, 4, 2, [['+79990000001']])), error => error.sheetRawDiagnostic === expected && error.message.includes(expected) && !/private-project|OAuth secret|private customer/.test(error.message));
+  }
+});
+
+test('Grid uncertainty exposes only the safe RAW diagnostic and keeps the request pending', () => {
+  const f = fixture({ rawStatus: 403, rawBody: JSON.stringify({ error: { details: [{ reason: 'SERVICE_DISABLED' }], message: 'PRIVATE_TOKEN_PRIVATE_USERDATA' } }) });
+  const old = f.read({ row: 3, column: 1, rowCount: 1, columnCount: 1 });
+  assert.throws(() => f.save([["'+79990000001"]], old), error => /GRID_UNCERTAIN/.test(error.message) && /HTTP 403, SERVICE_DISABLED/.test(error.message) && !/PRIVATE_TOKEN|PRIVATE_USERDATA/.test(error.message));
+  const key = JSON.parse(f.properties.get('GRID_RECEIPT_INDEX'))[0];
+  assert.equal(JSON.parse(f.properties.get(key)).status, 'pending');
 });
 
 test('the initial SDK pass escapes every string before the RAW batch restores its exact type', () => {
