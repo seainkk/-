@@ -42,6 +42,15 @@ body{margin:0;background:#fff}
 #bases-registry-app .br-user{margin-left:auto;color:var(--br-muted);font-size:11px;max-width:180px;overflow-wrap:anywhere}
 #bases-registry-app .br-header-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 #bases-registry-app .br-header-actions .br-button{font-size:11px;min-height:37px;padding:9px 12px}
+#bases-registry-app .br-provider-dialog{box-sizing:border-box;width:min(560px,calc(100% - 24px));max-height:calc(100% - 24px);margin:auto;padding:clamp(16px,4vw,28px);border:1px solid var(--br-line);border-radius:24px;background:var(--br-nav);color:inherit;overflow:auto}
+#bases-registry-app .br-provider-dialog::backdrop{background:rgb(0 0 0 / .5)}
+#bases-registry-app .br-provider-fields{display:grid;gap:12px;min-width:0;border:0;margin:0;padding:0}
+#bases-registry-app .br-provider-fields label{display:grid;gap:6px}
+#bases-registry-app .br-provider-fields .br-provider-choice{display:flex;align-items:center}
+#bases-registry-app .br-provider-fields input:not([type=checkbox]){min-width:0;width:100%}
+#bases-registry-app .br-provider-fields p,#bases-registry-app .br-provider-automation p{margin:0}
+#bases-registry-app .br-provider-actions{display:flex;flex-wrap:wrap;gap:8px}
+#bases-registry-app .br-provider-automation{display:grid;justify-items:start;gap:8px;border-top:1px solid var(--br-line);padding-top:16px}
 #bases-registry-app #br-refresh{border-color:transparent;color:var(--br-muted)}
 #bases-registry-app .br-main{width:100%;min-width:0}
 #bases-registry-app .br-sources-view,#bases-registry-app .br-segments-view,#bases-registry-app .br-retarget-view,#bases-registry-app .br-mailings-view{max-width:1360px;margin:0 auto;padding:38px 32px 52px;min-width:0}
