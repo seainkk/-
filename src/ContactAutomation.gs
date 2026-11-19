@@ -116,15 +116,18 @@ function contactAutomationTick_(event) {
       while (remaining.length && Date.now() - started < CONTACT_AUTOMATION.maxMillis - 20000) {
         var item = remaining[0];
         try {
-          authorize_();
-          if (item.role === 'segment-companies' && typeof syncSegmentPeople_ === 'function') {
+          var current = authorize_();
+          var workspace = getContactWorkspace_({ id: item.id }), result;
+          var pendingSegment = workspace.segmentId && typeof segmentRecordsActiveJob_ === 'function' ? segmentRecordsActiveJob_(current, workspace.segmentId) : null;
+          if ((workspace.shouldSync !== false || pendingSegment) && item.role === 'segment-companies' && typeof syncSegmentPeople_ === 'function') {
             var people = syncSegmentPeople_({ companyFileId: item.id, requestId: 'auto-person-' + Utilities.getUuid() }), personSteps = 0;
             while (people && people.state === 'processing' && personSteps++ < 5 && Date.now() - started < CONTACT_AUTOMATION.maxMillis - 20000) {
               people = continueSegmentRecords_({ segmentId: people.segmentId, jobId: people.jobId, requestId: people.requestId });
             }
             if (people && people.state === 'processing') break;
+            // A transfer can change source rows or settle another active job.
+            workspace = getContactWorkspace_({ id: item.id });
           }
-          var workspace = getContactWorkspace_({ id: item.id }), result;
           if (workspace.job && workspace.job.jobId) result = continueContactSync_({ id: item.id, jobId: workspace.job.jobId, requestId: workspace.job.requestId });
           else if (workspace.shouldSync === false) result = { state: 'complete' };
           else result = syncWorkbookContacts_({ id: item.id, requestId: 'auto-sync-' + Utilities.getUuid() });

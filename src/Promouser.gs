@@ -119,7 +119,7 @@ function advanceWorkbookValidation_(request) {
   return api_(function () {
     var input = pvInput_(request, ['id', 'requestId']); pvRequestId_(input.requestId);
     var scope = gridFile_(id_(input.id), true);
-    return processWorkbookValidation_(scope.context, input.id);
+    return processWorkbookValidation_(scope.context, input.id, { forceQueue: true });
   });
 }
 
@@ -136,7 +136,14 @@ function payValidationOrder_(request) {
   });
 }
 
-function processWorkbookValidation_(context, fileId) {
+function processWorkbookValidation_(context, fileId, options) {
+  var scope = gridFile_(id_(fileId), true, context.rootId);
+  // Contact sync queues changed books. An idle timer need not rescan their sheets;
+  // explicit interface commands still queue, including before API configuration.
+  if (!options || !options.forceQueue) {
+    var settings = pvSettings_(scope.context), state = pvLedger_(scope.context, fileId, false);
+    if (!settings.key || !settings.enabled || state && !(state.pendingApplications > 0) && !state.jobs.some(function (job) { return !pvJobFinished_(job.state); })) return pvPublic_(scope.context, state);
+  }
   queueWorkbookValidation_(context, fileId, {});
   var started = Date.now(), result = pvAdvance_(context, fileId, {});
   return pvFinishPayment_(context, fileId, result, started);
