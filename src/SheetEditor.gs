@@ -131,7 +131,7 @@ function gridFile_(fileId, writable, expectedRoot) {
   catch (error) { fail_('GRID_ACCESS_UNAVAILABLE', 'Не удалось проверить доступ и состояние таблицы. Повторите открытие через несколько секунд.'); }
   if (!metadata || typeof metadata !== 'object') fail_('GRID_ACCESS_UNAVAILABLE', 'Google не подтвердил состояние таблицы.');
   var tags = metadata.appProperties || {}, role = tags.registryPreparedRole;
-  if ((role || tags.registryPreparedDraft) && (role !== 'output' || tags.registryPreparedVersion !== '1' || tags.registryPreparedRoot !== context.rootId)) fail_('GRID_PROTECTED', 'Эта таблица ещё относится к служебной подготовке базы.');
+  if ((role || tags.registryPreparedDraft) && (role !== 'output' || ['1', '2'].indexOf(tags.registryPreparedVersion) === -1 || tags.registryPreparedRoot !== context.rootId)) fail_('GRID_PROTECTED', 'Эта таблица ещё относится к служебной подготовке базы.');
   var canEdit = !!(metadata.capabilities && metadata.capabilities.canEdit === true);
   if (writable && !canEdit) fail_('GRID_READ_ONLY', 'Аккаунт сервиса не имеет подтверждённых прав редактора этой таблицы.');
   return { context: context, file: file, canEdit: canEdit };

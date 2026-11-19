@@ -12,7 +12,7 @@ const functionSource = name => {
 };
 const context = () => {
   const scope = vm.createContext({});
-  vm.runInContext(['gridText', 'gridColumnName', 'gridAddress', 'gridParseAddress', 'gridEncodeTsv', 'gridParseTsv', 'gridFailure'].map(functionSource).join('\n'), scope);
+  vm.runInContext(['gridText', 'gridColumnName', 'gridAddress', 'gridParseAddress', 'gridEncodeTsv', 'gridParseTsv', 'gridFailure', 'validationTime', 'validationPollDelay'].map(functionSource).join('\n'), scope);
   return scope;
 };
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -55,4 +55,16 @@ test('grid failures distinguish a conflict from an unknown result without losing
   const c = context();
   assert.deepEqual(plain(c.gridFailure(new Error('[GRID_CONFLICT] Ячейку уже изменили.'))), { code: 'GRID_CONFLICT', message: 'Ячейку уже изменили.' });
   assert.deepEqual(plain(c.gridFailure({ message: '[GRID_UNCERTAIN] Проверьте результат.\nПовтор безопасно сверит запрос.' })), { code: 'GRID_UNCERTAIN', message: 'Проверьте результат.\nПовтор безопасно сверит запрос.' });
+});
+
+
+test('validation continuation follows server eligibility for auto-budget and pending cached applications', () => {
+  const c = context(), now = 2000000000000;
+  const data = { configured: true, enabled: true, state: 'pending', canAutoAdvance: true, nextActionAt: now + 1000, jobs: [{ state: 'awaiting_payment', canPay: true, cost: 1 }] };
+  assert.equal(c.validationPollDelay(data, now), 15000);
+  assert.equal(c.validationPollDelay({ ...data, jobs: [], nextActionAt: now + 20000 }, now), 20000);
+  assert.equal(c.validationPollDelay({ ...data, canAutoAdvance: false }, now), null);
+  assert.equal(c.validationPollDelay({ ...data, enabled: false }, now), null);
+  assert.equal(c.validationPollDelay({ ...data, configured: false }, now), null);
+  assert.equal(c.validationPollDelay({ configured: true, enabled: true, jobs: data.jobs }, now), null);
 });

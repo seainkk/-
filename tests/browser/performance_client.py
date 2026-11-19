@@ -112,7 +112,7 @@ def main():
         assert page.evaluate('backend.maxActive') == 1
 
         # The catalog entry point fetches previously missing segment destinations,
-        # then selects the requested ready source and fetches its real worksheets.
+        # then selects the requested ready source for automatic normalization.
         reset()
         page.evaluate("backend.holdMethods=['getSegmentsDashboard']")
         page.locator('[data-source-id="source-companies"] [data-add-source]').click()
@@ -121,38 +121,42 @@ def main():
         assert page.locator('#br-segment-name').is_enabled()
         page.evaluate('backend.holdMethods=[]')
         release('getSegmentsDashboard')
-        page.wait_for_selector('[data-ready-source="source-companies"] [data-leaf="0"]')
+        page.wait_for_function("document.querySelector('[data-choose-source=\"source-companies\"]').checked")
         assert page.locator('#br-segment-target option[value="existing-segment"]').count() == 1
         assert page.locator('#br-segment-name').input_value() == 'Из реестра'
         assert page.evaluate('backend.sourceGets') == 1
         assert page.evaluate('backend.maxActive') == 1
 
-        # Cached readiness never bypasses the server's fresh mutation check.
+        # Cached readiness never bypasses the server's fresh preview check.
+        # Empty segment creation is acknowledged separately from loading data.
         reset()
         segments()
         page.locator('#br-add-segment').click()
         page.locator('#br-segment-name').fill('Проверка готовности')
         page.locator('[data-choose-source="source-companies"]').check()
-        page.wait_for_selector('[data-ready-source="source-companies"] [data-leaf="0"]')
-        page.locator('[data-ready-source="source-companies"] [data-leaf="0"] input').first.check()
         page.evaluate("backend.sources[0].status='collection';backend.sources[0].canAddToSegment=false")
         page.locator('#br-segment-submit').click()
         page.wait_for_function("document.getElementById('br-segment-error').textContent.includes('База уже не готова')")
         assert page.locator('#br-segment-panel').is_visible()
         assert page.locator('#br-segment-name').input_value() == 'Проверка готовности'
-        assert page.evaluate('backend.segmentCount') == 0
-        assert page.evaluate('backend.copyCount') == 0
-        first_id = page.evaluate("backend.calls.filter(item=>item.name==='createSegment').at(-1).p.requestId")
-        page.evaluate("backend.sources[0].status='ready';backend.sources[0].canAddToSegment=true;backend.recoveryOnce=true")
+        assert page.evaluate('backend.segmentCount') == 1
+        assert page.evaluate('backend.normalizedImports') == 0
+        page.evaluate("backend.sources[0].status='ready';backend.sources[0].canAddToSegment=true")
         page.locator('#br-segment-submit').click()
-        page.wait_for_function("document.getElementById('br-segment-error').textContent.includes('Проверьте результат')")
+        page.wait_for_selector('#br-segment-normalized-preview:not([hidden])')
+        assert page.evaluate('backend.normalizedImports') == 0
+        assert 'ЛПР без контактов' in page.locator('#br-segment-preview-counts').inner_text()
+        assert 'Спорная компания' in page.locator('#br-segment-preview-review').inner_text()
         assert page.locator('#br-segment-name').is_disabled()
-        assert page.locator('#br-segment-error a').get_attribute('href').endswith('/created-segment-1')
-        effects = page.evaluate('[backend.segmentCount,backend.copyCount]')
+        page.evaluate('backend.failNormalizedAfterCommit=true')
+        page.locator('#br-segment-submit').click()
+        page.wait_for_function("document.getElementById('br-segment-error').textContent.includes('Ответ потерялся')")
+        first_id = page.evaluate("backend.calls.filter(item=>item.name==='importSegmentRecords').at(-1).p.requestId")
         page.locator('#br-segment-submit').click()
         page.wait_for_selector('#br-segment-panel', state='hidden')
-        assert page.evaluate('[backend.segmentCount,backend.copyCount]') == effects
-        assert page.evaluate("backend.calls.filter(item=>item.name==='createSegment').at(-1).p.requestId") == first_id
+        assert page.evaluate('backend.normalizedImports') == 1
+        assert page.evaluate('backend.segmentCount') == 1
+        assert page.evaluate("backend.calls.filter(item=>item.name==='importSegmentRecords').at(-1).p.requestId") == first_id
 
         # A failed post-save read must not turn acknowledged creation into a form error.
         reset()

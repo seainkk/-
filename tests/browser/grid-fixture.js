@@ -1,5 +1,5 @@
 (() => {
-  const state = window.gridBackend = { calls: [], active: 0, maxActive: 0, pending: [], holdMethods: [], failures: {}, failAfterSave: false, receipts: new Map(), canEdit: true };
+  const state = window.gridBackend = { calls: [], active: 0, maxActive: 0, pending: [], holdMethods: [], failures: {}, failAfterSave: false, receipts: new Map(), canEdit: true, contactsEnabled: false, checked: ['valid@example.test','invalid@example.test'], checkedWrites: 0, syncRuns: 0, validationRuns: 0, providerSettings: {configured:false,enabled:false,autoPayLimitUsd:0,mode:'direct'} };
   const sheet = (id, name, rows, columns) => ({ id, name, rowCount: rows, columnCount: columns, usedRows: 4, usedColumns: 4, cells: new Map() });
   state.sheets = [sheet(0, 'Исходная база', 240, 80), sheet(1, 'Email', 100, 26), sheet(2, 'Телефоны', 100, 26)];
   const key = (row, column) => row + ':' + column;
@@ -21,6 +21,25 @@
   }
   function execute(method, payload) {
     const next = state.failures[method]?.shift(); if (next) throw new Error('[' + next + '] Проверочная ошибка.');
+    if (method === 'getContactWorkspace') return {enrolled:true,canSync:true,targets:{emailSheetId:1,phoneSheetId:2},sourceSheetIds:state.contactsEnabled?[0]:[],role:'registry'};
+    if (method === 'syncWorkbookContacts' || method === 'continueContactSync') {
+      if(method==='syncWorkbookContacts'&&state.syncProcessing){state.syncProcessing=false;state.runningContactRequest='existing-contact-request';return {state:'processing',jobId:'running-contacts',requestId:state.runningContactRequest,progress:{label:'Добавляем новые контакты'}};}
+      if(method==='continueContactSync'&&state.runningContactRequest&&payload.requestId!==state.runningContactRequest)throw new Error('[REQUEST_REUSED] Нужен UUID активного задания.');
+      const previous=state.receipts.get(payload.requestId);if(!previous){state.receipts.set(payload.requestId,structuredClone(payload));state.syncRuns++;}
+      if(state.failAfterSync){state.failAfterSync=false;throw new Error('[CONTACT_UNCERTAIN] Ответ потерялся.');}
+      return {state:'complete',requestId:payload.requestId,counts:{addedEmail:1,addedPhone:2,addedTelegram:1,existing:2},warnings:[]};
+    }
+    if (['getValidationState','advanceWorkbookValidation','refreshWorkbookValidation','payValidationOrder'].includes(method)) {
+      if(['advanceWorkbookValidation','refreshWorkbookValidation','payValidationOrder'].includes(method)&&(!payload||typeof payload.requestId!=='string'||payload.requestId.length<8||payload.requestId.length>120||!/^[A-Za-z0-9_-]+$/.test(payload.requestId)))throw new Error('[INVALID_REQUEST] Нужен идентификатор запроса проверки.');
+      if(method==='advanceWorkbookValidation')state.validationRuns++;
+      return {configured:state.providerSettings.configured,enabled:state.providerSettings.enabled,state:state.validationState||'complete',canAutoAdvance:state.validationAutoAdvance,nextActionAt:state.validationNextActionAt,counts:{queued:0,processing:0,checked:2,review:0},jobs:state.validationJobs||[],warnings:[]};
+    }
+    if (method === 'getPromouserSettings') return {...state.providerSettings};
+    if (method === 'configurePromouser') {state.providerSettings={configured:state.providerSettings.configured||!!payload.apiKey,enabled:payload.enabled,autoPayLimitUsd:payload.autoPayLimitUsd,mode:'direct'};return {...state.providerSettings};}
+    if (method === 'getPromouserBalance') return {balance:'12.50'};
+    if (method === 'getContactAutomationState') return {installed:false};
+    if (method === 'enableContactAutomation') return {installed:true};
+    if (method === 'disableContactAutomation') return {installed:false};
     if (method === 'getGridWorkbook') return { id: payload.id, name: 'Кухни — рабочая база', canEdit: state.canEdit, sheets: state.sheets.map(({ cells, ...value }) => ({ ...value })) };
     if (method === 'getGridRange') return range(payload);
     if (method === 'saveGridRange') {
@@ -41,8 +60,8 @@
     throw new Error('Unexpected method: ' + method);
   }
   window.fakeGridRpc = (method, payload) => new Promise((resolve, reject) => {
-    state.calls.push({ method, payload: structuredClone(payload) }); state.active++; state.maxActive = Math.max(state.active, state.maxActive);
-    const run = () => { try { const value = execute(method, payload); state.active--; resolve(value); } catch (error) { state.active--; reject(error); } };
+    state.calls.push({ method, payload: structuredClone(payload), at: Date.now() }); state.active++; state.maxActive = Math.max(state.active, state.maxActive);
+    const run = () => { try { const value = execute(method, payload); state.active--; resolve(structuredClone(value)); } catch (error) { state.active--; reject(error); } };
     if (state.holdMethods.includes(method)) state.pending.push({ method, run }); else setTimeout(run, 8);
   });
   window.releaseGridRpc = method => { const index = state.pending.findIndex(item => item.method === method); if (index < 0) throw new Error('No held method: ' + method); state.pending.splice(index, 1)[0].run(); };

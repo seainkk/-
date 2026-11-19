@@ -56,6 +56,27 @@
 
 #rg-grid-panel #rg-grid-address,#rg-grid-panel #rg-grid-formula{height:32px;min-height:0;max-width:100%;border:0;border-radius:0;padding:7px 10px;background:#fff;color:#202124;outline:none;font:inherit;line-height:18px}
 
+#rg-grid-panel .rg-grid-contact-button{background:#d3e3fd;color:#174ea6}
+#rg-grid-panel .rg-grid-contact-progress{padding:7px 14px;background:#e8f0fe;color:#174ea6;display:flex;align-items:center;gap:12px;flex:none;line-height:1.5;max-height:90px;overflow:auto}
+#rg-grid-panel .rg-grid-contact-progress[data-error="true"]{background:#fce8e6;color:#8c1d18}
+#rg-grid-panel .rg-grid-contact-progress .rg-grid-button{white-space:normal;border-color:currentColor}
+#rg-grid-panel .rg-grid-validation{position:absolute;z-index:12;right:12px;top:120px;bottom:52px;width:min(430px,calc(100% - 24px));overflow:auto;padding:18px;background:#fff;border:1px solid #dadce0;border-radius:8px;box-shadow:0 4px 22px #20212430;font:13px Arial,sans-serif}
+#rg-grid-panel .rg-grid-validation-heading{display:flex;gap:8px;align-items:center;justify-content:space-between}
+#rg-grid-panel .rg-grid-validation h2{font-size:18px;line-height:1.4;letter-spacing:normal;margin:0;font-weight:500}
+#rg-grid-panel .rg-grid-validation p{font-size:13px;line-height:1.5;margin:10px 0}
+#rg-grid-panel .rg-grid-validation-note{color:#5f6368}
+#rg-grid-panel .rg-grid-validation details{border-top:1px solid #e2e5e9;margin-top:16px;padding-top:12px}
+#rg-grid-panel .rg-grid-validation summary{cursor:pointer;font-weight:500}
+#rg-grid-panel .rg-grid-validation form{display:grid;gap:12px}
+#rg-grid-panel .rg-grid-validation label{display:grid;gap:6px;font-size:13px;color:#3c4043;line-height:1.4}
+#rg-grid-panel .rg-grid-validation input:not([type="checkbox"]){width:100%;height:36px;min-height:0;border:1px solid #dadce0;border-radius:4px;padding:7px 9px;font-size:13px;background:#fff;color:#202124}
+#rg-grid-panel .rg-grid-validation .rg-grid-provider-choice{display:flex;align-items:center;gap:8px}
+#rg-grid-panel .rg-grid-validation input[type="checkbox"]{width:16px;height:16px;min-height:0;margin:0;accent-color:#1a73e8}
+#rg-grid-panel .rg-grid-validation-actions{display:flex;gap:6px;flex-wrap:wrap}
+#rg-grid-panel .rg-grid-validation-actions .rg-grid-button{border-color:#dadce0;white-space:normal}
+#rg-grid-panel .rg-grid-validation-job{padding:10px 0;border-top:1px solid #edf0f3;display:grid;gap:6px}
+#rg-grid-panel .rg-grid-validation-job .rg-grid-button{justify-self:start;background:#e8f0fe;color:#174ea6;border-color:#d3e3fd;white-space:normal}
+#rg-grid-panel .rg-grid-provider-error{color:#b3261e}
 @media(max-width:600px){
 #rg-grid-panel .rg-grid-header{padding:8px;gap:5px;flex-wrap:wrap;min-height:68px}
 #rg-grid-panel .rg-grid-header>.rg-grid-button{font-size:11px;padding:5px}

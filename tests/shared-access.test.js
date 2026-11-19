@@ -172,3 +172,14 @@ test('only the shell and the two verified transports are exposed to google.scrip
   const publicFunctions = names.flatMap(name => [...readFileSync(new URL('../src/' + name, import.meta.url), 'utf8').matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map(match => match[1])).filter(name => !name.endsWith('_')).sort();
   assert.deepEqual(publicFunctions, ['callApp', 'doGet', 'uploadSourceBase']);
 });
+
+test('all contact, validation and automation RPCs require the current shared credential', () => {
+  const f=fixture(); let entered=0;
+  const methods=['getContactWorkspace','syncWorkbookContacts','continueContactSync','getPromouserSettings','configurePromouser','getPromouserBalance','getValidationState','advanceWorkbookValidation','refreshWorkbookValidation','payValidationOrder','previewSegmentRecords','importSegmentRecords','continueSegmentRecords','syncSegmentPeople','getContactAutomationState','enableContactAutomation','disableContactAutomation'];
+  for(const method of methods) f.context[method+'_']=()=>{entered++;f.context.authorize_();return{safe:true};};
+  for(const method of methods){assert.throws(()=>f.call(method,'Z'.repeat(43),{}),/LINK_ACCESS_REQUIRED/);assert.equal(f.context.SHARED_REQUEST_SCOPE_,null);}
+  assert.equal(entered,0);
+  for(const method of methods){assert.deepEqual(plain(f.call(method,TEST_ACCESS_KEY,{})),{safe:true});assert.equal(f.context.SHARED_REQUEST_SCOPE_,null);}
+  assert.equal(entered,methods.length);
+  for(const method of ['setupContactAutomation','contactAutomationTick','contactAutomationOwnerScope','pvSettings','pvFetch','sheetWriteRawStrings'])assert.throws(()=>f.call(method,TEST_ACCESS_KEY,{}),/INVALID_REQUEST/);
+});

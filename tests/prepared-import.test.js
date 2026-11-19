@@ -118,7 +118,7 @@ function fixture(options = {}) {
     if (options.loseWrite) { options.loseWrite = false; throw Error('Lost RAW write reply'); }
   };
   context.Utilities = { getUuid: () => crypto.randomUUID(), DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' }, computeDigest: (_kind, value) => [...crypto.createHash('sha256').update(typeof value === 'string' ? value : Buffer.from(value)).digest()], base64EncodeWebSafe: value => Buffer.from(value).toString('base64url'), newBlob: (value, type, name) => ({ getBytes: () => [...Buffer.from(value)], getDataAsString: () => String(value), getContentType: () => type, getName: () => name }) };
-  for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'PreparedImport.gs', 'Access.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
+  for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'PreparedImport.gs', 'PreparedWorkbookImport.gs', 'Access.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   const storage = { public: { id: SERVICE }, basesSheet: {} };
   const database = () => ({ records: Object.fromEntries(records), relations: [], lastRow: Math.max(1, ...[...records.values()].map(row => row.row || 1)) });
   context.sourceBasesReadDatabase_ = database;
@@ -339,16 +339,18 @@ test('published prepared books may be new link inputs while unpublished artifact
   assert.throws(() => f.stage({ url: `https://docs.google.com/spreadsheets/d/${pending.stageFileId}/edit`, requestId: 'bad_marker_as_input_1234567890' }), /PROTECTED_FILE/);
 });
 
-test('the real data reader and writer agree on unique emails, social-link phones and exactly three tabs', () => {
+test('V2 real reader aggregates all original leaves and keeps exactly two derived tabs', () => {
   const f = fixture(), source = f.books.get(ORIGINAL).getSheets()[0];
   source.state.data[0].push('WhatsApp'); source.state.data[1].push('https://wa.me/79994445566'); source.state.data[2].push('https://vk.com/id123456789');
   for (const name of ['ContactPreview.gs', 'PreparedData.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), f.context, { filename: name });
   const draft = f.stage(), shown = f.preview(draft); assert.equal(shown.canConfirm, true);
-  assert.equal(shown.counts.emails, 1); assert.equal(shown.counts.phones, 2);
+  assert.equal(shown.counts.emails, 2); assert.equal(shown.counts.phones, 2);
+  assert.equal(shown.sourceSheetCount, 2);
   const result = f.finish(draft, shown), output = f.books.get(result.file.id);
-  assert.equal(output.getSheetByName('Email').getLastRow(), 2); assert.equal(output.getSheetByName('Телефоны').getLastRow(), 3);
-  assert.deepEqual(output.getSheetByName('Телефоны').state.data.slice(1).map(row => row[0]).sort(), ['+79991112233', '+79994445566']);
-  assert.equal(output.getSheetByName('Исходная база').state.data[1][4], 'https://wa.me/79994445566');
+  assert.equal(output.getSheetByName('Email').getLastRow(), 3); assert.equal(output.getSheetByName('Телефоны и Telegram').getLastRow(), 3);
+  assert.deepEqual(output.getSheetByName('Телефоны и Telegram').state.data.slice(1).map(row => row[0]).sort(), ['+79991112233', '+79994445566']);
+  assert.equal(output.getSheetByName('Компании').state.data[1][4], 'https://wa.me/79994445566');
+  assert.deepEqual(output.getSheets().map(tab => tab.getName()), ['Компании', 'ЛПР', 'Email', 'Телефоны и Telegram']);
 });
 
 test('confirmed unfinished jobs survive a reload and list only current nonexpired processing records', () => {
@@ -506,4 +508,186 @@ test('expiry fallback re-reads ownership under the claim lock before releasing a
     assert.equal(locks, 2);
     assert.equal(f.drafts()[0].lease, replaced ? 'replacement-owner' : undefined);
   }
+});
+
+function workbookReader(f) {
+  for (const name of ['ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), f.context, { filename: name });
+  return f;
+}
+
+test('V2 deduplicates contacts across all leaves while selected leaf changes only the preview', () => {
+  const f = workbookReader(fixture()), originals = f.books.get(ORIGINAL).tabs;
+  originals[1].state.data[1][2] = 'a@example.test';
+  const draft = f.stage(), shown = f.preview(draft, 9);
+  assert.equal(shown.counts.emails, 1); assert.equal(shown.counts.sharedEmails, 1);
+  assert.equal(shown.counts.phones, 2); assert.equal(shown.sourceSheetCount, 2);
+  assert.equal(shown.sheets[0].name, 'ЛПР'); assert.equal(shown.sheets[0].sample[0][0], 'B');
+  const result = f.finish(draft, shown), output = f.books.get(result.file.id), metadata = f.resources.get(result.file.id);
+  assert.deepEqual(output.tabs.map(tab => tab.getName()), ['Компании', 'ЛПР', 'Email', 'Телефоны и Telegram']);
+  assert.equal(output.getSheetByName('Email').getLastRow(), 2);
+  assert.equal(metadata.appProperties.registryPreparedVersion, '2');
+  assert.equal(metadata.appProperties.registryPreparedOriginalSheetId, String(output.getSheetByName('ЛПР').getSheetId()));
+  assert.equal(metadata.appProperties.registryContactEmailSheetId, String(output.getSheetByName('Email').getSheetId()));
+  assert.equal(metadata.appProperties.registryContactPhoneSheetId, String(output.getSheetByName('Телефоны и Telegram').getSheetId()));
+});
+
+test('V2 never adopts originals whose names collide with managed contact tabs', () => {
+  const f = workbookReader(fixture()), originals = f.books.get(ORIGINAL).tabs;
+  originals[0].setName('Email'); originals[1].setName('Телефоны и Telegram');
+  const draft = f.stage(), shown = f.preview(draft), result = f.finish(draft, shown), output = f.books.get(result.file.id);
+  assert.deepEqual(output.tabs.map(tab => tab.getName()), ['Email', 'Телефоны и Telegram', 'Email (2)', 'Телефоны и Telegram (2)']);
+  assert.equal(output.getSheetByName('Email').state.data[0][0], 'Company_ID');
+  assert.equal(output.getSheetByName('Email (2)').state.data[0][0], 'Email');
+  assert.equal(output.getSheetByName('Телефоны и Telegram (2)').state.data[1][0], '+79991112233');
+  assert.deepEqual(shown.sheets.map(tab => tab.name), ['Email', 'Email (2)', 'Телефоны и Telegram (2)']);
+});
+
+test('V2 freezes Date, numeric and literal linked formula snapshots on every original leaf', () => {
+  const f = workbookReader(fixture({ nativeRichTextPrefix: true })), originals = f.books.get(ORIGINAL).tabs;
+  const date = new Date('2026-11-01T00:00:00.000Z');
+  originals[0].state.data[1][1] = date; originals[0].state.formulaMap['2:2'] = '=DATE(2026,11,1)';
+  originals[1].state.data[1][1] = 42; originals[1].state.formulaMap['2:2'] = '=6*7';
+  originals[1].state.data[1][2] = 'person@example.test'; originals[1].state.formulaMap['2:3'] = '=HYPERLINK("mailto:person@example.test","person@example.test")';
+  const result = f.finish(f.stage()), output = f.books.get(result.file.id), first = output.tabs[0], second = output.tabs[1];
+  assert.equal(first.state.data[1][1].toISOString(), date.toISOString()); assert.equal(first.state.data[1][1] instanceof Date, true);
+  assert.equal(second.state.data[1][1], 42); assert.equal(typeof second.state.data[1][1], 'number');
+  assert.equal(second.state.data[1][2], 'person@example.test');
+  assert.equal(Object.keys(first.state.formulaMap).length, 0); assert.equal(Object.keys(second.state.formulaMap).length, 0);
+  assert.ok(f.calls.writes.some(call => call.sheet === second.getSheetId() && call.raw && call.links?.[0]?.[0] === 'mailto:person@example.test'));
+});
+
+test('V2 preserves empty sibling originals and keeps the single-source three-tab convention', () => {
+  const f = workbookReader(fixture()), empty = f.books.get(ORIGINAL).insertSheet('Пустой лист');
+  const result = f.finish(f.stage()), output = f.books.get(result.file.id);
+  assert.equal(output.tabs.length, 5); assert.equal(output.getSheetByName(empty.getName()).getLastRow(), 0);
+  const g = workbookReader(fixture());
+  const draft = g.invoke('stagePreparedUpload_', { name: 'Один лист', section: 'companies', status: 'collection', requestId: 'single_upload_1234567890', file: g.blob() });
+  const single = g.books.get(g.finish(draft).file.id);
+  assert.deepEqual(single.tabs.map(tab => tab.getName()), ['Исходная база', 'Email', 'Телефоны и Telegram']);
+});
+
+test('V2 version changes recheck every source leaf including additions outside the selected leaf', () => {
+  for (const change of ['sibling', 'new-leaf']) {
+    const f = workbookReader(fixture()), draft = f.stage(), shown = f.preview(draft), receipt = f.drafts()[0];
+    const input = f.books.get(receipt.stageFileId);
+    if (change === 'sibling') input.tabs[1].state.data[1][2] = 'changed-sibling@example.test';
+    else input.insertSheet('Новый лист').state.data.push(['Email'], ['new@example.test']);
+    f.resources.get(receipt.stageFileId).version = '2';
+    assert.throws(() => f.confirm(draft, shown), /PREVIEW_CHANGED/);
+    assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
+  }
+});
+
+test('V2 partial read of any sibling refuses confirmation rather than publishing a subset', () => {
+  const f = workbookReader(fixture()), read = f.context.preparedDataRead_;
+  f.context.preparedDataRead_ = (...args) => { const value = read(...args); if (args[0].getSheetId() === 9) value.complete = false; return value; };
+  const draft = f.stage(), shown = f.preview(draft);
+  assert.equal(shown.canConfirm, false); assert.equal(shown.sourceSheetCount, 2);
+  assert.throws(() => f.confirm(draft, shown), /PREVIEW_REQUIRED/);
+  assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
+});
+
+test('V2 lost sheet-copy acknowledgement recovers only the matching unclaimed source and keeps order', () => {
+  const f = workbookReader(fixture({ loseSheetCopy: true })), draft = f.stage(), shown = f.preview(draft), result = f.finish(draft, shown);
+  assert.equal(f.calls.copies, 2); assert.equal(f.books.get(result.file.id).tabs.length, 4);
+  assert.deepEqual(f.books.get(result.file.id).tabs.map(tab => tab.getName()), ['Компании', 'ЛПР', 'Email', 'Телефоны и Telegram']);
+});
+
+test('V2 an uncertain copy cannot blindly repeat and can later recover its delayed single result', () => {
+  const f = workbookReader(fixture()), draft = f.stage(), shown = f.preview(draft);
+  f.confirm(draft, shown);
+  const input = f.books.get(f.drafts()[0].stageFileId).tabs[0], actualCopy = input.copyTo;
+  let attempts = 0; input.copyTo = () => { attempts++; throw Error('No acknowledgement'); };
+  assert.throws(() => f.next(draft), /CREATION_UNCERTAIN/);
+  assert.throws(() => f.next(draft), /CREATION_UNCERTAIN/); assert.equal(attempts, 1);
+  input.copyTo = actualCopy; actualCopy(f.books.get(f.drafts()[0].outputId));
+  let result = f.next(draft); for (let i = 0; result.state === 'processing' && i < 30; i++) result = f.next(draft);
+  assert.equal(result.state, 'complete'); assert.equal(f.calls.copies, 2);
+});
+
+test('V2 recovers lost managed-sheet insertion and literal block writes without duplicating contacts', () => {
+  const f = workbookReader(fixture()), draft = f.stage(), shown = f.preview(draft);
+  f.confirm(draft, shown); while (f.drafts()[0].phase !== 'freeze' || f.drafts()[0].freezeSourceIndex !== 1) f.next(draft);
+  const output = f.books.get(f.drafts()[0].outputId), actualInsert = output.insertSheet;
+  output.insertSheet = name => { const created = actualInsert(name); output.insertSheet = actualInsert; throw Error('Lost sheet insertion reply'); };
+  assert.throws(() => f.next(draft), /GOOGLE_ERROR/);
+  f.next(draft); assert.equal(f.drafts()[0].phase, 'emails');
+  f.options.loseWrite = true; assert.throws(() => f.next(draft), /GOOGLE_ERROR/);
+  let result; do { result = f.next(draft); } while (result.state === 'processing');
+  assert.equal(result.state, 'complete'); assert.equal(output.tabs.length, 4); assert.equal(output.getSheetByName('Email').getLastRow(), 3);
+});
+
+test('V2 verification checks all frozen original snapshots before publishing', () => {
+  const f = workbookReader(fixture()), draft = f.stage(), shown = f.preview(draft);
+  f.confirm(draft, shown); while (f.drafts()[0].phase !== 'publish') f.next(draft);
+  const output = f.books.get(f.drafts()[0].outputId); output.getSheetByName('ЛПР').state.data[1][1] = 'Changed manually';
+  assert.throws(() => f.next(draft), /PREVIEW_CHANGED/); assert.equal(f.records.size, 0);
+});
+
+test('V2 successful publication enrolls exact original and contact GIDs once; replay preserves edits', () => {
+  const f = workbookReader(fixture()), enrollments = [], queues = [];
+  f.context.enrollContactWorkbook_ = (_context, id, options) => { enrollments.push({ id, options: plain(options) }); };
+  f.context.queueWorkbookValidation_ = (_context, id, options) => { queues.push({ id, options: plain(options) }); };
+  const draft = f.stage(), shown = f.preview(draft), result = f.finish(draft, shown), output = f.books.get(result.file.id);
+  assert.equal(enrollments.length, 1); assert.deepEqual(enrollments[0].options.sourceSheetIds, output.tabs.slice(0, 2).map(tab => tab.getSheetId()));
+  assert.equal(enrollments[0].options.seedExisting, true); assert.equal(enrollments[0].options.role, 'registry');
+  assert.equal(enrollments[0].options.sourceMode, 'all');
+  assert.equal(queues.length, 1); assert.equal(queues[0].options.reason, 'upload');
+  output.getSheetByName('Email').state.data[1][0] = 'Keep my validation and manual edits';
+  const writes = f.calls.writes.length, copies = f.calls.copies;
+  assert.equal(f.confirm(draft, shown).state, 'complete'); assert.equal(f.next(draft).state, 'complete');
+  assert.equal(f.calls.writes.length, writes); assert.equal(f.calls.copies, copies); assert.equal(enrollments.length, 1); assert.equal(queues.length, 1);
+});
+
+test('V2 automation enrollment failure never rolls back publication and retry performs no sheet writes', () => {
+  const f = workbookReader(fixture()), draft = f.stage(); let enrollments = 0;
+  f.context.enrollContactWorkbook_ = () => { if (++enrollments === 1) throw Error('Temporary private state error'); };
+  const shown = f.preview(draft), result = f.finish(draft, shown), writes = f.calls.writes.length;
+  assert.equal(result.state, 'complete'); assert.deepEqual(f.resources.get(result.file.id).parents, [SOURCE]);
+  assert.equal(f.next(draft).state, 'complete'); assert.equal(enrollments, 2); assert.equal(f.calls.writes.length, writes);
+});
+
+test('V2 cancellation removes only its unpublished multi-leaf output and leaves real sources untouched', () => {
+  const f = workbookReader(fixture()), draft = f.stage(), shown = f.preview(draft);
+  f.confirm(draft, shown); f.next(draft); const outputId = f.drafts()[0].outputId;
+  assert.equal(f.invoke('cancelPreparedBase_', { draftId: draft.draftId }).state, 'cancelled');
+  assert.equal(f.resources.get(outputId).trashed, true); assert.equal(f.resources.get(ORIGINAL).trashed, false); assert.equal(f.books.get(ORIGINAL).tabs.length, 2);
+});
+
+test('pending V1 plans retain their selected-leaf behavior after workbook reader V2 is loaded', () => {
+  const f = fixture(), draft = f.stage(), shown = f.preview(draft, 9);
+  assert.equal(JSON.parse(f.resources.get(f.drafts()[0].planId).content).version, 1);
+  f.confirm(draft, shown); workbookReader(f);
+  let result; do { result = f.next(draft); } while (result.state === 'processing');
+  assert.deepEqual(f.books.get(result.file.id).tabs.map(tab => tab.getName()), ['Исходная база', 'Email', 'Телефоны']);
+  assert.equal(f.resources.get(result.file.id).appProperties.registryPreparedVersion, '1');
+  assert.equal(f.books.get(result.file.id).getSheetByName('Email').state.data[1][0], 'person@example.test');
+});
+
+test('pending native V1 fingerprints survive metadata-only version bumps under the V2 recognizer', () => {
+  const f = workbookReader(fixture());
+  // Simulate the former selected-leaf preview writer using the current exact
+  // raw reader with its former, fully reproducible fingerprint envelope.
+  const actualRead = f.context.preparedDataRead_;
+  f.context.preparedDataReadWorkbook_ = undefined;
+  f.context.preparedDataRead_ = (sheet, fileId, section, options) => {
+    const model = actualRead(sheet, fileId, section, options);
+    model.fingerprint = f.context.preparedLegacyFingerprint_({ stageFileId: fileId, section }, model);
+    return model;
+  };
+  const draft = f.stage(), shown = f.preview(draft, 9), inputId = f.drafts()[0].stageFileId;
+  f.context.preparedDataRead_ = actualRead;
+  f.resources.get(inputId).version = '2';
+  assert.equal(f.confirm(draft, shown).state, 'processing');
+  f.resources.get(inputId).version = '3'; f.books.get(inputId).tabs[1].state.data[1][2] = 'actually-changed@example.test';
+  assert.throws(() => f.next(draft), /PREVIEW_CHANGED/);
+});
+
+test('V2 re-import of a prepared book excludes managed tabs by GID without excluding user name collisions', () => {
+  const f = workbookReader(fixture());
+  f.books.get(ORIGINAL).tabs[0].setName('Email');
+  const first = f.finish(f.stage()), output = f.books.get(first.file.id);
+  const next = f.stage({ url: first.file.url, requestId: 'v2_reimport_1234567890' }), shown = f.preview(next, output.tabs[0].getSheetId());
+  assert.equal(shown.sourceSheetCount, 2); assert.equal(shown.sourceSheets[0].name, 'Email');
+  const result = f.finish(next, shown); assert.equal(f.books.get(result.file.id).tabs.length, 4);
 });

@@ -87,6 +87,7 @@ function previewPreparedBase_(request) {
     var input = importInput_(request, ['draftId', 'sheetId']);
     return preparedWithLease_(input.draftId, function (draft, context) {
       if (draft.state !== 'staged') fail_('PREVIEW_LOCKED', 'Подготовка уже начата. Дождитесь результата или продолжите тот же запрос.');
+      if (typeof preparedDataReadWorkbook_ === 'function') return preparedWorkbookPreview_(context, draft, preparedSheetId_(input.sheetId));
       var sheetId = preparedSheetId_(input.sheetId), stable = preparedStableRead_(context, draft, sheetId), model = stable.model;
       var token = digest_(JSON.stringify([draft.draftId, sheetId, draft.name, draft.section, draft.status, model.fingerprint]));
       var response = { draftId: draft.draftId, sheetId: sheetId, previewToken: token, canConfirm: model.complete === true && model.canConfirm === true, counts: model.counts, sheets: model.previewSheets || [], warnings: model.warnings || [] };
@@ -121,7 +122,7 @@ function confirmPreparedBase_(request) {
     preparedRequestId_(input.requestId);
     return preparedWithLease_(input.draftId, function (draft, context) {
       if (draft.confirmRequestId && draft.confirmRequestId !== input.requestId) fail_('REQUEST_REUSED', 'Продолжите подтверждение с прежним идентификатором запроса.');
-      if (draft.state === 'complete') { var complete = preparedCompleteResponse_(context, draft); preparedCleanupComplete_(context, draft); authorize_(); return complete; }
+      if (draft.state === 'complete') { var complete = preparedCompleteResponse_(context, draft); if (draft.planVersion === 2) preparedWorkbookEnroll_(context, draft); preparedCleanupComplete_(context, draft); authorize_(); return complete; }
       if (preparedSheetId_(input.sheetId) !== draft.sheetId || typeof input.previewToken !== 'string' || input.previewToken !== draft.previewToken || !draft.canConfirm) fail_('PREVIEW_REQUIRED', 'Сначала получите полный предпросмотр выбранного листа.');
       preparedCheckSnapshot_(context, draft);
       if (!draft.confirmRequestId) {
@@ -138,7 +139,7 @@ function continuePreparedBase_(request) {
     var input = importInput_(request, ['draftId', 'requestId']); preparedRequestId_(input.requestId);
     return preparedWithLease_(input.draftId, function (draft, context) {
       if (!draft.confirmRequestId || draft.confirmRequestId !== input.requestId) fail_('PREVIEW_REQUIRED', 'Не найдено подтверждение этой подготовки.');
-      if (draft.state === 'complete') { var complete = preparedCompleteResponse_(context, draft); preparedCleanupComplete_(context, draft); authorize_(); return complete; }
+      if (draft.state === 'complete') { var complete = preparedCompleteResponse_(context, draft); if (draft.planVersion === 2) preparedWorkbookEnroll_(context, draft); preparedCleanupComplete_(context, draft); authorize_(); return complete; }
       if (draft.state !== 'processing') fail_('PREVIEW_REQUIRED', 'Сначала подтвердите предпросмотр.');
       preparedCheckSnapshot_(context, draft);
       return preparedAdvance_(context, draft);
@@ -329,7 +330,7 @@ function preparedOriginal_(context, link) {
   var stagingId = current.properties.getProperty(PREPARED_IMPORT.folderProperty), object = DriveApp.getFileById(original.id);
   if (stagingId && insideRegistry_(object, stagingId)) fail_('PROTECTED_FILE', 'Служебный черновик нельзя использовать как исходную базу.');
   if (original.appProperties && original.appProperties.registryPreparedRole) {
-    if (!(original.appProperties.registryPreparedRole === 'output' && original.appProperties.registryPreparedVersion === '1' && insideRegistry_(object, binding.source.id))) fail_('PROTECTED_FILE', 'Служебный черновик нельзя использовать как исходную базу.');
+    if (!(original.appProperties.registryPreparedRole === 'output' && ['1', '2'].indexOf(original.appProperties.registryPreparedVersion) >= 0 && insideRegistry_(object, binding.source.id))) fail_('PROTECTED_FILE', 'Служебный черновик нельзя использовать как исходную базу.');
   }
   if (original.capabilities && original.capabilities.canCopy === false) fail_('COPY_ACCESS_REQUIRED', 'Владелец исходной таблицы запретил копирование.');
   return original;
@@ -366,7 +367,8 @@ function preparedDraftFile_(context, draft) {
 
 function preparedStageResponse_(context, draft) {
   var file = preparedDraftFile_(context, draft), book = SpreadsheetApp.openById(file.id);
-  var sheets = book.getSheets().map(function (sheet) { return { id: sheet.getSheetId(), name: sheet.getName(), rows: sheet.getLastRow(), columns: sheet.getLastColumn() }; });
+  var options = typeof preparedDataReadWorkbook_ === 'function' ? preparedWorkbookSourceOptions_(context, draft) : {};
+  var sheets = book.getSheets().filter(function (sheet) { var id = sheet.getSheetId(); return (!options.sourceSheetIds || options.sourceSheetIds.indexOf(id) >= 0) && (options.managedSheetIds || []).indexOf(id) < 0; }).map(function (sheet) { return { id: sheet.getSheetId(), name: sheet.getName(), rows: sheet.getLastRow(), columns: sheet.getLastColumn() }; });
   if (!sheets.length) fail_('INVALID_SOURCE', 'В исходной книге нет листов.');
   return { state: 'staged', draftId: draft.draftId, name: draft.name, section: draft.section, status: draft.status, sheets: sheets, selectedSheetId: sheets[0].id, expiresAt: draft.expiresAt };
 }
@@ -378,8 +380,13 @@ function preparedCheckSnapshot_(context, draft) {
   if (draft.sourceVersion && version && draft.sourceVersion === version) return;
   // Drive versions also change while an imported workbook finishes initial
   // calculation. A complete content fingerprint remains authoritative.
-  var stable = preparedStableRead_(context, draft, draft.sheetId, file), model = stable.model;
-  if (!model.complete || !model.canConfirm || model.fingerprint !== draft.sourceFingerprint) fail_('PREVIEW_CHANGED', 'Исходный лист изменился после предпросмотра. Пересчитайте результат.');
+  var stable = draft.planVersion === 2 ? preparedWorkbookStableRead_(context, draft, file) : preparedStableRead_(context, draft, draft.sheetId, file), model = stable.model;
+  var matching = model.fingerprint === draft.sourceFingerprint;
+  // The V2 recognizer has a newer fingerprint envelope. A pending V1 receipt
+  // still compares the exact old envelope of raw values, display, formulas and
+  // links, so a harmless Drive version bump does not invalidate its snapshot.
+  if (!matching && draft.planVersion !== 2) matching = preparedLegacyFingerprint_(draft, model) === draft.sourceFingerprint;
+  if (!model.complete || !model.canConfirm || !matching) fail_('PREVIEW_CHANGED', 'Исходный лист изменился после предпросмотра. Пересчитайте результат.');
   draft.sourceVersion = stable.version; preparedSave_(context, draft);
 }
 
@@ -396,6 +403,11 @@ function preparedStableRead_(context, draft, sheetId, initialFile) {
   fail_('PREVIEW_CHANGED', 'Черновик продолжает изменяться во время чтения. Пересчитайте предпросмотр.');
 }
 
+function preparedLegacyFingerprint_(draft, model) {
+  if (!model.source || !Array.isArray(model.sourceValues) || !Array.isArray(model.sourceDisplayValues) || !Array.isArray(model.sourceFormulas) || !Array.isArray(model.sourceLinks)) return '';
+  return digest_(JSON.stringify({ version: 1, sourceId: draft.stageFileId, section: draft.section, sheetId: model.source.sheetId, sheetName: model.source.name, rows: model.source.rowCount, columns: model.source.columnCount, values: model.sourceValues, display: model.sourceDisplayValues, formulas: model.sourceFormulas, links: model.sourceLinks }));
+}
+
 function preparedPlan_(context, draft) {
   preparedAssertLease_(authorize_(), draft);
   preparedFolder_(context, draft.folderId);
@@ -406,7 +418,8 @@ function preparedPlan_(context, draft) {
   if (digest_(text) !== draft.planHash) fail_('PREVIEW_CHANGED', 'Сохранённый предпросмотр изменён. Подготовка остановлена.');
   var plan;
   try { plan = JSON.parse(text); } catch (error) { fail_('PREVIEW_STORAGE', 'Не удалось прочитать план подготовки.'); }
-  if (plan.version !== 1 || plan.token !== draft.previewToken || plan.sheetId !== draft.sheetId || plan.fingerprint !== draft.sourceFingerprint || !plan.email || !Array.isArray(plan.email.rows) || !plan.phone || !Array.isArray(plan.phone.rows)) fail_('PREVIEW_CHANGED', 'План не соответствует подтверждённому предпросмотру.');
+  if ([1, 2].indexOf(plan.version) === -1 || plan.token !== draft.previewToken || plan.sheetId !== draft.sheetId || plan.fingerprint !== draft.sourceFingerprint || !plan.email || !Array.isArray(plan.email.rows) || !plan.phone || !Array.isArray(plan.phone.rows)) fail_('PREVIEW_CHANGED', 'План не соответствует подтверждённому предпросмотру.');
+  if (plan.version === 2) preparedWorkbookValidatePlan_(plan);
   return plan;
 }
 
@@ -422,6 +435,7 @@ function preparedOutput_(context, draft, allowPublished) {
 
 function preparedAdvance_(context, draft) {
   var plan = preparedPlan_(context, draft);
+  if (plan.version === 2) return preparedWorkbookAdvance_(context, draft, plan);
   if (draft.phase === 'create') {
     if (!draft.outputId) {
       var artifact = preparedFindArtifact_(context, draft, 'output');
@@ -581,7 +595,8 @@ function preparedPublish_(context, draft, plan, metadata) {
     if ((file.parents || []).indexOf(preparation.binding.source.id) === -1) {
       importDestinationWritable_(preparation);
       draft.publishAttempted = true; preparedSave_(current, draft);
-      var tags = preparedTags_(draft, 'output'); tags.registryPreparedVersion = '1'; tags.registryPreparedSourceSheetId = String(draft.sheetId); tags.registryPreparedOriginalSheetId = String(draft.originalSheetId); tags.registryPreparedSection = draft.section;
+      var tags = preparedTags_(draft, 'output'); tags.registryPreparedVersion = String(plan.version); tags.registryPreparedSourceSheetId = String(draft.sheetId); tags.registryPreparedOriginalSheetId = String(draft.originalSheetId); tags.registryPreparedSection = draft.section;
+      if (plan.version === 2) { tags.registryContactEmailSheetId = String(draft.emailSheetId); tags.registryContactPhoneSheetId = String(draft.phoneSheetId); }
       try { Drive.Files.update({ appProperties: tags }, file.id, null, { addParents: preparation.binding.source.id, removeParents: draft.folderId, fields: PREPARED_IMPORT.fields, supportsAllDrives: true }); }
       catch (error) { var recovered = preparedOutput_(current, draft, true); if ((recovered.parents || []).indexOf(preparation.binding.source.id) === -1) fail_('CREATION_UNCERTAIN', 'Google не подтвердил публикацию. Продолжите тот же запрос.'); }
     }
@@ -607,6 +622,11 @@ function preparedCompleteResponse_(context, draft, preparation) {
 
 function preparedProcessing_(draft, plan) {
   var labels = { copy: 'Копируем исходный лист…', freeze: 'Сохраняем значения исходной базы…', emails: 'Записываем email…', phones: 'Записываем телефоны…', publish: 'Публикуем готовую базу…' };
+  if (plan.version === 2) {
+    labels.copy = 'Копируем исходные листы: ' + (draft.copyIndex || 0) + ' из ' + plan.sources.length + '…';
+    labels.freeze = 'Сохраняем исходные листы: ' + (draft.freezeSourceIndex || 0) + ' из ' + plan.sources.length + '…';
+    labels.phones = 'Записываем телефоны и Telegram…';
+  }
   var completed = draft.phase === 'phones' ? (plan.email.rows.length + (draft.writeCursor || 0)) : draft.phase === 'emails' ? (draft.writeCursor || 0) : draft.phase === 'publish' ? plan.email.rows.length + plan.phone.rows.length : 0;
   return { state: 'processing', draftId: draft.draftId, jobId: draft.draftId, progress: { stage: draft.phase, completed: completed, total: plan.email.rows.length + plan.phone.rows.length, label: labels[draft.phase] || 'Готовим базу…' } };
 }

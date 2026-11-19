@@ -33,8 +33,8 @@ function getSourceSheets_(request) {
   });
 }
 
-function createSegment_(request) { return segmentMutation_('create', request); }
-function updateSegment_(request) { return segmentMutation_('update', request); }
+function createSegment_(request) { return typeof segmentNormalizedMutation_ === 'function' ? segmentNormalizedMutation_('create', request) : segmentMutation_('create', request); }
+function updateSegment_(request) { return typeof segmentNormalizedMutation_ === 'function' ? segmentNormalizedMutation_('update', request) : segmentMutation_('update', request); }
 
 function segmentMutation_(kind, request) {
   return api_(function () {

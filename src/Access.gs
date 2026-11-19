@@ -19,6 +19,28 @@ function callApp(request) {
         createSegment: createSegment_, updateSegment: updateSegment_,
         getSegmentsDashboard: getSegmentsDashboard_, getSegmentMailings: getSegmentMailings_
       };
+      // Explicit optional handlers keep isolated legacy fixtures usable; the
+      // release check requires every feature module in the deployed project.
+      var contactMethods = {
+        getContactWorkspace: typeof getContactWorkspace_ === 'function' ? getContactWorkspace_ : null,
+        syncWorkbookContacts: typeof syncWorkbookContacts_ === 'function' ? syncWorkbookContacts_ : null,
+        continueContactSync: typeof continueContactSync_ === 'function' ? continueContactSync_ : null,
+        getPromouserSettings: typeof getPromouserSettings_ === 'function' ? getPromouserSettings_ : null,
+        configurePromouser: typeof configurePromouser_ === 'function' ? configurePromouser_ : null,
+        getPromouserBalance: typeof getPromouserBalance_ === 'function' ? getPromouserBalance_ : null,
+        getValidationState: typeof getValidationState_ === 'function' ? getValidationState_ : null,
+        advanceWorkbookValidation: typeof advanceWorkbookValidation_ === 'function' ? advanceWorkbookValidation_ : null,
+        refreshWorkbookValidation: typeof refreshWorkbookValidation_ === 'function' ? refreshWorkbookValidation_ : null,
+        payValidationOrder: typeof payValidationOrder_ === 'function' ? payValidationOrder_ : null,
+        previewSegmentRecords: typeof previewSegmentRecords_ === 'function' ? previewSegmentRecords_ : null,
+        importSegmentRecords: typeof importSegmentRecords_ === 'function' ? importSegmentRecords_ : null,
+        continueSegmentRecords: typeof continueSegmentRecords_ === 'function' ? continueSegmentRecords_ : null,
+        syncSegmentPeople: typeof syncSegmentPeople_ === 'function' ? syncSegmentPeople_ : null,
+        getContactAutomationState: typeof getContactAutomationState_ === 'function' ? getContactAutomationState_ : null,
+        enableContactAutomation: typeof enableContactAutomation_ === 'function' ? enableContactAutomation_ : null,
+        disableContactAutomation: typeof disableContactAutomation_ === 'function' ? disableContactAutomation_ : null
+      };
+      Object.keys(contactMethods).forEach(function (name) { if (typeof contactMethods[name] === 'function') methods[name] = contactMethods[name]; });
       if (typeof input.method !== 'string' || !Object.prototype.hasOwnProperty.call(methods, input.method)) fail_('INVALID_REQUEST', 'Неизвестное действие приложения.');
       return methods[input.method](input.payload);
     });

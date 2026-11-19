@@ -13,6 +13,9 @@
     <span class="rg-grid-toolbar-divider" aria-hidden="true"></span>
     <button id="rg-grid-add-rows" class="rg-grid-button" type="button">＋ 100 строк</button>
     <button id="rg-grid-add-columns" class="rg-grid-button" type="button">＋ Столбец</button>
+    <span class="rg-grid-toolbar-divider" aria-hidden="true"></span>
+    <button id="rg-grid-new-contacts" class="rg-grid-button rg-grid-contact-button" type="button" disabled>Проверить новые контакты</button>
+    <button id="rg-grid-validation-open" class="rg-grid-button" type="button">Валидация</button>
     <span id="rg-grid-readonly" class="rg-grid-readonly" hidden>Только просмотр</span>
   </div>
   <div class="rg-grid-formula-bar">
@@ -22,6 +25,27 @@
   </div>
   <div id="rg-grid-error" class="rg-grid-error" role="alert" hidden><p id="rg-grid-error-text"></p><div class="rg-grid-error-actions"><button id="rg-grid-retry" class="rg-grid-button" type="button">Повторить сохранение</button><button id="rg-grid-copy-draft" class="rg-grid-button" type="button">Скопировать несохранённое</button><button id="rg-grid-discard" class="rg-grid-button" type="button">Отменить несохранённые правки и перечитать</button></div></div>
   <p id="rg-grid-hint" class="rg-grid-hint" role="status" aria-live="polite"></p>
+  <div id="rg-grid-contact-progress" class="rg-grid-contact-progress" role="status" aria-live="polite" hidden><span id="rg-grid-contact-message"></span><button id="rg-grid-contact-retry" class="rg-grid-button" type="button" hidden>Продолжить тот же запрос</button></div>
+  <aside id="rg-grid-validation" class="rg-grid-validation" aria-labelledby="rg-grid-validation-title" hidden>
+    <div class="rg-grid-validation-heading"><h2 id="rg-grid-validation-title">Проверка новых контактов</h2><button id="rg-grid-validation-close" class="rg-grid-button" type="button" aria-label="Скрыть валидацию">✕</button></div>
+    <p class="rg-grid-validation-note">Проверяются только контакты без результата. Уже проверенные email и телефоны, включая невалидные, остаются без изменений.</p>
+    <p id="rg-grid-validation-summary" role="status" aria-live="polite"></p>
+    <div id="rg-grid-validation-jobs"></div>
+    <p id="rg-grid-validation-warnings" class="rg-grid-validation-note"></p>
+    <details id="rg-grid-provider-settings"><summary>Подключение Promouser</summary>
+      <p id="rg-grid-provider-configured" class="rg-grid-validation-note"></p>
+      <form id="rg-grid-provider-form" autocomplete="off">
+        <label>API-ключ<input id="rg-grid-provider-key" type="password" autocomplete="new-password" placeholder="Оставьте пустым, чтобы сохранить текущий"></label>
+        <label class="rg-grid-provider-choice"><input id="rg-grid-provider-enabled" type="checkbox">Проверять новые контакты через Promouser</label>
+        <label>Лимит автоматической оплаты одного заказа, $<input id="rg-grid-provider-limit" type="number" min="0" max="1000" step="0.01" value="0" inputmode="decimal"></label>
+        <p class="rg-grid-validation-note">0 — сначала показать стоимость и дождаться вашей оплаты. Положительный лимит разрешает оплачивать каждый новый заказ до этой суммы. Ключ хранится на сервере и не показывается повторно.</p>
+        <div class="rg-grid-validation-actions"><button id="rg-grid-provider-save" class="rg-grid-button" type="submit">Сохранить подключение</button><button id="rg-grid-provider-balance" class="rg-grid-button" type="button">Показать баланс</button></div>
+      </form>
+      <p id="rg-grid-provider-message" role="status" aria-live="polite"></p>
+      <div class="rg-grid-validation-actions"><button id="rg-grid-automation-toggle" class="rg-grid-button" type="button">Включить обработку изменений в Google Таблицах</button></div>
+      <p id="rg-grid-automation-message" class="rg-grid-validation-note" role="status"></p>
+    </details>
+  </aside>
   <div id="rg-grid-viewport" class="rg-grid-viewport" tabindex="0" role="grid" aria-label="Ячейки таблицы" aria-multiselectable="true"><table id="rg-grid-table" class="rg-grid-table" aria-label="Данные листа"><colgroup id="rg-grid-colgroup"></colgroup><thead id="rg-grid-head"></thead><tbody id="rg-grid-body"></tbody></table></div>
   <textarea id="rg-grid-editor" class="rg-grid-editor" aria-label="Редактирование ячейки" spellcheck="false" hidden></textarea>
   <footer class="rg-grid-footer"><nav id="rg-grid-tabs" class="rg-grid-tabs" aria-label="Листы таблицы"></nav><span id="rg-grid-position" class="rg-grid-position"></span></footer>

@@ -29,12 +29,14 @@ const driveService = manifest.dependencies?.enabledAdvancedServices?.find(item =
 if (driveService?.serviceId !== 'drive' || driveService?.version !== 'v3') {
   throw new Error('Source imports require the Advanced Drive v3 service.');
 }
-for (const scope of ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/script.external_request']) {
+const sheetsService = manifest.dependencies?.enabledAdvancedServices?.find(item => item.userSymbol === 'Sheets');
+if (sheetsService?.serviceId !== 'sheets' || sheetsService?.version !== 'v4') throw new Error('Contact workspaces require the Advanced Sheets v4 service.');
+for (const scope of ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/script.external_request', 'https://www.googleapis.com/auth/script.scriptapp']) {
   if (!manifest.oauthScopes?.includes(scope)) throw new Error('Missing source import scope: ' + scope);
 }
 const mapping = JSON.parse(readFileSync('.clasp.json', 'utf8'));
 if (mapping.rootDir !== 'src' || !mapping.scriptId) throw new Error('Apps Script project mapping missing.');
-for (const required of ['Index.html', 'Styles.html', 'Client.html', 'GridPanel.html', 'GridStyles.html', 'GridClient.html', 'Code.gs', 'Config.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'ContactPreview.gs', 'ContactTarget.gs', 'PreparedData.gs', 'PreparedImport.gs', 'SheetEditor.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'Access.gs']) {
+for (const required of ['Index.html', 'Styles.html', 'Client.html', 'GridPanel.html', 'GridStyles.html', 'GridClient.html', 'Code.gs', 'Config.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'ContactPreview.gs', 'ContactTarget.gs', 'PreparedData.gs', 'SourceRecords.gs', 'PreparedImport.gs', 'PreparedWorkbookImport.gs', 'SheetEditor.gs', 'SegmentActions.gs', 'SegmentAnalytics.gs', 'SegmentRecords.gs', 'SegmentImports.gs', 'ContactSync.gs', 'ContactAutomation.gs', 'Promouser.gs', 'Access.gs']) {
   if (!files.includes(required)) throw new Error(`Missing ${required}.`);
 }
 if (files.includes('TeamAccess.gs')) throw new Error('Role-based team administration must not ship in shared-link mode.');

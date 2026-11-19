@@ -255,3 +255,18 @@ test('a missing prepared original leaf fails closed before reading any generated
   assert.throws(() => f.preview(), /PREPARED_SCHEMA/);
   assert.equal(f.calls.ranges.length, 0);
 });
+
+test('V2 excludes only managed GIDs and keeps an original source named Email',()=>{
+ const f=fixture({sheets:[
+  {id:11,name:'Email',rows:[['Company_ID','Компания','Email'],['A','Альфа','one@example.test']]},
+  {id:12,name:'Второй источник',rows:[['Company_ID','Компания','Email'],['B','Бета','two@example.test']]},
+  {id:21,name:'Email (2)',rows:[['Email'],['one@example.test'],['two@example.test']]},
+  {id:22,name:'Телефоны и Telegram',rows:[['Телефон'],['+79991234567']]}
+ ]});
+ f.context.Drive={Files:{get:()=>({appProperties:{registryPreparedVersion:'2',registryContactEmailSheetId:'21',registryContactPhoneSheetId:'22'}})}};
+ const r=f.preview();assert.equal(r.emails.unique,2);assert.equal(r.phones.unique,0);assert.deepEqual(r.sheets.map(s=>s.name),['Email','Второй источник']);assert.equal(f.calls.writes,0);
+});
+test('V2 with a missing managed contact sheet fails closed instead of scanning derived data',()=>{
+ const f=fixture();f.context.Drive={Files:{get:()=>({appProperties:{registryPreparedVersion:'2',registryContactEmailSheetId:'21',registryContactPhoneSheetId:'22'}})}};
+ assert.throws(()=>f.preview(),/PREPARED_SCHEMA/);
+});

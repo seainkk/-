@@ -13,9 +13,16 @@ const modules = [
   ['ContactPreview.gs', 'previewSourceBaseContacts_'],
   ['ContactTarget.gs', 'contactPreviewCompareTarget_'],
   ['PreparedData.gs', 'preparedReadSource_'],
+  ['SourceRecords.gs', 'sourceRecordsBuild_'],
   ['PreparedImport.gs', 'stagePreparedUpload_'],
+  ['PreparedWorkbookImport.gs', 'preparedWorkbookPreview_'],
   ['SheetEditor.gs', 'getGridWorkbook_'],
+  ['ContactSync.gs', 'syncWorkbookContacts_'],
+  ['ContactAutomation.gs', 'contactAutomationTick_'],
+  ['Promouser.gs', 'queueWorkbookValidation_'],
   ['SegmentActions.gs', 'createSegment_'],
+  // SegmentActions fixtures deliberately exercise the resumable V1 core.
+  // Normalized segment tests load SegmentRecords/SegmentImports explicitly.
   ['SegmentAnalytics.gs', 'getSegmentsDashboard_'],
 ];
 const methods = ['getAppBootstrap', 'getBootstrap', 'createBase', 'createFolder', 'renameItem', 'getSourceBases', 'updateSourceBase', 'importSourceBaseLink', 'getSourceSheets', 'createSegment', 'updateSegment', 'getSegmentsDashboard', 'getSegmentMailings', 'previewSourceBaseContacts', 'stagePreparedBaseLink', 'previewPreparedBase', 'confirmPreparedBase', 'continuePreparedBase', 'cancelPreparedBase', 'listPreparedJobs', 'getGridWorkbook', 'getGridRange', 'saveGridRange', 'appendGridRows', 'appendGridColumns'];
