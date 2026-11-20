@@ -104,6 +104,26 @@ test('email normalization preserves plus aliases and dots', () => {
   assert.equal(f.preview().emails.unique, 3);
 });
 
+test('URL paths and dotted social handles are never email addresses, while unusual valid local parts remain intact',()=>{
+  const c=fixture().context;
+  for(const url of ['https://www.youtube.com/@sample.digitalagency','//www.youtube.com/@sample.digitalagency','www.youtube.com/@sample.digitalagency','youtube.com/@sample.digitalagency','m.youtube.com/@sample.agency','https://instagram.com/@some.person','https://example.test/path?email=not-a-contact@example.test'])assert.equal(c.contactPreviewEmails_(url).length,0,url);
+  assert.deepEqual(plain(c.contactPreviewEmails_("https://www.youtube.com/@sample.agency, SALES/Department@EXAMPLE.TEST; O'Connor@example.test; a.b+tag@example.test; www.team@example.test")),['sales/department@example.test',"o'connor@example.test",'a.b+tag@example.test','www.team@example.test']);
+});
+
+test('company fallback requires name plus an independent site or city and never an email or bare repeated name',()=>{
+  const c=fixture().context,resolve=rows=>plain(c.contactPreviewResolveOwners_(rows,FILE));
+  const anchored=resolve([{name:'Альфа',website:'https://www.alpha.example/path'},{name:'Альфа',website:'alpha.example'},{name:'Альфа',website:'https://other.example'},{name:'Альфа',city:'Москва'},{name:'Альфа'}]);
+  assert.equal(Object.keys(anchored.owners).length,3);assert.equal(anchored.unresolvedRows,1);assert.equal(anchored.byRow[0],anchored.byRow[1]);assert.notEqual(anchored.byRow[0],anchored.byRow[2]);
+  const bare=resolve([{name:'Одинаково',emails:['shared@example.test']},{name:'Одинаково',emails:['shared@example.test']}]);assert.equal(Object.keys(bare.owners).length,0);assert.equal(bare.unresolvedRows,2);
+  for(const website of ['https://vk.com/company','https://youtube.com/@some.agency','https://user@alpha.example','https://alpha..example','https://-bad.example'])assert.equal(c.contactPreviewOwnerAnchor_({name:'Альфа',website}), '');
+});
+
+test('fallback can join a single grounded identifier but cannot merge conflicting INNs sharing a name/site',()=>{
+  const c=fixture().context,rows=[{inn:INN_A,name:'Альфа',website:'alpha.example'},{inn:INN_B,name:'Альфа',website:'alpha.example'},{name:'Альфа',website:'alpha.example'}];
+  const conflict=c.contactPreviewResolveOwners_(rows,FILE);assert.equal(Object.keys(conflict.owners).length,2);assert.equal(conflict.byRow[2],'');assert.equal(conflict.unresolvedRows,1);assert.equal(conflict.ambiguousIds,true);
+  const same=c.contactPreviewResolveOwners_([rows[0],rows[2]],FILE);assert.equal(same.byRow[0],same.byRow[1]);assert.equal(same.unresolvedRows,0);
+});
+
 test('unsupported Unicode local parts are not silently rewritten to ASCII addresses', () => {
   const f = fixture({ sheets: [{ name: 'База', rows: [['Company_ID', 'Email'], ['a', 'примерuser@example.com']] }] });
   const r = f.preview(); assert.equal(r.emails.unique, 0); assert.equal(r.state, 'partial'); assert.ok(r.warnings.some(x => /не удалось извлечь/.test(x)));

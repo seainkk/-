@@ -168,6 +168,38 @@ test('email extraction preserves Unicode, dots and plus aliases without inventin
   assert.equal(r.sourceValues[1][1].includes('broken@@'), true);
 });
 
+test('YouTube and other social URL handles do not become emails in ordinary source cells or rich links',()=>{
+  const f=fixture([['Company_ID','Компания','Соцсети','Другие контакты'],
+    ['A','Альфа','https://www.youtube.com/@sample.digitalagency','//www.youtube.com/@second.agency'],
+    ['B','Бета','youtube.com/@third.studio','Связаться'],
+    ['C','Гамма','https://example.test/?email=not-a-contact@example.test','Почта'],
+  ],{rich:{'3:4':{url:'https://www.youtube.com/@fourth.agency'},'4:4':{url:'mailto:real+tag@example.test'}}});const r=f.result();
+  assert.equal(r.canConfirm,true);assert.deepEqual(r.emailRows.map(row=>row[0]),['real+tag@example.test']);assert.equal(r.counts.emails,1);
+  assert.equal(r.records.some(record=>record.general.emails.some(email=>email.includes('youtube')||email.includes('/@'))),false);
+});
+
+test('URL filtering preserves real addresses beside URLs, mailto contacts and unusual legitimate local parts',()=>{
+  const f=fixture([['Company_ID','Email'],['A',"https://www.youtube.com/@sample.agency, SALES/Department@EXAMPLE.TEST; O'Connor@example.test; a.b+tag@example.test; Анна@пример.рф; www.team@example.test"]]);
+  const r=f.result();assert.deepEqual(r.emailRows.map(row=>row[0]),['a.b+tag@example.test',"o'connor@example.test",'sales/department@example.test','www.team@example.test','анна@пример.рф']);
+  assert.deepEqual(plain(f.context.preparedDataMailto_('mailto:sales/department@example.test?subject=Hello')),['sales/department@example.test']);
+});
+
+test('directory company names, websites and cities form conservative owners without invented identifiers',()=>{
+  const r=fixture([['Названия','Сайты','Населенные пункты','Email-адреса'],
+    ['Альфа','https://www.alpha.example','Москва','same@example.test'],
+    ['Альфа','alpha.example/contacts','Санкт-Петербург','same@example.test'],
+    ['Бета','https://beta.example','Москва','same@example.test'],
+    ['Гамма','','Казань','third@example.test'],
+    ['Только название','','','fourth@example.test'],
+  ]).result();assert.equal(r.counts.companies,3);assert.equal(r.counts.companyUnknown,1);assert.equal(r.counts.sharedEmails,1);
+  assert.equal(r.records[0].company.name,'Альфа');assert.equal(r.records[0].company.website,'https://www.alpha.example');assert.equal(r.records[0].company.city,'Москва');
+  assert.match(r.warnings.join(' '),/юридическая уникальность/);assert.equal(r.records.every(record=>record.company.id===''),true);
+});
+
+test('verified OGRN can identify a company without name, website or a synthetic Company_ID',()=>{
+  const r=fixture([['ИНН/ОГРН','Email'],['1027700132195','company@example.test']]).result();assert.equal(r.records[0].company.ogrn,'1027700132195');assert.equal(r.counts.companies,1);assert.equal(r.counts.companyUnknown,0);
+});
+
 test('unknown country/local phones are kept without inventing +7 or declaring Telegram eligibility', () => {
   const r = fixture([['Company_ID', 'Телефон'], ['A', '9991234567; 123456; +44 20 7946 0123']]).result();
   assert.deepEqual(r.phoneRows.map(row => row[0]), ['+442079460123', '123456', '9991234567']);

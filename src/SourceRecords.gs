@@ -18,7 +18,7 @@ function sourceRecordsBuild_(displayRows, options) {
     columns.forEach(function (column, index) {
       var value = sourceRecordsText_(cells[index]), ref = sourceRecordsRef_(source, index + 1), cellContacts = rowContacts[index] || sourceRecordsEmptyContacts_();
       var raw = options.rawRows && options.rawRows[rowIndex] && options.rawRows[rowIndex][index];
-      if (['id', 'inn', 'ogrn'].indexOf(column.company) >= 0 && typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 && /^[\d., ]+[eE][+-]?\d+$/.test(value)) value = String(raw);
+      if (['id', 'inn', 'ogrn', 'registration'].indexOf(column.company) >= 0 && typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 && /^[\d., ]+[eE][+-]?\d+$/.test(value)) value = String(raw);
       if (column.company && value) {
         if (!companyValues[column.company]) companyValues[column.company] = [];
         companyValues[column.company].push({ value: value, source: ref });
@@ -139,7 +139,7 @@ function sourceRecordsMergeGenericPerson_(groups, columns, rowContacts) {
 function sourceRecordsColumns_(headers, section) {
   return headers.map(function (label) {
     var key = sourceRecordsKey_(label), result = { label: String(label || ''), key: key, person: false, kind: '', group: '', number: '' };
-    var companyAliases = { id: ['companyid', 'idкомпании', 'идкомпании', 'companykey'], inn: ['инн', 'иннкомпании', 'иннюрлица', 'иннорганизации', 'inn', 'companyinn'], ogrn: ['огрн', 'огрнип', 'ogrn', 'ogrnip', 'companyogrn'], name: ['название', 'названиекомпании', 'названиеорганизации', 'названиеюрлица', 'компания', 'компании', 'фирма', 'company', 'companyname', 'companytitle', 'organization', 'organizationname', 'organisation', 'организация', 'наименование', 'наименованиеорганизации', 'наименованиекомпании', 'наименованиеюрлица', 'юрлицо'], website: ['сайт', 'сайткомпании', 'website', 'site', 'companywebsite', 'домен', 'domain'], city: ['город', 'city', 'городкомпании', 'городрегистрации', 'населенныйпункт'] };
+    var companyAliases = { id: ['companyid', 'idкомпании', 'идкомпании', 'companykey'], inn: ['инн', 'иннкомпании', 'иннюрлица', 'иннорганизации', 'inn', 'companyinn'], ogrn: ['огрн', 'огрнип', 'ogrn', 'ogrnip', 'companyogrn'], registration: ['инногрн', 'огрнинн'], name: ['название', 'названия', 'названиекомпании', 'названиякомпаний', 'названиеорганизации', 'названиеюрлица', 'компания', 'компании', 'фирма', 'company', 'companyname', 'companytitle', 'organization', 'organizationname', 'organisation', 'организация', 'наименование', 'наименованиеорганизации', 'наименованиекомпании', 'наименованиеюрлица', 'юрлицо'], website: ['сайт', 'сайты', 'сайткомпании', 'сайтыкомпании', 'website', 'websites', 'site', 'sites', 'companywebsite', 'домен', 'domain'], city: ['город', 'city', 'городкомпании', 'городрегистрации', 'городстрана', 'населенныйпункт', 'населенныепункты'] };
     Object.keys(companyAliases).forEach(function (kind) { if (companyAliases[kind].indexOf(key) !== -1) result.company = kind; });
     if (key === 'name' && section !== 'lpr') result.company = 'name';
     if (result.company) { result.general = true; return result; }
@@ -172,6 +172,26 @@ function sourceRecordsRole_(key) {
 
 function sourceRecordsCompany_(record, values, warn) {
   record.company.provenance = {};
+  // A real source uses one "ИНН/ОГРН" column. Keep the two identifier types
+  // distinct; an invalid or ambiguous value must never become a strong key.
+  if (values.registration) {
+    var registration = values.registration; delete values.registration;
+    record.company.provenance.registration = registration.map(function (entry) { return entry.source; });
+    registration.forEach(function (entry) {
+      var text = sourceRecordsText_(entry.value), compact = text.replace(/\D/g, '');
+      var candidates = /^(?:\d{10}|\d{12}|\d{13}|\d{15})$/.test(compact) ? [compact] : text.match(/\b(?:\d{15}|\d{13}|\d{12}|\d{10})\b/g) || [];
+      var valid = candidates.filter(function (candidate) {
+        var kind = candidate.length === 10 || candidate.length === 12 ? 'inn' : 'ogrn';
+        var identity = kind === 'inn' ? typeof contactPreviewInn_ === 'function' ? contactPreviewInn_(candidate) : '' : sourceRecordsOgrn_(candidate);
+        if (!identity) return false;
+        if (!values[kind]) values[kind] = []; values[kind].push({ value: identity, source: entry.source }); return true;
+      });
+      if (!valid.length || valid.length !== candidates.length) {
+        record.company.rawRegistration = [record.company.rawRegistration, text].filter(Boolean).join('; ');
+        warn('Часть реквизитов из колонки «ИНН/ОГРН» не распознана или не прошла проверку. Исходное значение сохранено для ручной проверки.');
+      }
+    });
+  }
   Object.keys(values).forEach(function (kind) {
     var entries = values[kind], unique = sourceRecordsUnique_(entries.map(function (entry) { return entry.value; }));
     record.company.provenance[kind] = entries.map(function (entry) { return entry.source; });
@@ -186,6 +206,13 @@ function sourceRecordsCompany_(record, values, warn) {
     else if (kind === 'ogrn') record.company.ogrn = unique[0].replace(/\s/g, '');
     else record.company[kind] = unique[0] || '';
   });
+}
+
+function sourceRecordsOgrn_(value) {
+  var digits = String(value || ''); if (!/^(?:\d{13}|\d{15})$/.test(digits) || /^0+$/.test(digits)) return '';
+  var divisor = digits.length === 13 ? 11 : 13, remainder = 0;
+  for (var index = 0; index < digits.length - 1; index++) remainder = (remainder * 10 + Number(digits.charAt(index))) % divisor;
+  return remainder % 10 === Number(digits.charAt(digits.length - 1)) ? digits : '';
 }
 
 function sourceRecordsContacts_(value) {

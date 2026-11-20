@@ -307,7 +307,7 @@ function preparedDataPerson_(cells, columns) {
 function preparedDataMailto_(value) { var url = preparedDataDecode_(String(value || '')); return /^mailto:/i.test(url) ? preparedDataEmails_(url.slice(7).split('?')[0]) : []; }
 
 function preparedDataEmails_(value) {
-  var text = String(value || '').replace(/mailto:/gi, ''), result = [], pattern = /(^|[\s,;<>"()[\]:])([^\s,@<>"()[\]:;]+@[^\s,@<>"()[\]:;]+)(?=$|[\s,;<>"()[\]:])/g, match;
+  var text = contactPreviewEmailText_(value).replace(/mailto:/gi, ''), result = [], pattern = /(^|[\s,;<>"()[\]:])([^\s,@<>"()[\]:;]+@[^\s,@<>"()[\]:;]+)(?=$|[\s,;<>"()[\]:])/g, match;
   while ((match = pattern.exec(text))) {
     var email = match[2].replace(/[.!?]+$/, '');
     if (/^[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}$/u.test(email)) result.push(email.toLowerCase());
@@ -479,6 +479,9 @@ function preparedDataApplyRecordContexts_(observations, records) {
     if (!observation.localId && record.company.id) observation.localId = record.company.id;
     if (!observation.inn && record.company.inn) observation.inn = record.company.inn;
     if (!observation.name && record.company.name) observation.name = record.company.name;
+    if (!observation.ogrn && record.company.ogrn) observation.ogrn = record.company.ogrn;
+    if (!observation.website && record.company.website) observation.website = record.company.website;
+    if (!observation.city && record.company.city) observation.city = record.company.city;
     var company = record.company.name || observation.name || observation.localId || observation.inn;
     [['email', 'emails'], ['phone', 'phones'], ['telegram', 'telegrams']].forEach(function (pair) {
       var kind = pair[0], field = pair[1], values = kind === 'email' ? observation.emails : observation[field].map(function (contact) { return typeof contact === 'string' ? contact : contact.value; });
@@ -500,6 +503,7 @@ function preparedDataApplyRecordContexts_(observations, records) {
 function preparedDataAggregate_(observations, sourceId, warn, options) {
   options = options || {};
   var resolved = contactPreviewResolveOwners_(observations, sourceId), stores = { email: Object.create(null), phone: Object.create(null), telegram: Object.create(null) }, total = 0, partial = false;
+  if (resolved.fallbackRows) warn('Часть компаний определена по сочетанию названия с сайтом или городом. Без ИНН или ОГРН юридическая уникальность этих компаний не подтверждена.');
   observations.forEach(function (row, index) {
     var owner = resolved.byRow[index];
     var add = function (kind, value, phoneKind, origin, needsReview) {
