@@ -52,6 +52,34 @@ test('a genuine unnamed role survives when there is no named person', () => {
   assert.equal(r.records[0].people.length, 1); assert.equal(r.records[0].people[0].name, ''); assert.equal(r.records[0].people[0].role, 'Директор по маркетингу');
 });
 
+test('web-studio person summaries keep named role lines and discard explanatory evidence rather than inventing people',()=>{
+  const r=fixture([['Компания','ЛПР / маркетинг / PR','Полное ФИО ЛПР'],['Студия',
+    'Иванов Иван — Генеральный директор\nУказан в карточке Рейтинга Рунета; проверено 17.11.2026. На сайте должность не подтверждена.\n<https://rating.example.test/card>',
+    '']]);
+  assert.equal(r.records[0].people.length,1);const p=r.records[0].people[0];assert.equal(p.name,'Иванов Иван');assert.equal(p.role,'Генеральный директор');assert.deepEqual(p.emails,[]);assert.deepEqual(p.phones,[]);assert.equal(p.source.columns[0],2);
+});
+
+test('several named people in one summary stay separate and embedded contacts are not assigned to a guessed person',()=>{
+  const r=fixture([['Компания','ЛПР / маркетинг / PR'],['Студия','Иванов Иван — Директор\nУказан в карточке Рейтинга Рунета\nПетров Пётр — Основатель\nпроверено . На сайте должность не подтверждена.\nshared@example.test']],{'2:2':email('shared@example.test')});
+  assert.deepEqual(r.records[0].people.map(p=>p.name),['Иванов Иван','Петров Пётр']);assert.deepEqual(r.records[0].people.map(p=>p.role),['Директор','Основатель']);assert.ok(r.records[0].people.every(p=>!p.emails.length));assert.deepEqual(r.records[0].general.emails,['shared@example.test']);
+});
+
+test('dedicated full name and explicit job title take priority when the same person appears in summary evidence',()=>{
+  const r=fixture([['ЛПР / маркетинг / PR','Полное ФИО ЛПР','Должность','Тел ЛПР'],['Иванов Иван — Генеральный директор\nУказан в карточке Рейтинга Рунета','Иванов Иван','Директор по продажам','+79990000001']],{'2:4':phone('+79990000001')});
+  assert.equal(r.records[0].people.length,1);const p=r.records[0].people[0];assert.equal(p.name,'Иванов Иван');assert.equal(p.role,'Директор по продажам');assert.deepEqual(p.phones,['+79990000001']);
+});
+
+test('a different summary person cannot receive the dedicated full-name persons contacts',()=>{
+  const r=fixture([['ЛПР / маркетинг / PR','Полное ФИО ЛПР','Тел ЛПР'],['Иванов Иван — Директор\nУказан в карточке Рейтинга Рунета','Петров Пётр','+79990000002']],{'2:3':phone('+79990000002')});
+  assert.equal(r.records[0].people.length,2);assert.deepEqual(r.records[0].people.find(p=>p.name==='Петров Пётр').phones,['+79990000002']);assert.deepEqual(r.records[0].people.find(p=>p.name==='Иванов Иван').phones,[]);
+});
+
+test('comments and evidence mentioning an LPR are not identities; genuine dedicated no-contact names and roles survive',()=>{
+  const r=fixture([['Комментарий ЛПР','Описание маркетолога','Источник ЛПР','Полное ФИО ЛПР','Должность'],['Указан в карточке Рейтинга Рунета','Проверено. На сайте должность не подтверждена.','Карточка компании','Иванов Иван','Директор']]);
+  assert.equal(r.records[0].people.length,1);assert.equal(r.records[0].people[0].name,'Иванов Иван');assert.equal(r.records[0].people[0].role,'Директор');assert.deepEqual(r.records[0].people[0].phones,[]);
+  const noPerson=fixture([['ЛПР / маркетинг / PR'],['Указан в карточке Рейтинга Рунета\nпроверено . На сайте должность не подтверждена.']]);assert.equal(noPerson.records[0].people.length,0);
+});
+
 test('actual directory plural headers retain company identity and contacts in a lean segment instead of anonymous contact rows', () => {
   const headers = ['Названия', 'Категории', 'Регионы, области', 'Населенные пункты', 'Полные адреса', 'Мобильные телефоны', 'Городские телефоны', 'Email-адреса', 'Telegram', 'WhatsApp', 'Вконтакте', 'Одноклассники', 'Сайты', 'Max', 'Филиалов', 'Индексы', 'Дата парсинга'];
   const rows = [headers, ['Тестовая компания', 'Магазин', 'Москва', 'Москва', '', '+79990000001', '', 'hello@example.test', '', '', '', '', 'https://company.example.test']];

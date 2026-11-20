@@ -35,6 +35,10 @@ function sourceRecordsBuild_(displayRows, options) {
         }
       }
     });
+    columns.forEach(function (column, index) {
+      if (!column.summary) return;
+      sourceRecordsSummaryPeople_(groups, getGroup, cells[index], rowContacts[index] || sourceRecordsEmptyContacts_(), source, index + 1);
+    });
     sourceRecordsMergeGenericPerson_(groups, columns, rowContacts);
     sourceRecordsCompany_(record, companyValues, warn);
     var knownKeys = Object.keys(groups).filter(function (key) { var group = groups[key]; return group.names.length || group.first.length || group.last.length || group.middle.length || group.roles.length; }), personalTargets = Object.create(null);
@@ -144,6 +148,10 @@ function sourceRecordsColumns_(headers, section) {
     if (key === 'name' && section !== 'lpr') result.company = 'name';
     if (result.company) { result.general = true; return result; }
     if (/валид|результат|статус|отправител|sender|провер|колво|количество|дубль|кампан|рассылк/.test(key) || /^(?:переносвлпр|перенесеновлпр|добавленовлпр|idлпр|идлпр|идентификаторлпр)$/.test(key)) { result.ignored = true; return result; }
+    // This real source column combines named people with source-card evidence.
+    // It is not one FIO field, and its prose must never become extra people.
+    if (/^лпрмаркетинг(?:pr|пиар)$/.test(key)) { result.summary = true; result.general = true; return result; }
+    if (/коммент|примечан|публикац|упоминан|описани|информаци|evidence|comments?|notes?|^источник|^ссылк/.test(key) && /лпр|маркетолог|директор|руководител|person|manager|decisionmaker/.test(key) && !/фио|fullname|personname|contactname|полноеимя|^(?:должность|position|jobtitle)/.test(key)) { result.general = true; result.evidence = true; return result; }
     var isContact = /email|почт|телефон|phone|mobile|телеграм|telegram|^tg\d*$/.test(key), number = (key.match(/(?:^|[^0-9])(\d+)$/) || [])[1] || '';
     var role = sourceRecordsRole_(key), nameKey = key.replace(/\d+$/, ''), personal = /фио|фамилияимяотчество|полноеимя|fullname|personname|contactname|контактноелицо|лпр|директор|руководител|маркетолог|менеджер|специалист|закупщик|бухгалтер|собственник|владелец|учредител|director|manager|ceo|decisionmaker/.test(key);
     result.general = (/компании|emailадреса|мобильныетелефоны|городскиетелефоны|общ(?:ий|ая|ие|ее)|general|corporate|корпоративн/.test(key) || (isContact && !!role.key)) && !personal;
@@ -157,6 +165,27 @@ function sourceRecordsColumns_(headers, section) {
     } else if (isContact) { result.kind = 'contact'; result.number = number; }
     return result;
   });
+}
+
+/** Only explicit name / role lines are identities; evidence remains in the source. */
+function sourceRecordsSummaryPeople_(groups, getGroup, value, contacts, source, column) {
+  var empty = sourceRecordsEmptyContacts_(), ref = sourceRecordsRef_(source, column);
+  String(value || '').split(/[\r\n]+/).forEach(function (line) {
+    var cleaned = sourceRecordsCleanName_(line, empty).split(';')[0].trim();
+    var parts = cleaned.split(/\s+[—–-]\s+/), name = parts.shift().replace(/^(?:ФИО|Полное имя|ЛПР)\s*:\s*/i, '').trim(), role = parts.join(' — ').trim();
+    if (!sourceRecordsSummaryName_(name)) return;
+    if (/указан|проверен|подтвержд|карточк|на сайте|не найден|источник|уточн/i.test(role) || role.length > 180) role = '';
+    var nameKey = name.toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' '), matches = Object.keys(groups).filter(function (key) { var group = groups[key]; return group.names.length === 1 && group.names[0].toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ') === nameKey; });
+    var group = matches.length === 1 ? groups[matches[0]] : getGroup('summary:' + column + ':' + nameKey);
+    if (matches.length !== 1) sourceRecordsPush_(group.names, name);
+    sourceRecordsPush_(group.columns, column); group.nameRefs.push(ref);
+    // A dedicated FIO/job-title field has priority. Summary roles enrich only
+    // their exact named person; contacts embedded in prose stay general.
+    if (role && (!group.roles.length || group.key.indexOf('summary:') === 0)) { sourceRecordsPush_(group.roles, role); group.roleRefs.push(ref); }
+  });
+}
+function sourceRecordsSummaryName_(value) {
+  return /^\p{Lu}[\p{L}'’.-]*(?:\s+\p{Lu}[\p{L}'’.-]*){1,3}$/u.test(value) && !/^(?:ООО|ИП|АО|ПАО|LLC|Ltd)\b/u.test(value) && !/^(?:Указан|Указана|Проверено|Проверен|Источник|Должность|Маркетинг|Информация|На Сайте|Нет Данных|Генеральный|Директор|Руководитель|Маркетолог|Специалист)\b/i.test(value);
 }
 
 function sourceRecordsRole_(key) {
