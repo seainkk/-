@@ -35,6 +35,7 @@ function sourceRecordsBuild_(displayRows, options) {
         }
       }
     });
+    sourceRecordsMergeGenericPerson_(groups, columns, rowContacts);
     sourceRecordsCompany_(record, companyValues, warn);
     var knownKeys = Object.keys(groups).filter(function (key) { var group = groups[key]; return group.names.length || group.first.length || group.last.length || group.middle.length || group.roles.length; }), personalTargets = Object.create(null);
     columns.forEach(function (column, index) {
@@ -101,6 +102,38 @@ function sourceRecordsBuild_(displayRows, options) {
     records.push(record);
   }
   return { records: records, warnings: warnings };
+}
+
+/** A generic job title / matching first name describes the sole named person.
+ * Keep separate anonymous people when another name or contact group makes the
+ * attribution ambiguous. No contacts or source evidence are discarded.
+ */
+function sourceRecordsMergeGenericPerson_(groups, columns, rowContacts) {
+  var generic = groups.default; if (!generic) return;
+  var others = Object.keys(groups).filter(function (key) {
+    var group = groups[key]; return key !== 'default' && (group.names.length || group.first.length || group.last.length || group.middle.length || group.roles.length);
+  });
+  if (others.length !== 1) return;
+  var key = others[0], target = groups[key];
+  if (target.names.length !== 1 || target.first.length > 1 || target.last.length > 1 || target.middle.length > 1 || generic.first.length > 1 || generic.last.length > 1 || generic.middle.length > 1) return;
+  var identity = sourceRecordsKey_(target.names[0]), words = sourceRecordsText_(target.names[0]).split(/[\s,;]+/).map(sourceRecordsKey_).filter(Boolean);
+  if (generic.names.some(function (name) { return sourceRecordsKey_(name) !== identity; })) return;
+  if (['first', 'last', 'middle'].some(function (part) {
+    return generic[part].some(function (value) { return words.indexOf(sourceRecordsKey_(value)) < 0; });
+  })) return;
+  // Explicit contacts of a different role/number can represent another person,
+  // even when that person's name is missing. A plain personal contact can be
+  // assigned to the sole named person after this reconciliation.
+  if (columns.some(function (column, index) {
+    if (column.kind !== 'contact' || !sourceRecordsHasContacts_(rowContacts[index])) return false;
+    if (column.number && key !== 'number:' + column.number) return true;
+    return column.person && column.group && column.group !== 'personal' && column.group !== 'default' && column.group !== key;
+  })) return;
+  ['names', 'first', 'last', 'middle', 'roles', 'defaultRoles', 'columns'].forEach(function (field) {
+    generic[field].forEach(function (value) { sourceRecordsPush_(target[field], value); });
+  });
+  target.nameRefs = target.nameRefs.concat(generic.nameRefs); target.roleRefs = target.roleRefs.concat(generic.roleRefs);
+  delete groups.default;
 }
 
 function sourceRecordsColumns_(headers, section) {

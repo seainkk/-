@@ -13,6 +13,45 @@ function fixture(rows, contacts = {}, options = {}) {
 const email = (...emails) => ({ emails });
 const phone = (...phones) => ({ phones });
 
+test('a sole named manager and generic position become one person with both source columns', () => {
+  const r = fixture([['Компания', 'Руководитель (ФИО)', 'Должность', 'Почта основная'], ['Альфа', 'Иванов Иван Иванович', 'Генеральный директор', 'ivan@example.test']],
+    { '2:4': email('ivan@example.test') }, { section: 'lpr' });
+  assert.equal(r.records[0].people.length, 1);
+  const person = r.records[0].people[0]; assert.equal(person.name, 'Иванов Иван Иванович'); assert.equal(person.role, 'Генеральный директор');
+  assert.deepEqual(person.emails, ['ivan@example.test']); assert.deepEqual(person.source.columns, [2, 3, 4]);
+  assert.equal(person.provenance.role[0].column, 3);
+});
+
+test('matching generic first name and position enrich a sole full-name manager', () => {
+  const r = fixture([['Руководитель (ФИО)', 'Имя', 'Должность'], ['Иванов Иван Иванович', 'Иван', 'Генеральный директор']], {}, { section: 'lpr' });
+  assert.equal(r.records[0].people.length, 1); assert.equal(r.records[0].people[0].name, 'Иванов Иван Иванович');
+  assert.equal(r.records[0].people[0].role, 'Генеральный директор');
+  assert.equal(r.records[0].people[0].provenance.name.length, 2);
+});
+
+test('generic position is retained separately when two named people are present', () => {
+  const r = fixture([['ФИО директора', 'Маркетолог', 'Должность'], ['Иванов Иван', 'Петров Пётр', 'Специалист']], {}, { section: 'lpr' });
+  assert.equal(r.records[0].people.length, 3);
+  assert.ok(r.records[0].people.some(person => !person.name && person.role === 'Специалист'));
+});
+
+test('an unnamed role with its own alternative personal contacts is not merged into a named manager', () => {
+  const r = fixture([['Руководитель (ФИО)', 'Должность', 'Email маркетолога'], ['Иванов Иван', 'Маркетолог', 'marketing@example.test']],
+    { '2:3': email('marketing@example.test') }, { section: 'lpr' });
+  assert.ok(r.records[0].people.some(person => person.name === 'Иванов Иван' && !person.emails.length));
+  assert.ok(r.records[0].people.some(person => !person.name && person.role === 'Маркетолог'));
+});
+
+test('a different generic first name is a separate person rather than evidence of the full-name manager', () => {
+  const r = fixture([['Руководитель (ФИО)', 'Имя', 'Должность'], ['Иванов Иван Иванович', 'Пётр', 'Маркетолог']], {}, { section: 'lpr' });
+  assert.equal(r.records[0].people.length, 2); assert.ok(r.records[0].people.some(person => person.name === 'Пётр'));
+});
+
+test('a genuine unnamed role survives when there is no named person', () => {
+  const r = fixture([['Компания', 'Должность'], ['Альфа', 'Директор по маркетингу']], {}, { section: 'lpr' });
+  assert.equal(r.records[0].people.length, 1); assert.equal(r.records[0].people[0].name, ''); assert.equal(r.records[0].people[0].role, 'Директор по маркетингу');
+});
+
 test('normalizes company requisites and keeps a named director with no contacts', () => {
   const r = fixture([
     ['Company_ID', 'ИНН', 'ОГРН', 'Название', 'Сайт', 'Город', 'Директор'],
