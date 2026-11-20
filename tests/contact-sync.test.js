@@ -184,6 +184,28 @@ function fixture(options = {}) {
   return { context, options, resources, book, properties, calls, invoke, start, next, finish, state, saveState, target, editSource, scope };
 }
 
+function slowWholeSourceFixture(chunkMillis) {
+  const clock = { now: 0, reading: false }, modelReads = [];
+  const f = fixture({ realExtractor: true,
+    rows: [['Компания', 'Email', 'Телефон'], ['One', 'one@example.test', ''], ['Two', 'two@example.test', '']],
+    secondSource: [['Компания', 'Email', 'Телефон'], ['Three', 'three@example.test', ''], ['Four', 'four@example.test', '']],
+    onRead({ sheetId }) { if (clock.reading && [0, 9].includes(sheetId)) clock.now += chunkMillis; }
+  });
+  class Clock extends Date { constructor(...args) { super(...(args.length ? args : [clock.now])); } static now() { return clock.now; } }
+  f.context.Date = Clock;
+  f.context.PREPARED_DATA_LIMITS = { ...f.context.PREPARED_DATA_LIMITS, chunkCells: 6 };
+  const workbookRead = f.context.preparedDataReadWorkbook_, leafRead = f.context.preparedDataRead_;
+  f.context.preparedDataReadWorkbook_ = (...args) => {
+    modelReads.push({ deadline: args[3].deadline, leaves: [] }); clock.reading = true;
+    try { return workbookRead(...args); } finally { clock.reading = false; }
+  };
+  f.context.preparedDataRead_ = (...args) => {
+    modelReads.at(-1).leaves.push({ sheetId: args[0].getSheetId(), deadline: args[3].deadline });
+    return leafRead(...args);
+  };
+  return { ...f, clock, modelReads };
+}
+
 test('an unmanaged workbook keeps an original tab named Email and creates separate managed lists', () => {
   const f = fixture({ sourceName: 'Email' }), before = plain(f.book.tabs[0].data), r = f.finish();
   assert.equal(r.counts.addedEmail, 1); assert.equal(r.counts.addedPhone, 1); assert.equal(r.counts.addedTelegram, 1);
@@ -311,6 +333,52 @@ test('empty valid sources finish without adding fake contacts; incomplete reads 
   assert.equal(r.counts.addedEmail + r.counts.addedPhone + r.counts.addedTelegram, 0);
   const g = fixture({ incomplete: true }); assert.throws(() => g.start(), /CONTACT_SOURCE_INCOMPLETE/);
   assert.equal(g.calls.raw.filter(call => call.row > 1).length, 0);
+});
+
+test('contact sync reads slow whole sources within one 120-second budget while other reader calls retain 45 seconds', () => {
+  const f = slowWholeSourceFixture(25000);
+  const defaultRead = f.context.preparedDataReadWorkbook_(f.book, FILE, 'companies', { sourceSheetIds: [0, 9] });
+  assert.equal(defaultRead.complete, false); assert.equal(f.context.PREPARED_DATA_LIMITS.maxMillis, 45000);
+  f.clock.now = 0; f.modelReads.length = 0;
+  const result = f.finish(); assert.equal(result.counts.addedEmail, 4);
+  assert.ok(f.modelReads.length > 0);
+  for (const read of f.modelReads) {
+    assert.equal(read.leaves.length, 2);
+    assert.deepEqual(read.leaves.map(leaf => leaf.sheetId), [0, 9]);
+    assert.ok(read.leaves.every(leaf => leaf.deadline === read.deadline), 'all leaves/chunks receive the same absolute deadline');
+  }
+  assert.equal(f.modelReads[0].deadline, 120000);
+  assert.ok(f.clock.now >= 100000, 'the full extraction really takes longer than the default 45 seconds');
+});
+
+test('contact sync rejects an over-budget partial multi-leaf source before writing any contacts', () => {
+  const f = slowWholeSourceFixture(35000), before = plain(f.book.tabs.map(sheet => sheet.data));
+  assert.throws(() => f.start(), /CONTACT_SOURCE_INCOMPLETE/);
+  assert.equal(f.modelReads[0].deadline, 120000);
+  assert.ok(f.modelReads[0].leaves.every(leaf => leaf.deadline === 120000));
+  assert.ok(f.clock.now >= 120000);
+  assert.equal(f.calls.raw.filter(call => call.row > 1).length, 0);
+  assert.deepEqual(f.book.tabs.slice(0, 2).map(sheet => sheet.data), before, 'source data is unchanged');
+});
+
+test('a source-version retry shares the original contact-read deadline instead of gaining another 120 seconds', () => {
+  const f = slowWholeSourceFixture(25000), extract = f.context.preparedDataReadWorkbook_; let changed = false;
+  f.context.preparedDataReadWorkbook_ = (...args) => {
+    const model = extract(...args);
+    if (!changed) { changed = true; f.resources.get(FILE).version = String(Number(f.resources.get(FILE).version) + 1); }
+    return model;
+  };
+  assert.throws(() => f.start(), /CONTACT_SOURCE_INCOMPLETE/);
+  assert.equal(f.modelReads.length, 2);
+  assert.deepEqual(f.modelReads.map(read => read.deadline), [120000, 120000]);
+  assert.equal(f.calls.raw.filter(call => call.row > 1).length, 0);
+});
+
+test('the longer contact-read budget still rejects a source moved outside the registry during reading', () => {
+  const f = slowWholeSourceFixture(25000), onRead = f.options.onRead;
+  f.options.onRead = read => { onRead(read); if (f.clock.reading) f.resources.get(FILE).parents = [OUTSIDE]; };
+  assert.throws(() => f.start(), /OUTSIDE_REGISTRY/);
+  assert.equal(f.calls.raw.filter(call => call.row > 1).length, 0);
 });
 
 test('target grid extension happens before reading or writing an out-of-grid pending range', () => {
