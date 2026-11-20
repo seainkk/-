@@ -336,9 +336,9 @@ function coldyCampaignCollect_(context, binding, ledger) {
       var valid = !changed && email.length <= 254 && !/[\u0000-\u001f\u007f]/.test(email) && /^(?:валиден|валидный|valid|deliverable)$/i.test(status), completed = !!status && !pvPendingStatus_(status) && !changed;
       var row = { fileId: fileId, sheetId: sheet.getSheetId(), row: index + 2, email: email, valid: valid, completed: completed, review: !acceptable,
         company: companyColumn === undefined ? kind === 'companies' && ownerColumn !== undefined ? cell(ownerColumn) : '' : cell(companyColumn),
-        name: nameColumn === undefined ? kind === 'lpr' && ownerColumn !== undefined ? cell(ownerColumn) : '' : cell(nameColumn),
+        name: nameColumn === undefined ? '' : cell(nameColumn), ownerLabel: ownerColumn === undefined ? '' : cell(ownerColumn),
         fingerprintSource: JSON.stringify([fileId, sheet.getSheetId(), index + 2, email, status, bound, review]) };
-      row.fingerprintSource = JSON.stringify([fileId, sheet.getSheetId(), index + 2, email, status, bound, review, row.company, row.name, cacheReview]);
+      row.fingerprintSource = JSON.stringify([fileId, sheet.getSheetId(), index + 2, email, status, bound, review, row.company, row.name, row.ownerLabel, cacheReview]);
       rows.push(row); (grouped[email] || (grouped[email] = [])).push(row);
     });
   });
@@ -350,7 +350,7 @@ function coldyCampaignCollect_(context, binding, ledger) {
     if (entries.some(function (entry) { return entry.completed && !entry.valid; })) { counts.invalid++; return; }
     var validRows = entries.filter(function (entry) { return entry.valid; });
     if (!validRows.length) { counts.notValidated++; return; }
-    var owners = {}; entries.forEach(function (entry) { var owner = (entry.company || entry.name || '').trim().toLowerCase(); if (owner) owners[owner] = true; });
+    var owners = {}; entries.forEach(function (entry) { var owner = (entry.ownerLabel || entry.company || entry.name || '').trim().toLowerCase(); if (owner) owners[owner] = true; });
     // The same address in company and person workbooks needs an explicit ownership decision.
     if (Object.keys(owners).length > 1) { counts.ownershipReview++; return; }
     var first = validRows[0]; contacts.push({ email: email, company: first.company.slice(0, 500), name: first.name.slice(0, 500), refs: validRows.map(function (row) { return { fileId: row.fileId, sheetId: row.sheetId, row: row.row, fingerprint: digest_(row.fingerprintSource) }; }) });
@@ -377,8 +377,8 @@ function coldyCampaignDispatchRows_(context, binding, contacts) {
       if (entry.ref.sheetId !== sheet.getSheetId() || entry.ref.row > sheet.getLastRow()) fail_('COLDY_SOURCE_CHANGED', 'Строка контакта изменилась перед загрузкой.');
       var line = sheet.getRange(entry.ref.row, 1, 1, width).getDisplayValues()[0], note = sheet.getRange(entry.ref.row, status + 1, 1, 1).getNotes()[0][0], value = pvEmail_(line[email]);
       var companyValue = company === undefined ? kind === 'companies' && owner !== undefined ? String(line[owner] || '') : '' : String(line[company] || '');
-      var nameValue = name === undefined ? kind === 'lpr' && owner !== undefined ? String(line[owner] || '') : '' : String(line[name] || '');
-      var fingerprint = digest_(JSON.stringify([fileId, sheet.getSheetId(), entry.ref.row, value, String(line[status] || '').trim(), pvBinding_(note), String(line[review] || '').trim(), companyValue, nameValue, false]));
+      var nameValue = name === undefined ? '' : String(line[name] || ''), ownerLabel = owner === undefined ? '' : String(line[owner] || '');
+      var fingerprint = digest_(JSON.stringify([fileId, sheet.getSheetId(), entry.ref.row, value, String(line[status] || '').trim(), pvBinding_(note), String(line[review] || '').trim(), companyValue, nameValue, ownerLabel, false]));
       if (value !== entry.contact.email || fingerprint !== entry.ref.fingerprint) fail_('COLDY_SOURCE_CHANGED', 'Контакт, его принадлежность или результат проверки изменились перед загрузкой.');
     });
   });

@@ -43,6 +43,14 @@ test('sheets with no history columns read a bounded header probe and never their
   const f=fixture([{id:0,rows:[['Компания','Email'],['Новая','new@example.test']]},{id:1,rows}]);const r=f.read();assert.equal(Object.keys(r.history).length,0);assert.deepEqual(f.calls.display.filter(x=>x.id===1).map(x=>x.height),[10]);assert.equal(f.calls.notes.length,0);
 });
 
+test('web-report quantity headers are metrics rather than unreadable email or phone identities',()=>{
+  const f=fixture([{id:0,name:'Компании',rows:[['Email'],['one@example.test']]},
+    {id:1,name:'Email (1)',rows:[['Приоритет','Почт на компанию','ID компании','Компания','Категории','Статус','Комментарий','','Email','Валидация'],['1','3','company-a','Альфа','','Рассылка','','','one@example.test','valid']]},
+    {id:2,name:'Мобильные и Telegram',rows:[['Контактов на компанию','Телефонов на компанию','Мобильный телефон','Telegram ID','Active_days_ago'],['3','2','79990000001','12345','4']]}]);
+  const r=f.read();assert.equal(r.history['email:one@example.test'].validation.status,'Валиден');assert.equal(r.history['email:one@example.test'].work[0],'Рассылка');assert.equal(r.history['telegram:+79990000001'].validation.idTg,'12345');
+  const schema=f.c.legacyContactHistoryColumns_(['Почт на компанию','Email','Телефонов на компанию','Телефон']);assert.deepEqual(plain(schema.email),[1]);assert.deepEqual(plain(schema.phone),[3]);
+});
+
 test('header probes find a report header below titles and retain absolute provenance',()=>{
   const f=fixture([{id:0,rows:[['Email'],['one@example.test']]},{id:1,rows:[['Отчет за ноябрь','',''],['Email','Валидация','Провайдер'],['one@example.test','invalid','Other']]}]);const r=f.read();assert.equal(r.history['email:one@example.test'].validation.status,'Невалиден');assert.equal(r.history['email:one@example.test'].evidence[0].row,3);
 });

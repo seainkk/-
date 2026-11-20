@@ -51,7 +51,7 @@ function legacyContactHistoryColumns_(headers) {
   headers.forEach(function (header, index) {
     var key = legacyContactHistoryKey_(header); if (!key) return;
     if (result.columns[key] === undefined) result.columns[key] = index;
-    var meta = /валидац|validation|статус|status|провер|дата|date|count|колво|количество|провайдер|provider|ник|nickname|idtg|telegramid|active|days|давно|строк|источник/.test(key);
+    var meta = /валидац|validation|статус|status|провер|дата|date|count|колво|количество|провайдер|provider|ник|nickname|idtg|telegramid|active|days|давно|строк|источник/.test(key) || /^(?:почт|телефонов|номеров|контактов)на(?:компанию|организацию|человека|лпр)$/.test(key);
     if (!meta && /email|почт|емейл/.test(key)) result.email.push(index);
     if (!meta && (/телефон|phone|mobile|мобильн|^тел|^доптел|numbertg/.test(key)) && !/телеграм|telegram/.test(key)) result.phone.push(index);
     if (/^(?:статус|status|комментарий|коммент|статусподтверждения|статусизисточника)$/.test(key) || /статусрассылки|статусконтакта/.test(key)) result.work.push(index);
