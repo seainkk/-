@@ -4,6 +4,10 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
   for (var attempt = 0; attempt < 2; attempt++) {
     var before = attempt ? preparedDraftFile_(context, draft) : file;
     var options = preparedWorkbookSourceOptions_(context, draft);
+    // A whole historical workbook can need more time than a single changed
+    // contact sheet. This server-only deadline remains below the execution
+    // limit, and the recognizer still rejects every incomplete result.
+    options.deadline = Date.now() + 120000;
     // This is a read transaction over one fixed, app-owned staging workbook.
     // Full Drive ancestry is checked before and after it, before any model can
     // escape into a preview or plan. During bounded reads, revoke a changed

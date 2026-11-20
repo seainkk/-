@@ -7,6 +7,17 @@ import {readFileSync} from 'node:fs';
 const FILE='prepared_rich_file_1234567890';
 const plain=value=>JSON.parse(JSON.stringify(value));
 
+function timedWorkbook(deadline,elapsed){
+  let now=1700000000000;
+  const f=fixture([['Компания','Email'],['Альфа','alpha@example.test']],{api:({response})=>{now+=elapsed;return response;}});
+  f.c.Date=class extends Date{static now(){return now;}};
+  const options={guard:f.guard};if(deadline!==undefined)options.deadline=1700000000000+deadline;
+  return f.c.preparedDataReadWorkbook_({getSheets:()=>[f.sheet]},FILE,'companies',options);
+}
+test('ordinary contact workbook reads retain their default short budget',()=>{assert.equal(timedWorkbook(undefined,60000).complete,false);});
+test('preparation can use its explicit complete-workbook budget without accepting partial data',()=>{const r=timedWorkbook(120000,60000);assert.equal(r.complete,true);assert.equal(r.canConfirm,true);assert.equal(r.counts.emails,1);});
+test('an explicit workbook deadline is capped and never becomes an unbounded read',()=>{assert.equal(timedWorkbook(999999999,130000).complete,false);});
+
 function fixture(rows,options={}) {
   const calls={api:[],nativeReads:0,nativeMethods:0,guards:0,writes:0,events:[]};
   const width=options.width??Math.max(0,...rows.map(row=>row.length)),gid=options.gid??0,name=options.name??"Сбор O'Brien";

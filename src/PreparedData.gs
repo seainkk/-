@@ -549,7 +549,9 @@ function preparedDataSourceLabel_(refs, includeSheetNames) {
 /** Read every explicitly selected source leaf; callers identify generated targets by IDs. */
 function preparedDataReadWorkbook_(book, fileId, section, options) {
   options = options || {};
-  var guard = typeof options.guard === 'function' ? options.guard : function () {}, started = Date.now(), deadline = started + PREPARED_DATA_LIMITS.maxMillis;
+  var guard = typeof options.guard === 'function' ? options.guard : function () {}, started = Date.now();
+  if (options.deadline !== undefined && !Number.isFinite(options.deadline)) fail_('INVALID_REQUEST', 'Некорректное время полного чтения книги.');
+  var deadline = options.deadline === undefined ? started + PREPARED_DATA_LIMITS.maxMillis : Math.min(options.deadline, started + 120000);
   guard();
   var available = book.getSheets(), selected = available.slice(), explicit = options.sourceSheetIds;
   if (explicit !== undefined) {
