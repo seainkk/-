@@ -11,6 +11,19 @@ const iter = array => { let index = 0; return { hasNext: () => index < array.len
 const inn = prefix => prefix + ([2,4,10,3,5,9,4,6,8].reduce((sum, n, index) => sum + n * Number(prefix[index]), 0) % 11 % 10);
 const INN_A = inn('770708389'), INN_B = inn('771014067');
 
+test('standalone WWW URL masking preserves WWW email domains alone and in address lists', () => {
+  const c = fixture().context;
+  const addresses = ['person@www.example.test', 'person@sub.www.example.test', "o'brien+tag@www.example.test", 'sales/department@www.example.test'];
+  for (const email of addresses) assert.deepEqual(plain(c.contactPreviewEmails_(email)), [email]);
+  assert.deepEqual(plain(c.contactPreviewEmails_(addresses.join('; '))), addresses);
+  assert.deepEqual(plain(c.contactPreviewEmails_('mailto:person@www.example.test')), ['person@www.example.test']);
+  assert.equal(c.contactPreviewEmailText_('почта@www.пример.рф'), 'почта@www.пример.рф');
+  for (const url of ['www.example.test/@person.example', '"www.example.test/@person.example"', "'www.example.test/@person.example'", '//www.example.test/@person.example', 'https://person@www.example.test', 'www.youtube.com/@person.example', 'instagram.com/@person.example']) {
+    assert.deepEqual(plain(c.contactPreviewEmails_(url)), [], url);
+  }
+  assert.deepEqual(plain(c.contactPreviewEmails_('person@www.example.test; www.example.test/@fake.example; person@sub.www.example.test')), ['person@www.example.test', 'person@sub.www.example.test']);
+});
+
 function fixture(options = {}) {
   const calls = { opened: [], ranges: [], files: [], propertiesWritten: 0, writes: 0 };
   const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SOURCE_BASES_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: SERVICE, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ...options.properties }));
