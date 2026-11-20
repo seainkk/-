@@ -135,8 +135,19 @@ function contactPreviewInn_(value) {
   return digits.length === 10 ? (check([2, 4, 10, 3, 5, 9, 4, 6, 8], 9) ? digits : null) : (check([7, 2, 4, 10, 3, 5, 9, 4, 6, 8], 10) && check([3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8], 11) ? digits : null);
 }
 
+/** An @ inside a URL path/query is not an email separator. Keep mailto links. */
+function contactPreviewEmailText_(value) {
+  var text = String(value || '');
+  // Explicit URLs are unambiguous. Do not ban slash/apostrophe/plus characters
+  // from legitimate local parts such as sales/department@example.test.
+  text = text.replace(/(?:[a-z][a-z0-9+.-]*:\/\/|\/\/(?=(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[:/?#]|$)|(?:\d{1,3}\.){3}\d{1,3}(?:[:/?#]|$))|www\.(?=(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[:/?#]|$)))[^\s<>"()[\],;]+/gi, ' ');
+  // Recognize scheme-less social profile paths as URLs, including dotted
+  // handles, without treating arbitrary dotted/slashed email local parts so.
+  return text.replace(/(?:^|[\s,;<>"()[\]:=])(?:[a-z0-9-]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|tiktok\.com|twitter\.com|x\.com|facebook\.com|vk\.com|ok\.ru|t\.me|telegram\.me|telegram\.dog)\/[^\s<>"()[\],;]+/gi, ' ');
+}
+
 function contactPreviewEmails_(value) {
-  var text = String(value || ''), pattern = /(^|[\s,;<>"()[\]:])([A-Z0-9.!#$%&'*+\/=\?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,})(?=$|[\s,;<>"()[\]:.])/gi, values = [], match;
+  var text = contactPreviewEmailText_(value), pattern = /(^|[\s,;<>"()[\]:])([A-Z0-9.!#$%&'*+\/=\?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,})(?=$|[\s,;<>"()[\]:.])/gi, values = [], match;
   while ((match = pattern.exec(text))) values.push(match[2].toLowerCase());
   return values;
 }
@@ -162,24 +173,58 @@ function contactPreviewPhones_(value) {
 }
 
 function contactPreviewResolveOwners_(rows, fileId) {
-  var idInns = Object.create(null), owners = Object.create(null), byRow = [], unresolvedRows = 0, ambiguousIds = false;
+  var idInns = Object.create(null), owners = Object.create(null), byRow = [], unresolvedRows = 0, ambiguousIds = false, fallbackRows = 0;
   rows.forEach(function (row) {
     if (!row.localId || !row.inn || row.identityAmbiguous) return;
     if (!idInns[row.localId]) idInns[row.localId] = Object.create(null);
     idInns[row.localId][row.inn] = true;
   });
+  var anchors = [], anchoredOwners = Object.create(null), initialOwners = [];
   rows.forEach(function (row) {
-    var aliases = row.localId && idInns[row.localId] ? Object.keys(idInns[row.localId]) : [], owner = '';
-    if (aliases.length > 1) ambiguousIds = true;
-    if (row.identityAmbiguous) ambiguousIds = true;
-    else if (row.inn) owner = 'inn:' + row.inn;
-    else if (row.localId && aliases.length === 1) owner = 'inn:' + aliases[0];
-    else if (row.localId && !aliases.length) owner = 'source:' + fileId + ':' + row.localId;
+    var aliases = row.localId && idInns[row.localId] ? Object.keys(idInns[row.localId]) : [], owner = '', anchor = contactPreviewOwnerAnchor_(row);
+    if (aliases.length > 1 || row.identityAmbiguous) ambiguousIds = true;
+    if (!row.identityAmbiguous) {
+      if (row.inn) owner = 'inn:' + row.inn;
+      else if (row.ogrn && typeof sourceRecordsOgrn_ === 'function' && sourceRecordsOgrn_(row.ogrn)) owner = 'ogrn:' + sourceRecordsOgrn_(row.ogrn);
+      else if (row.localId && aliases.length === 1) owner = 'inn:' + aliases[0];
+      else if (row.localId && !aliases.length) owner = 'source:' + fileId + ':' + row.localId;
+    }
+    initialOwners.push(owner); anchors.push(anchor);
+    if (anchor && owner) { if (!anchoredOwners[anchor]) anchoredOwners[anchor] = Object.create(null); anchoredOwners[anchor][owner] = true; }
+  });
+  rows.forEach(function (row, index) {
+    var owner = initialOwners[index], anchor = anchors[index];
+    if (!owner && anchor && !row.identityAmbiguous && !(row.localId && idInns[row.localId] && Object.keys(idInns[row.localId]).length > 1)) {
+      var known = anchoredOwners[anchor] ? Object.keys(anchoredOwners[anchor]) : [];
+      if (known.length === 1) { owner = known[0]; fallbackRows++; }
+      else if (!known.length) { owner = 'source:' + fileId + ':' + anchor; fallbackRows++; }
+      else ambiguousIds = true;
+    }
     if (owner) { if (!owners[owner]) owners[owner] = { key: owner, label: row.name || row.localId || row.inn }; }
     else unresolvedRows++;
     byRow.push(owner);
   });
-  return { byRow: byRow, owners: owners, unresolvedRows: unresolvedRows, ambiguousIds: ambiguousIds };
+  return { byRow: byRow, owners: owners, unresolvedRows: unresolvedRows, ambiguousIds: ambiguousIds, fallbackRows: fallbackRows };
+}
+
+/** Source-scoped fallback requires a company name plus independent site/city. */
+function contactPreviewOwnerAnchor_(row) {
+  var clean = function (value) { return String(value || '').toLowerCase().replace(/ё/g, 'е').replace(/[«»"]/g, '').replace(/\s+/g, ' ').trim(); };
+  var name = clean(row.name); if (!name || !contactPreviewHasValue_(name)) return '';
+  var domain = contactPreviewOwnerDomain_(row.website);
+  if (domain) return 'name-site:' + JSON.stringify([name, domain]);
+  var city = clean(row.city); if (city && /[\p{L}]/u.test(city) && contactPreviewHasValue_(city)) return 'name-city:' + JSON.stringify([name, city]);
+  return '';
+}
+function contactPreviewOwnerDomain_(value) {
+  var text = String(value || '').trim().toLowerCase();
+  var match = text.match(/^(?:https?:\/\/)?(?:www\.)?([\p{L}\p{N}](?:[\p{L}\p{N}.-]*[\p{L}\p{N}])?\.[\p{L}]{2,})(?::\d{1,5})?(?:[/?#][^\s]*)?$/u);
+  if (!match || /[\s@]/.test(text)) return '';
+  var domain = match[1];
+  if (domain.split('.').some(function (label) { return !/^[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?$/u.test(label); })) return '';
+  // Common profile/directory hosts identify a platform, not this company.
+  if (/(?:^|\.)(?:youtube\.com|youtu\.be|instagram\.com|tiktok\.com|twitter\.com|x\.com|facebook\.com|vk\.com|ok\.ru|t\.me|telegram\.me|yandex\.(?:ru|com)|google\.(?:ru|com)|2gis\.ru|zoon\.ru|flamp\.ru)$/.test(domain)) return '';
+  return domain;
 }
 
 function contactPreviewAggregate_(result, rows, fileId, budget) {

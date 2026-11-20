@@ -52,6 +52,35 @@ test('a genuine unnamed role survives when there is no named person', () => {
   assert.equal(r.records[0].people.length, 1); assert.equal(r.records[0].people[0].name, ''); assert.equal(r.records[0].people[0].role, 'Директор по маркетингу');
 });
 
+test('actual directory plural headers retain company identity and contacts in a lean segment instead of anonymous contact rows', () => {
+  const headers = ['Названия', 'Категории', 'Регионы, области', 'Населенные пункты', 'Полные адреса', 'Мобильные телефоны', 'Городские телефоны', 'Email-адреса', 'Telegram', 'WhatsApp', 'Вконтакте', 'Одноклассники', 'Сайты', 'Max', 'Филиалов', 'Индексы', 'Дата парсинга'];
+  const rows = [headers, ['Тестовая компания', 'Магазин', 'Москва', 'Москва', '', '+79990000001', '', 'hello@example.test', '', '', '', '', 'https://company.example.test']];
+  const parsed = fixture(rows, { '2:6': phone('+79990000001'), '2:8': email('hello@example.test') });
+  assert.equal(parsed.records[0].company.name, 'Тестовая компания'); assert.equal(parsed.records[0].company.website, 'https://company.example.test'); assert.equal(parsed.records[0].company.city, 'Москва');
+  assert.deepEqual(parsed.records[0].general.emails, ['hello@example.test']); assert.deepEqual(parsed.records[0].general.phones, ['+79990000001']); assert.equal(parsed.records[0].people.length, 0);
+  const c = vm.createContext({ console });
+  vm.runInContext(readFileSync(new URL('../src/SegmentRecords.gs', import.meta.url), 'utf8'), c);
+  c.digest_ = text => 'deterministic_' + Buffer.from(String(text)).toString('base64url');
+  const plan = plain(c.segmentRecordsPlanner_({ records: parsed.records, companies: [], people: [] }));
+  assert.equal(plan.companies.length, 1); assert.equal(plan.companies[0].after[1], 'Тестовая компания');
+  assert.equal(plan.counts.companiesAdded, 1); assert.ok(!plan.review.some(issue => /без определения компании/.test(issue.reason)));
+});
+
+test('actual web-studio city and existing singular company aliases keep their meaning', () => {
+  const parsed = fixture([['ID компании', 'Компания', 'Сайт', 'Город / страна', 'Инн компании'], ['WEB-1', 'Студия', 'https://studio.example.test', 'Москва / Россия', '7707083893']]);
+  const company = parsed.records[0].company;
+  assert.equal(company.id, 'WEB-1'); assert.equal(company.name, 'Студия'); assert.equal(company.website, 'https://studio.example.test'); assert.equal(company.city, 'Москва / Россия'); assert.equal(company.inn, '7707083893');
+});
+
+test('combined INN/OGRN requisites retain their checked identifier type without using invalid values as keys', () => {
+  const parsed = fixture([['Компания', 'ИНН/ОГРН'], ['ИНН', '7707083893'], ['ОГРН', '1027700132195'], ['Оба', 'ИНН 7707083893 / ОГРН 1027700132195'], ['Ошибка', '7707083894']]);
+  assert.equal(parsed.records[0].company.inn, '7707083893'); assert.equal(parsed.records[0].company.ogrn, '');
+  assert.equal(parsed.records[1].company.ogrn, '1027700132195'); assert.equal(parsed.records[1].company.inn, '');
+  assert.equal(parsed.records[2].company.inn, '7707083893'); assert.equal(parsed.records[2].company.ogrn, '1027700132195');
+  assert.equal(parsed.records[3].company.inn, ''); assert.equal(parsed.records[3].company.ogrn, ''); assert.equal(parsed.records[3].company.rawRegistration, '7707083894');
+  assert.ok(parsed.warnings.some(warning => warning.includes('ИНН/ОГРН')));
+});
+
 test('normalizes company requisites and keeps a named director with no contacts', () => {
   const r = fixture([
     ['Company_ID', 'ИНН', 'ОГРН', 'Название', 'Сайт', 'Город', 'Директор'],
