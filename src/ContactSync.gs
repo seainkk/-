@@ -629,6 +629,10 @@ function contactSyncComplete_(claim, plan) {
     try { answer.validation = queueWorkbookValidation_(claim.context, state.fileId, { emailSheetId: state.targets.emailSheetId, phoneSheetId: state.targets.phoneSheetId, reason: 'sync_complete' }); }
     catch (error) { answer.validation = { state: 'error', message: 'Контакты разнесены. Подключение валидации требует проверки.' }; }
   } else answer.validation = { state: 'not_configured' };
+  if (typeof queueColdyWorkbookValidation_ === 'function' && typeof emailValidationProvider_ === 'function' && emailValidationProvider_(claim.context) === 'coldy') {
+    try { answer.coldyValidation = queueColdyWorkbookValidation_(claim.context, state.fileId); }
+    catch (error) { answer.coldyValidation = { state: 'error', message: 'Контакты разнесены. Откройте подключение Coldy для проверки настроек.' }; }
+  }
   // A Drive version observed after our own target append can also include a
   // simultaneous native source edit. Re-read the source once at completion,
   // even when the last observed version appears unchanged, before declaring

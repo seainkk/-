@@ -9,7 +9,7 @@
   let preparedImport=null,preparedEpoch=0,preparedPollTimer=null,accessEpoch=0,workspaceRpcQueue=Promise.resolve();
   let preparedJobs=[],preparedJobsLoaded=false,preparedJobsQueued=false,preparedJobsLoading=false;
   let accessKey='',accessReady=false,accessMessage=null,pendingAccessChange=false;
-  let providerSession=null;
+  let providerSession=null,coldySession=null,coldyMailings=null;
   let dashboard=null,dashboardLoading=false,dashboardError=null,lastDashboardAttempt=0,lastDashboardLoaded=0,renderedDashboardKey=null;
   let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0,lastMailingsLoaded=0;
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
@@ -43,10 +43,10 @@
   }
   function renderAccess(){
     $('br-access-panel').hidden=accessReady;$('br-access-title').textContent=busy?'Открываем реестр…':'Для входа нужна закрытая ссылка';$('br-access-message').textContent=accessMessage||(busy?'Проверяем ссылку…':'Откройте полную ссылку, которую вам передал владелец сервиса.');$('br-access-retry').disabled=busy||networkPending>0;
-    const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-provider-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
+    const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-provider-open').hidden=!accessReady;$('br-coldy-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message){
-    accessEpoch++;accessReady=false;accessKey='';closeProviderSettings();preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
+    accessEpoch++;accessReady=false;accessKey='';closeProviderSettings();closeColdySettings();coldyMailings=null;preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
     contactPreview=null;contactPreviewEpoch++;segmentImportDestination=null;segmentReturnPending=null;renderContactPreview();
     pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;
     if(message)notifyEntry('locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
@@ -89,7 +89,7 @@
     $('br-provider-automation-message').textContent=data.needsOwnerSetup?'Включение требует разрешения владельца.':data.installed?'Фоновая обработка подключённых таблиц включена.':'Фоновая обработка подключённых таблиц выключена.';
   }
   async function openProviderSettings(){
-    if(!accessReady||providerSession||gridIsOpen())return;
+    if(!accessReady||providerSession||coldySession||gridIsOpen())return;
     const current={pending:'load',settings:null,automation:null,needsOwnerAuth:false};
     providerSession=current;
     $('br-provider-configured').textContent='';
@@ -156,6 +156,110 @@
     if(!automation)return;
     runProviderAction('automation',automation.installed?'disableContactAutomation':'enableContactAutomation',{},showAutomationState,'br-provider-automation-message');
   }
+  function closeColdySettings(){coldySession=null;$('br-coldy-form').reset();$('br-coldy-key').value='';if($('br-coldy-dialog').open)$('br-coldy-dialog').close();}
+  function renderColdySettings(current=coldySession){
+    if(!current||coldySession!==current)return;const pending=!!current.pending;
+    $('br-coldy-fields').disabled=pending||!current.settings;$('br-coldy-close').disabled=current.pending==='save';$('br-coldy-test').disabled=pending||current.settings?.configured!==true;
+    $('br-coldy-save').disabled=pending||!current.settings;
+  }
+  function showColdySettings(current,data){
+    current.settings=data;$('br-coldy-configured').textContent=data.configured?(data.connected?'Coldy подключён.':'Ключ сохранён. Проверьте подключение.'):'API-ключ ещё не подключён.';
+    $('br-coldy-provider').value=data.emailValidationProvider==='coldy'?'coldy':'promouser';
+  }
+  async function openColdySettings(){
+    if(!accessReady||coldySession||providerSession||gridIsOpen())return;const current={pending:'load',settings:null};coldySession=current;$('br-coldy-message').textContent='Загружаем настройки…';$('br-coldy-configured').textContent='';$('br-coldy-key').value='';$('br-coldy-dialog').showModal();renderColdySettings(current);
+    try{const data=await workspaceRpc('getColdySettings',{});if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='';}}catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
+  }
+  async function saveColdySettings(event){
+    event.preventDefault();const current=coldySession;if(!current?.settings||current.pending)return;
+    const payload={emailValidationProvider:$('br-coldy-provider').value,autoValidateEmails:false};
+    const key=$('br-coldy-key').value.trim();if(key)payload.apiKey=key;$('br-coldy-key').value='';current.pending='save';$('br-coldy-message').textContent='Сохраняем подключение…';renderColdySettings(current);
+    try{const data=await workspaceRpc('configureColdy',payload);if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='Настройки сохранены. Ранее проверенные контакты сохраняют результаты.';if(coldyMailings)coldyMailings.loaded=false;}}
+    catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{delete payload.apiKey;if(coldySession===current){current.pending=null;renderColdySettings(current);}}
+  }
+  async function testColdyConnection(){
+    const current=coldySession;if(!current?.settings?.configured||current.pending)return;current.pending='test';$('br-coldy-message').textContent='Читаем список рассылок…';renderColdySettings(current);
+    try{const data=await workspaceRpc('testColdyConnection',{});if(coldySession===current){current.settings.connected=data.connected===true;$('br-coldy-configured').textContent='Coldy подключён.';$('br-coldy-message').textContent='Подключение подтверждено. Рассылок: '+Number(data.campaignCount||0)+'. Платные проверки не запускались.';}}
+    catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
+  }
+  function coldyMailingsAlive(current){return !!current&&coldyMailings===current&&accessReady&&current.epoch===accessEpoch;}
+  function requestId(){return globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);}
+  function coldyBindingId(binding){return String(binding?.id||binding?.bindingId||'');}
+  function coldyCampaignLabel(campaign){return String(campaign?.name||campaign?.id||'Рассылка')+(campaign?.status?' · '+String(campaign.status):'');}
+  function coldyTimestamp(value){const date=new Date(value);return Number.isFinite(date.getTime())?date.toLocaleString('ru-RU'):'';}
+  function renderColdyBindings(current=coldyMailings){
+    if(!coldyMailingsAlive(current)||current.segmentId!==mailingSegmentId)return;const data=current.data,disabled=!!current.busy,unresolved=!!current.failed&&!!current.step;
+    $('br-coldy-bindings-message').textContent=current.error||(current.busy?current.busyMessage||'Обновляем Coldy…':!data?'Загружаем привязки…':data.configured?'Выберите существующую рассылку Coldy для этого сегмента.':'Сначала сохраните API-ключ через «Подключение Coldy» в шапке.');
+    $('br-coldy-binding-fields').disabled=disabled||unresolved||!data?.configured;$('br-coldy-mailings-refresh').disabled=disabled||!data?.configured;
+    const select=$('br-coldy-campaign'),selected=select.value;select.replaceChildren();const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Выберите рассылку';select.append(placeholder);
+    for(const campaign of data?.campaigns||[]){const option=document.createElement('option');option.value=String(campaign.id);option.textContent=coldyCampaignLabel(campaign);select.append(option);}if(Array.from(select.options).some(option=>option.value===selected))select.value=selected;
+    const list=$('br-coldy-bindings-list');list.replaceChildren();
+    for(const binding of data?.bindings||[]){const id=coldyBindingId(binding),campaign=data.campaigns?.find(item=>String(item.id)===String(binding.campaignId)),row=document.createElement('article');row.className='br-coldy-binding';
+      const title=document.createElement('strong');title.textContent=String(campaign?.name||binding.campaignName||binding.campaignId);row.append(title);
+      const details=document.createElement('p');details.className='br-muted';details.textContent=[binding.includeCompanies?'Компании':null,binding.includeLpr?'ЛПР':null,binding.autoUpload?'Автозагрузка включена':'Ручная загрузка',binding.allowActive?'Разрешена загрузка в активную рассылку':'Только черновик / пауза'].filter(Boolean).join(' · ');row.append(details);
+      const actions=document.createElement('div');actions.className='br-provider-actions';const preview=button('','Предпросмотр загрузки');preview.dataset.coldyPreview=id;preview.disabled=disabled||unresolved;preview.addEventListener('click',()=>previewColdyUpload(id));
+      const resume=button('','Проверить незавершённую загрузку');resume.dataset.coldyResume=id;resume.disabled=disabled||unresolved;resume.addEventListener('click',()=>resumeColdyUpload(id));
+      const edit=button('','Изменить');edit.dataset.coldyEdit=id;edit.disabled=disabled||unresolved;edit.addEventListener('click',()=>{select.value=String(binding.campaignId);$('br-coldy-companies').checked=binding.includeCompanies===true;$('br-coldy-lpr').checked=binding.includeLpr===true;$('br-coldy-autoupload').checked=binding.autoUpload===true;$('br-coldy-active-consent').checked=false;current.editing=true;$('br-coldy-bindings-message').textContent='Измените параметры и сохраните привязку. Разрешение для активной рассылки подтвердите повторно.';select.focus();});
+      const remove=button('','Убрать привязку');remove.dataset.coldyRemove=id;remove.disabled=disabled||unresolved;remove.addEventListener('click',()=>removeColdyBinding(id));actions.append(preview,resume,edit,remove);row.append(actions);list.append(row);
+    }
+    renderColdyUpload(current);
+  }
+  async function loadColdyBindings(segmentId,force=false){
+    let current=coldyMailings;if(!current||current.segmentId!==segmentId||current.epoch!==accessEpoch){current={segmentId,epoch:accessEpoch,data:null,loaded:false,busy:false,error:null,editing:false,preview:null,job:null,step:null,failed:false,removeRequests:new Map()};coldyMailings=current;}
+    if(current.busy||current.loaded&&!force)return;current.busy=true;current.busyMessage='Загружаем привязки Coldy…';renderColdyBindings(current);
+    try{const data=await workspaceRpc('getColdyBindings',{segmentId});if(coldyMailingsAlive(current)){current.data=data;current.loaded=true;current.error=null;}}
+    catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
+  }
+  async function saveColdyBinding(event){
+    event.preventDefault();const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;
+    const values={segmentId:current.segmentId,campaignId:$('br-coldy-campaign').value,includeCompanies:$('br-coldy-companies').checked,includeLpr:$('br-coldy-lpr').checked,autoUpload:$('br-coldy-autoupload').checked,allowActive:$('br-coldy-active-consent').checked};
+    if(!values.campaignId||!values.includeCompanies&&!values.includeLpr){current.error='Выберите рассылку и хотя бы один источник email.';renderColdyBindings(current);return;}
+    const fingerprint=JSON.stringify(values);if(!current.bindingRequest||current.bindingRequest.fingerprint!==fingerprint)current.bindingRequest={fingerprint,payload:{...values,requestId:requestId()}};
+    current.busy=true;current.busyMessage='Сохраняем привязку…';current.error=null;renderColdyBindings(current);
+    try{await workspaceRpc('saveColdyBinding',current.bindingRequest.payload);if(!coldyMailingsAlive(current))return;current.bindingRequest=null;current.editing=false;current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;$('br-coldy-active-consent').checked=false;notice('Привязка Coldy сохранена.');}
+    catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
+  }
+  async function removeColdyBinding(bindingId){
+    const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;const request=current.removeRequests.get(bindingId)||requestId();current.removeRequests.set(bindingId,request);current.busy=true;current.busyMessage='Убираем привязку…';renderColdyBindings(current);
+    try{await workspaceRpc('removeColdyBinding',{segmentId:current.segmentId,bindingId,requestId:request});if(!coldyMailingsAlive(current))return;current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;current.removeRequests.delete(bindingId);current.preview=null;current.job=null;current.step=null;current.failed=false;current.error=null;}
+    catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
+  }
+  function renderColdyUpload(current=coldyMailings){
+    if(!coldyMailingsAlive(current))return;const preview=current.preview,job=current.job,visible=!!preview||!!job||!!current.step;$('br-coldy-upload-preview').hidden=!visible;if(!visible)return;
+    $('br-coldy-upload-title').textContent='Загрузка'+(preview?.campaign?.name?' · '+preview.campaign.name:' в Coldy');const counts=$('br-coldy-upload-counts');counts.replaceChildren();
+    const values=preview?[['К загрузке','eligible'],['Уже загружены','alreadyLoaded'],['Без проверки','notValidated'],['Невалидные / рискованные','invalid'],['Проверить принадлежность','ownershipReview'],['Всего','total']]:[['Создано','created'],['Уже в рассылке','alreadyInCampaign'],['Дубли в Coldy','workspaceDuplicate'],['Чёрный список','blacklist'],['Нужна сверка','uncertain']];
+    for(const [label,key] of values){const item=document.createElement('div'),dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=metricNumber((preview?preview.counts:job?.counts)?.[key]);item.append(dt,dd);counts.append(item);}
+    const sample=$('br-coldy-upload-sample');sample.replaceChildren();for(const item of preview?.sample||[]){const li=document.createElement('li');li.textContent=[item.email,item.company,item.name].filter(Boolean).join(' · ');sample.append(li);}
+    $('br-coldy-upload-warnings').textContent=[...(preview?.warnings||[]),...(job?.warnings||[])].map(String).join(' ');
+    $('br-coldy-upload-message').textContent=current.uploadError||(current.busy?current.busyMessage:job?.state==='complete'?'Загрузка подтверждена. Это не означает, что письма уже отправлены.':job?.state==='needs_review'?'Результат требует сверки. Повторная отправка контактов остановлена.':job?.progress?.label||'Предпросмотр готов. Загрузка начнётся после подтверждения.');
+    $('br-coldy-upload-start').hidden=!!current.step||!!job;$('br-coldy-upload-start').disabled=current.busy||preview?.canUpload!==true;$('br-coldy-upload-retry').hidden=!current.failed;$('br-coldy-upload-retry').disabled=current.busy;$('br-coldy-upload-cancel').disabled=current.busy||current.failed&&!!current.step;
+  }
+  async function previewColdyUpload(bindingId){
+    const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy||current.failed&&current.step)return;current.busy=true;current.busyMessage='Считаем новые валидные email…';current.error=null;current.uploadError=null;current.preview=null;current.job=null;current.step=null;current.failed=false;renderColdyBindings(current);
+    try{const data=await workspaceRpc('previewColdyUpload',{segmentId:current.segmentId,bindingId});if(coldyMailingsAlive(current))current.preview=data;}
+    catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
+  }
+  async function runColdyUpload(retry=false){
+    const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;
+    if(!retry){if(!current.preview?.canUpload)return;current.step={method:'startColdyUpload',payload:{segmentId:current.segmentId,bindingId:current.preview.bindingId,previewToken:current.preview.previewToken,requestId:requestId()}};}
+    if(!current.step)return;current.busy=true;current.failed=false;current.uploadError=null;current.busyMessage='Загружаем только новые контакты…';renderColdyBindings(current);
+    try{let data;while(coldyMailingsAlive(current)){
+        const step=current.step;data=await workspaceRpc(step.method,step.payload);if(!coldyMailingsAlive(current))return;current.job=data;current.preview=null;
+        if(data.state!=='processing'){current.step=null;break;}
+        current.step={method:'continueColdyUpload',payload:{segmentId:current.segmentId,bindingId:data.bindingId||step.payload.bindingId,jobId:data.jobId,requestId:data.requestId||step.payload.requestId}};current.busyMessage=data.progress?.label||'Продолжаем загрузку…';renderColdyBindings(current);await new Promise(resolve=>setTimeout(resolve,450));
+      }}catch(error){if(coldyMailingsAlive(current)){const problem=failure(error);current.uploadError=problem.message;current.failed=true;if(current.step?.method==='startColdyUpload'&&['COLDY_PREVIEW_EXPIRED','COLDY_SOURCE_CHANGED'].includes(problem.code)){current.step=null;current.failed=false;current.preview=null;current.error=problem.message+' Откройте новый предпросмотр.';}}}
+    finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
+  }
+  async function resumeColdyUpload(bindingId){
+    const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;current.busy=true;current.busyMessage='Читаем состояние загрузки…';current.error=null;renderColdyBindings(current);
+    try{const data=await workspaceRpc('getColdyUploadState',{segmentId:current.segmentId,bindingId});if(!coldyMailingsAlive(current))return;current.job=data;current.preview=null;current.uploadError=null;current.failed=false;current.step=data.state==='processing'?{method:'continueColdyUpload',payload:{segmentId:current.segmentId,bindingId,jobId:data.jobId,requestId:data.requestId}}:null;if(data.state==='idle'){current.job=null;current.error='Незавершённых загрузок нет.';}}
+    catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}if(coldyMailingsAlive(current)&&current.step)await runColdyUpload(true);
+  }
+  async function refreshColdyMailings(){
+    const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;current.busy=true;current.busyMessage='Обновляем показатели Coldy…';current.error=null;renderColdyBindings(current);
+    try{const refreshed=await workspaceRpc('refreshColdyMailings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;mailings=await workspaceRpc('getSegmentMailings',{segmentId:current.segmentId});if(coldyMailingsAlive(current)){renderMailings();notice(refreshed.hasMore?'Обновлены следующие '+Number(refreshed.refreshedCampaigns||0)+' рассылок. Нажмите обновление ещё раз, чтобы получить остальные.':'Показатели Coldy обновлены. Проверьте время данных и предупреждения.');}}
+    catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
+  }
   function nativeUrl(id,sheetId){return 'https://docs.google.com/spreadsheets/d/'+encodeURIComponent(id)+'/edit'+(sheetId===undefined?'':'#gid='+encodeURIComponent(sheetId));}
   function notice(message,kind='info',link=null){const node=$('br-notice');node.hidden=!message;node.className='br-notice'+(kind==='error'?' br-error':'');node.replaceChildren();if(message)node.append(document.createTextNode(message));if(link){const anchor=document.createElement('a');anchor.href=nativeUrl(link.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent=link.label||'Открыть созданную базу';node.append(anchor);}}
   function folderUrl(id){return 'https://drive.google.com/drive/folders/'+encodeURIComponent(id);}
@@ -204,7 +308,7 @@
   function requesting(){return networkPending>0||busy||sourceLoading||!!sourceSaving||importing||dashboardLoading||mailingsLoading||segmentSaving||segmentPreviewLoading;}
   // Reading a list must not prevent opening a cached form or typing into it.
   function editingBlocked(){return !accessReady||busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||gridIsOpen();}
-  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0||gridIsOpen()||!!providerSession;}
+  function formIsOpen(){return importOpen||!!segmentEditor||sourceDrafts.size>0||gridIsOpen()||!!providerSession||!!coldySession||!!coldyMailings?.busy||!!coldyMailings?.editing||!!coldyMailings?.preview;}
   function gridIsOpen(){return window.RegistryGrid?.isOpen?.()===true;}
   function workspaceRpc(method,payload){
     const epoch=accessEpoch;
@@ -212,7 +316,7 @@
     const task=workspaceRpcQueue.catch(()=>{}).then(run);workspaceRpcQueue=task.catch(()=>{});return task;
   }
   function openGridWorkbook(id){
-    if(!accessReady||importing||sourceSaving||segmentSaving||segmentEditor)return;
+    if(!accessReady||importing||sourceSaving||segmentSaving||segmentEditor||coldySession||providerSession||coldyMailings?.busy)return;
     if(!window.RegistryGrid?.open){notice('Редактор таблиц ещё загружается. Обновите страницу.','error');return;}
     window.RegistryGrid.open({id,transport:workspaceRpc,onClose:()=>{render();armViewTimer();flushPendingView();}});updateControls();
   }
@@ -378,8 +482,8 @@
     const segment=mailings?.segment||segmentById(mailingSegmentId);$('br-mailings-title').textContent='Рассылки'+(segment?.name?' · '+segment.name:'');$('br-mailings-health').textContent=mailingsError?'Не удалось загрузить экран рассылок. '+mailingsError:mailingsLoading?'Загружаем рассылки…':mailings?.message||'Сервисы ещё не подключены. Показатели появятся после подключения.';
     const totals=$('br-mailings-totals'),services=$('br-mailings-services');totals.replaceChildren();services.replaceChildren();if(!mailings)return;
     function appendMetrics(parent,values,connected){const list=document.createElement('dl');list.className='br-mailing-metrics';for(const entry of [['Отправлено','sent'],['Ответы','replies'],['Лиды','leads']]){const group=document.createElement('div');const label=document.createElement('dt');label.textContent=entry[0];const value=document.createElement('dd');value.textContent=mailingMetric(values?.[entry[1]],connected);group.append(label,value);list.append(group);}parent.append(list);}
-    const totalTitle=document.createElement('h2');totalTitle.textContent='Итого по сегменту';totals.append(totalTitle);appendMetrics(totals,mailings.totals,mailings.state==='connected');
-    for(const service of mailings.services||[]){const block=document.createElement('section');block.className='br-mailing-service';const title=document.createElement('h2');title.textContent=service.name+' · '+(service.channel==='email'?'Email':service.channel==='telegram'?'Telegram':service.channel);block.append(title);const connected=service.state==='connected';const state=document.createElement('p');state.className='br-muted';state.textContent=connected?'Сервис подключён':'Сервис не подключён';block.append(state);appendMetrics(block,service.totals,connected);
+    const totalTitle=document.createElement('h2');totalTitle.textContent='Итого по сегменту';totals.append(totalTitle);appendMetrics(totals,mailings.totals,['connected','partial'].includes(mailings.state));
+    for(const service of mailings.services||[]){const block=document.createElement('section');block.className='br-mailing-service';const title=document.createElement('h2');title.textContent=service.name+' · '+(service.channel==='email'?'Email':service.channel==='telegram'?'Telegram':service.channel);block.append(title);const connected=['connected','partial'].includes(service.state);const state=document.createElement('p');state.className='br-muted';state.textContent=(connected?'Сервис подключён':'Сервис не подключён')+(service.generatedAt?' · Данные: '+coldyTimestamp(service.generatedAt):'')+(service.cached?' · Из кеша':'')+(service.message?' · '+service.message:'');block.append(state);appendMetrics(block,service.totals,connected);
       const wrap=document.createElement('div');wrap.className='br-mailing-table-wrap';const table=document.createElement('table');table.className='br-mailing-table';const head=document.createElement('thead'),hr=document.createElement('tr');for(const name of ['Кампания','Отправлено','Ответы','Лиды']){const th=document.createElement('th');th.scope='col';th.textContent=name;hr.append(th);}head.append(hr);table.append(head);const body=document.createElement('tbody');
       if(connected&&Array.isArray(service.campaigns)&&service.campaigns.length){for(const campaign of service.campaigns){const tr=document.createElement('tr');for(const value of [campaign.name,mailingMetric(campaign.sent,true),mailingMetric(campaign.replies,true),mailingMetric(campaign.leads,true)]){const td=document.createElement('td');td.textContent=String(value??'—');tr.append(td);}body.append(tr);}}else{const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=4;td.className='br-muted';td.textContent=connected?'Пока нет кампаний.':'Кампании появятся после подключения сервиса.';tr.append(td);body.append(tr);}table.append(body);wrap.append(table);block.append(wrap);services.append(block);
     }
@@ -389,7 +493,7 @@
     mailingsLoading=true;lastMailingsAttempt=Date.now();updateControls();renderMailings();const id=mailingSegmentId;
     try{const result=await rpc('getSegmentMailings',{segmentId:id});if(mailingSegmentId===id){mailings=result;mailingsError=null;lastMailingsLoaded=Date.now();}}
     catch(error){if(mailingSegmentId===id)mailingsError=failure(error).message;}
-    finally{mailingsLoading=false;updateControls();if(activeView==='mailings')renderMailings();flushPendingView();}
+    finally{mailingsLoading=false;updateControls();if(activeView==='mailings')renderMailings();flushPendingView();}if(activeView==='mailings'&&mailingSegmentId===id)await loadColdyBindings(id);
   }
   function segmentRecoveryLocked(){return segmentError?.code==='SEGMENT_RECOVERY_REQUIRED';}
   function renderSegmentError(){const node=$('br-segment-error');node.hidden=!segmentError;node.replaceChildren();if(!segmentError)return;node.append(document.createTextNode(segmentError.message));const folderId=folderRecoveryId(segmentError.message),sheetId=importRecoveryId(segmentError.message);if(folderId||sheetId){const link=document.createElement('a');link.href=folderId?folderUrl(folderId):nativeUrl(sheetId);link.target='_blank';link.rel='noopener noreferrer';link.textContent=' Открыть результат в Google Диске';node.append(link);}$('br-segment-reread').hidden=!segmentError;}
@@ -585,7 +689,7 @@
     root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderContactPreview();renderRegistrySections();renderAccess();updateControls();
   }
   function updateControls(){
-    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen();$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen();for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
+    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen();$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()||!!providerSession;for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
     for(const add of root.querySelectorAll('[data-add-source]')){const item=sourceItem(add.dataset.addSource);add.disabled=!readySource(item)||sourceDrafts.has(item.id)||editing||importOpen||!!segmentEditor;}
     for(const analyze of root.querySelectorAll('[data-preview-source]'))analyze.disabled=editing||importOpen||!!segmentEditor;
@@ -623,6 +727,17 @@
   }
   function setView(view,options={}){activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});}
   $('br-access-retry').addEventListener('click',startSharedAccess);$('br-share-copy').addEventListener('click',copySharedLink);
+  $('br-coldy-open').addEventListener('click',openColdySettings);
+  $('br-coldy-close').addEventListener('click',()=>{if(!$('br-coldy-close').disabled){closeColdySettings();flushPendingView();}});
+  $('br-coldy-dialog').addEventListener('cancel',event=>{event.preventDefault();if(!$('br-coldy-close').disabled){closeColdySettings();flushPendingView();}});
+  $('br-coldy-form').addEventListener('submit',saveColdySettings);
+  $('br-coldy-test').addEventListener('click',testColdyConnection);
+  $('br-coldy-binding-form').addEventListener('submit',saveColdyBinding);
+  $('br-coldy-binding-form').addEventListener('change',()=>{if(coldyMailings)coldyMailings.editing=true;});
+  $('br-coldy-mailings-refresh').addEventListener('click',refreshColdyMailings);
+  $('br-coldy-upload-start').addEventListener('click',()=>runColdyUpload());
+  $('br-coldy-upload-retry').addEventListener('click',()=>runColdyUpload(true));
+  $('br-coldy-upload-cancel').addEventListener('click',()=>{if(coldyMailings&&!coldyMailings.busy){coldyMailings.preview=null;coldyMailings.job=null;coldyMailings.step=null;coldyMailings.failed=false;renderColdyBindings();}});
   $('br-provider-open').addEventListener('click',openProviderSettings);
   $('br-provider-close').addEventListener('click',()=>{closeProviderSettings();flushPendingView();});
   $('br-provider-dialog').addEventListener('cancel',(event)=>{event.preventDefault();if(!$('br-provider-close').disabled){closeProviderSettings();flushPendingView();}});

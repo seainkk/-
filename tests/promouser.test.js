@@ -35,7 +35,7 @@ function fixture(options={}) {
   api_:fn=>fn(),authorize_:()=>{if(!allowed)throw coded('OUTSIDE_REGISTRY','Moved');return context;},object_:value=>{if(!value||typeof value!=='object'||Array.isArray(value))throw coded('INVALID_REQUEST','Bad');return value;},id_:value=>{if(typeof value!=='string'||value.length<10)throw coded('INVALID_REQUEST','id');return value;},fail_:(code,message)=>{throw coded(code,message);},registryError_:coded,digest_:value=>crypto.createHash('sha256').update(String(value)).digest('base64url'),
   locked_:fn=>{assert.equal(lock,false,'No recursive global lock');lock=true;calls.locks++;try{return fn();}finally{lock=false;}},
   gridFile_:(id,writable,expected)=>{if(!allowed||![A,B].includes(id)||expected&&expected!==ROOT)throw coded('OUTSIDE_REGISTRY','Outside');return{context,file:{getId:()=>id},canEdit:true};},
-  sourceBasesStorage_:()=>({public:{id:SERVICE},book:service}),SpreadsheetApp:{openById:id=>{if(!books.has(id))throw new Error('Missing book');return books.get(id);},flush(){}},
+  getContactWorkspace_:()=>({targets:{emailSheetId:1,phoneSheetId:2}}),sourceBasesStorage_:()=>({public:{id:SERVICE},book:service}),SpreadsheetApp:{openById:id=>{if(!books.has(id))throw new Error('Missing book');return books.get(id);},flush(){}},
   Utilities:{getUuid:()=>`request-${++seq}-unique`,newBlob:(text,mime,name)=>({text,mime,name,getDataAsString:()=>text})},
   DriveApp:{getFileById:id=>({getBlob:()=>({getDataAsString:()=>files.get(id).body})})},
   Drive:{Files:{get:id=>{if(!files.has(id))throw new Error('Missing file');return plain(files.get(id));},list:()=>({files:[...files.values()].filter(f=>f.mimeType==='application/vnd.google-apps.folder'&&!f.trashed).map(plain)}),create:(meta,blob)=>{const id=`validation_state_${++seq}_123456`;const f={...plain(meta),id,body:blob?.text||''};files.set(id,f);return plain(f);},update:(meta,id,blob)=>{if(options.stateWriteFail&&blob?.name==='validation.json')throw new Error('Storage lost');const file=files.get(id);Object.assign(file,plain(meta));if(blob)file.body=blob.text;calls.fileWrites.push(id);return plain(file);}}},
@@ -47,16 +47,17 @@ function fixture(options={}) {
  function coded(code,message){const e=new Error('['+code+'] '+message);e.registryCode=code;return e;}
  const configure=(extra={})=>c.configurePromouser_({apiKey:KEY,enabled:true,autoPayLimitUsd:0,...extra});
  const queue=(id=A)=>c.queueWorkbookValidation_(context,id,{emailSheetId:1,phoneSheetId:2});
+ const start=(id=A,kind='email')=>{const preview=c.previewPromouserValidation_({id,kind});assert.equal(preview.canStart,true,JSON.stringify(preview));return c.startPromouserValidation_({id,kind,previewToken:preview.previewToken,requestId:`start-${++seq}-unique`});};
  const advance=(id=A)=>c.advanceWorkbookValidation_({id,requestId:`advance-${++seq}-unique`});
  const state=(id=A)=>c.getValidationState_({id});
  const ledger=(id=A)=>JSON.parse(files.get(files.get(id).appProperties.registryValidationStateId).body);
  const writeLedger=(value,id=A)=>{files.get(files.get(id).appProperties.registryValidationStateId).body=JSON.stringify(value);};
  const target=(id=A,kind='Email')=>books.get(id).getSheetByName(kind);
  const col=(name,id=A,kind='Email')=>target(id,kind).getRange(1,1,1,target(id,kind).getLastColumn()).getDisplayValues()[0].indexOf(name)+1;
- return{c,context,properties,books,files,calls,ba,bb,response,configure,queue,advance,state,ledger,writeLedger,target,col,tick:ms=>{now+=ms;},revoke:()=>{allowed=false;},now:()=>now};
+ return{c,context,properties,books,files,calls,ba,bb,response,configure,queue,start,advance,state,ledger,writeLedger,target,col,tick:ms=>{now+=ms;},revoke:()=>{allowed=false;},now:()=>now};
 }
 
-function createAndQuote(f,id=A){f.configure();f.queue(id);f.advance(id);f.advance(id);f.tick(15000);f.advance(id);return f.state(id).jobs[0];}
+function createAndQuote(f,id=A){f.configure();f.queue(id);f.start(id);f.advance(id);f.advance(id);f.tick(15000);f.advance(id);return f.state(id).jobs[0];}
 
 test('settings keep the API key write-only and retain it on an empty password field',()=>{
  const f=fixture();const configured=f.configure();assert.equal(configured.configured,true);assert.equal(configured.enabled,true);assert.equal(JSON.stringify(configured).includes(KEY),false);assert.equal(f.c.configurePromouser_({apiKey:'',enabled:false}).configured,true);assert.equal(f.properties.get('PROMOUSER_API_KEY'),KEY);assert.throws(()=>f.c.configurePromouser_({autoPayLimitUsd:-1}),/INVALID_REQUEST/);assert.throws(()=>f.c.configurePromouser_({apiKey:'bad\nsecret'}),/INVALID_REQUEST/);assert.equal(f.c.configurePromouser_({clearKey:true,enabled:false}).configured,false);
@@ -67,7 +68,7 @@ test('balance probes only the fixed endpoint with a header credential, never que
 });
 
 test('a normal order is a quote-only multipart upload; no force or top-up exists',()=>{
- const f=fixture();f.configure();f.queue();f.advance();f.advance();const call=f.calls.fetch.find(x=>x.url.endsWith('/api/order'));assert.ok(call);assert.equal(call.request.payload.type,'17');assert.equal(call.request.payload.file.text,'a@example.test\n');assert.equal(call.request.payload.force,undefined);assert.equal(f.calls.fetch.some(x=>x.url.includes('topup')||x.url.includes('/api/pay')),false);
+ const f=fixture();f.configure();f.queue();f.start();f.advance();f.advance();const call=f.calls.fetch.find(x=>x.url.endsWith('/api/order'));assert.ok(call);assert.equal(call.request.payload.type,'17');assert.equal(call.request.payload.file.text,'a@example.test\n');assert.equal(call.request.payload.force,undefined);assert.equal(f.calls.fetch.some(x=>x.url.includes('topup')||x.url.includes('/api/pay')),false);
 });
 
 test('status polling enforces 15 seconds and all same-order requests enforce 5 seconds',()=>{
@@ -99,11 +100,11 @@ test('checked global cache populates only new rows without another external orde
 });
 
 test('global pending reservation prevents duplicate provider orders in registry and segment books',()=>{
- const f=fixture({otherEmailRows:[EH,['a@example.test','B','','']]});f.configure();f.queue(A);f.queue(B);f.advance(A);f.advance(A);f.advance(B);assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/order')).length,1);assert.equal(f.state(B).jobs[0].state,'waiting_shared');
+ const f=fixture({otherEmailRows:[EH,['a@example.test','B','','']]});f.configure();f.queue(A);f.queue(B);f.start(A);f.start(B);f.advance(A);f.advance(A);f.advance(B);assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/order')).length,1);assert.equal(f.state(B).jobs[0].state,'waiting_shared');
 });
 
 test('lost create acknowledgements never resend the contact batch',()=>{
- const f=fixture({transport:({url,request,response})=>{if(url.endsWith('/balance'))return response({balance:'5'});if(url.endsWith('/order'))throw new Error('connection lost AFTER create; token '+KEY);throw new Error('unexpected');}});f.configure();f.queue();f.advance();const state=f.advance();assert.equal(state.jobs[0].state,'creation_uncertain');for(let i=0;i<3;i++){f.tick(60000);f.advance();}assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/order')).length,1);assert.equal(JSON.stringify(f.state()).includes(KEY),false);
+ const f=fixture({transport:({url,request,response})=>{if(url.endsWith('/balance'))return response({balance:'5'});if(url.endsWith('/order'))throw new Error('connection lost AFTER create; token '+KEY);throw new Error('unexpected');}});f.configure();f.queue();f.start();f.advance();const state=f.advance();assert.equal(state.jobs[0].state,'creation_uncertain');for(let i=0;i<3;i++){f.tick(60000);f.advance();}assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/order')).length,1);assert.equal(JSON.stringify(f.state()).includes(KEY),false);
 });
 
 test('lost payment acknowledgements poll the same order and never repeat the charge',()=>{
@@ -115,7 +116,7 @@ test('credential changes pause existing jobs rather than paying them under anoth
 });
 
 test('a missing initial key binds only at first dispatch after configuration',()=>{
- const f=fixture();f.queue();assert.equal(f.ledger().jobs[0].credentialHash,'');f.configure();f.advance();f.advance();assert.equal(f.state().jobs[0].state,'awaiting_quote');assert.equal(f.ledger().jobs[0].credentialHash,f.c.digest_(KEY));
+ const f=fixture();f.queue();assert.equal(f.ledger().jobs[0].credentialHash,'');f.configure();f.start();f.advance();f.advance();assert.equal(f.state().jobs[0].state,'awaiting_quote');assert.equal(f.ledger().jobs[0].credentialHash,f.c.digest_(KEY));
 });
 
 test('phone batches stay in one country and unsupported usernames or landlines are not sent',()=>{
@@ -169,7 +170,7 @@ test('full paid email lifecycle writes only new validation columns and preserves
 test('a shared completed result propagates to another workbook without a second provider order',()=>{
  let paid=false;const f=fixture({otherEmailRows:[EH,['a@example.test','B','','']],transport:({url,request,response})=>{
   if(url.endsWith('/balance'))return response({balance:'10'});if(url.endsWith('/order'))return response({order_id:55,type:17});if(url.includes('/status?'))return response(paid?{order_id:55,status:'ready_paid',cost:'0.5',result:'https://promouser.com/results/test/55.txt'}:{order_id:55,status:'not_ready_unpaid',cost:'0.5'});if(url.endsWith('/pay')){paid=true;return response({status:'success',order_id:55,charged:'0.5',balance:'9.5'});}if(url.includes('/results/'))return response('email,result,provider\na@example.test,valid,Shared');throw new Error('unexpected');
- }});f.configure();f.queue(A);f.queue(B);f.advance(A);f.advance(A);f.advance(B);assert.equal(f.state(B).jobs[0].state,'waiting_shared');f.tick(15000);f.advance(A);const j=f.state(A).jobs[0];f.tick(5000);f.c.payValidationOrder_({id:A,jobId:j.jobId,requestId:'shared-pay-once',expectedCostUsd:0.5});f.tick(15000);f.advance(A);f.tick(5000);f.advance(A);f.advance(B);assert.equal(f.state(B).jobs[0].state,'complete_shared');assert.equal(f.target(B).at(2,f.col('Валидация',B)).value,'Валиден');assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/order')).length,1);assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/pay')).length,1);
+ }});f.configure();f.queue(A);f.queue(B);f.start(A);f.start(B);f.advance(A);f.advance(A);f.advance(B);assert.equal(f.state(B).jobs[0].state,'waiting_shared');f.tick(15000);f.advance(A);const j=f.state(A).jobs[0];f.tick(5000);f.c.payValidationOrder_({id:A,jobId:j.jobId,requestId:'shared-pay-once',expectedCostUsd:0.5});f.tick(15000);f.advance(A);f.tick(5000);f.advance(A);f.advance(B);assert.equal(f.state(B).jobs[0].state,'complete_shared');assert.equal(f.target(B).at(2,f.col('Валидация',B)).value,'Валиден');assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/order')).length,1);assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/pay')).length,1);
 });
 
 test('changing the contact while the result runs does not apply a stale verdict to the new value',()=>{
@@ -181,7 +182,7 @@ test('results with missing contacts remain review-only and a later sync never bu
 });
 
 test('an unpaid cancelled batch releases its own global reservation so another workbook can continue',()=>{
- const f=fixture({otherEmailRows:[EH,['a@example.test','B','','']]});const j=createAndQuote(f);f.queue(B);f.advance(B);assert.equal(f.state(B).jobs[0].state,'waiting_shared');f.target().put(2,1,'');f.tick(15000);f.advance(A);assert.equal(f.state(A).jobs[0].state,'cancelled');f.advance(B);assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/order')).length,2);assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/pay')).length,0);
+ const f=fixture({otherEmailRows:[EH,['a@example.test','B','','']]});const j=createAndQuote(f);f.queue(B);f.advance(B);assert.equal(f.state(B).jobs[0].state,'queued');assert.equal(f.c.previewPromouserValidation_({id:B,kind:'email'}).canStart,false);f.target().put(2,1,'');f.tick(15000);f.advance(A);assert.equal(f.state(A).jobs[0].state,'cancelled');f.start(B);f.advance(B);assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/order')).length,2);assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/api/pay')).length,0);
 });
 
 test('existing Telegram provider columns and legacy email report results are already checked even without our status column',()=>{
@@ -213,7 +214,7 @@ test('stale automatic quotes are refreshed and a new amount above the cap is not
 });
 
 test('the five-minute worker can finish a fresh automatic quote in a bounded second operation outside locks',()=>{
- const f=fixture();f.configure({autoPayLimitUsd:1});f.queue();f.advance();f.advance();f.tick(15000);let slept=0;f.c.Utilities.sleep=ms=>{assert.ok(ms>0&&ms<=5000);slept+=ms;f.tick(ms);};const before=f.calls.fetch.length;f.advance();assert.equal(f.calls.fetch.length-before,2);assert.equal(f.calls.fetch.at(-2).url.includes('/status?'),true);assert.equal(f.calls.fetch.at(-1).url.endsWith('/pay'),true);assert.equal(slept,5000);assert.equal(f.state().jobs[0].state,'checking');
+ const f=fixture();f.configure({autoPayLimitUsd:1});f.queue();f.start();f.advance();f.advance();f.tick(15000);let slept=0;f.c.Utilities.sleep=ms=>{assert.ok(ms>0&&ms<=5000);slept+=ms;f.tick(ms);};const before=f.calls.fetch.length;f.advance();assert.equal(f.calls.fetch.length-before,2);assert.equal(f.calls.fetch.at(-2).url.includes('/status?'),true);assert.equal(f.calls.fetch.at(-1).url.endsWith('/pay'),true);assert.equal(slept,5000);assert.equal(f.state().jobs[0].state,'checking');
 });
 
 test('manual stale consent with an unchanged quote advances safely on the next operation',()=>{
@@ -221,15 +222,15 @@ test('manual stale consent with an unchanged quote advances safely on the next o
 });
 
 test('disabling validation during a bounded payment wait prevents the charge',()=>{
- const f=fixture();f.configure({autoPayLimitUsd:1});f.queue();f.advance();f.advance();f.tick(15000);f.c.Utilities.sleep=ms=>{f.tick(ms);f.c.configurePromouser_({enabled:false});};f.advance();assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/pay')).length,0);assert.equal(f.state().state,'disabled');
+ const f=fixture();f.configure({autoPayLimitUsd:1});f.queue();f.start();f.advance();f.advance();f.tick(15000);f.c.Utilities.sleep=ms=>{f.tick(ms);f.c.configurePromouser_({enabled:false});};f.advance();assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/pay')).length,0);assert.equal(f.state().state,'disabled');
 });
 
 test('a contact changed during the bounded wait is not charged as the old contact',()=>{
- const f=fixture();f.configure({autoPayLimitUsd:1});f.queue();f.advance();f.advance();f.tick(15000);f.c.Utilities.sleep=ms=>{f.tick(ms);f.target().put(2,1,'changed-during-wait@example.test');};f.advance();assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/pay')).length,0);assert.equal(f.state().jobs[0].state,'cancelled');
+ const f=fixture();f.configure({autoPayLimitUsd:1});f.queue();f.start();f.advance();f.advance();f.tick(15000);f.c.Utilities.sleep=ms=>{f.tick(ms);f.target().put(2,1,'changed-during-wait@example.test');};f.advance();assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/pay')).length,0);assert.equal(f.state().jobs[0].state,'cancelled');
 });
 
 test('automatic hints distinguish manual payment, cached applications and explicitly budgeted payment',()=>{
- const f=fixture();const state={jobs:[{state:'awaiting_payment',cost:1,lastRequestAt:f.now(),lastStatusAt:f.now()}]};assert.equal(f.c.pvAutomaticHint_(state,{key:KEY,enabled:true,autoPayLimitUsd:0}).canAutoAdvance,false);assert.equal(f.c.pvAutomaticHint_(state,{key:KEY,enabled:true,autoPayLimitUsd:5}).canAutoAdvance,true);assert.equal(f.c.pvAutomaticHint_({jobs:[],pendingApplications:5},{key:KEY,enabled:true,autoPayLimitUsd:0}).canAutoAdvance,true);assert.equal(f.c.pvAutomaticHint_({jobs:[],pendingApplications:5},{key:KEY,enabled:false,autoPayLimitUsd:5}).canAutoAdvance,false);
+ const f=fixture();const state={jobs:[{state:'awaiting_payment',manualStartApproved:true,cost:1,lastRequestAt:f.now(),lastStatusAt:f.now()}]};assert.equal(f.c.pvAutomaticHint_(state,{key:KEY,enabled:true,autoPayLimitUsd:0}).canAutoAdvance,false);assert.equal(f.c.pvAutomaticHint_(state,{key:KEY,enabled:true,autoPayLimitUsd:5}).canAutoAdvance,true);assert.equal(f.c.pvAutomaticHint_({jobs:[],pendingApplications:5},{key:KEY,enabled:true,autoPayLimitUsd:0}).canAutoAdvance,true);assert.equal(f.c.pvAutomaticHint_({jobs:[],pendingApplications:5},{key:KEY,enabled:false,autoPayLimitUsd:5}).canAutoAdvance,false);
 });
 
 test('disabled and unconfigured background validation reads no target rows and performs no writes or HTTP',()=>{
@@ -242,4 +243,98 @@ test('settled background validation skips scanning while an explicit command sti
 
 test('background validation continues cached result applications even with no unfinished jobs',()=>{
  const rows=[[...EH,'Валидация'],...Array.from({length:1005},()=>['a@example.test','Company','','','']),['a@example.test','Company','','','Валиден']];const f=fixture({emailRows:rows});f.configure();f.c.getPromouserBalance_();f.queue();assert.equal(f.state().jobs.length,0);assert.equal(f.ledger().pendingApplications,5);assert.equal(f.target().at(1006,f.col('Валидация')).value,'');const calls=f.calls.fetch.length;f.c.processWorkbookValidation_(f.context,A);assert.equal(f.target().at(1006,f.col('Валидация')).value,'Валиден');assert.equal(f.ledger().pendingApplications,0);assert.equal(f.calls.fetch.length,calls);
+});
+
+test('new email and phone queues require manual preview and start even with the five-dollar limit',()=>{
+ const f=fixture({phoneRows:[PH,['+79990000001','A','','','','','Телефон']]});f.configure({autoPayLimitUsd:5});f.queue();
+ assert.deepEqual(plain(f.state().pendingCounts),{email:1,telegram:1});assert.equal(f.state().manualStartRequired,true);assert.equal(f.state().canAutoAdvance,false);
+ for(let i=0;i<3;i++){f.advance();f.tick(60000);}assert.equal(f.calls.fetch.length,0);
+ const writes=f.calls.writes.length,fileWrites=f.calls.fileWrites.length;f.c.queueWorkbookValidation_=()=>assert.fail('Unapproved worker must stay idle');f.c.pvTargets_=()=>assert.fail('Unapproved worker must not read targets');f.c.processWorkbookValidation_(f.context,A);assert.equal(f.calls.writes.length,writes);assert.equal(f.calls.fileWrites.length,fileWrites);assert.equal(f.calls.fetch.length,0);
+});
+
+test('phone preview is local, deduplicates aliases and distinguishes unsupported and already checked contacts',()=>{
+ const f=fixture({emailRows:[EH],phoneRows:[[...PH,'Валидация'],['+79990000001','A','','','','','Телефон',''],['8 (999) 000-00-01','A','','','','','Телефон',''],['+77010000001','B','','','','','Телефон',''],['+74951234567','D','','','','','Телефон',''],['','E','','','','@some_person','Telegram',''],['not a phone','F','','','','','Телефон',''],['+79990000002','G','','','','','Телефон','Telegram не подтверждён']]});f.configure();const writes=f.calls.writes.length;
+ const result=f.c.previewPhoneValidation_({id:A});assert.deepEqual(plain(result.counts),{new:2,checked:1,cached:0,inProgress:0,unknownCountry:1,telegramWithoutPhone:1,invalid:1});assert.equal(result.canStart,true);assert.deepEqual(plain(result.sample.map(item=>item.country).sort()),['KZ','RU']);assert.equal(f.calls.fetch.length,0);assert.equal(f.calls.writes.length,writes,'preview does not add headers or edit cells');assert.equal(f.state().jobs.length,0,'preview does not queue paid work');
+});
+
+test('phone start approves its exact contact set only, and duplicate requests cannot approve later phones or email',()=>{
+ const f=fixture({phoneRows:[PH,['+79990000001','A','','','','','Телефон']]});f.configure({autoPayLimitUsd:5});const preview=f.c.previewPhoneValidation_({id:A});const input={id:A,previewToken:preview.previewToken,requestId:'phone-explicit-start'};
+ let state=f.c.startPhoneValidation_(input);assert.equal(state.jobs.find(job=>job.kind==='telegram').manualStartRequired,false);assert.equal(state.jobs.find(job=>job.kind==='email').manualStartRequired,true);
+ f.target(A,'Телефоны').put(3,1,'+79990000002');f.advance();f.c.startPhoneValidation_(input);f.c.startPhoneValidation_({...input,requestId:'same-preview-other-id'});f.advance();
+ const orders=f.calls.fetch.filter(call=>call.url.endsWith('/api/order'));assert.equal(orders.length,1);assert.equal(orders[0].request.payload.type,'6');assert.equal(orders[0].request.payload.file.text,'79990000001\n');state=f.state();assert.equal(state.pendingCounts.telegram,1);assert.equal(state.pendingCounts.email,1);assert.equal(f.ledger().jobs.find(job=>job.contacts.some(contact=>contact.value==='+79990000002')).manualStartApproved,false);
+});
+
+test('preview rejects stale source contacts, source fields, target IDs, expiry, key changes and cross-book reuse',()=>{
+ const changes=[f=>f.target().put(3,1,'new@example.test'),f=>f.target().put(2,1,'changed@example.test'),f=>f.target().put(2,2,'Changed company'),f=>{const state=f.ledger();state.targets={emailSheetId:2,phoneSheetId:1};f.writeLedger(state);},f=>f.tick(600001),f=>f.c.configurePromouser_({apiKey:'rotated-fixture-key'})];
+ for(const change of changes){const f=fixture();f.configure();const p=f.c.previewPromouserValidation_({id:A,kind:'email'});change(f);assert.throws(()=>f.c.startPromouserValidation_({id:A,kind:'email',previewToken:p.previewToken,requestId:'stale-explicit-start'}),/PV_PREVIEW_STALE/);assert.equal(f.calls.fetch.length,0);assert.equal(f.ledger().jobs.some(job=>job.manualStartApproved),false);}
+ const f=fixture();f.configure();const p=f.c.previewPhoneValidation_({id:A});assert.throws(()=>f.c.startPhoneValidation_({id:B,previewToken:p.previewToken,requestId:'cross-book-start'}),/PV_PREVIEW_STALE/);assert.equal(f.calls.fetch.length,0);
+});
+
+test('a started request recovers after its preview expires or is pruned without approving new contacts',()=>{
+ const f=fixture();f.configure();const preview=f.c.previewPromouserValidation_({id:A,kind:'email'}),input={id:A,kind:'email',previewToken:preview.previewToken,requestId:'recover-start-request'};f.c.startPromouserValidation_(input);f.tick(600001);f.target().put(3,1,'later@example.test');f.c.previewPromouserValidation_({id:A,kind:'email'});f.c.startPromouserValidation_(input);assert.equal(f.ledger().jobs.length,1);assert.deepEqual(f.ledger().jobs[0].contacts.map(contact=>contact.value),['a@example.test']);assert.throws(()=>f.c.startPromouserValidation_({...input,kind:'telegram'}),/PV_PREVIEW_STALE/);assert.equal(f.calls.fetch.length,0);
+});
+
+test('manual start uses cached outcomes and checked duplicates without buying another validation',()=>{
+ const f=fixture({emailRows:[[...EH,'Валидация'],['a@example.test','A','','',''],['a@example.test','B','','','Невалиден'],['b@example.test','C','','',''],['c@example.test','D','','','']]});f.configure();f.c.locked_(()=>{const cache=f.c.pvCache_(f.context,true),map=f.c.pvCacheRead_(cache);f.c.pvCachePut_(f.context,cache,map,f.c.pvKey_('email','b@example.test'),'email',{status:'Неизвестно',raw:'unknown',validator:'coldy',verificationBatchId:'coldy-batch-17',orderId:''});f.c.pvCacheFlush_(f.context,cache);});
+ const p=f.c.previewPromouserValidation_({id:A,kind:'email'});assert.deepEqual(plain(p.counts),{new:1,checked:1,cached:1,inProgress:0,unknownCountry:0,telegramWithoutPhone:0,invalid:0});f.c.startPromouserValidation_({id:A,kind:'email',previewToken:p.previewToken,requestId:'cache-aware-start'});assert.deepEqual(f.ledger().jobs.map(job=>job.contacts.map(contact=>contact.value)),[['c@example.test']]);assert.equal(f.target().at(2,f.col('Валидация')).value,'Невалиден');assert.equal(f.target().at(4,f.col('Валидация')).value,'Неизвестно');assert.equal(f.calls.fetch.length,0);
+});
+
+test('legacy submitted unpaid jobs cannot use the automatic limit until their own explicit payment approval',()=>{
+ const f=fixture({phoneRows:[PH,['+79990000001','A','','','','','Телефон']]});const job=createAndQuote(f);const ledger=f.ledger();delete ledger.jobs.find(item=>item.jobId===job.jobId).manualStartApproved;delete ledger.jobs.find(item=>item.jobId===job.jobId).startApproval;f.writeLedger(ledger);f.c.configurePromouser_({autoPayLimitUsd:5});f.tick(15000);f.advance();assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/pay')).length,0);assert.equal(f.state().jobs.find(item=>item.jobId===job.jobId).manualStartRequired,true);f.tick(5000);f.c.payValidationOrder_({id:A,jobId:job.jobId,requestId:'legacy-own-payment',expectedCostUsd:0.5});assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/pay')).length,1);assert.equal(f.ledger().jobs.find(item=>item.kind==='telegram').manualStartApproved,false);
+});
+
+test('already paid legacy jobs continue to fetch and apply results without a new start',()=>{
+ let paid=false;const f=fixture({transport:({url,request,response})=>{if(url.endsWith('/balance'))return response({balance:'10'});if(url.endsWith('/order'))return response({order_id:107,type:17});if(url.includes('/status?'))return response(paid?{order_id:107,status:'ready_paid',cost:'0.5',result:'https://promouser.com/results/test/107.txt'}:{order_id:107,status:'not_ready_unpaid',cost:'0.5'});if(url.endsWith('/pay')){paid=true;return response({status:'success',order_id:107,charged:'0.5',balance:'9.5'});}if(url.includes('/results/'))return response('email,result\na@example.test,invalid');throw new Error('unexpected');}});const job=createAndQuote(f);f.tick(5000);f.c.payValidationOrder_({id:A,jobId:job.jobId,requestId:'paid-legacy-payment',expectedCostUsd:0.5});const ledger=f.ledger();delete ledger.jobs[0].manualStartApproved;f.writeLedger(ledger);f.tick(15000);f.c.processWorkbookValidation_(f.context,A);f.tick(5000);f.c.processWorkbookValidation_(f.context,A);assert.equal(f.state().jobs[0].state,'complete');assert.equal(f.target().at(2,f.col('Валидация')).value,'Невалиден');assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/order')).length,1);assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/pay')).length,1);
+});
+
+test('Coldy preference cancels only safe unsent email work and never starts another Promouser email order',()=>{
+ const f=fixture({phoneRows:[PH,['+79990000001','A','','','','','Телефон']]});f.configure();f.queue();const email=f.ledger().jobs.find(job=>job.kind==='email');f.c.locked_(()=>{const cache=f.c.pvCache_(f.context,true),map=f.c.pvCacheRead_(cache);f.c.pvCacheReserve_(cache,map,email.contacts[0].key,'email',{fileId:A,jobId:email.jobId,keyHash:f.c.digest_(KEY)});f.c.pvCacheFlush_(f.context,cache);});f.c.emailValidationProvider_=()=> 'coldy';f.queue();assert.equal(f.state().jobs.find(job=>job.kind==='email').state,'cancelled');assert.equal(f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[email.contacts[0].key],undefined);assert.equal(f.state().pendingCounts.email,0);assert.equal(f.state().pendingCounts.telegram,1);assert.equal(f.c.previewPromouserValidation_({id:A,kind:'email'}).canStart,false);f.advance();assert.equal(f.calls.fetch.length,0);
+ const active=fixture();active.configure();active.queue();const ledger=active.ledger();ledger.lease={token:'active',until:active.now()+10000};active.writeLedger(ledger);active.c.emailValidationProvider_=()=> 'coldy';active.queue();assert.equal(active.state().jobs[0].state,'queued','an active lease is not cancelled underneath an in-flight worker');
+});
+
+test('the last dispatch guard stops a preferred-provider change after manual start and releases its reservation',()=>{
+ const f=fixture();f.configure();f.queue();f.start();f.advance();const original=f.c.gridFile_;let switched=false;f.c.gridFile_=(...args)=>{const result=original(...args);if(f.ledger().jobs[0].state==='creating'){switched=true;f.c.emailValidationProvider_=()=> 'coldy';}return result;};f.advance();assert.equal(switched,true);assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/order')).length,0);assert.equal(f.state().jobs[0].state,'cancelled');assert.equal(f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[f.c.pvKey_('email','a@example.test')],undefined);
+});
+
+test('shared cache retains Coldy provenance and never represents a Coldy batch as a Promouser order',()=>{
+ const f=fixture({emailRows:[[...EH,'Провайдер'],['a@example.test','A','','','Known mailbox provider']]});f.configure();f.c.locked_(()=>{const cache=f.c.pvCache_(f.context,true),map=f.c.pvCacheRead_(cache);f.c.pvCachePut_(f.context,cache,map,f.c.pvKey_('email','a@example.test'),'email',{status:'Валиден',provider:'',raw:'valid',validator:'coldy',verificationBatchId:'batch-abc',orderId:'must-not-be-a-promouser-order',review:true});f.c.pvCacheFlush_(f.context,cache);});const cached=f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[f.c.pvKey_('email','a@example.test')].result;assert.equal(cached.validator,'coldy');assert.equal(cached.verificationBatchId,'batch-abc');assert.equal(cached.review,true);assert.equal(cached.orderId,'');f.queue();assert.equal(f.target().at(2,f.col('Заказ Promouser')).value,'');assert.equal(f.target().at(2,f.col('Валидатор')).value,'coldy');assert.equal(f.target().at(2,f.col('Проверка Coldy')).value,'batch-abc');assert.equal(f.target().at(2,f.col('Провайдер')).value,'Known mailbox provider');assert.equal(f.state().jobs.length,0);assert.equal(f.calls.fetch.length,0);
+});
+
+test('a completed ambiguous provider result is not offered as new manual work',()=>{
+ const f=fixture({result:'email,result\nother@example.test,valid'});const job=createAndQuote(f);const state=f.ledger();state.jobs[0].state='result_pending';state.jobs[0].resultUrl='https://promouser.com/results/test/review.txt';state.jobs[0].orderId='80';f.writeLedger(state);f.tick(5000);f.advance();assert.equal(f.state().jobs[0].state,'result_review');const preview=f.c.previewPromouserValidation_({id:A,kind:'email'});assert.equal(preview.counts.new,0);assert.equal(preview.counts.inProgress,1);assert.equal(preview.canStart,false);assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/order')).length,1);
+});
+
+test('the background provider switch releases only its unsent reservation without scanning targets',()=>{
+ const f=fixture();f.configure();f.queue();const job=f.ledger().jobs[0];f.c.locked_(()=>{const cache=f.c.pvCache_(f.context,true),map=f.c.pvCacheRead_(cache);f.c.pvCacheReserve_(cache,map,job.contacts[0].key,'email',{fileId:A,jobId:job.jobId});f.c.pvCacheFlush_(f.context,cache);});f.c.emailValidationProvider_=()=> 'coldy';f.c.queueWorkbookValidation_=()=>assert.fail('No queue rescan on provider switch');f.c.pvTargets_=()=>assert.fail('No target reads on provider switch');f.c.processWorkbookValidation_(f.context,A);assert.equal(f.state().jobs[0].state,'cancelled');assert.equal(f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[job.contacts[0].key],undefined);assert.equal(f.calls.fetch.length,0);
+});
+
+test('a late provider acknowledgement cannot delete the lease of a newer worker',()=>{
+ const f=fixture({transport:({url,response})=>{if(url.endsWith('/balance'))return response({balance:'10'});if(url.endsWith('/order')){f.tick(120001);const state=f.ledger();state.lease={token:'new-worker-token',until:f.now()+120000};f.writeLedger(state);return response({order_id:55,type:17});}throw new Error('unexpected');}});f.configure();f.queue();f.start();f.advance();assert.throws(()=>f.advance(),/PV_UNCERTAIN/);assert.equal(f.ledger().lease.token,'new-worker-token');assert.equal(f.ledger().jobs[0].state,'creating');assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/order')).length,1);
+});
+
+test('a credential change during result download pauses the old order without writing its result',()=>{
+ let paid=false;const f=fixture({transport:({url,response})=>{if(url.endsWith('/balance'))return response({balance:'10'});if(url.endsWith('/order'))return response({order_id:205,type:17});if(url.includes('/status?'))return response(paid?{order_id:205,status:'ready_paid',cost:'0.5',result:'https://promouser.com/results/test/205.txt'}:{order_id:205,status:'not_ready_unpaid',cost:'0.5'});if(url.endsWith('/pay')){paid=true;return response({status:'success',order_id:205,charged:'0.5'});}if(url.includes('/results/')){f.c.configurePromouser_({apiKey:'changed-during-download'});return response('email,result\na@example.test,valid');}throw new Error('unexpected');}});const job=createAndQuote(f);f.tick(5000);f.c.payValidationOrder_({id:A,jobId:job.jobId,requestId:'before-key-change-pay',expectedCostUsd:0.5});f.tick(15000);f.advance();f.tick(5000);f.advance();assert.equal(f.state().jobs[0].state,'credential_changed');assert.equal(f.state().jobs[0].orderId,'205');assert.equal(f.target().at(2,f.col('Валидация')).value,'Ожидает проверки');assert.equal(f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[f.c.pvKey_('email','a@example.test')].result,null);
+});
+
+test('manual phone validation writes detailed Telegram data while preserving user campaign columns',()=>{
+ let paid=false;const f=fixture({emailRows:[EH],phoneRows:[[...PH,'Рассылка'],['+79990000001','A','','','','','Телефон','Не менять']],transport:({url,request,response})=>{if(url.endsWith('/balance'))return response({balance:'10'});if(url.endsWith('/order')){assert.equal(request.payload.type,'6');return response({order_id:306,type:6});}if(url.includes('/status?'))return response(paid?{order_id:306,status:'ready_paid',cost:'0.5',result:'https://promouser.com/results/test/306.txt'}:{order_id:306,status:'not_ready_unpaid',cost:'0.5'});if(url.endsWith('/pay')){paid=true;return response({status:'success',order_id:306,charged:'0.5'});}if(url.includes('/results/'))return response('phone\tID_TG\tNickname_TG\tActive_days_ago\n79990000001\t12345\tperson_test\t30');throw new Error('unexpected');}});f.configure({autoPayLimitUsd:5});f.queue();f.advance();assert.equal(f.calls.fetch.length,0);f.start(A,'telegram');f.advance();f.advance();f.tick(15000);f.advance();f.tick(5000);f.advance();f.tick(15000);f.advance();f.tick(5000);f.advance();const phone=f.target(A,'Телефоны');assert.equal(phone.at(2,f.col('Валидация',A,'Телефоны')).value,'Telegram: активен');assert.equal(phone.at(2,f.col('ID_TG',A,'Телефоны')).value,'12345');assert.equal(phone.at(2,f.col('Nickname_TG',A,'Телефоны')).value,'person_test');assert.equal(phone.at(2,f.col('Active_days_ago',A,'Телефоны')).value,'30');assert.equal(phone.at(2,f.col('Для Telegram',A,'Телефоны')).value,'Да');assert.equal(phone.at(2,8).value,'Не менять');assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/pay')).length,1);
+});
+
+test('a later imported exclusion adds permanent review without replacing an earlier valid cached verdict or checked rows',()=>{
+ const validRaw='provider-valid-original';const history='legacy-history:v1:'+JSON.stringify({validation:'valid',work:['Нецелевой'],conflict:false,source:['old source']});
+ const f=fixture({emailRows:[[...EH,'Валидация','Дата проверки','Результат проверки','Провайдер','Валидатор','Проверка Coldy'],['a@example.test','Old company','','','Валиден','2025-02-03',validRaw,'Yandex','coldy','old-batch']],otherEmailRows:[[...EH,'Валидация','Дата проверки','Результат проверки','Провайдер','Валидатор'],['a@example.test','New company','','','Проверить историю контакта','2026-04-05',history,'Other','источник']]});f.configure();f.target().put(2,5,'Валиден','old user note');f.queue(A);const key=f.c.pvKey_('email','a@example.test'),before=f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[key].result;const writes=f.calls.writes.length;f.queue(B);let cached=f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[key].result;assert.equal(cached.review,true);assert.deepEqual({...plain(cached),review:false},plain(before));assert.equal(f.target(A).at(2,5).value,'Валиден');assert.equal(f.target(A).at(2,5).note,'old user note');assert.equal(f.target(B).at(2,5).value,'Проверить историю контакта');assert.equal(f.target(B).at(2,7).value,history);assert.equal(f.calls.writes.slice(writes).filter(call=>(call.id===A||call.id===B)&&call.requests).length,0,'completed rows are never rewritten');
+ f.target(B).put(3,1,'a@example.test');f.target(B).put(3,2,'New segment contact');f.queue(B);assert.equal(f.target(B).at(3,f.col('Валидация',B)).value,'Проверить историю контакта');assert.equal(f.target(B).at(3,f.col('Дата проверки',B)).value,'2025-02-03');assert.equal(f.target(B).at(3,f.col('Результат проверки',B)).value,validRaw);assert.equal(f.target(B).at(3,f.col('Провайдер',B)).value,'Yandex');assert.equal(f.target(B).at(3,f.col('Валидатор',B)).value,'coldy');assert.equal(f.target(B).at(3,f.col('Проверка Coldy',B)).value,'old-batch');assert.equal(f.target(B).at(3,f.col('Заказ Promouser',B)).value,'');f.queue(A);cached=f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[key].result;assert.equal(cached.review,true,'an old clean row cannot remove a later exclusion');assert.equal(cached.status,'Валиден');assert.equal(f.calls.fetch.length,0);assert.equal(f.state(B).jobs.length,0);
+});
+
+test('history review is detected from work, conflicts and the explicit review status without treating clean validation history as review',()=>{
+ const cases=[{status:'Валиден',raw:'legacy-history:v1:'+JSON.stringify({validation:'valid',work:[],conflict:false}),review:false},{status:'Валиден',raw:'legacy-history:v1:'+JSON.stringify({validation:'valid',work:['Рассылка'],conflict:false}),review:true},{status:'Валиден',raw:'legacyhistory:v1:'+JSON.stringify({validation:'valid',work:[],conflict:true}),review:true},{status:'Проверить историю контакта',raw:'an old annotation',review:true},{status:'Валиден',raw:'legacy-history:v1:{damaged',review:true}];
+ for(const item of cases){const f=fixture({emailRows:[[...EH,'Валидация','Результат проверки'],['a@example.test','A','','',item.status,item.raw]]});f.configure();f.queue();assert.equal(f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[f.c.pvKey_('email','a@example.test')].result.review,item.review);assert.equal(f.target().at(2,5).value,item.status);assert.equal(f.calls.fetch.length,0);}
+});
+
+test('an exclusion later in the same worksheet supersedes an earlier cached application without rewriting completed contacts',()=>{
+ const history='legacy-history:v1:'+JSON.stringify({work:['Фильтр'],conflict:false});const f=fixture({emailRows:[[...EH,'Валидация','Результат проверки'],['a@example.test','New','','','', ''],['a@example.test','Imported','','','Проверить историю контакта',history]]});f.configure();f.c.locked_(()=>{const cache=f.c.pvCache_(f.context,true),map=f.c.pvCacheRead_(cache);f.c.pvCachePut_(f.context,cache,map,f.c.pvKey_('email','a@example.test'),'email',{status:'Валиден',raw:'valid',checkedAt:'2025'});f.c.pvCacheFlush_(f.context,cache);});f.queue();assert.equal(f.target().at(2,5).value,'Проверить историю контакта');assert.equal(f.target().at(2,6).value,'valid');assert.equal(f.target().at(3,6).value,history);assert.equal(f.calls.fetch.length,0);
+});
+
+test('review cache merges preserve provider fields, unknown stored metadata and Telegram eligibility while preventing green reuse',()=>{
+ const f=fixture({emailRows:[EH],phoneRows:[PH,['+79990000001','New','','','','','Телефон']]});f.configure();const key=f.c.pvKey_('telegram','+79990000001');f.c.locked_(()=>{const cache=f.c.pvCache_(f.context,true),map=f.c.pvCacheRead_(cache);f.c.pvCachePut_(f.context,cache,map,key,'telegram',{status:'Telegram: активен',raw:'original',checkedAt:'2024',idTg:'123',nickname:'original_name',days:1,eligible:true,orderId:'provider-order'});f.c.pvCacheFlush_(f.context,cache);const row=map[key].row;const original=cache.sheet.at(row,8).value;cache.sheet.put(row,8,JSON.stringify({...JSON.parse(original),futureMetadata:{retained:true}}));const fresh=f.c.pvCacheRead_(cache);f.c.pvCachePut_(f.context,cache,fresh,key,'telegram',{status:'Невалиден',raw:'must not replace',checkedAt:'2026',orderId:'different-order',review:true});f.c.pvCacheFlush_(f.context,cache);assert.equal(JSON.parse(cache.sheet.at(row,8).value).futureMetadata.retained,true);});f.queue();const result=f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[key].result;assert.equal(result.status,'Telegram: активен');assert.equal(result.raw,'original');assert.equal(result.checkedAt,'2024');assert.equal(result.orderId,'provider-order');assert.equal(result.eligible,true);assert.equal(result.review,true);assert.equal(f.target(A,'Телефоны').at(2,f.col('Валидация',A,'Телефоны')).value,'Проверить историю контакта');assert.equal(f.target(A,'Телефоны').at(2,f.col('Для Telegram',A,'Телефоны')).value,'Нужна проверка');assert.equal(f.calls.fetch.length,0);
 });

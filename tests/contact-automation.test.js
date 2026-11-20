@@ -46,3 +46,19 @@ test('unchanged sources skip extraction but continue an existing validation work
 test('an unchanged company master does not replan people or write contact lists on every timer tick',()=>{const f=fixture({items:[{id:'companies',role:'segment-companies'}],unchanged:true});f.enable();assert.equal(f.tick().processed,1);assert.equal(f.calls.people.length,0);assert.equal(f.calls.sync.length,0);assert.deepEqual(f.calls.validation,['companies'])});
 test('a pending contact receipt still resumes even when the last source version is unchanged',()=>{const f=fixture({items:[{id:'companies',role:'segment-companies'}],unchanged:true,pending:{companies:{jobId:'pending-contact',requestId:'original-receipt'}}});f.enable();f.tick();assert.equal(f.calls.people.length,0);assert.equal(f.calls.continued[0].requestId,'original-receipt');assert.equal(f.calls.sync.length,0)});
 test('an interrupted LPR-only segment import resumes even if its company master has not changed',()=>{const f=fixture({items:[{id:'companies',role:'segment-companies'}],unchanged:true,segmentIds:{companies:'segment'},activeSegments:['segment']});f.enable();assert.equal(f.tick().processed,1);assert.equal(f.calls.people[0].companyFileId,'companies');assert.equal(f.calls.sync.length,0);assert.deepEqual(f.calls.validation,['companies'])});
+
+test('provider failure does not block other approved provider work for the same workbook',()=>{
+ const f=fixture({items:[{id:'book'}],unchanged:true}), steps=[];
+ f.context.processWorkbookValidation_=()=>f.context.fail_('PV_OWNER_AUTH_REQUIRED','private');
+ f.context.processColdyWorkbookValidation_=(_,id)=>steps.push(['validation',id]);
+ f.context.processColdyCampaignUploads_=(_,item)=>steps.push(['upload',item.id]);
+ f.enable();assert.equal(f.tick().processed,1);assert.deepEqual(steps,[['validation','book'],['upload','book']]);
+ assert.equal(f.map.get('CONTACT_AUTOMATION_LAST_ERROR'),'PV_OWNER_AUTH_REQUIRED');
+});
+test('provider-side access revocation stops later providers and workbooks',()=>{
+ const f=fixture({items:[{id:'first'},{id:'second'}],unchanged:true}), steps=[];
+ f.context.processWorkbookValidation_=()=>{f.map.set('HASH','Z'.repeat(43));f.context.authorize_()};
+ f.context.processColdyWorkbookValidation_=()=>steps.push('must not run');
+ f.enable();assert.throws(()=>f.tick(),/LINK_ACCESS_REQUIRED/);assert.deepEqual(steps,[]);
+ assert.equal(f.map.has('CONTACT_AUTOMATION_LEASE'),false);
+});

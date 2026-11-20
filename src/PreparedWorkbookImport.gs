@@ -6,6 +6,9 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
     var options = preparedWorkbookSourceOptions_(context, draft);
     options.guard = function () { preparedDraftFile_(context, draft); };
     var model = preparedDataReadWorkbook_(SpreadsheetApp.openById(file.id), file.id, draft.section, options);
+    // Historical checks, exclusions and mailing marks stay attached to their
+    // canonical contacts before the immutable output plan is persisted.
+    if (typeof legacyContactHistoryEnrich_ === 'function') model = legacyContactHistoryEnrich_(model);
     var after = preparedDraftFile_(context, draft), beforeVersion = preparedVersion_(before), afterVersion = preparedVersion_(after);
     if (!beforeVersion || !afterVersion || beforeVersion === afterVersion) return { model: model, version: afterVersion };
   }
@@ -235,6 +238,10 @@ function preparedWorkbookEnroll_(context, draft) {
     if (!draft.validationQueued && typeof queueWorkbookValidation_ === 'function') {
       queueWorkbookValidation_(context, draft.outputId, { emailSheetId: draft.emailSheetId, phoneSheetId: draft.phoneSheetId, reason: 'upload' });
       draft.validationQueued = true; preparedSave_(context, draft);
+    }
+    if (!draft.coldyValidationQueued && typeof queueColdyWorkbookValidation_ === 'function' && typeof emailValidationProvider_ === 'function' && emailValidationProvider_(context) === 'coldy') {
+      queueColdyWorkbookValidation_(context, draft.outputId);
+      draft.coldyValidationQueued = true; preparedSave_(context, draft);
     }
   } catch (error) { console.warn('New prepared workbook automation enrollment is pending.'); }
 }

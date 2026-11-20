@@ -2,8 +2,8 @@
  * Read-only, bounded contact-presence checks. The general bootstrap remains a
  * metadata-only projection. Values stay on the server and are never returned.
  * Imported sheets use explicit header choices. For legacy sheets a lone first
- * row is ambiguous, so it never proves a segment empty. Launch detection and
- * Coldy/NSA integrations are not configured.
+ * row is ambiguous, so it never proves a segment empty. Coldy mailing metrics
+ * are read from the last explicit refresh; NSA and launch detection are pending.
  */
 function getSegmentsDashboard_() {
   return api_(function () {
@@ -28,15 +28,16 @@ function getSegmentMailings_(request) {
       if (error.registryCode === 'OUTSIDE_SEGMENTS') throw error;
       fail_('SEGMENT_NOT_FOUND', 'Сегмент недоступен. Обновите список сегментов.');
     }
+    var coldy = typeof coldySegmentMailings_ === 'function' ? coldySegmentMailings_(context, segmentId) : segmentDisconnectedMailings_('coldy', 'Coldy', 'email');
+    coldy.id = 'coldy';
+    var connected = coldy.state !== 'not_connected', services = [coldy, segmentDisconnectedMailings_('nsa', 'NSA', 'telegram')];
     return {
-      state: 'not_connected',
+      state: connected ? 'partial' : 'not_connected',
       segment: { id: folder.getId(), name: folder.getName(), url: segmentFolderUrl_(folder.getId()) },
-      services: [
-        segmentDisconnectedMailings_('coldy', 'Coldy', 'email'),
-        segmentDisconnectedMailings_('nsa', 'NSA', 'telegram')
-      ],
-      totals: segmentUnknownMailingTotals_(),
-      message: 'Coldy и NSA пока не подключены. Рассылки и показатели появятся после подключения API.'
+      services: services,
+      totals: connected ? segmentAggregateMailingMetrics_([coldy.totals], true) : segmentUnknownMailingTotals_(),
+      totalsScope: 'connected_channels',
+      message: connected ? 'Итоги показаны по подключённым каналам. Coldy — данные последнего обновления; NSA пока не подключён.' : 'Coldy и NSA пока не подключены. Рассылки и показатели появятся после подключения API.'
     };
   });
 }

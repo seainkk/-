@@ -136,7 +136,23 @@ function contactAutomationTick_(event) {
             result = continueContactSync_({ id: item.id, jobId: result.jobId, requestId: result.requestId });
           }
           if (result.state === 'processing') break;
-          if (typeof processWorkbookValidation_ === 'function' && Date.now() - started < CONTACT_AUTOMATION.maxMillis - 15000) processWorkbookValidation_(authorize_(), item.id);
+          // Provider failures are isolated: an unavailable validator must not
+          // block another approved job or a separately enabled upload binding.
+          // These processors cannot approve new paid validation jobs.
+          var providerSteps = [
+            typeof processWorkbookValidation_ === 'function' ? function () { return processWorkbookValidation_(authorize_(), item.id); } : null,
+            typeof processColdyWorkbookValidation_ === 'function' ? function () { return processColdyWorkbookValidation_(authorize_(), item.id); } : null,
+            typeof processColdyCampaignUploads_ === 'function' ? function () { return processColdyCampaignUploads_(authorize_(), item); } : null
+          ];
+          for (var providerIndex = 0; providerIndex < providerSteps.length && Date.now() - started < CONTACT_AUTOMATION.maxMillis - 15000; providerIndex++) {
+            if (!providerSteps[providerIndex]) continue;
+            try { providerSteps[providerIndex](); }
+            catch (providerError) {
+              var providerCode = providerError && typeof providerError.registryCode === 'string' ? providerError.registryCode : 'AUTOMATION_PROVIDER_ERROR';
+              hadError = true; properties.setProperty(CONTACT_AUTOMATION.lastError, providerCode);
+              if (providerCode === 'LINK_ACCESS_REQUIRED' || providerCode === 'LINK_SETUP_REQUIRED') throw providerError;
+            }
+          }
           remaining.shift(); processed++;
           properties.setProperty(CONTACT_AUTOMATION.remaining, JSON.stringify(remaining));
         } catch (error) {
