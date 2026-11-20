@@ -267,6 +267,7 @@ test('opting in while opening managed legacy contact tabs fills only blank statu
   assert.deepEqual(phone.data[0].slice(5), ['Рассылка', 'Статус рассылки']);
   assert.deepEqual(phone.data[1].slice(5), ['Кампания Б', 'новый']);
   assert.equal(email.validations['2:5'], customRule);
+  assert.equal(email.validations['4:5'], null);
   assert.deepEqual(email.validations['3:5'], { values: ['новый', 'в рассылке', 'фильтр'], dropdown: true, allowInvalid: false });
   assert.equal(f.calls.provider.length, 0);
   const writes = f.calls.raw.length;

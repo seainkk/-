@@ -46,10 +46,10 @@ function contactMailingStatusDropdown_(range, preserve) {
   if (typeof SpreadsheetApp.newDataValidation !== 'function') return;
   var rule = SpreadsheetApp.newDataValidation().requireValueInList(CONTACT_MAILING_STATUS.values, true).setAllowInvalid(false).build();
   if (!preserve) { range.setDataValidation(rule); return; }
-  var rules = range.getDataValidations(), values = range.getDisplayValues(), changed = false;
+  var rules = range.getDataValidations(), values = range.getDisplayValues(), formulas = range.getFormulas(), changed = false;
   rules.forEach(function (entry, index) {
     var value = values[index][0];
-    if (!entry[0] && (!value || CONTACT_MAILING_STATUS.values.indexOf(value) >= 0)) {
+    if (!entry[0] && !formulas[index][0] && (!value || CONTACT_MAILING_STATUS.values.indexOf(value) >= 0)) {
       entry[0] = rule; changed = true;
     }
   });
