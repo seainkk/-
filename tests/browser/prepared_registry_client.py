@@ -1,5 +1,6 @@
 """Three-sheet import preview and registry-section checks against fake RPCs only."""
 from pathlib import Path
+import sys
 from playwright.sync_api import expect, sync_playwright
 ROOT=Path(__file__).resolve().parents[2]
 FIXTURE=Path(__file__).with_name('performance-fixture.js').read_text()
@@ -43,9 +44,38 @@ def check_source_card(page):
     expect(status).to_be_hidden()
     expect(badge).to_be_visible()
 
+def check_lineage(page):
+    original = 'https://docs.google.com/spreadsheets/d/original_sheet_fixture/edit'
+    card = page.locator('[data-source-id="source-companies"]')
+    panel = page.locator('#br-source-lineage')
+    panel.locator('summary').click()
+    rows = page.locator('#br-lineage-rows tr')
+    assert rows.count() == 5
+    target = rows.filter(has_text='Готовая база компаний')
+    expect(target.locator('td').first).to_have_text('Не указан')
+    expect(target.get_by_role('link',name='Существующий сегмент')).to_be_visible()
+    # This overview includes both registry sections and all selections of one original.
+    expect(rows.filter(has_text='Готовая база ЛПР')).to_have_count(1)
+    card.locator('.br-source-settings > summary').click()
+    attach = card.get_by_role('button',name='Привязать исходную базу')
+    attach.click()
+    expect(page.locator('#br-origin-dialog')).to_be_visible()
+    page.locator('#br-origin-url').fill(original+'?gid=42')
+    page.locator('#br-origin-name').fill('Один исходник')
+    page.locator('#br-origin-criteria').fill('Два региона')
+    page.locator('#br-origin-save').click()
+    expect(page.locator('#br-origin-dialog')).to_be_hidden()
+    expect(target.get_by_role('link',name='Один исходник')).to_have_attribute('href',original)
+    expect(target.locator('td').nth(2)).to_have_text('Два региона')
+    expect(target.get_by_role('link',name='Существующий сегмент')).to_be_visible()
+    expect(rows.filter(has_text='Один исходник')).to_have_count(2)
+    expect(rows.filter(has_text='Готовая база ЛПР')).to_contain_text('Без сегмента')
+    expect(attach).to_have_count(0)
+
 def main():
  with sync_playwright() as p:
-  browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+  launch={'channel':'chrome'} if sys.platform=='win32' else {'executable_path':'/usr/bin/chromium'}
+  browser=p.chromium.launch(**launch,headless=True,args=['--no-sandbox'])
   page=browser.new_page(viewport={'width':1440,'height':1100});errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
   def reset(saved=None,boot=''):
    import json
@@ -55,9 +85,14 @@ def main():
   def idle():page.wait_for_function('backend.active===0')
   def held(method):page.wait_for_function('(m)=>backend.pending.some(p=>p.method===m)',arg=method)
   def release(method):page.evaluate('(m)=>releaseRpc(m)',method)
+  def open_catalog():
+   page.locator('#br-import-open').click()
+   page.locator('#br-import-destination').select_option('catalog')
   def stage_link(name='Кухни',section='companies'):
    if section=='lpr':page.locator('#br-section-lpr').click()
-   page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
+   open_catalog();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
+  reset(boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});backend.sources[2].origin={id:'original_sheet_fixture',name:'Один исходник',criteria:'',url:'https://docs.google.com/spreadsheets/d/original_sheet_fixture/edit'};")
+  check_lineage(page)
   reset(boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});")
   check_source_card(page)
   assert page.locator('[data-source-id="source-lpr"]').count()==0
@@ -83,7 +118,7 @@ def main():
   assert page.evaluate('RegistryGrid.accessSeenOnClose')=='locked', 'Grid close callback cannot resume the revoked app session'
   assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
   # Blob staging uses the live enabled form and selected single category.
-  reset();page.locator('#br-section-lpr').click();page.locator('#br-import-open').click();page.locator('#br-upload-name').fill('ЛПР кухни');page.locator('#br-upload-file').set_input_files({'name':'people.csv','mimeType':'text/csv','buffer':b'name,email\nAlice,a@example.com'})
+  reset();page.locator('#br-section-lpr').click();open_catalog();page.locator('#br-upload-name').fill('ЛПР кухни');page.locator('#br-upload-file').set_input_files({'name':'people.csv','mimeType':'text/csv','buffer':b'name,email\nAlice,a@example.com'})
   page.evaluate("backend.uploadSerializationDelay=35;backend.holdMethods=['uploadSourceBase']")
   page.locator('#br-upload-submit').click();held('uploadSourceBase')
   dispatch=page.evaluate('backend.dispatches.at(-1)');assert dispatch['form'] and dispatch['args']==1 and dispatch['file'] and dispatch['keyMatches'] and not dispatch['keyDisabled'], 'Deferred native serialization must retain the file and access key'
@@ -99,7 +134,7 @@ def main():
   # Incomplete analysis cannot confirm and has not created a final book.
   reset();page.evaluate('backend.partialPreparedPreview=true');stage_link();assert page.locator('#br-prepared-confirm').is_disabled();assert page.evaluate('backend.importCount')==0
   # Preview failures can retry without staging/uploading again.
-  reset();page.evaluate('backend.failPreparedPreview=true');page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Повтор');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_selector('#br-prepared-retry:not([hidden])');idle();page.locator('#br-prepared-retry').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle();assert page.evaluate('backend.preparedStages')==1
+  reset();page.evaluate('backend.failPreparedPreview=true');open_catalog();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Повтор');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_selector('#br-prepared-retry:not([hidden])');idle();page.locator('#br-prepared-retry').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle();assert page.evaluate('backend.preparedStages')==1
   # A changed source requires new preview and never creates a final book.
   page.evaluate('backend.preparedPreviewVersion++');page.locator('#br-prepared-confirm').click();page.wait_for_selector('#br-prepared-retry:not([hidden])');idle();assert page.evaluate('backend.importCount')==0
   # Unknown completion retries reuse the same request and do not create twice.
@@ -127,7 +162,7 @@ def main():
   for width in [360,320]:
    page.set_viewport_size({'width':width,'height':900});assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
   # Revocation clears staged preview contents and no late result restores them.
-  reset();page.evaluate("backend.holdMethods=['previewPreparedBase']");page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Отзыв');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();held('previewPreparedBase');page.evaluate('backend.revoked=true');release('previewPreparedBase');page.wait_for_selector('#bases-registry-app[data-access="locked"]');idle();assert page.locator('#br-prepared-table').inner_text()=='';assert page.evaluate('RegistryGrid.locked')
+  reset();page.evaluate("backend.holdMethods=['previewPreparedBase']");open_catalog();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Отзыв');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();held('previewPreparedBase');page.evaluate('backend.revoked=true');release('previewPreparedBase');page.wait_for_selector('#bases-registry-app[data-access="locked"]');idle();assert page.locator('#br-prepared-table').inner_text()=='';assert page.evaluate('RegistryGrid.locked')
   assert not errors,errors
   print('PASS: compact card settings and focus, two registry sections, live-form staging, single-sheet three-tab preview, confirm-only publish, cancellation, stale preview, chunk continuation, stable retry, Grid bridge, revocation and mobile/XSS safety; RPC concurrency1')
   browser.close()

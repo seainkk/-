@@ -3,12 +3,58 @@ import sys
 sys.dont_write_bytecode = True
 
 from playwright.sync_api import expect, sync_playwright
-from performance_client import FIXTURE, HTML
+from performance_client import FIXTURE, HTML, ROOT
+
+
+def check_browser_history(browser):
+    """Exercise the real entry and client on isolated, locally fulfilled origins."""
+    context = browser.new_context()
+    start = 'https://start.example.test/'
+    entry = 'https://seainkk.github.io/-/#access_key=' + 'A' * 43
+    shell = (ROOT / 'entry/index.html').read_text(encoding='utf-8')
+
+    def serve(route):
+        url = route.request.url
+        if url.startswith(start):
+            body = '<a href="' + entry + '">Открыть</a>'
+        elif url.startswith('https://seainkk.github.io/-/'):
+            body = shell
+        elif url.startswith('https://script.google.com/macros/s/'):
+            body = HTML
+        else:
+            route.abort()
+            return
+        route.fulfill(status=200, content_type='text/html; charset=utf-8', body=body)
+
+    context.route('**/*', serve)
+    host = context.new_page()
+    try:
+        host.goto(start)
+        host.get_by_role('link', name='Открыть').click()
+        expect(host.locator('body')).to_have_attribute('data-state', 'ready')
+        app = host.frame_locator('#entry-frame-host iframe')
+        app.locator('#br-view-segments').click()
+        row = app.locator('[data-segment="existing-segment"]')
+        row.get_by_role('button', name='Пополнить базы').click()
+        host.wait_for_function('history.state?.basesRegistryBack===true')
+        host.go_back(wait_until='commit')
+        expect(app.locator('#br-segment-panel')).to_be_hidden()
+        expect(row).to_be_visible()
+        host.wait_for_function('history.state?.basesRegistryBack===true')
+        host.go_back(wait_until='commit')
+        expect(app.locator('#br-sources-view')).to_be_visible()
+        expect(app.locator('#br-action-back')).to_be_hidden()
+        assert host.url == entry
+        host.go_back(wait_until='commit')
+        expect(host).to_have_url(start)
+    finally:
+        context.close()
 
 
 def main():
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+        launch = {'channel':'chrome'} if sys.platform == 'win32' else {'executable_path':'/usr/bin/chromium'}
+        browser = playwright.chromium.launch(**launch, headless=True, args=['--no-sandbox'])
         page = browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -35,6 +81,74 @@ def main():
             assert page.evaluate('backend.maxActiveReads <= 2'), 'At most two read RPCs may overlap'
             assert page.evaluate('backend.maxActiveWrites <= 1'), 'Mutations stay serial'
             assert page.evaluate('backend.counterSnapshots.every(item=>item.active>=0&&item.reads>=0&&item.writes>=0&&item.active===item.reads+item.writes)')
+
+        reset()
+        add = page.locator('[data-add-source="source-companies"]')
+        back = page.locator('#br-action-back')
+        panel = page.locator('#br-segment-panel')
+        selected = page.locator('[data-choose-source="source-companies"]')
+        expect(add).to_be_visible()
+        idle()
+        expect(back).to_be_hidden()
+        page.evaluate("backend.holdMethods=['getSegmentsDashboard']")
+        add.click()
+        held('getSegmentsDashboard')
+        expect(back).to_be_enabled()
+        page.keyboard.press('Escape')
+        expect(panel).to_be_hidden()
+        expect(add).to_be_focused()
+        page.evaluate('backend.holdMethods=[]')
+        release('getSegmentsDashboard')
+        idle()
+        expect(panel).to_be_hidden()
+        expect(back).to_be_hidden()
+
+        # Back returns to the previous step with the same chosen source and target.
+        add.click()
+        expect(selected).to_be_checked()
+        page.locator('#br-segment-target').select_option('existing-segment')
+        page.locator('#br-segment-submit').click()
+        preview = page.locator('#br-segment-normalized-preview')
+        expect(preview).to_be_visible()
+        back.click()
+        expect(preview).to_be_hidden()
+        expect(selected).to_be_checked()
+        expect(page.locator('#br-segment-target')).to_have_value('existing-segment')
+        expect(page.locator('#br-segment-submit')).to_be_focused()
+        page.locator('#br-segment-upload').click()
+        expect(page.locator('#br-import-panel')).to_be_visible()
+        back.click()
+        expect(page.locator('#br-import-panel')).to_be_hidden()
+        expect(panel).to_be_visible()
+        expect(selected).to_be_checked()
+        expect(page.locator('#br-segment-target')).to_have_value('existing-segment')
+        back.click()
+        expect(panel).to_be_hidden()
+        expect(add).to_be_focused()
+        expect(back).to_be_hidden()
+        assert not calls('createSegment') and not calls('updateSegment') and not calls('importSegmentRecords')
+
+        add.click()
+        page.locator('#br-segment-target').select_option('existing-segment')
+        page.locator('#br-segment-submit').click()
+        expect(preview).to_be_visible()
+        page.evaluate("backend.holdMethods=['importSegmentRecords'];backend.failNormalizedAfterCommit=true")
+        page.locator('#br-segment-submit').click()
+        held('importSegmentRecords')
+        back.click()
+        expect(panel).to_be_hidden()
+        page.evaluate('backend.holdMethods=[]')
+        release('importSegmentRecords')
+        resume = page.locator('#br-segment-resume')
+        expect(resume).to_be_visible()
+        expect(add).to_be_focused()
+        resume.click()
+        expect(preview).to_be_visible()
+        page.locator('#br-segment-submit').click()
+        expect(panel).to_be_hidden()
+        mutations = calls('importSegmentRecords')
+        assert len(mutations) == 2 and mutations[0]['p'] == mutations[1]['p']
+        assert page.evaluate('backend.normalizedImports') == 1
 
         # A slow catalog read must not hold the public settings panel hostage.
         reset("backend.holdMethods=['getSourceBases'];")
@@ -213,6 +327,7 @@ def main():
         assert page.evaluate('backend.active===0&&backend.activeReads===0&&backend.activeWrites===0')
         concurrency()
         assert not errors, errors
+        check_browser_history(browser)
         browser.close()
         print('PASS: lightweight segment paint, warm navigation, independent settings, bounded reads, serial mutations and stale-response/key isolation.')
 

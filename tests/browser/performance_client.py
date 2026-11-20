@@ -175,6 +175,7 @@ def main():
         # Link import acknowledgement also does not await the catalog scan.
         reset()
         page.locator('#br-import-open').click()
+        page.locator('#br-import-destination').select_option('catalog')
         page.locator('#br-import-mode-link').click()
         page.locator('#br-link-name').fill('Импорт без ожидания')
         page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit')

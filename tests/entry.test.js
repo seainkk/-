@@ -8,11 +8,22 @@ const script = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map(m
 const KEY = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG';
 const GOOGLE_ORIGIN = 'https://n-example-script.googleusercontent.com';
 
-function fixture({ hash = '#access_key=' + KEY, supported = true, clipboard = true, copyFallback = true, path = '/-/' } = {}) {
+function fixture({ hash = '#access_key=' + KEY, supported = true, clipboard = true, copyFallback = true, path = '/-/', active = true } = {}) {
   const events = new Map(), timers = new Map(), sequence = [], created = [], copies = [];
   let timerId = 0;
   const location = new URL('https://seainkk.github.io' + path + hash);
   const window = { location, addEventListener(name, handler) { events.set(name, handler); } };
+  const states = [null], pushes = [], sent = [];
+  let position = 0, backs = 0;
+  window.history = {
+    get state() { return states[position]; },
+    pushState(state, title, ...url) {
+      assert.deepEqual(url, []); pushes.push(structuredClone(state));
+      states.splice(position + 1, Infinity, state); position++;
+    },
+    back() { backs++; },
+  };
+  const activation = { hasBeenActive: active };
   window.parent = window;
   function element(tag = 'div') {
     const node = {
@@ -41,15 +52,18 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, clipboard = tr
   if (supported) Frame.prototype.credentialless = false;
   const context = vm.createContext({
     window, document, URL, HTMLIFrameElement: Frame,
-    navigator: clipboard ? { clipboard: { async writeText(value) { copies.push(value); } } } : {},
+    navigator: { userActivation: activation, ...(clipboard ? { clipboard: { async writeText(value) { copies.push(value); } } } : {}) },
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
   vm.runInContext(script, context, { filename: 'entry/index.html' });
   const currentFrame = () => ids['entry-frame-host'].children[0];
-  return { ids, window, body, timers, sequence, created, copies, currentFrame,
+  const app = () => ({ parent: currentFrame()?.contentWindow, postMessage(data, origin) { sent.push({ type: data.type, origin }); } });
+  return { ids, window, body, timers, sequence, created, copies, currentFrame, activation, app, pushes, sent, get backs(){return backs;},
     event(name, value) { return events.get(name)?.(value); },
-    ready(source = { parent: currentFrame()?.contentWindow }, origin = GOOGLE_ORIGIN) { events.get('message')({ origin, source, data: { type: 'bases-registry-ready' } }); },
+    traverse(by) { assert.ok(position + by >= 0 && position + by < states.length); position += by; events.get('popstate')({ state: states[position] }); },
+    nav(source, canBack, origin = GOOGLE_ORIGIN) { events.get('message')({ origin, source, data: { type:'bases-registry-navigation', canBack } }); },
+    ready(source = app(), origin = GOOGLE_ORIGIN) { events.get('message')({ origin, source, data: { type: 'bases-registry-ready' } }); return source; },
   };
 }
 
@@ -105,8 +119,8 @@ test('only a Google-origin message from the current iframe subtree confirms read
 
 test('a rejected key clears the iframe and never publishes the private credential as text', () => {
   const f = fixture(), frame = f.currentFrame();
-  f.ready();
-  f.event('message', { origin: GOOGLE_ORIGIN, source: { parent: frame.contentWindow }, data: { type: 'bases-registry-locked' } });
+  const source = f.ready();
+  f.event('message', { origin: GOOGLE_ORIGIN, source, data: { type: 'bases-registry-locked' } });
   assert.equal(f.body.dataset.state, 'locked');
   assert.equal(frame.removed, true);
   assert.equal(f.currentFrame(), undefined);
@@ -155,4 +169,60 @@ test('a timeout permits an explicit retry and never reports a loaded error page 
   assert.equal(old.removed, true);
   assert.notEqual(f.currentFrame(), old);
   assert.equal(f.body.dataset.state, 'loading');
+});
+
+test('browser Back sends one step to the ready child and re-arms only after its acknowledgement', () => {
+  const f=fixture(), app=f.ready(), address=f.window.location.href;
+  f.nav(app,false); assert.equal(f.pushes.length,0);
+  f.nav(app,true); f.nav(app,true);
+  assert.deepEqual(f.pushes,[{basesRegistryBack:true}]); assert.equal(f.window.location.href,address);
+  f.traverse(-1);
+  assert.deepEqual(f.sent,[{type:'bases-registry-back',origin:GOOGLE_ORIGIN}]);
+  f.event('popstate',{state:null}); assert.equal(f.sent.length,1);
+  f.nav(app,true); assert.equal(f.pushes.length,2);
+  f.traverse(-1); f.nav(app,false);
+  assert.equal(f.sent.length,2); assert.equal(f.pushes.length,2); assert.equal(f.backs,0);
+});
+
+test('going home removes the extra entry without sending a second back action', () => {
+  const f=fixture(), app=f.ready();
+  f.nav(app,true); f.nav(app,false); f.nav(app,false);
+  assert.equal(f.backs,1);
+  f.traverse(-1); assert.equal(f.sent.length,0);
+  f.event('popstate',{state:null}); assert.equal(f.sent.length,0); assert.equal(f.pushes.length,1);
+  // The forward entry is inert on the home screen.
+  f.traverse(1); f.traverse(-1); assert.equal(f.sent.length,0);
+  f.nav(app,true); f.nav(app,false); f.nav(app,true);
+  f.traverse(-1); assert.equal(f.sent.length,0); assert.equal(f.pushes.length,3);
+});
+
+test('only the same ready origin and window can claim browser Back in the current frame', () => {
+  const f=fixture(), app=f.app(), sibling=f.app();
+  f.nav(app,true); assert.equal(f.pushes.length,0);
+  f.ready(app); f.ready(sibling); f.nav(sibling,true); f.nav(app,true,'https://script.google.com');
+  f.nav(app,true,GOOGLE_ORIGIN+':8443'); f.nav(app,'true');
+  assert.equal(f.pushes.length,0);
+  f.nav(app,true);
+  f.event('message',{source:sibling,origin:GOOGLE_ORIGIN,data:{type:'bases-registry-locked'}});
+  assert.equal(f.body.dataset.state,'ready');
+  f.event('message',{source:app,origin:GOOGLE_ORIGIN,data:{type:'bases-registry-locked'}});
+  f.traverse(-1); assert.equal(f.sent.length,0);
+  f.window.location.hash='#access_key='+'Z'.repeat(43); f.event('hashchange');
+  const next=f.ready(); f.nav(app,true); assert.equal(f.pushes.length,1);
+  f.nav(next,true); f.window.location.hash='#changed'; f.traverse(-1);
+  assert.equal(f.sent.length,0);
+});
+
+test('lack of activation or a denied history operation leaves the browser free to navigate', () => {
+  const f=fixture({active:false}), app=f.ready();
+  f.nav(app,true); assert.equal(f.pushes.length,0);
+  f.event('popstate',{state:null}); assert.equal(f.sent.length,0);
+  f.activation.hasBeenActive=true;
+  const push=f.window.history.pushState;
+  f.window.history.pushState=()=>{throw Error('SecurityError');};
+  f.event('pointerup',{}); assert.equal(f.pushes.length,0);
+  f.window.history.pushState=push; f.nav(app,true);
+  assert.equal(f.pushes.length,1);
+  f.window.history.back=()=>{throw Error('SecurityError');};
+  f.nav(app,false); f.traverse(-1); assert.equal(f.sent.length,0);
 });
