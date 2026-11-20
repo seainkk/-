@@ -39,11 +39,16 @@ function updateSegment_(request) { return typeof segmentNormalizedMutation_ === 
 function segmentMutation_(kind, request) {
   return api_(function () {
     authorize_();
-    var input = segmentInput_(request, kind === 'create' ? ['name', 'requestId', 'loads'] : ['id', 'name', 'requestId', 'loads']);
+    var input = segmentMutationInput_(kind, request);
     var name = input.name === undefined && kind === 'update' ? null : itemName_(input.name);
     var segmentId = kind === 'update' ? id_(input.id) : null;
-    if (kind === 'update' && name === null && (!Array.isArray(input.loads) || !input.loads.length)) fail_('INVALID_REQUEST', 'Выберите изменение сегмента.');
     var requestId = segmentRequestId_(input.requestId), loads = segmentLoadInput_(input.loads);
+    var categoryOnly = segmentCategoryOnly_(kind, input, loads);
+    if (kind === 'update' && name === null && !categoryOnly && !loads.length) fail_('INVALID_REQUEST', 'Выберите изменение сегмента.');
+    var args = { id: segmentId, name: name, loads: loads };
+    // Old clients must still be able to retry requests already in the journal.
+    if (input.category !== undefined) args.category = input.category;
+    if (input.expectedCategory !== undefined) args.expectedCategory = input.expectedCategory;
     return locked_(function () {
       var context = authorize_(), parent = segmentSourceFolder_(context);
       var storage = sourceBasesStorage_(context);
@@ -56,8 +61,7 @@ function segmentMutation_(kind, request) {
       // mutation, including retries whose copies were already acknowledged.
       var plans = segmentPrepareLoads_(context, storage, database, loads);
       var folder = kind === 'update' ? segmentFolder_(context, parent, segmentId) : null;
-      var tracking = segmentTrackingStorage_(context, storage, true);
-      var journal = segmentJournal_(context, kind, requestId, { id: segmentId, name: name, loads: loads });
+      var journal = segmentJournal_(context, kind, requestId, args, folder);
       var recovered = journal.existing;
       if (journal.value.segmentId) folder = segmentFolder_(context, parent, journal.value.segmentId);
       if (!folder) {
@@ -70,9 +74,19 @@ function segmentMutation_(kind, request) {
           folder = segmentFolder_(context, parent, recoveredFolderId);
         }
       }
-      segmentPreflight_(storage, database, tracking, folder ? folder.getId() : null, plans, requestId);
+      var tracking = categoryOnly ? null : segmentTrackingStorage_(context, storage, true);
+      if (!categoryOnly) segmentPreflight_(storage, database, tracking, folder ? folder.getId() : null, plans, requestId);
       try {
+        if (categoryOnly) {
+          if (journal.value.stage !== 'done') {
+            segmentApplyCategory_(context, folder, journal, false);
+            journal.value.stage = 'done';
+            segmentSaveJournal_(context, journal);
+          }
+          return { segment: segmentFolderResult_(context, folder), loadedSheets: [], recovered: recovered };
+        }
         if (!folder) folder = segmentCreateFolder_(context, parent, name, journal);
+        segmentApplyCategory_(context, folder, journal, kind === 'create' && !journal.existing && recovered);
         var desiredName = name === null ? folder.getName() : name;
         var tables = segmentEnsureTables_(context, folder, desiredName, storage, tracking, journal);
         // All target identities are server-resolved and checked again immediately
@@ -101,6 +115,53 @@ function segmentMutation_(kind, request) {
       }
     });
   });
+}
+
+function segmentMutationInput_(kind, request) {
+  var input = segmentInput_(request, kind === 'create' ? ['name', 'requestId', 'loads', 'category'] : ['id', 'name', 'requestId', 'loads', 'category', 'expectedCategory']);
+  [input.category, input.expectedCategory].forEach(function (category) {
+    if (category !== undefined && category !== 'partners' && category !== 'clients') {
+      fail_('INVALID_REQUEST', 'Выберите раздел «Партнерка» или «Клиенты».');
+    }
+  });
+  return input;
+}
+
+function segmentCategoryOnly_(kind, input, loads) {
+  return kind === 'update' && input.name === undefined && input.category !== undefined && !loads.length;
+}
+
+function segmentPlanCategory_(context, folder, args, journalValue) {
+  var category = args.category, previousProperty = null;
+  if (folder) {
+    var oldName = folder.getName();
+    previousProperty = context.properties.getProperty(segmentCategoryKey_(folder.getId()));
+    var savedCategory = segmentStoredCategory_(previousProperty), currentCategory = savedCategory || segmentDefaultCategory_(oldName);
+    if (args.expectedCategory !== undefined && args.expectedCategory !== currentCategory) segmentCategoryConflict_();
+    // Persist the existing legacy category when an application rename would change it.
+    if (category === undefined && !savedCategory && args.name !== null && segmentDefaultCategory_(args.name) !== currentCategory) category = currentCategory;
+  }
+  if (category !== undefined) journalValue.categoryChange = { before: previousProperty, category: category };
+}
+
+function segmentApplyCategory_(context, folder, journal, recoveredCreate) {
+  var change = journal.value.categoryChange;
+  if (!change || journal.value.stage === 'done') return;
+  var key = segmentCategoryKey_(folder.getId()), current = context.properties.getProperty(key);
+  // The property also records the request so a lost write response can be
+  // distinguished from a change made by another request.
+  var desired = JSON.stringify({ category: change.category, request: journal.key });
+  if (current === desired) return;
+  if (current !== change.before) {
+    // A recovered folder can outlive the bounded journal of its original create.
+    if (recoveredCreate) return;
+    segmentCategoryConflict_();
+  }
+  context.properties.setProperty(key, desired);
+}
+
+function segmentCategoryConflict_() {
+  fail_('SEGMENT_CATEGORY_CONFLICT', 'Раздел сегмента изменился. Обновите список сегментов и повторите действие.');
 }
 
 function segmentInput_(value, keys) {
@@ -202,7 +263,7 @@ function segmentPrepareLoads_(context, storage, database, loads) {
   });
 }
 
-function segmentJournal_(context, kind, requestId, args) {
+function segmentJournal_(context, kind, requestId, args, folder) {
   var key = 'SEGMENT_ACTION_' + digest_(context.email + '|' + kind + '|' + requestId).slice(0, 32);
   var fingerprint = digest_(JSON.stringify(args)), raw = context.properties.getProperty(key);
   if (raw) {
@@ -211,6 +272,8 @@ function segmentJournal_(context, kind, requestId, args) {
     if (value.fingerprint !== fingerprint) fail_('REQUEST_REUSED', 'Этот запрос уже использован с другими параметрами. Откройте новую форму.');
     return { key: key, value: value, existing: true };
   }
+  var journal = { key: key, existing: false, value: { fingerprint: fingerprint, segmentId: args.id, stage: 'planned', files: {}, leaves: {}, creating: {} } };
+  segmentPlanCategory_(context, folder, args, journal.value);
   var index;
   try { index = JSON.parse(context.properties.getProperty('SEGMENT_ACTION_INDEX') || '[]'); }
   catch (error) { fail_('SEGMENT_RECOVERY_REQUIRED', 'Журнал действий с сегментами требует проверки администратора.'); }
@@ -224,7 +287,6 @@ function segmentJournal_(context, kind, requestId, args) {
     if (position === -1) fail_('SEGMENT_RECOVERY_REQUIRED', 'Слишком много неподтверждённых действий. Сначала проверьте предыдущие операции.');
     context.properties.deleteProperty(index.splice(position, 1)[0]);
   }
-  var journal = { key: key, existing: false, value: { fingerprint: fingerprint, segmentId: args.id, stage: 'planned', files: {}, leaves: {}, creating: {} } };
   segmentSaveJournal_(context, journal);
   index.push(key);
   context.properties.setProperty('SEGMENT_ACTION_INDEX', JSON.stringify(index));
@@ -351,10 +413,12 @@ function segmentTargetFile_(context, folder, fileId) {
 }
 
 function segmentActionResult_(context, folder, tables) {
-  return { id: folder.getId(), name: folder.getName(), url: segmentFolderUrl_(folder.getId()), files: SEGMENT_ACTIONS_SCHEMA.kinds.map(function (kind) {
+  var result = segmentFolderResult_(context, folder);
+  result.files = SEGMENT_ACTIONS_SCHEMA.kinds.map(function (kind) {
     var file = segmentTargetFile_(context, folder, tables[kind]);
     return { id: file.getId(), name: file.getName(), url: spreadsheetUrl_(file.getId()), kind: kind };
-  }) };
+  });
+  return result;
 }
 
 function segmentTrackingStorage_(context, storage, create) {

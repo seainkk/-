@@ -25,6 +25,37 @@ var REGISTRY_CONFIG = Object.freeze({
   creationReceiptLimit: 80
 });
 
+var CONTACT_MAILING_STATUS = Object.freeze({
+  header: 'Статус рассылки',
+  headers: ['Статус рассылки', 'Статус'],
+  initial: 'новый',
+  values: ['новый', 'в рассылке', 'фильтр']
+});
+
+function contactMailingStatusFromHistory_(history) {
+  var statuses = (Array.isArray(history) ? history : String(history || '').split(';')).map(function (value) {
+    var status = String(value || '').trim().toLowerCase();
+    if (status === 'в рассылке' || status === 'запущен') return 'в рассылке';
+    if (status === 'фильтр') return 'фильтр';
+    return '';
+  }).filter(Boolean);
+  return statuses.length && statuses.every(function (value) { return value === statuses[0]; }) ? statuses[0] : CONTACT_MAILING_STATUS.initial;
+}
+
+function contactMailingStatusDropdown_(range, preserve) {
+  if (typeof SpreadsheetApp.newDataValidation !== 'function') return;
+  var rule = SpreadsheetApp.newDataValidation().requireValueInList(CONTACT_MAILING_STATUS.values, true).setAllowInvalid(false).build();
+  if (!preserve) { range.setDataValidation(rule); return; }
+  var rules = range.getDataValidations(), values = range.getDisplayValues(), changed = false;
+  rules.forEach(function (entry, index) {
+    var value = values[index][0];
+    if (!entry[0] && (!value || CONTACT_MAILING_STATUS.values.indexOf(value) >= 0)) {
+      entry[0] = rule; changed = true;
+    }
+  });
+  if (changed) range.setDataValidations(rules);
+}
+
 /** Editor-only setup. Email lists from the previous mode are deliberately untouched. */
 function setupRegistry_() {
   var properties = PropertiesService.getScriptProperties();

@@ -264,7 +264,10 @@ function preparedWorkbookEnsureSheets_(book, draft, plan) {
       draft[kind + 'SheetId'] = target.getSheetId();
     }
     if (target.getName() !== plan[kind].name) fail_('PREVIEW_CHANGED', 'Название листа контактов изменено.');
-    preparedWriteBlock_(target, 1, [plan[kind].headers], plan[kind].headers.length); target.setFrozenRows(1);
+    var headers = plan[kind].headers;
+    preparedWriteBlock_(target, 1, [headers], headers.length); target.setFrozenRows(1);
+    var statusColumn = headers.indexOf(CONTACT_MAILING_STATUS.header);
+    if (statusColumn >= 0 && target.getMaxRows() > 1) contactMailingStatusDropdown_(target.getRange(2, statusColumn + 1, target.getMaxRows() - 1, 1), false);
   });
   var order = draft.copiedSheetIds.concat([draft.emailSheetId, draft.phoneSheetId]);
   if (book.getSheets().length !== order.length || new Set(order).size !== order.length) fail_('PREVIEW_CHANGED', 'В результате появились посторонние листы.');

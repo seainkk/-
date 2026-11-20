@@ -213,6 +213,10 @@ function legacyContactHistoryEnrich_(model, historyMap) {
       if (status && !(typeof pvPendingStatus_ === 'function' && pvPendingStatus_(status))) return row;
       var fields = legacyContactHistoryFields_(old);
       Object.keys(fields).forEach(function (header) { var index = map[legacyContactHistoryKey_(header)]; if (index !== undefined) row[index] = fields[header]; });
+      var mailingColumn = originalHeaders.indexOf('Статус рассылки');
+      if (mailingColumn !== -1 && (!row[mailingColumn] || row[mailingColumn] === CONTACT_MAILING_STATUS.initial)) {
+        row[mailingColumn] = contactMailingStatusFromHistory_(old.work);
+      }
       enriched++; return row;
     });
     entry.list.headers = headers; entry.list.sample = entry.list.rows.slice(0, 8);

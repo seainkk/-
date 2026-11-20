@@ -6,25 +6,38 @@
 var CONTACT_SYNC = Object.freeze({
   version: 1, folderProperty: 'CONTACT_SYNC_FOLDER_ID',
   fields: 'id,name,mimeType,parents,trashed,appProperties,version,modifiedTime,capabilities(canEdit,canAddChildren)',
-  stateProperty: 'registryContactStateId', leaseMillis: 10 * 60 * 1000,
+  stateProperty: 'registryContactStateId', mailingStatusProperty: 'registryContactMailingStatusTargets', leaseMillis: 10 * 60 * 1000,
   releaseGuardMillis: 60 * 1000, sourceReadMillis: 120000, writeRows: 1000, maxTargetRows: 100000,
   maxHeaderColumns: 512, maxStateCharacters: 12000000, receiptLimit: 20
 });
 
 function getContactWorkspace_(request) {
   return api_(function () {
-    var input = contactSyncInput_(request, ['id']), scope = gridFile_(input.id, false);
+    var input = contactSyncInput_(request, ['id', 'prepareMailingStatus']), scope = gridFile_(input.id, false);
+    if (input.prepareMailingStatus !== undefined && typeof input.prepareMailingStatus !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный запрос подготовки статусов контактов.');
     var metadata = contactSyncMetadata_(input.id);
-    var state = contactSyncReadState_(scope.context, metadata, true);
+    var state = contactSyncReadState_(scope.context, metadata, true), legacy, result, migrated = null;
     if (!state) {
       var book = SpreadsheetApp.openById(input.id);
-      var legacy = contactSyncLegacy_(book, metadata);
-      return { enrolled: false, canSync: scope.canEdit === true, targets: legacy ? legacy.targets : null,
-        sourceSheetIds: legacy ? legacy.sourceSheetIds : book.getSheets().map(function (s) { return s.getSheetId(); }),
-        role: 'registry', relatedFileId: null, lastSyncAt: null, job: null, warnings: [] };
+      legacy = contactSyncLegacy_(book, metadata);
     }
-    gridFile_(input.id, false, scope.context.rootId);
-    return contactSyncWorkspace_(state, scope.canEdit, contactSyncVersion_(metadata));
+    if (input.prepareMailingStatus && scope.canEdit && state && !state.job &&
+        contactSyncMailingStatusNeeded_(metadata.appProperties || {})) {
+      migrated = contactSyncWithLease_(input.id, contactSyncPrepareManagedMailingStatus_, false);
+      if (migrated) {
+        state = migrated;
+        metadata = contactSyncMetadata_(input.id);
+      }
+    }
+    if (state) {
+      gridFile_(input.id, false, scope.context.rootId);
+      result = contactSyncWorkspace_(state, scope.canEdit, contactSyncVersion_(metadata));
+    }
+    else result = { enrolled: false, canSync: scope.canEdit === true, targets: legacy ? legacy.targets : null,
+      sourceSheetIds: legacy ? legacy.sourceSheetIds : book.getSheets().map(function (s) { return s.getSheetId(); }),
+      role: 'registry', relatedFileId: null, lastSyncAt: null, job: null, warnings: [] };
+    if (input.prepareMailingStatus) result.mailingStatusChanged = !!migrated;
+    return result;
   });
 }
 
@@ -134,8 +147,8 @@ function contactSyncEnrollmentSheetsMatch_(state, book) {
     if (!width || width > CONTACT_SYNC.maxHeaderColumns) return false;
     var header = sheet.getRange(1, 1, 1, width).getDisplayValues()[0].map(contactSyncHeaderKey_);
     return required.every(function (label) {
-      var key = contactSyncHeaderKey_(label), column = schema.columns[label];
-      return Number.isSafeInteger(column) && column >= 0 && header[column] === key && header.indexOf(key) === column && header.lastIndexOf(key) === column;
+      var columns = contactSyncHeaderColumns_(header, label);
+      return columns.length === 1 && schema.columns[label] === columns[0];
     });
   });
 }
@@ -347,11 +360,16 @@ function contactSyncAssertLease_(claim) {
 }
 
 function contactSyncHeaders_(kind) {
-  if (typeof PREPARED_DATA_HEADERS !== 'undefined') return (kind === 'email' ? PREPARED_DATA_HEADERS.email : PREPARED_DATA_HEADERS.phone).slice();
-  return kind === 'email' ? ['Email', 'Компания / ЛПР', 'Исходные строки', 'Проверить принадлежность'] : ['Телефон', 'Компания / ЛПР', 'Откуда', 'Исходные строки', 'Проверить принадлежность', 'Telegram', 'Тип контакта'];
+  var base = typeof PREPARED_DATA_HEADERS !== 'undefined' ? PREPARED_DATA_HEADERS[kind] :
+    (kind === 'email' ? ['Email', 'Компания / ЛПР', 'Исходные строки', 'Проверить принадлежность'] : ['Телефон', 'Компания / ЛПР', 'Откуда', 'Исходные строки', 'Проверить принадлежность', 'Telegram', 'Тип контакта']);
+  return base.concat(CONTACT_MAILING_STATUS.header);
 }
 function contactSyncEnsureTargets_(claim, options) {
   options = options || {}; var state = claim.state, book = claim.book, changed = false;
+  var tags = contactSyncMetadata_(state.fileId).appProperties || {}, stamp = contactSyncMailingTargetsStamp_(state.targets);
+  var statusPrepared = !!stamp && tags[CONTACT_SYNC.mailingStatusProperty] === stamp &&
+    tags.registryContactEmailSheetId === String(state.targets.emailSheetId) &&
+    tags.registryContactPhoneSheetId === String(state.targets.phoneSheetId);
   ['email', 'phone'].forEach(function (kind) {
     var property = kind + 'SheetId';
     if (options[property] !== undefined) {
@@ -383,22 +401,94 @@ function contactSyncEnsureTargets_(claim, options) {
       contactSyncSaveState_(claim.context, state);
     }
     if (state.sourceSheetIds.indexOf(sheet.getSheetId()) !== -1 || (kind === 'phone' && sheet.getSheetId() === state.targets.emailSheetId)) fail_('CONTACT_SCHEMA_CHANGED', 'Исходные данные и списки контактов должны находиться на разных листах.');
-    state.schemas[kind] = contactSyncEnsureHeaders_(claim, sheet, kind, state.schemas[kind]); changed = true;
+    var previous = state.schemas[kind], schema = contactSyncEnsureHeaders_(claim, sheet, kind, previous);
+    if (!statusPrepared) contactSyncBackfillMailingStatus_(claim, sheet, kind, schema);
+    state.schemas[kind] = schema; changed = true;
   });
-  var tags = contactSyncMetadata_(state.fileId).appProperties || {}, pointer = {};
+  var pointer = {};
   if (tags.registryContactEmailSheetId !== String(state.targets.emailSheetId)) pointer.registryContactEmailSheetId = String(state.targets.emailSheetId);
   if (tags.registryContactPhoneSheetId !== String(state.targets.phoneSheetId)) pointer.registryContactPhoneSheetId = String(state.targets.phoneSheetId);
-  if (Object.keys(pointer).length) { gridFile_(state.fileId, true, state.rootId); contactSyncAssertLease_(claim); Drive.Files.update({ appProperties: pointer }, state.fileId, null, { fields: 'id', supportsAllDrives: true }); }
+  if (!statusPrepared) pointer[CONTACT_SYNC.mailingStatusProperty] = contactSyncMailingTargetsStamp_(state.targets);
+  if (Object.keys(pointer).length) contactSyncRememberMailingStatus_(claim, pointer);
   if (changed) contactSyncSaveState_(claim.context, state);
 }
 function contactSyncHeaderKey_(value) { return String(value || '').trim().toLowerCase().replace(/ё/g, 'е').replace(/[\s_-]+/g, ' '); }
+function contactSyncHeaderColumns_(keys, label) {
+  var names = label === CONTACT_MAILING_STATUS.header ? CONTACT_MAILING_STATUS.headers : [label];
+  for (var i = 0; i < names.length; i++) {
+    var key = contactSyncHeaderKey_(names[i]), columns = [];
+    keys.forEach(function (value, index) { if (value === key) columns.push(index); });
+    if (columns.length) return columns;
+  }
+  return [];
+}
+function contactSyncMailingTargetsStamp_(targets) {
+  if (!targets || !Number.isSafeInteger(targets.emailSheetId) || targets.emailSheetId < 0 ||
+      !Number.isSafeInteger(targets.phoneSheetId) || targets.phoneSheetId < 0 || targets.emailSheetId === targets.phoneSheetId) return '';
+  return '1:' + targets.emailSheetId + ':' + targets.phoneSheetId;
+}
+function contactSyncMailingStatusNeeded_(tags) {
+  if (!tags || !tags[CONTACT_SYNC.stateProperty]) return false;
+  if (!/^\d+$/.test(tags.registryContactEmailSheetId || '') || !/^\d+$/.test(tags.registryContactPhoneSheetId || '')) return false;
+  var stamp = contactSyncMailingTargetsStamp_({ emailSheetId: Number(tags.registryContactEmailSheetId), phoneSheetId: Number(tags.registryContactPhoneSheetId) });
+  return !!stamp && tags[CONTACT_SYNC.mailingStatusProperty] !== stamp;
+}
+function contactSyncRememberMailingStatus_(claim, pointer) {
+  var state = claim.state;
+  gridFile_(state.fileId, true, state.rootId); contactSyncAssertLease_(claim);
+  Drive.Files.update({ appProperties: pointer }, state.fileId, null, { fields: 'id', supportsAllDrives: true });
+}
+function contactSyncMailingLayouts_(book, workspace) {
+  if (!contactSyncMailingTargetsStamp_(workspace.targets)) return null;
+  var kinds = ['email', 'phone'], layouts = [];
+  // Validate both known targets before writing either of the contact tabs.
+  // In a legacy v1 book the names alone are not sufficient evidence.
+  for (var i = 0; i < kinds.length; i++) {
+    var kind = kinds[i], id = workspace.targets[kind + 'SheetId'];
+    if (workspace.sourceSheetIds.indexOf(id) !== -1) return null;
+    var sheet = gridSheet_(book, id), width = sheet.getLastColumn();
+    if (!width || width > CONTACT_SYNC.maxHeaderColumns || sheet.getLastRow() > CONTACT_SYNC.maxTargetRows + 1) return null;
+    var header = sheet.getRange(1, 1, 1, width).getDisplayValues()[0].map(contactSyncHeaderKey_);
+    var main = kind === 'email' ? 'Email' : 'Телефон', allowed = contactSyncHeaderColumns_(header, main);
+    var telegram = kind === 'phone' ? contactSyncHeaderColumns_(header, 'Telegram') : [];
+    var status = contactSyncHeaderColumns_(header, CONTACT_MAILING_STATUS.header);
+    if (allowed.length !== 1 || telegram.length > 1 || status.length > 1 || !status.length && width === CONTACT_SYNC.maxHeaderColumns) return null;
+    var columns = {};
+    columns[main] = allowed[0]; columns.Telegram = telegram[0];
+    columns[CONTACT_MAILING_STATUS.header] = status.length ? status[0] : width;
+    layouts.push({ kind: kind, sheet: sheet, columns: columns, addStatus: !status.length, header: header });
+  }
+  return layouts;
+}
+function contactSyncPrepareManagedMailingStatus_(claim) {
+  var state = claim.state, tags = contactSyncMetadata_(state.fileId).appProperties || {};
+  var stamp = contactSyncMailingTargetsStamp_(state.targets);
+  if (state.job || !stamp || tags[CONTACT_SYNC.mailingStatusProperty] === stamp) return null;
+  var layouts = contactSyncMailingLayouts_(claim.book, state);
+  if (!layouts) return null;
+  layouts.forEach(function (schema) {
+    var sheet = schema.sheet;
+    if (schema.addStatus) {
+      var column = schema.columns[CONTACT_MAILING_STATUS.header] + 1;
+      gridFile_(state.fileId, true, state.rootId); contactSyncAssertLease_(claim);
+      var current = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(contactSyncHeaderKey_);
+      if (JSON.stringify(current) !== JSON.stringify(schema.header)) fail_('CONTACT_SCHEMA_CHANGED', 'Заголовки списка изменились во время подготовки статусов. Откройте таблицу заново.');
+      if (column > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), 1);
+      sheetWriteRawStrings_(state.fileId, sheet.getSheetId(), 1, column, [[CONTACT_MAILING_STATUS.header]]);
+    }
+    contactSyncBackfillMailingStatus_(claim, sheet, schema.kind, schema);
+  });
+  var pointer = { registryContactEmailSheetId: String(state.targets.emailSheetId), registryContactPhoneSheetId: String(state.targets.phoneSheetId) };
+  pointer[CONTACT_SYNC.mailingStatusProperty] = stamp;
+  contactSyncRememberMailingStatus_(claim, pointer);
+  return state;
+}
 function contactSyncEnsureHeaders_(claim, sheet, kind, previous) {
   var width = Math.max(0, sheet.getLastColumn()), required = contactSyncHeaders_(kind);
   if (width > CONTACT_SYNC.maxHeaderColumns) fail_('CONTACT_SYNC_LIMIT', 'В листе контактов слишком много столбцов.');
-  var header = width ? sheet.getRange(1, 1, 1, width).getDisplayValues()[0] : [], mapping = {}, additions = [];
+  var header = width ? sheet.getRange(1, 1, 1, width).getDisplayValues()[0] : [], keys = header.map(contactSyncHeaderKey_), mapping = {}, additions = [];
   required.forEach(function (label) {
-    var target = contactSyncHeaderKey_(label), positions = [];
-    header.forEach(function (value, index) { if (contactSyncHeaderKey_(value) === target) positions.push(index); });
+    var positions = contactSyncHeaderColumns_(keys, label);
     if (positions.length > 1) fail_('CONTACT_SCHEMA_CHANGED', 'В листе контактов повторяется заголовок «' + label + '».');
     if (positions.length) mapping[label] = positions[0];
     else {
@@ -418,6 +508,37 @@ function contactSyncEnsureHeaders_(claim, sheet, kind, previous) {
   }
   if (additions.length && typeof sheet.setFrozenRows === 'function') { gridFile_(claim.state.fileId, true, claim.state.rootId); contactSyncAssertLease_(claim); sheet.setFrozenRows(1); }
   return { headers: required, columns: mapping };
+}
+function contactSyncBackfillMailingStatus_(claim, sheet, kind, schema) {
+  var state = claim.state, columns = schema.columns, statusColumn = columns[CONTACT_MAILING_STATUS.header] + 1;
+  var mainColumn = columns[kind === 'email' ? 'Email' : 'Телефон'] + 1, telegramColumn = kind === 'phone' ? columns.Telegram + 1 : null;
+  var last = sheet.getLastRow(), headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(contactSyncHeaderKey_);
+  var historyColumns = contactSyncHeaderColumns_(headers, 'Статус из источника');
+  if (last > CONTACT_SYNC.maxTargetRows + 1) fail_('CONTACT_SYNC_LIMIT', 'Список контактов превышает лимит обновления.');
+  for (var row = 2; row <= last; row += CONTACT_SYNC.writeRows) {
+    var count = Math.min(CONTACT_SYNC.writeRows, last - row + 1);
+    var version = contactSyncVersion_(contactSyncMetadata_(state.fileId));
+    var status = sheet.getRange(row, statusColumn, count, 1), values = status.getValues(), formulas = status.getFormulas();
+    var main = sheet.getRange(row, mainColumn, count, 1).getDisplayValues();
+    var telegram = telegramColumn ? sheet.getRange(row, telegramColumn, count, 1).getDisplayValues() : [];
+    var history = historyColumns.length === 1 ? sheet.getRange(row, historyColumns[0] + 1, count, 1).getDisplayValues() : [];
+    var mask = main.map(function (line, index) {
+      return [values[index][0] === '' && !formulas[index][0] && contactSyncRowKeys_(kind, line[0], telegram[index] && telegram[index][0]).length > 0];
+    });
+    if (!mask.some(function (line) { return line[0]; })) continue;
+    gridFile_(state.fileId, true, state.rootId); contactSyncAssertLease_(claim);
+    if (version && version !== contactSyncVersion_(contactSyncMetadata_(state.fileId))) {
+      fail_('CONTACT_SYNC_CONFLICT', 'Список контактов изменился во время заполнения статусов. Повторите обновление.');
+    }
+    var defaults = mask.map(function (line, index) {
+      return [line[0] ? contactMailingStatusFromHistory_(history[index] && history[index][0]) : ''];
+    });
+    sheetWriteRawStrings_(state.fileId, sheet.getSheetId(), row, statusColumn, defaults, mask);
+  }
+  if (last > 1) {
+    gridFile_(state.fileId, true, state.rootId); contactSyncAssertLease_(claim);
+    contactMailingStatusDropdown_(sheet.getRange(2, statusColumn, last - 1, 1), true);
+  }
 }
 function contactSyncSources_(state, book) {
   var managed = [state.targets.emailSheetId, state.targets.phoneSheetId], ids = state.sourceMode === 'all' ? book.getSheets().map(function (s) { return s.getSheetId(); }).filter(function (id) { return managed.indexOf(id) === -1; }) : state.sourceSheetIds.slice();
@@ -498,7 +619,11 @@ function contactSyncPlan_(claim, requestId) {
       if (existing.hashes[hash]) { counts.existing++; return; }
       if (known[hash]) { counts.excluded++; return; }
       var values = {};
-      headers.forEach(function (label, index) { values[label] = String(row[index] === null || row[index] === undefined ? '' : row[index]); });
+      headers.forEach(function (label, index) {
+        // Leave the default status out of durable plans so plans written by
+        // an earlier release can still be recovered with their original ID.
+        if (label !== CONTACT_MAILING_STATUS.header) values[label] = String(row[index] === null || row[index] === undefined ? '' : row[index]);
+      });
       plan[kind].rows.push({ key: key, hash: hash, values: values });
       if (kind === 'email') counts.newEmail++; else if (key.indexOf('telegram:') === 0) counts.newTelegram++; else counts.newPhone++;
     });
@@ -545,8 +670,11 @@ function contactSyncCheckSnapshot_(claim) {
   job.expectedVersion = stable.version; contactSyncSaveState_(claim.context, state);
 }
 function contactSyncAdvance_(claim) {
-  var state = claim.state; contactSyncEnsureTargets_(claim); var job = state.job, plan = contactSyncReadPlan_(claim);
+  var state = claim.state, job = state.job, plan = contactSyncReadPlan_(claim);
+  // Older pending writes still use an exact header hash. Settle them before
+  // adding a status column or changing the target schema.
   contactSyncRecoverPending_(claim, true);
+  contactSyncEnsureTargets_(claim);
   if (job.phase === 'complete') return contactSyncComplete_(claim, plan);
   contactSyncCheckSnapshot_(claim);
   var kind = job.phase, rows = plan[kind].rows;
@@ -564,10 +692,14 @@ function contactSyncAdvance_(claim) {
   var values = [], mask = [];
   additions.forEach(function (entry) {
     var line = Array(width).fill(''), selected = Array(width).fill(false);
-    schema.headers.forEach(function (label) { var column = schema.columns[label]; line[column] = String(entry.values[label] || ''); selected[column] = true; });
+    schema.headers.forEach(function (label) {
+      var column = schema.columns[label];
+      line[column] = label === CONTACT_MAILING_STATUS.header ? CONTACT_MAILING_STATUS.initial : String(entry.values[label] || '');
+      selected[column] = true;
+    });
     values.push(line); mask.push(selected);
   });
-  job.pending = { kind: kind, startRow: start, width: width, values: values, mask: mask, hashes: additions.map(function (entry) { return entry.hash; }), keys: additions.map(function (entry) { return entry.key; }), advance: batch.length, skipped: skipped, sheetId: target.sheet.getSheetId(), headerHash: contactSyncHeaderHash_(target.sheet), status: 'pending' };
+  job.pending = { kind: kind, startRow: start, width: width, values: values, mask: mask, hashes: additions.map(function (entry) { return entry.hash; }), keys: additions.map(function (entry) { return entry.key; }), advance: batch.length, skipped: skipped, sheetId: target.sheet.getSheetId(), headerHash: contactSyncHeaderHash_(target.sheet), statusColumn: schema.columns[CONTACT_MAILING_STATUS.header], status: 'pending' };
   contactSyncSaveState_(claim.context, state);
   contactSyncWritePending_(claim);
   contactSyncConfirmPending_(claim);
@@ -615,6 +747,11 @@ function contactSyncConfirmPending_(claim) {
   var state = claim.state, job = state.job, pending = job.pending;
   if (!pending) return;
   if (contactSyncPendingState_(claim) !== 'complete') fail_('CONTACT_SYNC_UNCERTAIN', 'Добавленные контакты пока не подтверждены.');
+  if (Number.isSafeInteger(pending.statusColumn)) {
+    gridFile_(state.fileId, true, state.rootId); contactSyncAssertLease_(claim);
+    var sheet = gridSheet_(claim.book, pending.sheetId);
+    contactMailingStatusDropdown_(sheet.getRange(pending.startRow, pending.statusColumn + 1, pending.values.length, 1), true);
+  }
   pending.keys.forEach(function (key) { if (key.indexOf('email:') === 0) job.counts.addedEmail++; else if (key.indexOf('telegram:') === 0) job.counts.addedTelegram++; else job.counts.addedPhone++; });
   state.known = contactSyncUnion_(state.known, pending.hashes);
   job.cursor += pending.advance; job.counts.existing += pending.skipped; job.pending = null; job.error = null;

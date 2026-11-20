@@ -18,7 +18,7 @@ const emptyIterator = () => ({ hasNext: () => false, next: () => { throw new Err
 function fixture(options = {}) {
   const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const driveCalls = [];
-  const propertyStore = { getProperty: key => properties.get(key) ?? null };
+  const propertyStore = { getProperty: key => properties.get(key) ?? null, getProperties: () => Object.fromEntries(properties) };
   const rootFolder = {
     getId: () => ROOT, getName: () => registry.name, isTrashed: () => false,
     getFolders: emptyIterator, getFilesByType: emptyIterator,
@@ -171,6 +171,18 @@ test('segment payloads have serializable timestamps and metadata-only links', ()
   assert.deepEqual(Object.keys(result.items[0].files[0]).sort(), ['id', 'name', 'url']);
   assert.equal(result.items[0].files[0].url, 'https://docs.google.com/spreadsheets/d/metadata_sheet_1234567890/edit');
   assert.equal(JSON.parse(JSON.stringify(result)).generatedAt, result.generatedAt);
+});
+
+test('segment category prefers an explicit ID assignment and falls back to the legacy studio name', () => {
+  const assigned = 'assigned_segment_1234567890';
+  const f = fixture({ properties: { ['SEGMENT_CATEGORY_' + assigned]: JSON.stringify({ category: 'clients' }) } });
+  const names = ['Веб-студии', '  ВЕБ — СТУДИИ ', 'Веб студии', 'Кухни', 'Веб-студии 2'];
+  const folders = names.map((name, index) => folder('segment_category_' + index, name, SOURCE));
+  const result = f.build([folder(SOURCE, 'Аутричи'), ...folders, folder(assigned, 'Веб-студии', SOURCE)]);
+  const categoryById = Object.fromEntries(result.items.map(item => [item.id, item.category]));
+  assert.equal(categoryById[assigned], 'clients');
+  assert.deepEqual(folders.map(item => categoryById[item.id]), ['partners', 'partners', 'partners', 'clients', 'clients']);
+  assert.deepEqual(f.driveCalls, []);
 });
 
 test('bootstrap authorizes the caller before any Drive lookup, including a configured outside source', () => {

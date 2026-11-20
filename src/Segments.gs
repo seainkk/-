@@ -49,6 +49,7 @@ function buildSegments_(context, registry, folders, files) {
     children[folder.parentId].push(folder);
   });
   var segments = (children[source.id] || []).slice().sort(byName_);
+  var categoryProperties = segments.length ? context.properties.getProperties() : {};
   result.items = segments.map(function (segment) {
     var folderIds = [], queue = [segment.id], visited = Object.create(null);
     while (queue.length) {
@@ -70,6 +71,7 @@ function buildSegments_(context, registry, folders, files) {
       id: segment.id,
       name: segment.name,
       url: segmentFolderUrl_(segment.id),
+      category: segmentCategory_(categoryProperties[segmentCategoryKey_(segment.id)], segment.name),
       folderIds: folderIds,
       files: tables,
       tableCount: tables.length,
@@ -87,6 +89,33 @@ function buildSegments_(context, registry, folders, files) {
 
 function segmentFolderName_(value) {
   return String(value || '').normalize('NFC').trim().toLocaleLowerCase('ru-RU');
+}
+
+function segmentCategoryKey_(segmentId) {
+  return 'SEGMENT_CATEGORY_' + segmentId;
+}
+
+function segmentDefaultCategory_(name) {
+  return /^веб[\s\u002d\u2010-\u2015\u2212]+студии$/.test(segmentFolderName_(name)) ? 'partners' : 'clients';
+}
+
+function segmentStoredCategory_(raw) {
+  if (raw) {
+    try {
+      var value = JSON.parse(raw);
+      if (value && (value.category === 'partners' || value.category === 'clients')) return value.category;
+    } catch (error) { /* Fall back to the legacy folder name if the value is unavailable. */ }
+  }
+  return null;
+}
+
+function segmentCategory_(raw, name) {
+  return segmentStoredCategory_(raw) || segmentDefaultCategory_(name);
+}
+
+function segmentFolderResult_(context, folder) {
+  var id = folder.getId(), name = folder.getName();
+  return { id: id, name: name, url: segmentFolderUrl_(id), category: segmentCategory_(context.properties.getProperty(segmentCategoryKey_(id)), name) };
 }
 
 function segmentFolderUrl_(folderId) {

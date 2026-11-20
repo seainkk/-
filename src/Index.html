@@ -57,6 +57,7 @@
     <form id="br-segment-form" class="br-segment-form">
       <label id="br-segment-target-label" for="br-segment-target" hidden>Куда добавить базу<select id="br-segment-target"><option value="">Новый сегмент</option></select></label>
       <label for="br-segment-name">Название сегмента<input id="br-segment-name" type="text" maxlength="100" autocomplete="off" required></label>
+      <label id="br-segment-category-label" for="br-segment-category">Раздел<select id="br-segment-category"><option value="partners">Партнерка</option><option value="clients" selected>Клиенты</option></select></label>
       <p class="br-muted">Компании и ЛПР автоматически попадут в две связанные таблицы единого формата. Повторы дополняют существующие записи; ЛПР переносятся даже без контактов. Подробности сохранятся в исходных базах реестра.</p>
       <div class="br-segment-source-heading"><h3>Добавить готовые базы <span class="br-muted">необязательно</span></h3><button id="br-segment-refresh-sources" type="button" class="br-button">Обновить список баз</button></div>
       <p id="br-segment-sources-health" class="br-muted" role="status" aria-live="polite"></p>
@@ -147,6 +148,7 @@
       </section>
     <section id="br-segments-view" class="br-segments-view" hidden aria-labelledby="br-segments-title">
       <div class="br-segments-heading"><div><h1 id="br-segments-title">Сегменты</h1><p id="br-segments-count" class="br-muted"></p></div><button id="br-add-segment" type="button" class="br-button br-primary">＋ Добавить сегмент</button></div>
+      <nav class="br-registry-sections" aria-label="Разделы сегментов"><button id="br-segment-category-partners" type="button" class="br-button" aria-pressed="false">Партнерка</button><button id="br-segment-category-clients" type="button" class="br-button" aria-pressed="true">Клиенты</button></nav>
       <p id="br-segments-health" class="br-segments-health" role="status" aria-live="polite"></p>
       <div id="br-segments-empty" class="br-segments-empty" role="status" hidden><h2 id="br-segments-empty-title"></h2><p id="br-segments-empty-description"></p></div>
       <div id="br-segments-rows" class="br-segments-rows"></div>

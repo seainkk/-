@@ -36,10 +36,10 @@ function fixture(options = {}) {
     }
   };
   function makeSheet(id, name, rows) {
-    const data = rows.map(row => row.slice()), formulas = {};
+    const data = rows.map(row => row.slice()), formulas = {}, validations = {};
     let maxRows = options.gridRows || Math.max(1000, rows.length), maxColumns = Math.max(26, ...rows.map(line => line.length));
     const api = {
-      data, formulas, getSheetId: () => id, getName: () => name, getParent: () => book,
+      data, formulas, validations, getSheetId: () => id, getName: () => name, getParent: () => book,
       getLastRow() { for (let y = data.length - 1; y >= 0; y--) if (data[y]?.some(v => v !== '' && v !== null && v !== undefined)) return y + 1; return 0; },
       getLastColumn() { return Math.max(0, ...data.map(row => { for (let x = row.length - 1; x >= 0; x--) if (row[x] !== '' && row[x] !== null && row[x] !== undefined) return x + 1; return 0; })); },
       getMaxRows: () => maxRows, getMaxColumns: () => maxColumns,
@@ -55,6 +55,8 @@ function fixture(options = {}) {
             return values().map(line => line.map(v => v === null || v === undefined ? '' : String(v)));
           },
           getFormulas: () => Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => formulas[(row + y) + ':' + (column + x)] || '')),
+          getDataValidations: () => Array.from({ length: height }, (_, y) => [validations[(row + y) + ':' + column] || null]),
+          setDataValidations: rules => rules.forEach((line, y) => { validations[(row + y) + ':' + column] = line[0]; }),
           getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null))
         };
       }
@@ -73,6 +75,7 @@ function fixture(options = {}) {
   }
   const scope = { rootId: ROOT, properties: store };
   const context = vm.createContext({ console: { warn() {} }, Date, JSON, Object, Array, Number, String, Boolean, RegExp, Math, Error, Set, Map });
+  vm.runInContext(readFileSync(new URL('../src/Config.gs', import.meta.url), 'utf8'), context, { filename: 'Config.gs' });
   context.authorize_ = () => { if (options.revoked) context.fail_('LINK_ACCESS_REQUIRED', 'revoked'); return scope; };
   context.object_ = value => { if (!value || typeof value !== 'object' || Array.isArray(value)) context.fail_('INVALID_REQUEST', 'request'); return value; };
   context.id_ = id => { if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{10,200}$/.test(id)) context.fail_('INVALID_ID', 'id'); return id; };
@@ -97,6 +100,14 @@ function fixture(options = {}) {
   context.locked_ = fn => { calls.lockAttempts++; if (options.busy) context.fail_('BUSY', 'busy'); calls.locks++; try { return fn(); } finally { calls.locks--; } };
   context.LockService = { getScriptLock: () => ({ tryLock: () => !options.busy, releaseLock() {} }) };
   context.SpreadsheetApp = { openById(id) { calls.opened.push(id); if (id !== FILE) throw Error('unexpected book'); return book; }, flush() {} };
+  if (options.nativeDropdown) context.SpreadsheetApp.newDataValidation = () => {
+    const rule = {}, builder = {
+      requireValueInList(values, dropdown) { rule.values = plain(values); rule.dropdown = dropdown; return builder; },
+      setAllowInvalid(allowInvalid) { rule.allowInvalid = allowInvalid; return builder; },
+      build: () => rule,
+    };
+    return builder;
+  };
   context.Utilities = {
     getUuid: () => crypto.randomUUID(),
     newBlob: (text, type, name) => ({ getDataAsString: () => String(text), getName: () => name, type })
@@ -227,7 +238,49 @@ test('source changes append only new contacts while existing validation, campaig
   assert.equal(f.target('phone').data[0][5], 'Статус рассылки');
   assert.equal(f.target('phone').data[0][6], 'Telegram');
   assert.equal(f.target('phone').data[0][7], 'Тип контакта');
-  assert.equal(f.target('phone').data.find(row => row[0] === '+79990000002')[5] ?? '', '');
+  assert.equal(f.target('phone').data.find(row => row[0] === '+79990000002')[5], 'новый');
+  assert.equal(f.target('email').data.find(row => row[0] === 'new@example.test')[5], 'новый');
+  assert.equal(f.target('phone').data.find(row => row[6] === '@new_person')[5], 'новый');
+});
+
+test('opting in while opening managed legacy contact tabs fills only blank statuses without provider work', () => {
+  const f = fixture({ legacy: true, nativeDropdown: true, provider: true,
+    emailRows: [EMAIL.concat(['Статус', 'Статус из источника']), ['one@example.test', '', '', '', 'Ручной'], ['two@example.test', '', '', '', '', 'Фильтр'],
+      ['formula@example.test'], ['new@example.test'], ['', '', 'Примечание']],
+    phoneRows: [PHONE.slice(0, 5).concat('Рассылка'), ['+79990000001', '', '', '', '', 'Кампания Б']] });
+  const email = f.book.getSheetByName('Email'), phone = f.book.getSheetByName('Телефоны');
+  email.formulas['4:5'] = '=""';
+  const customRule = { allowed: 'Ручной' };
+  email.validations['2:5'] = customRule;
+  f.context.contactSyncWithLease_(FILE, () => null, true);
+  Object.assign(f.resources.get(FILE).appProperties, { registryContactEmailSheetId: '1', registryContactPhoneSheetId: '2' });
+  assert.equal(f.invoke('getContactWorkspace_', { id: FILE }).enrolled, true);
+  assert.equal(f.calls.raw.length, 0);
+  assert.equal(f.invoke('getContactWorkspace_', { id: FILE, prepareMailingStatus: true }).mailingStatusChanged, true);
+  assert.equal(email.data[0][4], 'Статус');
+  assert.equal(email.data[1][4], 'Ручной');
+  assert.equal(email.data[2][4], 'фильтр');
+  assert.equal(email.data[2][5], 'Фильтр');
+  assert.equal(email.formulas['4:5'], '=""');
+  assert.equal(email.data[4][4], 'новый');
+  assert.equal(email.data[5][4], undefined);
+  assert.deepEqual(phone.data[0].slice(5), ['Рассылка', 'Статус рассылки']);
+  assert.deepEqual(phone.data[1].slice(5), ['Кампания Б', 'новый']);
+  assert.equal(email.validations['2:5'], customRule);
+  assert.deepEqual(email.validations['3:5'], { values: ['новый', 'в рассылке', 'фильтр'], dropdown: true, allowInvalid: false });
+  assert.equal(f.calls.provider.length, 0);
+  const writes = f.calls.raw.length;
+  assert.equal(f.invoke('getContactWorkspace_', { id: FILE, prepareMailingStatus: true }).mailingStatusChanged, false);
+  assert.equal(f.calls.raw.length, writes);
+});
+
+test('opening an unenrolled legacy workbook creates no contact status columns or artifacts', () => {
+  const f = fixture({ legacy: true, emailRows: [EMAIL, ['one@example.test']] });
+  const r = f.invoke('getContactWorkspace_', { id: FILE, prepareMailingStatus: true });
+  assert.equal(r.mailingStatusChanged, false);
+  assert.equal(r.enrolled, false);
+  assert.deepEqual(f.calls.mutations, []);
+  assert.deepEqual(f.calls.raw, []);
 });
 
 test('a repeated request is a pure receipt replay and a fresh scan adds no duplicates', () => {

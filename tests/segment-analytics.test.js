@@ -18,7 +18,7 @@ const iterator = values => { let index = 0; return { hasNext: () => index < valu
 function fixture(options = {}) {
   const calls = { folders: [], files: [], opened: [], ranges: [], tracking: [], trackingSnapshots: 0, metadataScans: [], rootFileScans: 0 };
   const propertyValues = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, SEGMENTS_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: SERVICE, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
-  const propertyStore = { getProperty: key => propertyValues.get(key) ?? null };
+  const propertyStore = { getProperty: key => propertyValues.get(key) ?? null, getProperties: () => Object.fromEntries(propertyValues) };
   const folderRows = [
     { id: ROOT, name: 'Реестр баз', parents: [] },
     { id: SOURCE, name: 'Аутричи', parents: [ROOT] },
@@ -109,13 +109,14 @@ test('dashboard and mailings authorize before Drive or spreadsheet reads', () =>
 
 test('light dashboard exposes usable canonical table links without opening business worksheets', () => {
   const file = sourceFile('overview_companies_1234567890', [{ rows: [['PRIVATE BUSINESS CELL']] }], { unreadable: true });
-  const f = fixture({ files: [file], tracking: { available: true, tables: [
+  const f = fixture({ properties: { ['SEGMENT_CATEGORY_' + SEGMENT]: '{"category":"partners"}' }, files: [file], tracking: { available: true, tables: [
     { segmentId: SEGMENT, fileId: file.id, kind: 'companies' },
     { segmentId: 'other_segment_1234567890', fileId: file.id, kind: 'lpr' },
   ], loads: [] } });
   const result = f.dashboard({ includeAnalysis: false });
   assert.equal(result.state, 'ready');
   assert.equal(result.analysisPending, true);
+  assert.equal(result.items[0].category, 'partners');
   assert.equal(result.items[0].files[0].kind, 'companies');
   assert.equal(result.items[0].files[0].id, file.id);
   assert.equal(result.items[0].overallStatus, null);
@@ -496,6 +497,7 @@ test('mailings validate their folder without scanning unrelated segments or busi
   const result = f.mailings();
   assert.equal(result.state, 'not_connected');
   assert.equal(result.segment.id, SEGMENT);
+  assert.equal(result.segment.category, 'clients');
   assert.deepEqual(result.totals, { sent: null, replies: null, leads: null });
   assert.deepEqual(result.services.map(service => [service.id, service.name, service.channel]), [['coldy', 'Coldy', 'email'], ['nsa', 'NSA', 'telegram']]);
   for (const service of result.services) {

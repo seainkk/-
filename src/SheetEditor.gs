@@ -16,6 +16,7 @@ function getGridWorkbook_(request) {
     scope = gridFile_(input.id, false, scope.context.rootId);
     var result = { id: scope.file.getId(), name: name, url: spreadsheetUrl_(scope.file.getId()), canEdit: scope.canEdit, sheets: metadata };
     if (input.includeInitialRange) result.initialRange = initial;
+    if (scope.canEdit && typeof contactSyncMailingStatusNeeded_ === 'function' && contactSyncMailingStatusNeeded_(scope.tags)) result.needsMailingStatus = true;
     return result;
   });
 }
@@ -145,7 +146,7 @@ function gridFile_(fileId, writable, expectedRoot) {
   if ((role || tags.registryPreparedDraft) && (role !== 'output' || ['1', '2'].indexOf(tags.registryPreparedVersion) === -1 || tags.registryPreparedRoot !== context.rootId)) fail_('GRID_PROTECTED', 'Эта таблица ещё относится к служебной подготовке базы.');
   var canEdit = !!(metadata.capabilities && metadata.capabilities.canEdit === true);
   if (writable && !canEdit) fail_('GRID_READ_ONLY', 'Аккаунт сервиса не имеет подтверждённых прав редактора этой таблицы.');
-  return { context: context, file: file, canEdit: canEdit };
+  return { context: context, file: file, canEdit: canEdit, tags: tags };
 }
 
 function gridInsideSegment_(file, outreachId) {

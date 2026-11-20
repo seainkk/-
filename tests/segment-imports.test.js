@@ -41,6 +41,7 @@ function fixture(options = {}) {
   sheet(peopleBook, 'Лист1', [], 13);
   const status = { value: options.status || 'ready', revision: 1 }, tracking = { tables: [{ segmentId: SEGMENT, kind: 'companies', fileId: COMPANIES }, { segmentId: SEGMENT, kind: 'lpr', fileId: PEOPLE }] };
   const context = vm.createContext({ console: { warn() {} } });
+  for (const name of ['Config.gs', 'Segments.gs', 'SegmentActions.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   context.digest_ = value => crypto.createHash('sha256').update(value).digest('base64url');
   context.registryError_ = (code, message) => Object.assign(new Error('[' + code + '] ' + message), { registryCode: code });
   context.fail_ = (code, message) => { throw context.registryError_(code, message); };
@@ -59,12 +60,12 @@ function fixture(options = {}) {
   context.segmentTrackingStorage_ = () => tracking;
   context.segmentTargetFile_ = (_scope, folder, id) => { const item = resources.get(id); if (!item || item.parent !== folder.id || item.mime !== 'application/vnd.google-apps.spreadsheet') context.fail_('OUTSIDE_SEGMENTS', 'Target moved'); return item; };
   context.segmentFindSheet_ = (target, id) => target.sheets.find(entry => entry.getSheetId() === id) || null;
-  context.segmentActionResult_ = (_scope, folder, tables) => ({ id: folder.id, name: folder.name, files: Object.keys(tables).map(kind => ({ id: tables[kind], kind })) });
   context.segmentRememberRelation_ = (_scope, _storage, _db, fileId, segmentId) => { if (!calls.relations.some(entry => entry.fileId === fileId && entry.segmentId === segmentId)) calls.relations.push({ fileId, segmentId }); };
   context.segmentMutation_ = (kind, input) => { calls.segmentMutations.push({ kind, input: plain(input) }); return { segment: { id: SEGMENT }, loadedSheets: [] }; };
   context.spreadsheetUrl_ = id => 'https://docs.google.com/spreadsheets/d/' + id + '/edit';
   context.preparedEnsureFolder_ = () => resources.get(PRIVATE); context.preparedFolder_ = (_scope, id) => { if (id !== PRIVATE) context.fail_('OUTSIDE_REGISTRY', 'Wrong private folder'); return resources.get(PRIVATE); };
   context.enrollContactWorkbook_ = (_scope, fileId, settings) => { calls.enrollments.push({ fileId, settings: plain(settings) }); };
+  vm.runInContext(readFileSync(new URL('../src/Config.gs', import.meta.url), 'utf8'), context, { filename: 'Config.gs' });
   context.REGISTRY_CONFIG = { defaultSourceBasesStorageId: STORE };
   context.Utilities = { getUuid: () => 'lease-' + ++sequence, newBlob: value => ({ value }) };
   context.LockService = { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) };
@@ -117,6 +118,14 @@ test('creates lean masters, transfers a person without contacts and marks origin
   assert.deepEqual(original[1].slice(0, 6), ['ООО Пример', '7707083893', 'sales@example.test', 'Иван Иванов', 'Директор', '']);
   assert.match(original[1][6], /Перенесено в ЛПР/);
   assert.equal(f.calls.relations.length, 1); assert.ok(f.calls.enrollments.some(entry => entry.settings.role === 'segment-lpr'));
+});
+
+test('normalized previews and import results include the current segment category', () => {
+  const f = fixture();
+  f.properties.set('SEGMENT_CATEGORY_' + SEGMENT, JSON.stringify({ category: 'partners' }));
+  const shown = f.preview();
+  assert.equal(shown.segment.category, 'partners');
+  assert.equal(f.finish(f.start(shown)).segment.category, 'partners');
 });
 
 test('a second import and completed-request replay never duplicate rows or reset campaign statuses', () => {
@@ -217,6 +226,15 @@ test('a legacy loads-only segment update keeps its existing name when stripping 
   assert.deepEqual(f.calls.segmentMutations[0].input.loads, []);
   f.finish(result.normalizedImport);
   assert.equal(f.master('companies').state.rows.length, 2);
+});
+
+test('a normalized category-only update does not initialize target workbooks', () => {
+  const f = fixture();
+  f.context.segmentRecordsTargets_ = () => assert.fail('Category-only updates must not initialize target workbooks');
+  f.context.segmentNormalizedMutation_('update', { id: SEGMENT, category: 'partners', expectedCategory: 'clients', requestId: 'category-update-001' });
+  assert.equal(f.calls.segmentMutations[0].input.category, 'partners');
+  assert.equal(f.calls.segmentMutations[0].input.expectedCategory, 'clients');
+  assert.equal(f.calls.segmentMutations[0].input.name, undefined);
 });
 
 test('per-sheet person target and header choice are retained through preview and import', () => {

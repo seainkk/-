@@ -65,7 +65,7 @@ function getSegmentMailings_(request) {
     var connected = coldy.state !== 'not_connected', services = [coldy, segmentDisconnectedMailings_('nsa', 'NSA', 'telegram')];
     return {
       state: connected ? 'partial' : 'not_connected',
-      segment: { id: folder.getId(), name: folder.getName(), url: segmentFolderUrl_(folder.getId()) },
+      segment: segmentFolderResult_(context, folder),
       services: services,
       totals: connected ? segmentAggregateMailingMetrics_([coldy.totals], true) : segmentUnknownMailingTotals_(),
       totalsScope: 'connected_channels',

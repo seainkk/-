@@ -256,6 +256,21 @@
   function flush(current=session){if(!alive(current))return Promise.resolve();commitEditor();if(current.formulaDirty)commitFormula();clearTimeout(current.saveTimer);if(current.error)return Promise.reject(current.error);if(!current.queue.length&&!current.inFlight&&!current.failed)return Promise.resolve();const done=new Promise((resolve,reject)=>current.waiters.push({resolve,reject}));drain(current);return done;}
   function retry(){const current=session;if(!current?.failed||current.inFlight||current.error?.code==='GRID_CONFLICT')return;const op=current.failed;current.failed=null;current.error=null;if(op.kind==='append'){runAppend(op.axis,op);return;}current.queue.unshift(op);drain(current);}
   async function refreshBook(current,selected=current.sheetId,includeInitialRange=false){const data=await rpc(current,'getGridWorkbook',{id:current.id,...(includeInitialRange?{includeInitialRange:true}:{})});if(!alive(current))return;current.book=data;if(!Array.isArray(data.sheets)||!data.sheets.length)throw new Error('В таблице нет доступных листов.');current.sheetId=data.sheets.some(item=>String(item.id)===String(selected))?selected:data.sheets[0].id;$('rg-grid-title').textContent=gridText(data.name||'Таблица');$('rg-grid-native').href='https://docs.google.com/spreadsheets/d/'+encodeURIComponent(current.id)+'/edit#gid='+encodeURIComponent(current.sheetId);renderTabs();return data;}
+  async function prepareGridMailingStatus(current){
+    current.transition=true;
+    notify(current);
+    try{
+      const workspace=await rpc(current,'getContactWorkspace',{id:current.id,prepareMailingStatus:true},()=>alive(current));
+      if(!workspace||!alive(current))return;
+      current.workspace=workspace;current.workspaceLoaded=true;
+      if(workspace.mailingStatusChanged===true){
+        current.cache.clear();
+        await refreshBook(current);
+        if(alive(current))await loadWindow(current.window.row,current.window.column);
+      }
+    }catch(error){if(alive(current))hint(gridFailure(error).message);}
+    finally{if(alive(current)){current.transition=false;notify(current);}}
+  }
   async function switchSheet(id){const current=session;if(!current||current.transition||String(id)===String(current.sheetId))return;commitEditor();if(current.formulaDirty)commitFormula();current.transition=true;notify(current);try{await flush(current);if(!alive(current))return;current.sheetId=id;current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];current.active={row:1,column:1};current.selection={r1:1,c1:1,r2:1,c2:1};const view=$('rg-grid-viewport');view.scrollTop=0;view.scrollLeft=0;renderTabs();$('rg-grid-native').href='https://docs.google.com/spreadsheets/d/'+encodeURIComponent(current.id)+'/edit#gid='+encodeURIComponent(id);await loadWindow(1,1,{focus:true});}catch(error){if(alive(current)&&!current.error)setError(error,current);}finally{if(alive(current)){current.transition=false;notify(current);}}}
   async function reload(discard=false){const current=session;if(!current||current.inFlight)return;if(hasPending()&&!discard){hint('Сначала дождитесь сохранения. При ошибке можно явно отменить несохранённые правки.');return;}commitEditor(true);current.formulaDirty=false;current.formulaFocused=false;clearTimeout(current.saveTimer);current.queue=[];current.failed=null;current.error=null;current.dirty.clear();current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];current.transition=true;notify(current);try{await refreshBook(current);if(alive(current))await loadWindow(current.window.row,current.window.column,{focus:true});}catch(error){setError(error,current);}finally{if(alive(current)){current.transition=false;notify(current);}}}
   async function runAppend(axis,existing=null){const current=session;if(!current||current.transition||current.book?.canEdit!==true)return;commitEditor();try{await flush(current);}catch(error){return;}if(!alive(current))return;current.transition=true;const meta=sheet(current),op=existing||{kind:'append',axis,requestId:requestId(),payload:{id:current.id,sheetId:current.sheetId,count:axis==='rows'?100:1,requestId:requestId()}};if(!existing){op.payload.requestId=op.requestId;if(axis==='rows')op.payload.expectedRowCount=meta.rowCount;else op.payload.expectedColumnCount=meta.columnCount;}current.inFlight=op;notify(current);try{await rpc(current,axis==='rows'?'appendGridRows':'appendGridColumns',op.payload);if(!alive(current))return;current.failed=null;current.error=null;await refreshBook(current);if(alive(current))await loadWindow(current.window.row,current.window.column);}catch(error){if(alive(current)){current.failed=op;current.error=gridFailure(error);}}finally{if(alive(current)){current.inFlight=null;current.transition=false;notify(current);settle(current);}}}
@@ -270,7 +285,14 @@
   async function open(options={}){
     if(!panel)throw new Error('Редактор таблиц недоступен. Обновите страницу.');if(session){if(hasPending())return false;lock(false);}if(typeof options.transport!=='function'||!options.id)throw new Error('Не указана таблица для открытия.');
     const current={epoch:++generation,id:String(options.id),transport:options.transport,onClose:options.onClose,bodyOverflow:document.body.style.overflow,returnFocus:document.activeElement,book:null,sheetId:null,cache:new Map(),committed:new Map(),dirty:new Map(),queue:[],failed:null,inFlight:null,error:null,waiters:[],rpcTail:Promise.resolve(),active:{row:1,column:1},selection:{r1:1,c1:1,r2:1,c2:1},window:{row:1,column:1},loadSequence:0,editSequence:0,undo:[],redo:[],loading:true,transition:false,formulaFocused:false,formulaDirty:false,workspace:null,workspaceLoaded:false,contactBusy:false,contactFailed:false,contactDirty:false,contactStep:null,contactTimer:null,validation:null,validationTimer:null,validationBusy:false,validationOpenEpoch:0,payRequests:new Map(),coldyValidation:null,coldyValidationTimer:null,coldyPreview:null,coldyStep:null,coldyFailed:false,phonePreview:null,phoneStep:null,phoneFailed:false,pvEmailPreview:null,pvEmailStep:null,pvEmailFailed:false};session=current;panel.hidden=false;document.body.style.overflow='hidden';$('rg-grid-title').textContent='Открываем таблицу…';$('rg-grid-editor').hidden=true;hint('Двойной щелчок или F2 — изменить ячейку. Enter — подтвердить, Esc — отменить ввод.');notify(current);
-    try{const data=await refreshBook(current,current.sheetId,true);if(alive(current)&&data?.initialRange&&String(data.initialRange.sheetId)===String(current.sheetId)){mergeRange(current,data.initialRange);current.loading=false;draw();$('rg-grid-viewport').focus({preventScroll:true});}else if(alive(current))await loadWindow(1,1,{focus:true});return alive(current);}catch(error){if(alive(current)){current.loading=false;setError(error,current);}return false;}
+    try{
+      const data=await refreshBook(current,current.sheetId,true);
+      if(alive(current)&&data?.initialRange&&String(data.initialRange.sheetId)===String(current.sheetId)){
+        mergeRange(current,data.initialRange);current.loading=false;draw();$('rg-grid-viewport').focus({preventScroll:true});
+      }else if(alive(current))await loadWindow(1,1,{focus:true});
+      if(alive(current)&&data?.canEdit===true&&data.needsMailingStatus===true)prepareGridMailingStatus(current);
+      return alive(current);
+    }catch(error){if(alive(current)){current.loading=false;setError(error,current);}return false;}
   }
   window.RegistryGrid={open,lock,isOpen:()=>!!session,hasPending};
   if(!panel)return;
