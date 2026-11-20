@@ -84,10 +84,11 @@ function stagePreparedBaseLink_(request) {
 
 function previewPreparedBase_(request) {
   return api_(function () {
-    var input = importInput_(request, ['draftId', 'sheetId']);
+    var input = importInput_(request, ['draftId', 'sheetId', 'sourceSheetIds']);
     return preparedWithLease_(input.draftId, function (draft, context) {
       if (draft.state !== 'staged') fail_('PREVIEW_LOCKED', 'Подготовка уже начата. Дождитесь результата или продолжите тот же запрос.');
-      if (typeof preparedDataReadWorkbook_ === 'function') return preparedWorkbookPreview_(context, draft, preparedSheetId_(input.sheetId));
+      if (typeof preparedDataReadWorkbook_ === 'function') return preparedWorkbookPreview_(context, draft, preparedSheetId_(input.sheetId), input.sourceSheetIds);
+      if (input.sourceSheetIds !== undefined) fail_('PREVIEW_UPDATE_REQUIRED', 'Для выбора исходных листов обновите приложение.');
       var sheetId = preparedSheetId_(input.sheetId), stable = preparedStableRead_(context, draft, sheetId), model = stable.model;
       var token = digest_(JSON.stringify([draft.draftId, sheetId, draft.name, draft.section, draft.status, model.fingerprint]));
       var response = { draftId: draft.draftId, sheetId: sheetId, previewToken: token, canConfirm: model.complete === true && model.canConfirm === true, counts: model.counts, sheets: model.previewSheets || [], warnings: model.warnings || [] };
@@ -370,7 +371,9 @@ function preparedStageResponse_(context, draft) {
   var options = typeof preparedDataReadWorkbook_ === 'function' ? preparedWorkbookSourceOptions_(context, draft) : {};
   var sheets = book.getSheets().filter(function (sheet) { var id = sheet.getSheetId(); return (!options.sourceSheetIds || options.sourceSheetIds.indexOf(id) >= 0) && (options.managedSheetIds || []).indexOf(id) < 0; }).map(function (sheet) { return { id: sheet.getSheetId(), name: sheet.getName(), rows: sheet.getLastRow(), columns: sheet.getLastColumn() }; });
   if (!sheets.length) fail_('INVALID_SOURCE', 'В исходной книге нет листов.');
-  return { state: 'staged', draftId: draft.draftId, name: draft.name, section: draft.section, status: draft.status, sheets: sheets, selectedSheetId: sheets[0].id, expiresAt: draft.expiresAt };
+  var selection = typeof preparedWorkbookSelection_ === 'function' ? preparedWorkbookSelection_(book, options, draft.sourceSheetIds) : sheets.map(function (sheet) { return sheet.id; });
+  var selectedSheetId = Number.isSafeInteger(draft.sheetId) && selection.indexOf(draft.sheetId) >= 0 ? draft.sheetId : selection[0];
+  return { state: 'staged', draftId: draft.draftId, name: draft.name, section: draft.section, status: draft.status, sheets: sheets, sourceSheetIds: selection, selectedSheetId: selectedSheetId, expiresAt: draft.expiresAt };
 }
 
 function preparedSheet_(book, sheetId) { var sheets = book.getSheets().filter(function (sheet) { return sheet.getSheetId() === sheetId; }); if (sheets.length !== 1) fail_('INVALID_SOURCE', 'Выбранный лист больше недоступен.'); return sheets[0]; }

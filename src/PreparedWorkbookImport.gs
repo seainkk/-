@@ -3,7 +3,9 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
   var file = initialFile || preparedDraftFile_(context, draft);
   for (var attempt = 0; attempt < 2; attempt++) {
     var before = attempt ? preparedDraftFile_(context, draft) : file;
-    var options = preparedWorkbookSourceOptions_(context, draft);
+    var options = preparedWorkbookSourceOptions_(context, draft), book = SpreadsheetApp.openById(file.id);
+    var allSourceSheets = preparedWorkbookSourceSheets_(book, options);
+    options.sourceSheetIds = preparedWorkbookSelection_(book, options, draft.sourceSheetIds);
     // A whole historical workbook can need more time than a single changed
     // contact sheet. This server-only deadline remains below the execution
     // limit, and the recognizer still rejects every incomplete result.
@@ -14,10 +16,20 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
     // access key, root or lease immediately without repeating the same remote
     // original/folder ancestry once for every sheet and API boundary.
     options.guard = function () { preparedWorkbookReadGuard_(context, draft); };
-    var model = preparedDataReadWorkbook_(SpreadsheetApp.openById(file.id), file.id, draft.section, options);
+    var model = preparedDataReadWorkbook_(book, file.id, draft.section, options);
+    model.allSourceSheets = allSourceSheets;
     // Historical checks, exclusions and mailing marks stay attached to their
     // canonical contacts before the immutable output plan is persisted.
-    if (typeof legacyContactHistoryEnrich_ === 'function') model = legacyContactHistoryEnrich_(model);
+    if (draft.historyReadVersion === 1 && model.complete === true && typeof legacyContactHistoryReadWorkbook_ === 'function') {
+      // Unselected archives supply check/work history only. Their contacts and
+      // records are never normalized into the selected output. Old managed
+      // report tabs may also contain history when re-importing a prepared book.
+      var history = legacyContactHistoryReadWorkbook_(book, file.id, draft.section, options.guard, model.models || [], { sourceSheetIds: book.getSheets().map(function (sheet) { return sheet.getSheetId(); }), deadline: options.deadline });
+      if (!history || history.complete !== true || typeof history.fingerprint !== 'string') fail_('LEGACY_HISTORY_PARTIAL', 'Не удалось полностью прочитать историю контактов. Повторите предпросмотр.');
+      if (typeof legacyContactHistoryEnrich_ === 'function') model = legacyContactHistoryEnrich_(model, history.history);
+      model.fingerprint = digest_(JSON.stringify([3, model.fingerprint, history.fingerprint]));
+      (history.warnings || []).forEach(function (warning) { if (model.warnings.indexOf(warning) < 0) model.warnings.push(warning); });
+    } else if (typeof legacyContactHistoryEnrich_ === 'function') model = legacyContactHistoryEnrich_(model);
     var after = preparedDraftFile_(context, draft), beforeVersion = preparedVersion_(before), afterVersion = preparedVersion_(after);
     if (!beforeVersion || !afterVersion || beforeVersion === afterVersion) return { model: model, version: afterVersion };
   }
@@ -42,7 +54,32 @@ function preparedWorkbookSourceOptions_(context, draft) {
   return options;
 }
 
-function preparedWorkbookPreview_(context, draft, sheetId) {
+/** Metadata for all permitted originals; managed contact targets are not selectable. */
+function preparedWorkbookSourceSheets_(book, options) {
+  return book.getSheets().filter(function (sheet) {
+    var id = sheet.getSheetId(); return (!options.sourceSheetIds || options.sourceSheetIds.indexOf(id) >= 0) && (options.managedSheetIds || []).indexOf(id) < 0;
+  }).map(function (sheet) { var id = sheet.getSheetId(); return { id: id, sheetId: id, name: sheet.getName(), rowCount: sheet.getLastRow(), columnCount: sheet.getLastColumn() }; });
+}
+
+/** Canonical book order makes a set's token independent of checkbox click order. */
+function preparedWorkbookSelection_(book, options, requested) {
+  var allowed = book.getSheets().map(function (sheet) { return sheet.getSheetId(); }).filter(function (id) { return (!options.sourceSheetIds || options.sourceSheetIds.indexOf(id) >= 0) && (options.managedSheetIds || []).indexOf(id) < 0; });
+  if (!allowed.length) fail_('INVALID_SOURCE', 'В исходной книге нет доступных исходных листов.');
+  if (requested === undefined) return allowed;
+  if (!Array.isArray(requested) || !requested.length || requested.length > 100 || requested.some(function (id) { return !Number.isSafeInteger(id) || id < 0; }) || new Set(requested).size !== requested.length) fail_('INVALID_REQUEST', 'Выберите от одного до ста исходных листов без повторов.');
+  if (requested.some(function (id) { return allowed.indexOf(id) < 0; })) fail_('INVALID_SOURCE', 'Выбранный лист не относится к доступным исходным листам этой базы.');
+  return allowed.filter(function (id) { return requested.indexOf(id) >= 0; });
+}
+
+function preparedWorkbookPreview_(context, draft, sheetId, sourceSheetIds) {
+  var file = preparedDraftFile_(context, draft), book = SpreadsheetApp.openById(file.id), options = preparedWorkbookSourceOptions_(context, draft);
+  var selectedIds = preparedWorkbookSelection_(book, options, sourceSheetIds === undefined ? draft.sourceSheetIds : sourceSheetIds);
+  if (selectedIds.indexOf(sheetId) < 0) fail_('INVALID_SOURCE', 'Лист предпросмотра должен входить в выбранные исходные листы.');
+  if (sourceSheetIds !== undefined) draft.sourceSheetIds = selectedIds;
+  // Only newly staged previews use the extended selected-source/history
+  // envelope. Already confirmed V2 receipts keep their earlier fingerprints.
+  draft.historyReadVersion = 1; draft.previewToken = ''; draft.canConfirm = false; draft.planId = ''; draft.planHash = ''; draft.planRole = '';
+  preparedSave_(context, draft);
   var stable = preparedWorkbookStableRead_(context, draft), model = stable.model;
   var selected = (model.models || []).filter(function (leaf) { return leaf.source.sheetId === sheetId; })[0];
   if (!selected && model.complete === false) {
@@ -59,7 +96,7 @@ function preparedWorkbookPreview_(context, draft, sheetId) {
   var token = digest_(JSON.stringify([2, draft.draftId, sheetId, draft.name, draft.section, draft.status, model.fingerprint]));
   var canConfirm = model.complete === true && model.canConfirm === true;
   var email = { name: emailName, headers: model.email.headers, rows: model.email.rows }, phone = { name: phoneName, headers: model.phone.headers, rows: model.phone.rows };
-  var response = { draftId: draft.draftId, sheetId: sheetId, previewToken: token, canConfirm: canConfirm, counts: model.counts, sourceSheets: model.sourceSheets || [], sourceSheetCount: (model.sourceSheets || []).length, warnings: model.warnings || [], sheets: [
+  var response = { draftId: draft.draftId, sheetId: sheetId, sourceSheetIds: selectedIds, allSourceSheets: model.allSourceSheets || [], previewToken: token, canConfirm: canConfirm, counts: model.counts, sourceSheets: model.sourceSheets || [], sourceSheetCount: (model.sourceSheets || []).length, warnings: model.warnings || [], sheets: [
     { name: (sources.filter(function (source) { return source.source.sheetId === sheetId; })[0] || {}).name || selected.source.name, headers: selected.source.headers || [], sample: selected.source.sample || [], rowCount: selected.source.rowCount },
     { name: emailName, headers: email.headers, sample: email.rows.slice(0, 8), rowCount: email.rows.length + 1 },
     { name: phoneName, headers: phone.headers, sample: phone.rows.slice(0, 8), rowCount: phone.rows.length + 1 }

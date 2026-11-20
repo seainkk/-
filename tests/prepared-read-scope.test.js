@@ -12,7 +12,7 @@ function fixture(mode) {
     preparedAssertLease_:()=>{calls.leases++;if(leaseLost)fail('BUSY');},
     preparedDraftFile_:()=>{calls.scope++;if(moved)fail('OUTSIDE_REGISTRY');return {id:draft.stageFileId,version:'1'};},
     preparedVersion_:f=>f.version,
-    SpreadsheetApp:{openById:id=>{assert.equal(id,draft.stageFileId);return {fixedWorkbook:true};}},
+    SpreadsheetApp:{openById:id=>{assert.equal(id,draft.stageFileId);return {fixedWorkbook:true,getSheets:()=>[{getSheetId:()=>0,getName:()=>"Исходная",getLastRow:()=>2,getLastColumn:()=>2}]};}},
   });
   vm.runInContext(readFileSync(new URL('../src/PreparedWorkbookImport.gs',import.meta.url),'utf8'),c);
   c.preparedWorkbookSourceOptions_=()=>({});

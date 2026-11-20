@@ -20,7 +20,7 @@ def main():
   def release(method):page.evaluate('(m)=>releaseRpc(m)',method)
   def stage_link(name='Кухни',section='companies'):
    if section=='lpr':page.locator('#br-section-lpr').click()
-   page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
+   page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
   reset()
   assert page.locator('[data-source-id="source-lpr"]').count()==0
   assert page.locator('[data-source-id="source-mixed"]').is_visible()
@@ -61,7 +61,7 @@ def main():
   # Incomplete analysis cannot confirm and has not created a final book.
   reset();page.evaluate('backend.partialPreparedPreview=true');stage_link();assert page.locator('#br-prepared-confirm').is_disabled();assert page.evaluate('backend.importCount')==0
   # Preview failures can retry without staging/uploading again.
-  reset();page.evaluate('backend.failPreparedPreview=true');page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Повтор');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-retry:not([hidden])');idle();page.locator('#br-prepared-retry').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle();assert page.evaluate('backend.preparedStages')==1
+  reset();page.evaluate('backend.failPreparedPreview=true');page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Повтор');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_selector('#br-prepared-retry:not([hidden])');idle();page.locator('#br-prepared-retry').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle();assert page.evaluate('backend.preparedStages')==1
   # A changed source requires new preview and never creates a final book.
   page.evaluate('backend.preparedPreviewVersion++');page.locator('#br-prepared-confirm').click();page.wait_for_selector('#br-prepared-retry:not([hidden])');idle();assert page.evaluate('backend.importCount')==0
   # Unknown completion retries reuse the same request and do not create twice.
@@ -89,7 +89,7 @@ def main():
   for width in [360,320]:
    page.set_viewport_size({'width':width,'height':900});assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
   # Revocation clears staged preview contents and no late result restores them.
-  reset();page.evaluate("backend.holdMethods=['previewPreparedBase']");page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Отзыв');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();held('previewPreparedBase');page.evaluate('backend.revoked=true');release('previewPreparedBase');page.wait_for_selector('#bases-registry-app[data-access="locked"]');idle();assert page.locator('#br-prepared-table').inner_text()=='';assert page.evaluate('RegistryGrid.locked')
+  reset();page.evaluate("backend.holdMethods=['previewPreparedBase']");page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Отзыв');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();held('previewPreparedBase');page.evaluate('backend.revoked=true');release('previewPreparedBase');page.wait_for_selector('#bases-registry-app[data-access="locked"]');idle();assert page.locator('#br-prepared-table').inner_text()=='';assert page.evaluate('RegistryGrid.locked')
   assert not errors,errors
   print('PASS: two registry sections, live-form staging, single-sheet three-tab preview, confirm-only publish, cancellation, stale preview, chunk continuation, stable retry, Grid bridge, revocation and mobile/XSS safety; RPC concurrency1')
   browser.close()

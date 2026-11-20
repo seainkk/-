@@ -31,12 +31,56 @@ function legacyContactHistoryVerdict_(value) {
   if (/^(?:unknown|неизвестно|неизвестен|неизвестный|unverifiable)$/.test(text)) return 'Неизвестно';
   return '';
 }
+function legacyContactHistoryCompleted_(value) {
+  var text = legacyContactHistoryText_(value);
+  if (!text || typeof pvPendingStatus_ === 'function' && pvPendingStatus_(text)) return false;
+  return !/^(?:not[_ ]?verified|unchecked|pending|new|не\s*проверен[оаы]?|нов[ыао]й?|сбор|подготовка|ожидает\s+проверки|проверяется|нужна\s+оплата|ошибка\s+подключения|проверка\s+не\s+подтверждена|нужен\s+телефон|уточните\s+страну\s+или\s+номер)$/i.test(text);
+}
 function legacyContactHistoryWork_(value) {
   var text = legacyContactHistoryText_(value), key = text.toLowerCase().replace(/ё/g, 'е');
   if (!text) return '';
   if (/фильтр|нецелев|не\s*совпал|не\s*актуал|не\s*подтвержден|дубль|исключ|невалид|отпис|блокиров|срок\s*>\s*30/.test(key)) return text;
   if (/^(?:рассылка|в\s+рассылке|отправлен[оыа]?|sent|запущен[аоы]?|in\s+campaign|replied|ответил[аи]?|в\s+плане.*)$/.test(key)) return text;
   return '';
+}
+
+function legacyContactHistoryColumns_(headers) {
+  var result = { columns: Object.create(null), email: [], phone: [], work: [], validation: [], history: false };
+  var validationNames = ['Валидация', 'Результат валидации', 'Результат проверки', 'Статус email', 'email_status', 'validation', 'Validation result'].map(legacyContactHistoryKey_);
+  var historyNames = validationNames.concat(['Дата проверки', 'checked_at', 'validation_date', 'ID_TG', 'Telegram ID', 'Nickname_TG', 'TG username', 'Telegram username', 'Active_days_ago', 'days_offline', 'Как давно был в сети'].map(legacyContactHistoryKey_));
+  headers.forEach(function (header, index) {
+    var key = legacyContactHistoryKey_(header); if (!key) return;
+    if (result.columns[key] === undefined) result.columns[key] = index;
+    var meta = /валидац|validation|статус|status|провер|дата|date|count|колво|количество|провайдер|provider|ник|nickname|idtg|telegramid|active|days|давно|строк|источник/.test(key);
+    if (!meta && /email|почт|емейл/.test(key)) result.email.push(index);
+    if (!meta && (/телефон|phone|mobile|мобильн|^тел|^доптел|numbertg/.test(key)) && !/телеграм|telegram/.test(key)) result.phone.push(index);
+    if (/^(?:статус|status|комментарий|коммент|статусподтверждения|статусизисточника)$/.test(key) || /статусрассылки|статусконтакта/.test(key)) result.work.push(index);
+    if (validationNames.indexOf(key) >= 0) result.validation.push(index);
+    if (historyNames.indexOf(key) >= 0) result.history = true;
+  });
+  result.history = result.history || result.work.length > 0;
+  return result;
+}
+
+/** Owned completion notes identify the old contact, never the row's replacement. */
+function legacyContactHistoryBindingAllows_(model, row, kind, contact) {
+  var bindings = model.cellValidationBindings && model.cellValidationBindings[row];
+  if (!bindings || !bindings.length) return true;
+  var key = typeof pvKey_ === 'function' ? pvKey_(kind, contact) : typeof digest_ === 'function' ? digest_('promouser-contact-v1|' + kind + '|' + String(contact).toLowerCase()) : '';
+  return !!key && bindings.indexOf(key) >= 0;
+}
+function legacyContactHistoryChannel_(source, schema) {
+  var name = legacyContactHistoryKey_(source.name || source.sheetName || '');
+  var email = /email|emails|mail|почт|емейл/.test(name), phone = /telegram|телеграм|nsa|телефон|мобильн|phones|phone/.test(name);
+  if (email && !phone) return 'email';
+  if (phone && !email) return 'telegram';
+  // Wide source records can carry an email verdict and an independent paired
+  // Telegram report together. TG metadata alone must not erase email history.
+  if (schema.email.length && schema.phone.length) return 'mixed';
+  if (['ID_TG', 'Telegram ID', 'Nickname_TG', 'Active_days_ago', 'days_offline'].some(function (header) { return schema.columns[legacyContactHistoryKey_(header)] !== undefined; })) return 'telegram';
+  if (schema.email.length && !schema.phone.length) return 'email';
+  if (schema.phone.length && !schema.email.length) return 'telegram';
+  return 'mixed';
 }
 
 /** A verdict is attached only to an unambiguous contact, never to an entire company. */
@@ -46,15 +90,7 @@ function legacyContactHistoryCollect_(modelOrModels) {
   leaves.filter(Boolean).forEach(function (model) {
     var source = model.source || {}, headers = source.headers || [], rows = model.sourceDisplayValues || model.sourceValues || [];
     if (source.hasHeader === false || !headers.length || !rows.length) return;
-    var columns = Object.create(null), emailColumns = [], phoneColumns = [], workColumns = [];
-    headers.forEach(function (header, index) {
-      var key = legacyContactHistoryKey_(header); if (!key) return;
-      if (columns[key] === undefined) columns[key] = index;
-      var meta = /валидац|validation|статус|status|провер|дата|date|count|колво|количество|провайдер|provider|ник|nickname|idtg|telegramid|active|days|давно|строк|источник/.test(key);
-      if (!meta && /email|почт|емейл/.test(key)) emailColumns.push(index);
-      if (!meta && (/телефон|phone|mobile|мобильн|^тел|^доптел|numbertg/.test(key)) && !/телеграм|telegram/.test(key)) phoneColumns.push(index);
-      if (/^(?:статус|status|комментарий|коммент|статусподтверждения)$/.test(key) || /статусрассылки|статусконтакта/.test(key)) workColumns.push(index);
-    });
+    var schema = legacyContactHistoryColumns_(headers), columns = schema.columns, emailColumns = schema.email, phoneColumns = schema.phone, workColumns = schema.work;
     var first = Number.isSafeInteger(source.headerIndex) ? source.headerIndex + 1 : 1;
     rows.slice(first).forEach(function (row, offset) {
       var absolute = first + offset + 1, emails = [], phones = [];
@@ -79,11 +115,18 @@ function legacyContactHistoryCollect_(modelOrModels) {
       var works = workColumns.map(function (column) { return legacyContactHistoryWork_(row[column]); }).filter(Boolean);
       works = works.filter(function (text, index) { return works.indexOf(text) === index; });
       var rawEmail = legacyContactHistoryPick_(row, columns, ['Валидация', 'Результат валидации', 'Результат проверки', 'Статус email', 'email_status', 'validation', 'Validation result']);
-      var verdict = legacyContactHistoryVerdict_(rawEmail), date = legacyContactHistoryPick_(row, columns, ['Дата проверки', 'checked_at', 'validation_date']);
+      var verdict = legacyContactHistoryVerdict_(rawEmail), canonicalEmailVerdict = verdict, date = legacyContactHistoryPick_(row, columns, ['Дата проверки', 'checked_at', 'validation_date']);
+      var completed = model.preserveAmbiguousHistory === true && legacyContactHistoryCompleted_(rawEmail);
+      var rawResult = legacyContactHistoryPick_(row, columns, ['Результат проверки', 'Результат валидации', 'Validation result']);
+      if (completed && !verdict && !/telegram|телеграм/i.test(rawEmail)) verdict = rawEmail;
+      var allowEmailHistory = model.historyChannel !== 'telegram', allowPhoneHistory = model.historyChannel !== 'email';
       var provider = legacyContactHistoryPick_(row, columns, ['Провайдер', 'provider']);
       var evidence = { sheetId: source.sheetId, sheetName: source.name || source.sheetName || '', row: absolute };
       emails.forEach(function (email) {
-        var validation = emails.length === 1 && verdict ? { status: verdict, raw: rawEmail, checkedAt: date, provider: provider } : null;
+        if (!allowEmailHistory) return;
+        if (!legacyContactHistoryBindingAllows_(model, absolute, 'email', email)) return;
+        var validation = emails.length === 1 && verdict ? { status: verdict, raw: rawResult || rawEmail, checkedAt: date, provider: provider } : null;
+        if (!validation && emails.length > 1 && verdict && model.preserveAmbiguousHistory === true) validation = { status: LEGACY_CONTACT_HISTORY.reviewStatus, raw: 'Неоднозначная прежняя проверка нескольких email: ' + rawEmail, checkedAt: date, provider: provider };
         if (validation || works.length) legacyContactHistoryAdd_(result, 'email', email, validation, works, evidence);
       });
       var idTg = legacyContactHistoryPick_(row, columns, ['ID_TG', 'Telegram ID']), nickname = legacyContactHistoryPick_(row, columns, ['Nickname_TG', 'TG username', 'Telegram username']);
@@ -99,12 +142,18 @@ function legacyContactHistoryCollect_(modelOrModels) {
         paired = legacyContactHistoryPhone_(row[candidates[0]]);
       }
       phones.forEach(function (phone) {
+        if (!legacyContactHistoryBindingAllows_(model, absolute, 'telegram', phone)) return;
         var validation = null;
         if (phone === paired && (hasId || explicitNo || days !== null)) {
           var eligible = hasId && days !== null ? days <= 30 : explicitNo ? false : null;
           validation = { status: explicitNo ? 'Telegram не найден' : hasId ? days === null ? 'Telegram: активность скрыта' : eligible ? 'Telegram: активен' : 'Telegram: более 30 дней офлайн' : 'Telegram не подтверждён', checkedAt: date, raw: '', provider: '', idTg: hasId ? idTg : '', nickname: nickname, days: days, eligible: eligible };
         }
-        if (validation || works.length) legacyContactHistoryAdd_(result, 'telegram', phone, validation, works, evidence);
+        var genericPhoneCompletion = completed && allowPhoneHistory && (!canonicalEmailVerdict || model.historyChannel === 'telegram');
+        if (!validation && genericPhoneCompletion && phones.length === 1) validation = { status: rawEmail, checkedAt: date, raw: rawResult || rawEmail, provider: '', idTg: '', nickname: nickname, days: null, eligible: /(?:telegram|телеграм).*(?:не найден|нет)|нет\s+(?:telegram|телеграм)/i.test(rawEmail) ? false : null };
+        if (!validation && genericPhoneCompletion && phones.length > 1 && model.preserveAmbiguousHistory === true) validation = { status: LEGACY_CONTACT_HISTORY.reviewStatus, checkedAt: date, raw: rawResult || rawEmail, provider: '', idTg: '', nickname: '', days: null, eligible: null };
+        if (!validation && !paired && phones.length > 1 && (hasId || explicitNo || days !== null) && model.preserveAmbiguousHistory === true) validation = { status: LEGACY_CONTACT_HISTORY.reviewStatus, raw: 'Неоднозначная прежняя проверка нескольких телефонов.', checkedAt: date, provider: '', idTg: '', nickname: '', days: null, eligible: null };
+        var phoneWorks = allowPhoneHistory ? works : [];
+        if (validation || phoneWorks.length) legacyContactHistoryAdd_(result, 'telegram', phone, validation, phoneWorks, evidence);
       });
     });
   });
@@ -144,9 +193,9 @@ function legacyContactHistoryFields_(entry) {
 }
 
 /** Called on the full stable workbook model before the immutable import plan. */
-function legacyContactHistoryEnrich_(model) {
+function legacyContactHistoryEnrich_(model, historyMap) {
   if (!model || !model.email || !model.phone) return model;
-  var history = legacyContactHistoryCollect_(model), enriched = 0;
+  var history = historyMap || legacyContactHistoryCollect_(model), enriched = 0;
   [{ kind: 'email', list: model.email, wanted: LEGACY_CONTACT_HISTORY.emailHeaders }, { kind: 'telegram', list: model.phone, wanted: LEGACY_CONTACT_HISTORY.phoneHeaders }].forEach(function (entry) {
     var originalHeaders = entry.list.headers.slice(), keyColumn = originalHeaders.map(legacyContactHistoryKey_).indexOf(entry.kind === 'email' ? 'email' : 'телефон');
     if (keyColumn < 0) return;
@@ -176,4 +225,121 @@ function legacyContactHistoryEnrich_(model) {
     model.warnings = model.warnings || []; if (model.warnings.indexOf(warning) < 0) model.warnings.push(warning);
   }
   return model;
+}
+
+/**
+ * Read history from all original input leaves without turning archive/report
+ * contacts into new source records. Selected normalized models are reused.
+ * The caller owns full before/after staging ancestry and Drive-version checks.
+ */
+function legacyContactHistoryReadWorkbook_(book, fileId, section, guard, selectedModels, options) {
+  options = typeof options === 'number' ? { deadline: options } : options || {};
+  if (typeof guard !== 'function' || !Array.isArray(selectedModels)) return legacyContactHistoryReadFail_('Для истории нужна проверка области доступа.');
+  var started = Date.now(), deadline = Number.isFinite(options.deadline) ? Math.min(options.deadline, started + 120000) : started + 120000;
+  var limits = typeof PREPARED_DATA_LIMITS === 'object' ? PREPARED_DATA_LIMITS : { maxRows: 50000, maxColumns: 100, maxCells: 1000000, chunkCells: 100000 };
+  var cellsRead = 0, rowsRead = 0, signatures = [], leaves = [], warnings = [], selected = Object.create(null);
+  function check() { guard(); if (Date.now() >= deadline) legacyContactHistoryReadFail_('Не удалось полностью прочитать прежние проверки за отведённое время. Частичный импорт отключён.'); }
+  function reserve(height, width, physical) {
+    cellsRead += height * width; if (physical) rowsRead += height;
+    if (cellsRead > limits.maxCells || rowsRead > limits.maxRows) legacyContactHistoryReadFail_('История проверок превышает лимит полного чтения. Частичный импорт отключён.');
+  }
+  function display(sheet, first, height, width) {
+    check(); reserve(height, width, true);
+    var values = sheet.getRange(first, 1, height, width).getDisplayValues(); check();
+    if (!legacyContactHistoryRectangle_(values, height, width)) legacyContactHistoryReadFail_('Google вернул неполную историю проверок.');
+    return values.map(function (row) { return row.map(function (value) { return String(value === null || value === undefined ? '' : value); }); });
+  }
+  check();
+  if (!book || typeof book.getId !== 'function' || book.getId() !== fileId) legacyContactHistoryReadFail_('История относится к другой исходной книге.');
+  var sheets = book.getSheets();
+  if (!Array.isArray(sheets) || sheets.length > 100) legacyContactHistoryReadFail_('Слишком много исходных листов для полного чтения истории.');
+  var allowed = options.sourceSheetIds;
+  if (allowed !== undefined && (!Array.isArray(allowed) || allowed.some(function (id, index) { return !Number.isSafeInteger(id) || id < 0 || allowed.indexOf(id) !== index; }))) legacyContactHistoryReadFail_('Некорректный список исходных листов истории.');
+  var byId = Object.create(null);
+  sheets.forEach(function (sheet) { var id = sheet.getSheetId(); if (!Number.isSafeInteger(id) || id < 0 || byId[id]) legacyContactHistoryReadFail_('Не удалось однозначно определить исходные листы истории.'); byId[id] = sheet; });
+  if (allowed && allowed.some(function (id) { return !byId[id]; })) legacyContactHistoryReadFail_('Один из исходных листов истории недоступен.');
+  selectedModels.forEach(function (model) {
+    var id = model && model.source && model.source.sheetId;
+    if (!Number.isSafeInteger(id) || !byId[id] || selected[id] || allowed && allowed.indexOf(id) < 0) legacyContactHistoryReadFail_('Выбранная база не соответствует исходной книге истории.');
+    selected[id] = model;
+  });
+  sheets.forEach(function (sheet) {
+    check(); var id = sheet.getSheetId(); if (allowed && allowed.indexOf(id) < 0) return;
+    var height = sheet.getLastRow(), width = sheet.getLastColumn(), name = sheet.getName();
+    if (!Number.isSafeInteger(height) || !Number.isSafeInteger(width) || height < 0 || width < 0 || width > limits.maxColumns) legacyContactHistoryReadFail_('Размер исходного листа истории превышает лимит.');
+    if (!height || !width) { signatures.push([id, name, height, width, 'empty']); return; }
+    var cached = selected[id], values, source, schema;
+    if (cached) {
+      values = cached.sourceDisplayValues || cached.sourceValues || [];
+      if (!legacyContactHistoryRectangle_(values, height, width)) legacyContactHistoryReadFail_('Выбранный исходный лист изменился во время чтения истории.');
+      reserve(height, width, true); source = Object.assign({}, cached.source); schema = legacyContactHistoryColumns_(source.headers || []);
+    } else {
+      var probe = display(sheet, 1, Math.min(10, height), width), header = legacyContactHistoryReadHeader_(probe, section);
+      source = { sheetId: id, name: name, headers: header.header, hasHeader: header.hasHeader, headerIndex: header.index, rowCount: height, columnCount: width };
+      schema = legacyContactHistoryColumns_(source.headers);
+      if (!source.hasHeader || !schema.history || !schema.email.length && !schema.phone.length) { signatures.push([id, name, height, width, 'no_contact_history', probe]); return; }
+      values = probe.slice();
+      var chunk = Math.max(1, Math.floor(limits.chunkCells / width));
+      for (var first = probe.length + 1; first <= height; first += chunk) values = values.concat(display(sheet, first, Math.min(chunk, height - first + 1), width));
+    }
+    if (source.hasHeader === false || !schema.history || !cached && !schema.email.length && !schema.phone.length) { signatures.push([id, name, height, width, 'selected_no_contact_history', cached && cached.fingerprint || '']); return; }
+    var bindings = Object.create(null), firstData = Number.isSafeInteger(source.headerIndex) ? source.headerIndex + 2 : 2;
+    schema.validation.forEach(function (column) {
+      var chunk = Math.max(1, Math.floor(limits.chunkCells));
+      for (var first = firstData; first <= height; first += chunk) {
+        check(); var count = Math.min(chunk, height - first + 1); reserve(count, 1, false);
+        var range = sheet.getRange(first, column + 1, count, 1);
+        if (typeof range.getNotes !== 'function') legacyContactHistoryReadFail_('Не удалось проверить привязку прежних результатов к контактам.');
+        var notes = range.getNotes(); check();
+        if (!legacyContactHistoryRectangle_(notes, count, 1)) legacyContactHistoryReadFail_('Google вернул неполные отметки прежних проверок.');
+        notes.forEach(function (row, index) {
+          var note = String(row[0] || ''), binding = typeof pvBinding_ === 'function' ? pvBinding_(note) : legacyContactHistoryReadBinding_(note);
+          if (binding) { var at = first + index; if (!bindings[at]) bindings[at] = []; if (bindings[at].indexOf(binding) < 0) bindings[at].push(binding); }
+        });
+      }
+    });
+    var leaf = { source: source, sourceDisplayValues: values, cellContacts: cached && cached.cellContacts || null, cellValidationBindings: bindings, preserveAmbiguousHistory: true, historyChannel: legacyContactHistoryChannel_(source, schema) };
+    legacyContactHistoryReadValidate_(leaf, schema);
+    leaves.push(leaf);
+    signatures.push([id, name, height, width, source.headerIndex, source.headers, values, bindings]);
+  });
+  check(); var history = legacyContactHistoryCollect_(leaves); check();
+  return { history: history, fingerprint: digest_(JSON.stringify({ version: 1, fileId: fileId, leaves: signatures })), warnings: warnings, complete: true, cellsRead: cellsRead };
+}
+
+function legacyContactHistoryReadHeader_(rows, section) {
+  if (typeof preparedDataHeader_ === 'function') return preparedDataHeader_(rows, rows, [], section);
+  var best = -1, score = 0;
+  rows.forEach(function (row, index) {
+    var schema = legacyContactHistoryColumns_(row), current = schema.email.length + schema.phone.length + schema.work.length + schema.validation.length;
+    if (current > score && !row.some(function (value) { return !!legacyContactHistoryEmail_(value) || !!legacyContactHistoryPhone_(value); })) { best = index; score = current; }
+  });
+  return { hasHeader: best >= 0, index: best, header: best >= 0 ? rows[best].slice() : [] };
+}
+function legacyContactHistoryReadBinding_(note) { var match = String(note || '').match(/(?:^|\n)registry-promouser-contact:v1:([A-Za-z0-9_-]{43})(?=\n|$)/); return match ? match[1] : ''; }
+function legacyContactHistoryRectangle_(values, height, width) { return Array.isArray(values) && values.length === height && values.every(function (row) { return Array.isArray(row) && row.length === width; }); }
+function legacyContactHistoryReadFail_(message) { if (typeof fail_ === 'function') fail_('LEGACY_HISTORY_PARTIAL', message); var error = new Error('[LEGACY_HISTORY_PARTIAL] ' + message); error.registryCode = 'LEGACY_HISTORY_PARTIAL'; throw error; }
+
+/** Unreadable old completion identities must never silently become new paid work. */
+function legacyContactHistoryReadValidate_(model, schema) {
+  var first = Number.isSafeInteger(model.source.headerIndex) ? model.source.headerIndex + 1 : 1;
+  model.sourceDisplayValues.slice(first).forEach(function (row, offset) {
+    var number = first + offset + 1, work = schema.work.some(function (column) { return !!legacyContactHistoryWork_(row[column]); });
+    var rawValidation = legacyContactHistoryPick_(row, schema.columns, ['Валидация', 'Результат валидации', 'Результат проверки', 'Статус email', 'email_status', 'validation', 'Validation result']);
+    var verdict = legacyContactHistoryCompleted_(rawValidation);
+    var id = legacyContactHistoryPick_(row, schema.columns, ['ID_TG', 'Telegram ID']), days = legacyContactHistoryDays_(legacyContactHistoryPick_(row, schema.columns, ['Active_days_ago', 'days_offline', 'Как давно был в сети']));
+    var telegram = /^[1-9]\d*$/.test(id) || /^(?:нет|no|false|not\s*found|не\s*найден(?:о)?)$/i.test(id) || days !== null;
+    function meaningful(value) { return !/^(?:\s*|нет|не найден[оы]?|не указан[оы]?|—|-|n\/a|no|0)$/i.test(String(value || '').trim()); }
+    if (model.historyChannel !== 'telegram' && (work || verdict)) schema.email.forEach(function (column) {
+      if (!meaningful(row[column])) return;
+      var parsed = model.cellContacts && model.cellContacts[number + ':' + (column + 1)], emails = parsed && parsed.emails || (String(row[column]).match(/[^\s,;<>]+@[^\s,;<>]+\.[^\s,;<>]+/g) || []).map(legacyContactHistoryEmail_).filter(Boolean);
+      if (!emails.length) legacyContactHistoryReadFail_('В прежней проверке email не удалось прочитать сам контакт. Нужна ручная проверка исходного отчёта.');
+    });
+    var canonicalEmailVerdict = legacyContactHistoryVerdict_(rawValidation);
+    if (telegram || model.historyChannel !== 'email' && (work || verdict && (!canonicalEmailVerdict || model.historyChannel === 'telegram'))) schema.phone.forEach(function (column) {
+      if (!meaningful(row[column])) return;
+      var parsed = model.cellContacts && model.cellContacts[number + ':' + (column + 1)], phones = parsed && parsed.phones || String(row[column]).split(/[;,\n]+/).map(legacyContactHistoryPhone_).filter(Boolean);
+      if (!phones.length) legacyContactHistoryReadFail_('В прежней проверке Telegram не удалось прочитать номер телефона. Нужна ручная проверка исходного отчёта.');
+    });
+  });
 }
