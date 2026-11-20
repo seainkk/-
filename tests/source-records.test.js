@@ -72,6 +72,14 @@ test('actual web-studio city and existing singular company aliases keep their me
   assert.equal(company.id, 'WEB-1'); assert.equal(company.name, 'Студия'); assert.equal(company.website, 'https://studio.example.test'); assert.equal(company.city, 'Москва / Россия'); assert.equal(company.inn, '7707083893');
 });
 
+test('actual developer source-list website identifies the company without mistaking evidence links for its site', () => {
+  const parsed = fixture([['Компания', 'ФИО', 'Должность в источнике', 'Сайт из исходного списка', 'Публикация / упоминание', 'Ссылка из бота'],
+    ['Застройщик', 'Иванов Иван', 'Директор по маркетингу', 'https://developer.example.test/', 'https://news.example.test/article', 'https://report.example.test/result']], {}, { section: 'lpr' });
+  const record = parsed.records[0]; assert.equal(record.company.name, 'Застройщик'); assert.equal(record.company.website, 'https://developer.example.test/');
+  assert.equal(record.company.provenance.website.length, 1); assert.equal(record.company.provenance.website[0].column, 4);
+  assert.equal(record.people.length, 1); assert.equal(record.people[0].name, 'Иванов Иван'); assert.equal(record.people[0].role, 'Директор по маркетингу');
+});
+
 test('combined INN/OGRN requisites retain their checked identifier type without using invalid values as keys', () => {
   const parsed = fixture([['Компания', 'ИНН/ОГРН'], ['ИНН', '7707083893'], ['ОГРН', '1027700132195'], ['Оба', 'ИНН 7707083893 / ОГРН 1027700132195'], ['Ошибка', '7707083894']]);
   assert.equal(parsed.records[0].company.inn, '7707083893'); assert.equal(parsed.records[0].company.ogrn, '');
