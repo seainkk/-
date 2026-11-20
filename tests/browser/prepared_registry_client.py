@@ -43,7 +43,7 @@ def main():
   page.evaluate("RegistryGrid.lock=function(){this.openedNow=false;this.locked=true;this.closed?.({locked:true});this.accessSeenOnClose=document.getElementById('bases-registry-app').dataset.access;};backend.revoked=true;backend.location.hash='access_key='+'Z'.repeat(43);backend.historyChanged({location:backend.location});")
   page.wait_for_selector('#bases-registry-app[data-access=\"locked\"]')
   assert page.evaluate('RegistryGrid.accessSeenOnClose')=='locked', 'Grid close callback cannot resume the revoked app session'
-  assert page.evaluate('backend.maxActive')==1
+  assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
   # Blob staging uses the live enabled form and selected single category.
   reset();page.locator('#br-section-lpr').click();page.locator('#br-import-open').click();page.locator('#br-upload-name').fill('ЛПР кухни');page.locator('#br-upload-file').set_input_files({'name':'people.csv','mimeType':'text/csv','buffer':b'name,email\nAlice,a@example.com'})
   page.evaluate("backend.uploadSerializationDelay=35;backend.holdMethods=['uploadSourceBase']")

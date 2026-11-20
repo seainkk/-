@@ -86,7 +86,7 @@ function fixture(options = {}) {
     return snapshot || context.segmentReadTrackingSnapshot_();
   };
   if (options.limits) context.REGISTRY_CONFIG = Object.freeze({ ...context.REGISTRY_CONFIG, ...options.limits });
-  return { context, calls, dashboard: () => plain(context.getSegmentsDashboard()), mailings: id => plain(context.getSegmentMailings({ segmentId: id ?? SEGMENT })) };
+  return { context, calls, dashboard: request => plain(context.getSegmentsDashboard(request)), mailings: id => plain(context.getSegmentMailings({ segmentId: id ?? SEGMENT })) };
 }
 
 function sourceFile(id = 'business_sheet_1234567890', sheets = [], extra = {}) {
@@ -105,6 +105,103 @@ test('dashboard and mailings authorize before Drive or spreadsheet reads', () =>
     assert.deepEqual(f.calls.folders, []);
     assert.deepEqual(f.calls.opened, []);
   }
+});
+
+test('light dashboard exposes usable canonical table links without opening business worksheets', () => {
+  const file = sourceFile('overview_companies_1234567890', [{ rows: [['PRIVATE BUSINESS CELL']] }], { unreadable: true });
+  const f = fixture({ files: [file], tracking: { available: true, tables: [
+    { segmentId: SEGMENT, fileId: file.id, kind: 'companies' },
+    { segmentId: 'other_segment_1234567890', fileId: file.id, kind: 'lpr' },
+  ], loads: [] } });
+  const result = f.dashboard({ includeAnalysis: false });
+  assert.equal(result.state, 'ready');
+  assert.equal(result.analysisPending, true);
+  assert.equal(result.items[0].files[0].kind, 'companies');
+  assert.equal(result.items[0].files[0].id, file.id);
+  assert.equal(result.items[0].overallStatus, null);
+  assert.equal(result.items[0].contactPresence, 'unknown');
+  assert.deepEqual(result.items[0].analysis, { state: 'pending', hasContacts: null, warnings: [] });
+  assert.deepEqual(f.calls.opened, []);
+  assert.deepEqual(f.calls.ranges, []);
+  assert.equal(f.calls.trackingSnapshots, 1);
+  assert.ok(!JSON.stringify(result).includes('PRIVATE BUSINESS CELL'));
+});
+
+test('light dashboard remains unknown and usable when the tracking journal is unavailable', () => {
+  const f = fixture({ files: [sourceFile()], trackingThrows: true });
+  const result = f.dashboard({ includeAnalysis: false });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].files.length, 1);
+  assert.equal(result.items[0].files[0].kind, undefined);
+  assert.equal(result.items[0].overallStatus, null);
+  assert.equal(result.items[0].analysis.state, 'pending');
+  assert.deepEqual(f.calls.opened, []);
+});
+
+test('light dashboard mode is strictly validated before metadata reads', () => {
+  for (const request of [null, [], 'fast', { includeAnalysis: 'false' }, { includeAnalysis: 0 }, { skipScope: true }]) {
+    const f = fixture();
+    assert.throws(() => f.dashboard(request), /INVALID_REQUEST/);
+    assert.deepEqual(f.calls.folders, []);
+    assert.deepEqual(f.calls.opened, []);
+  }
+  const unauthorized = fixture({ accessKey: 'a'.repeat(43) });
+  assert.throws(() => unauthorized.dashboard({ includeAnalysis: false }), /LINK_ACCESS_REQUIRED/);
+  assert.deepEqual(unauthorized.calls.folders, []);
+});
+
+test('light dashboard rejects revoked keys and changed roots before returning its projection', () => {
+  for (const key of ['ROOT_FOLDER_ID', 'SHARED_ACCESS_KEY_SHA256']) {
+    const f = fixture();
+    f.context.segmentReadTrackingSnapshot_ = () => {
+      const properties = f.context.PropertiesService.getScriptProperties();
+      const previous = properties.getProperty;
+      properties.getProperty = name => name === key ? (key === 'ROOT_FOLDER_ID' ? 'different_registry_1234567890' : 'b'.repeat(43)) : previous(name);
+      return { available: true, tables: [], loads: [] };
+    };
+    assert.throws(() => f.dashboard({ includeAnalysis: false }), key === 'ROOT_FOLDER_ID' ? /SOURCE_CHANGED/ : /LINK_ACCESS_REQUIRED/);
+  }
+});
+
+test('light dashboard rechecks the actual source ancestry after loading canonical assignments', () => {
+  const f = fixture({ files: [sourceFile()] });
+  f.context.segmentReadTrackingSnapshot_ = () => {
+    const previous = f.context.DriveApp.getFolderById;
+    f.context.DriveApp.getFolderById = id => id === SOURCE ? { ...previous(id), getParents: () => iterator([]) } : previous(id);
+    return { available: true, tables: [], loads: [] };
+  };
+  assert.throws(() => f.dashboard({ includeAnalysis: false }), /OUTSIDE_REGISTRY/);
+  assert.deepEqual(f.calls.opened, []);
+});
+
+test('full dashboard proves a populated large sheet with one body row rather than a 10000-cell block', () => {
+  const file = sourceFile('large_nonempty_sheet_1234567890', [{ id: 7,
+    rows: [Array(24).fill('Header'), ['Company']], lastRow: 50000, lastColumn: 24 }]);
+  const f = fixture({ files: [file], tracking: headers(file.id, 7, true) });
+  const result = f.dashboard({ includeAnalysis: true });
+  assert.equal(result.analysisPending, undefined);
+  assert.equal(result.items[0].overallStatus, 'preparation');
+  assert.deepEqual(f.calls.ranges.map(range => [range.row, range.rowCount, range.columnCount]), [[2, 1, 24]]);
+});
+
+test('a blank first body row still scans remaining data without double-reading cells', () => {
+  const rows = Array.from({ length: 302 }, () => ['', '', '']);
+  rows[0] = ['Company', 'Email', 'Phone'];
+  rows[301] = ['Last company', '', ''];
+  const file = sourceFile('late_contact_sheet_1234567890', [{ id: 9, rows }]);
+  const f = fixture({ files: [file], tracking: headers(file.id, 9, true) });
+  assert.equal(f.dashboard().items[0].overallStatus, 'preparation');
+  const seen = new Set();
+  for (const range of f.calls.ranges) {
+    for (let row = range.row; row < range.row + range.rowCount; row++) {
+      for (let column = range.column; column < range.column + range.columnCount; column++) {
+        const key = `${row}:${column}`;
+        assert.ok(!seen.has(key), 'A blank probe must not consume the scan budget twice');
+        seen.add(key);
+      }
+    }
+  }
+  assert.equal(seen.size, 301 * 3);
 });
 
 test('outreach metadata excludes the unrelated root/source catalog and service book', () => {

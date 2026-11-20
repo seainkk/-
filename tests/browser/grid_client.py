@@ -28,10 +28,11 @@ def main():
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
 
-        def reset(rows=240):
+        def reset(rows=240, omit_initial=False, hold_workspace=False):
             page.goto('about:blank')
             page.set_content(HTML)
-            page.evaluate('(rows)=>{gridBackend.sheets[0].rowCount=rows;void openTestGrid();}', rows)
+            page.evaluate('options=>{gridBackend.sheets[0].rowCount=options.rows;gridBackend.omitInitialRange=options.omit_initial;gridBackend.holdMethods=options.hold_workspace?["getContactWorkspace"]:[];void openTestGrid();}',
+                          {'rows': rows, 'omit_initial': omit_initial, 'hold_workspace': hold_workspace})
             page.wait_for_selector('#rg-cell-2-1')
             page.wait_for_function('gridBackend.active===0')
 
@@ -78,6 +79,103 @@ def main():
             assert actual['registryTitle'] == ('32px' if width <= 640 else '38px'), actual
             assert actual['registryRadius'] == '100px', actual
             assert actual['registryMinHeight'] == '46px', actual
+
+        # Initial cells arrive with metadata in one request. Optional contact
+        # workspace metadata cannot sit ahead of the user's first saved edit.
+        reset(hold_workspace=True)
+        initial = page.evaluate('gridBackend.calls')
+        assert [call['method'] for call in initial] == ['getGridWorkbook']
+        assert initial[0]['payload']['includeInitialRange'] is True
+        edit(2, 1, 'Сохранить без ожидания контактов')
+        page.wait_for_function("gridBackend.sheets[0].cells.get('2:1').input==='Сохранить без ожидания контактов'")
+        assert page.evaluate("gridBackend.sheets[0].cells.get('2:1').input") == 'Сохранить без ожидания контактов'
+        assert page.evaluate("gridBackend.calls.filter(call=>call.method==='saveGridRange').length") == 1
+        assert not page.evaluate("gridBackend.calls.some(call=>['getPromouserSettings','getValidationState','getColdyValidationState'].includes(call.method))")
+        assert page.evaluate("(()=>{const saved=gridBackend.calls.findIndex(call=>call.method==='saveGridRange'),workspace=gridBackend.calls.findIndex(call=>call.method==='getContactWorkspace');return workspace<0||saved<workspace;})()")
+        page.locator('#rg-grid-close').click()
+        assert page.locator('#rg-grid-panel').is_hidden()
+
+        # Older deployments without the optional bundled DTO still make exactly
+        # one initial range request and retain editable cells/version hashes.
+        reset(omit_initial=True)
+        opening = page.evaluate('gridBackend.calls')
+        assert [call['method'] for call in opening] == ['getGridWorkbook', 'getGridRange']
+        assert opening[0]['payload']['includeInitialRange'] is True
+        assert page.locator('#rg-cell-2-1').inner_text() == 'Альфа'
+
+        # Revocation while the bundled read is held cannot restore its nested
+        # cells or issue a later fallback read after the grid has been locked.
+        page.goto('about:blank')
+        page.set_content(HTML)
+        page.evaluate("gridBackend.holdMethods=['getGridWorkbook'];void openTestGrid()")
+        held('getGridWorkbook')
+        page.evaluate('RegistryGrid.lock()')
+        release('getGridWorkbook')
+        page.wait_for_function('gridBackend.active===0')
+        assert page.locator('#rg-grid-panel').is_hidden()
+        assert page.locator('#rg-grid-body').inner_text() == ''
+        assert page.evaluate('gridBackend.calls.length') == 1
+
+        # Closing a drawer stops its remaining optional reads. An old settings
+        # response cannot reopen it or start provider work after closing.
+        reset()
+        page.evaluate("gridBackend.holdMethods=['getPromouserSettings']")
+        page.locator('#rg-grid-validation-open').click()
+        held('getPromouserSettings')
+        page.locator('#rg-grid-validation-close').click()
+        release('getPromouserSettings')
+        idle()
+        methods = page.evaluate('gridBackend.calls.map(call=>call.method)')
+        assert methods == ['getGridWorkbook', 'getPromouserSettings']
+        assert page.locator('#rg-grid-validation').is_hidden()
+        assert not page.evaluate("gridBackend.calls.some(call=>['advanceWorkbookValidation','payValidationOrder','advanceColdyValidation','startPhoneValidation','startColdyValidation'].includes(call.method))")
+
+        # A response from a closed opening cannot unlock the provider form for
+        # a newer opening whose own settings request is still held.
+        reset()
+        page.evaluate("gridBackend.holdMethods=['getPromouserSettings']")
+        page.locator('#rg-grid-validation-open').click()
+        held('getPromouserSettings')
+        page.locator('#rg-grid-validation-close').click()
+        page.locator('#rg-grid-validation-open').click()
+        release('getPromouserSettings')
+        held('getPromouserSettings')
+        assert page.locator('#rg-grid-provider-form').evaluate('form=>form.inert')
+        page.evaluate('gridBackend.holdMethods=[]')
+        release('getPromouserSettings')
+        idle()
+        assert not page.locator('#rg-grid-provider-form').evaluate('form=>form.inert')
+
+        # Rapid navigation keeps one in-flight read and the latest queued
+        # destination. Intermediate destinations never consume server requests.
+        reset()
+        page.evaluate("gridBackend.holdMethods=['getGridRange']")
+        page.locator('#rg-grid-address').fill('A130')
+        page.locator('#rg-grid-address').press('Enter')
+        held('getGridRange')
+        page.evaluate("""()=>{
+          const address=document.getElementById('rg-grid-address');
+          for(const value of ['A180','A220']){
+            address.value=value;
+            address.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+          }
+        }""")
+        page.wait_for_timeout(120)
+        assert page.evaluate("gridBackend.calls.filter(call=>call.method==='getGridRange').length") == 1
+        release('getGridRange')
+        held('getGridRange')
+        assert page.evaluate("gridBackend.calls.filter(call=>call.method==='getGridRange').length") == 2
+        page.evaluate('gridBackend.holdMethods=[]')
+        release('getGridRange')
+        idle()
+        assert page.locator('#rg-grid-address').input_value() == 'A220'
+        ranges_before = page.evaluate("gridBackend.calls.filter(call=>call.method==='getGridRange').length")
+        page.locator('#rg-grid-address').fill('A1')
+        page.locator('#rg-grid-address').press('Enter')
+        idle()
+        page.wait_for_timeout(100)
+        assert page.evaluate("gridBackend.calls.filter(call=>call.method==='getGridRange').length") == ranges_before
+        assert page.locator('#rg-cell-2-1').inner_text() == 'Альфа'
 
         reset()
         integrated_styles(1440)

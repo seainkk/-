@@ -107,7 +107,6 @@ function sourceBasesSource_(context) {
   catch (error) {
     if (explicit) return { state: 'source_outside_registry', source: null };
   }
-  if (folder && (folder.isTrashed() || !insideRegistry_(folder, context.rootId))) return { state: 'source_outside_registry', source: null };
   if (!folder && !explicit) {
     var matches = [], iterator = root.getFolders();
     while (iterator.hasNext()) {
@@ -458,7 +457,7 @@ function sourceBasesAssociations_(relations, context) {
   var index = Object.create(null);
   if (!relations.length) return { relations: relations, index: index };
   try {
-    var segments = getSegmentsMetadata_(context || authorize_());
+    var segments = getSegmentNames_(context || authorize_());
     if (segments.state === 'ready') segments.items.forEach(function (segment) { index[segment.id] = { id: segment.id, name: segment.name, url: segment.url }; });
   } catch (error) { /* Existing links remain stored; their unavailable targets are not guessed. */ }
   return { relations: relations, index: index };

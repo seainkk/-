@@ -42,12 +42,12 @@ def main():
 
         reset()
         segments()
-        initial = page.evaluate('[backend.sourceGets,backend.dashboardGets]')
+        initial = page.evaluate('[backend.sourceGets,backend.dashboardLightGets||0]')
         page.locator('#br-add-segment').click()
         assert page.locator('#br-segment-panel').is_visible()
         assert page.locator('#br-segment-name').is_enabled()
         assert page.locator('#br-segment-submit').is_enabled()
-        assert page.evaluate('[backend.sourceGets,backend.dashboardGets]') == initial, 'Warm form performs no redundant catalog/dashboard scans'
+        assert page.evaluate('[backend.sourceGets,backend.dashboardLightGets||0]') == initial, 'Warm form performs no redundant catalog/light-dashboard scans'
         page.locator('#br-segment-name').fill('Кухни')
         page.evaluate("backend.holdMethods=['createSegment','getSegmentsDashboard']")
         page.locator('#br-segment-submit').click()
@@ -82,7 +82,7 @@ def main():
         idle()
         assert page.locator('#br-segment-name').input_value() == 'Следующий сегмент'
         page.locator('#br-segment-close').click()
-        assert page.evaluate('backend.maxActive') == 1
+        assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
 
         # Every mailing entry needs actual data for that segment, even within the cache window.
         page.locator('[data-segment="existing-segment"] .br-link-button').click()
@@ -109,7 +109,7 @@ def main():
         assert page.locator('[data-choose-source="source-companies"]').is_enabled()
         assert page.locator('#br-segment-name').input_value() == 'Холодный старт'
         assert page.evaluate('backend.sourceGets') == 1
-        assert page.evaluate('backend.maxActive') == 1
+        assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
 
         # The catalog entry point fetches previously missing segment destinations,
         # then selects the requested ready source for automatic normalization.
@@ -125,7 +125,7 @@ def main():
         assert page.locator('#br-segment-target option[value="existing-segment"]').count() == 1
         assert page.locator('#br-segment-name').input_value() == 'Из реестра'
         assert page.evaluate('backend.sourceGets') == 1
-        assert page.evaluate('backend.maxActive') == 1
+        assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
 
         # Cached readiness never bypasses the server's fresh preview check.
         # Empty segment creation is acknowledged separately from loading data.
@@ -198,7 +198,7 @@ def main():
         release('getSourceBases')
         idle()
         assert page.locator('#br-link-name').input_value() == 'Следующая база'
-        assert page.evaluate('backend.maxActive') == 1
+        assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
 
         # Access revocation clears deferred work and prevents a keyed retry.
         page.locator('#br-import-cancel').click()
@@ -211,7 +211,7 @@ def main():
         assert page.locator('#br-segment-panel').is_hidden()
         assert not errors, errors
         browser.close()
-        print('PASS: cached forms/navigation, held RPC acknowledgement, no duplicate mutation, cold data, readiness/recovery, sync failure, import and revocation; max RPC concurrency 1')
+        print('PASS: cached forms/navigation, held RPC acknowledgement, no duplicate mutation, cold data, readiness/recovery, sync failure, import and revocation; read concurrency <=2, mutation concurrency <=1')
 
 
 if __name__ == '__main__':

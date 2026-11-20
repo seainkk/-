@@ -1,4 +1,4 @@
-window.backend={holdMethods:[],pending:[],failDashboard:false,failCreate:false,calls:[],active:0,maxActive:0,sourceGets:0,dashboardGets:0,copyCount:0,segmentCount:0,importCount:0,hold:false,failPreview:null,failSource:false,recoveryOnce:false,receipts:{},dispatches:[]};
+window.backend={holdMethods:[],holdAfterMethods:[],activeReads:0,maxActiveReads:0,activeWrites:0,maxActiveWrites:0,counterSnapshots:[],pending:[],failDashboard:false,failCreate:false,calls:[],active:0,maxActive:0,sourceGets:0,dashboardGets:0,copyCount:0,segmentCount:0,importCount:0,hold:false,failPreview:null,failSource:false,recoveryOnce:false,receipts:{},dispatches:[]};
 window.testClock={now:Date.parse('2026-11-16T10:00:00Z'),hidden:false,timers:new Map(),next:0};Date.now=()=>testClock.now;window.setInterval=(fn,ms)=>{const id=++testClock.next;testClock.timers.set(id,{fn,ms});return id;};window.clearInterval=(id)=>testClock.timers.delete(id);Object.defineProperty(document,'hidden',{configurable:true,get:()=>testClock.hidden});window.tick=(ms)=>{testClock.now+=ms;for(const timer of [...testClock.timers.values()])timer.fn();};
 const clone=value=>JSON.parse(JSON.stringify(value));
 function makeSource(id,name,contents,status='ready',mimeType='application/vnd.google-apps.spreadsheet'){return {id,name,fileName:name,mimeType,format:mimeType==='text/csv'?'CSV':'Google Таблица',url:mimeType==='text/csv'?'https://drive.google.com/file/d/'+id+'/view':'https://docs.google.com/spreadsheets/d/'+id+'/edit',contents,status,formatCheck:'unchecked',revision:1,present:true,segments:[],associationsAvailable:true,canEdit:true,canAddToSegment:status==='ready'&&mimeType==='application/vnd.google-apps.spreadsheet'};}
@@ -18,7 +18,7 @@ const api={
  getAppBootstrap(){backend.bootstrapCalls++;return {user:{email:'',isAdmin:false,accessMode:'link'},registry:{id:'root-registry',name:'Базы компании'}};},
  getSourceBases(){backend.sourceGets++;if(backend.failSource){backend.failSource=false;throw new Error('[STORAGE_ERROR] Список баз временно недоступен');}return {state:'ready',source:{id:'source-folder',name:'Исходные базы'},storage:{id:'service-book'},canEdit:true,associationsAvailable:true,items:clone(backend.sources),generatedAt:new Date(testClock.now).toISOString()};},
  updateSourceBase(p){const item=backend.sources.find(x=>x.id===p.id);if(item.revision!==p.expectedRevision)throw new Error('[CONFLICT] Версия изменена');if(p.contents){item.contents=p.contents;if(p.formatCheck===undefined)item.formatCheck='unchecked';}if(p.status)item.status=p.status;if(p.formatCheck)item.formatCheck=p.formatCheck;item.revision++;item.canAddToSegment=item.status==='ready'&&item.mimeType==='application/vnd.google-apps.spreadsheet'&&item.contents.length>0;return {item:clone(item)};},
- getSegmentsDashboard(){backend.dashboardGets++;if(backend.failDashboard){backend.failDashboard=false;throw new Error('[STORAGE_ERROR] Аналитика временно недоступна');}return {state:'ready',source:{id:'outreach-folder',name:'Аутричи'},items:clone(backend.segments),generatedAt:new Date(testClock.now).toISOString(),rulesConfigured:false};},
+ getSegmentsDashboard(p={}){backend.dashboardGets++;const light=p.includeAnalysis===false;if(light)backend.dashboardLightGets=(backend.dashboardLightGets||0)+1;else backend.dashboardFullGets=(backend.dashboardFullGets||0)+1;if(backend.failDashboard||(!light&&backend.failFullDashboardAlways)){backend.failDashboard=false;throw new Error('[STORAGE_ERROR] Аналитика временно недоступна');}const items=clone((light?backend.lightSegments:backend.fullSegments)||backend.segments);if(light)for(const item of items){item.overallStatus=null;item.contactPresence='unknown';item.analysis={state:'pending',hasContacts:null,warnings:[]};}return {state:'ready',source:{id:'outreach-folder',name:'Аутричи'},items,generatedAt:new Date(testClock.now).toISOString(),rulesConfigured:false,...(light?{analysisPending:true}:{})};},
  getSourceSheets(p){const item=backend.sources.find(x=>x.id===p.sourceId);if(backend.failPreview===p.sourceId){backend.failPreview=null;throw new Error('[SOURCE_NOT_READY] База больше не готова');}if(!item.canAddToSegment||item.status!=='ready')throw new Error('[SOURCE_NOT_READY] База не готова');if(item.revision!==p.expectedRevision)throw new Error('[CONFLICT] Сначала обновите базу');return {sourceId:item.id,name:item.name,revision:item.revision,contents:clone(item.contents),sheets:clone(backend.worksheets[item.id]||[]).map(x=>({...x,hasHeader:true}))};},
  createSegment(p){if(backend.failCreate){backend.failCreate=false;throw new Error('[STORAGE_ERROR] Временно недоступно');}for(const load of p.loads||[]){const item=backend.sources.find(x=>x.id===load.sourceId);if(!item?.canAddToSegment||item.status!=='ready')throw new Error('[SOURCE_NOT_READY] База уже не готова');if(item.revision!==load.expectedRevision)throw new Error('[CONFLICT] Состояние базы изменилось');}if(backend.receipts[p.requestId])return {...clone(backend.receipts[p.requestId]),recovered:true};const segment=makeSegment('created-segment-'+(++backend.segmentCount),p.name,p.loads?.length?'preparation':'no_contacts');backend.segments.push(segment);return completeSegment(segment,p);},
  updateSegment(p){if(backend.receipts[p.requestId])return {...clone(backend.receipts[p.requestId]),recovered:true};const segment=backend.segments.find(x=>x.id===p.id);if(p.name){segment.name=p.name;for(const file of segment.files)file.name=p.name+(file.kind==='companies'?': компании':': ЛПР');}if(p.loads?.length)segment.overallStatus='preparation';return completeSegment(segment,p);},
@@ -38,8 +38,12 @@ function runner(){
    let p=args[0],method=name,key;
    const liveForm=name==='uploadSourceBase'?p:null;
    if(name==='callApp'){key=p.accessKey;method=p.method;p=p.payload;backend.transport.push({name,args:args.length,method,keyMatches:key===MOCK_KEY});}
-   if(!liveForm)backend.calls.push({name:method,p:clone(p??null)});
+   const readOnly=/^(?:get|list)/.test(method)||method==='previewSourceBaseContacts',tag=method==='getSegmentsDashboard'?method+(p?.includeAnalysis===false?':light':':full'):method;
+   if(!liveForm)backend.calls.push({name:method,p:clone(p??null),readOnly,tag});
    backend.active++;backend.maxActive=Math.max(backend.maxActive,backend.active);
+   if(readOnly){backend.activeReads++;backend.maxActiveReads=Math.max(backend.maxActiveReads,backend.activeReads);}else{backend.activeWrites++;backend.maxActiveWrites=Math.max(backend.maxActiveWrites,backend.activeWrites);}
+   const snapshot=()=>backend.counterSnapshots.push({active:backend.active,reads:backend.activeReads,writes:backend.activeWrites});snapshot();
+   const finish=()=>{backend.active--;if(readOnly)backend.activeReads--;else backend.activeWrites--;snapshot();};
    Promise.resolve().then(async()=>{
     // Match HTML Service's deferred live-form serialization, rather than
     // hiding disabled-field races with an eager FormData snapshot.
@@ -50,18 +54,22 @@ function runner(){
      p=Object.fromEntries(fd);delete p.accessKey;p.file=file instanceof File?{name:file.name,size:file.size,type:file.type}:null;
      backend.transport.push({name,args:args.length,keyMatches:key===MOCK_KEY});backend.calls.push({name:method,p:clone(p??null)});
     }
-    if(backend.holdMethods.includes(method))await new Promise(resolve=>backend.pending.push({method,resolve}));
+    if(backend.holdMethods.includes(method)||backend.holdMethods.includes(tag))await new Promise(resolve=>backend.pending.push({method,tag,payload:clone(p??null),phase:'before',resolve}));
     if(backend.revoked||key!==MOCK_KEY)throw new Error('[LINK_ACCESS_REQUIRED] Для входа нужна действующая закрытая ссылка.');
     if(!['callApp','uploadSourceBase'].includes(name))throw new Error('Unkeyed direct endpoint rejected');
-    return api[method](p);
-   }).then(value=>{backend.active--;success(clone(value));},error=>{backend.active--;fail(error);});
+    const value=await api[method](p);
+    if(backend.holdAfterMethods.includes(method)||backend.holdAfterMethods.includes(tag))await new Promise(resolve=>backend.pending.push({method,tag,payload:clone(p??null),phase:'after',resolve}));
+    return value;
+   }).then(value=>{finish();success(clone(value));},error=>{finish();fail(error);});
   };
  }});
  return proxy;
 }
-window.google={script:{get run(){return runner();},url:{getLocation(callback){backend.urlCalls++;setTimeout(()=>callback(clone(backend.location)),0);}},history:{setChangeHandler(callback){backend.historyChanged=callback;}}}};
+backend.pendingLocations=[];
+window.google={script:{get run(){return runner();},url:{getLocation(callback){backend.urlCalls++;const location=clone(backend.location),run=()=>callback(location);if(backend.holdLocation)backend.pendingLocations.push({location,run});else setTimeout(run,0);}},history:{setChangeHandler(callback){backend.historyChanged=callback;}}}};
+window.releaseLocation=()=>{const pending=backend.pendingLocations.shift();if(!pending)throw new Error('No held location callback');pending.run();};
 
-window.releaseRpc=(method)=>{const index=backend.pending.findIndex(item=>item.method===method);if(index<0)throw new Error('No held RPC: '+method);backend.pending.splice(index,1)[0].resolve();};
+window.releaseRpc=(method)=>{const index=backend.pending.findIndex(item=>item.method===method||item.tag===method);if(index<0)throw new Error('No held RPC: '+method);backend.pending.splice(index,1)[0].resolve();};
 
 // New UI prepares a draft and requires an explicit preview confirmation.
 backend.preparedDrafts={};backend.preparedStages=0;backend.preparedPreviewVersion=1;backend.processingPrepared=false;backend.failPreparedPreview=false;backend.partialPreparedPreview=false;backend.failPreparedAfterCommit=false;

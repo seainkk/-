@@ -102,13 +102,61 @@ function fixture(options = {}) {
   const run = callback => plain(context.withSharedAccess_(TEST_ACCESS_KEY, callback));
   const read = (area = {}) => run(() => context.getGridRange_({ id: FILE, sheetId: 0, row: 1, column: 1, rowCount: 2, columnCount: 3, ...area }));
   const save = (values, old, extra = {}) => run(() => context.saveGridRange_({ id: FILE, sheetId: 0, row: old.row, column: old.column, values, expected: old.versions, requestId: 'grid_save_request_12345', ...extra }));
-  return { context, calls, properties, cells, state, run, read, save, put, move: ids => { parents = ids; }, metadata: () => run(() => context.getGridWorkbook_({ id: FILE })) };
+  return { context, calls, properties, cells, state, run, read, save, put, move: ids => { parents = ids; }, metadata: (extra = {}) => run(() => context.getGridWorkbook_({ id: FILE, ...extra })) };
 }
 
 test('workbook metadata exposes actual sheets, dimensions and editable capability', () => {
   const f = fixture();
   assert.deepEqual(f.metadata(), { id: FILE, name: 'Рабочая база', url: `https://docs.google.com/spreadsheets/d/${FILE}/edit`, canEdit: true, sheets: [{ id: 0, name: 'Исходная база', rowCount: 100, columnCount: 26, usedRows: 2, usedColumns: 3 }] });
   assert.equal(f.calls.mutations.length, 0);
+});
+
+test('optional first viewport matches the versioned range read with one book open and two fresh scope checks', () => {
+  const rows = [['plain', { formula: '=1+2', value: 3 }, '000123'], [false, 12.5, new Date('2026-01-02T00:00:00.000Z')]];
+  const separate = fixture({ rows, rowCount: 1000, columnCount: 150 }), metadata = separate.metadata();
+  const range = separate.read({ rowCount: 80, columnCount: 50 });
+  const combined = fixture({ rows, rowCount: 1000, columnCount: 150 }), data = combined.metadata({ includeInitialRange: true });
+  assert.deepEqual(data, { ...metadata, initialRange: range });
+  assert.equal(data.initialRange.rowCount, 80); assert.equal(data.initialRange.columnCount, 50); assert.equal(data.initialRange.sheetId, metadata.sheets[0].id);
+  assert.equal(combined.calls.opened.length, 1); assert.equal(separate.calls.opened.length, 2);
+  assert.equal(combined.calls.capabilities, 2); assert.equal(separate.calls.capabilities, 4);
+  assert.equal(combined.calls.reads, 3, 'only one bounded rectangle for raw values, formulas and display');
+  assert.equal(combined.calls.mutations.length, 0); assert.equal(combined.calls.propertyWrites, 0);
+});
+
+test('initial viewport clamps to the actual grid and false preserves the old metadata-only response', () => {
+  const small = fixture({ rowCount: 7, columnCount: 4 }), data = small.metadata({ includeInitialRange: true });
+  assert.equal(data.initialRange.rowCount, 7); assert.equal(data.initialRange.columnCount, 4);
+  const f = fixture(); const dataWithoutFlag = f.metadata(), dataWithFalse = f.metadata({ includeInitialRange: false });
+  assert.deepEqual(dataWithFalse, dataWithoutFlag); assert.equal(Object.hasOwn(dataWithFalse, 'initialRange'), false); assert.equal(f.calls.reads, 0);
+  for (const value of ['true', 1, null, {}, []]) {
+    const invalid = fixture(); assert.throws(() => invalid.metadata({ includeInitialRange: value }), /INVALID_REQUEST/);
+    assert.equal(invalid.calls.opened.length, 0); assert.equal(invalid.calls.capabilities, 0); assert.equal(invalid.calls.reads, 0);
+  }
+});
+
+test('combined opening checks moved, protected, revoked and changed-root workbooks after reading cells', () => {
+  for (const failure of ['moved', 'protected', 'revoked', 'root']) {
+    let f; const options = { onRead(event) {
+      if (failure === 'moved') event.move([ROOT]);
+      if (failure === 'protected') options.appProperties = { registryPreparedRole: 'input', registryPreparedRoot: ROOT };
+      if (failure === 'revoked') event.revoke();
+      if (failure === 'root') f.properties.set('ROOT_FOLDER_ID', 'grid_changed_root_123456');
+    } }; f = fixture(options);
+    assert.throws(() => f.metadata({ includeInitialRange: true }), failure === 'protected' ? /GRID_PROTECTED/ : failure === 'revoked' ? /LINK_ACCESS_REQUIRED/ : /OUTSIDE_REGISTRY/);
+    assert.equal(f.calls.mutations.length, 0); assert.equal(f.calls.propertyWrites, 0);
+  }
+  const options = { onRead() { options.canEdit = false; } }, viewer = fixture(options);
+  assert.equal(viewer.metadata({ includeInitialRange: true }).canEdit, false, 'editability comes from the final fresh scope');
+});
+
+test('initial viewport versions stay fresh across openings and retain the normal prewrite conflict check', () => {
+  const f = fixture(), first = f.metadata({ includeInitialRange: true }).initialRange;
+  f.put(2, 1, 'External change');
+  assert.throws(() => f.run(() => f.context.saveGridRange_({ id: FILE, sheetId: 0, row: 2, column: 1, values: [['Never overwrite']], expected: [[first.versions[1][0]]], requestId: 'initial_range_stale_save_12345' })), /GRID_CONFLICT/);
+  assert.equal(f.calls.mutations.length, 0);
+  const current = f.metadata({ includeInitialRange: true }).initialRange;
+  assert.equal(current.values[1][0], 'External change'); assert.notEqual(current.versions[1][0], first.versions[1][0]);
 });
 
 test('display values, formula/raw inputs and independent cell versions are read within bounds', () => {

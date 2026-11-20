@@ -1,5 +1,5 @@
 (() => {
-  const state = window.gridBackend = { calls: [], active: 0, maxActive: 0, pending: [], holdMethods: [], failures: {}, failAfterSave: false, receipts: new Map(), canEdit: true, contactsEnabled: false, checked: ['valid@example.test','invalid@example.test'], checkedWrites: 0, syncRuns: 0, validationRuns: 0, providerSettings: {configured:false,enabled:false,autoPayLimitUsd:0,mode:'direct'} };
+  const state = window.gridBackend = { calls: [], active: 0, maxActive: 0, activeReads: 0, activeMutations: 0, maxReads: 0, maxMutations: 0, pending: [], holdMethods: [], failures: {}, failAfterSave: false, receipts: new Map(), canEdit: true, contactsEnabled: false, checked: ['valid@example.test','invalid@example.test'], checkedWrites: 0, syncRuns: 0, validationRuns: 0, providerSettings: {configured:false,enabled:false,autoPayLimitUsd:0,mode:'direct'} };
   const sheet = (id, name, rows, columns) => ({ id, name, rowCount: rows, columnCount: columns, usedRows: 4, usedColumns: 4, cells: new Map() });
   state.sheets = [sheet(0, 'Исходная база', 240, 80), sheet(1, 'Email', 100, 26), sheet(2, 'Телефоны', 100, 26)];
   const key = (row, column) => row + ':' + column;
@@ -36,12 +36,13 @@
       return validationDto();
     }
     if (method === 'getPromouserSettings') return {...state.providerSettings};
+    if (method === 'getColdyValidationState') return {configured:false,enabled:false,preferred:false,state:'complete',counts:{queued:0,processing:0,checked:0,review:0},jobs:[],warnings:[],canAutoAdvance:false};
     if (method === 'configurePromouser') {state.providerSettings={configured:state.providerSettings.configured||!!payload.apiKey,enabled:payload.enabled,autoPayLimitUsd:payload.autoPayLimitUsd,mode:'direct'};return {...state.providerSettings};}
     if (method === 'getPromouserBalance') return {balance:'12.50'};
     if (method === 'getContactAutomationState') return {installed:false};
     if (method === 'enableContactAutomation') return {installed:true};
     if (method === 'disableContactAutomation') return {installed:false};
-    if (method === 'getGridWorkbook') return { id: payload.id, name: 'Кухни — рабочая база', canEdit: state.canEdit, sheets: state.sheets.map(({ cells, ...value }) => ({ ...value })) };
+    if (method === 'getGridWorkbook') return { id: payload.id, name: 'Кухни — рабочая база', canEdit: state.canEdit, sheets: state.sheets.map(({ cells, ...value }) => ({ ...value })), ...(payload.includeInitialRange===true&&!state.omitInitialRange?{initialRange:range({id:payload.id,sheetId:state.sheets[0].id,row:1,column:1,rowCount:Math.min(80,state.sheets[0].rowCount),columnCount:Math.min(50,state.sheets[0].columnCount)})}:{}) };
     if (method === 'getGridRange') return range(payload);
     if (method === 'saveGridRange') {
       const previous = state.receipts.get(payload.requestId);
@@ -61,8 +62,10 @@
     throw new Error('Unexpected method: ' + method);
   }
   window.fakeGridRpc = (method, payload) => new Promise((resolve, reject) => {
-    state.calls.push({ method, payload: structuredClone(payload), at: Date.now() }); state.active++; state.maxActive = Math.max(state.active, state.maxActive);
-    const run = () => { try { const value = execute(method, payload); state.active--; resolve(structuredClone(value)); } catch (error) { state.active--; reject(error); } };
+    const read=method.startsWith('get'),call={ method, payload: structuredClone(payload), at: Date.now(), read };
+    state.calls.push(call); state.active++; state.maxActive = Math.max(state.active, state.maxActive);state[read?'activeReads':'activeMutations']++;state.maxReads=Math.max(state.maxReads,state.activeReads);state.maxMutations=Math.max(state.maxMutations,state.activeMutations);
+    const finish=()=>{state.active--;state[read?'activeReads':'activeMutations']--;call.completedAt=Date.now();};
+    const run = () => { try { const value = execute(method, payload);finish();resolve(structuredClone(value)); } catch (error) {finish();reject(error); } };
     if (state.holdMethods.includes(method)) state.pending.push({ method, run }); else setTimeout(run, 8);
   });
   window.releaseGridRpc = method => { const index = state.pending.findIndex(item => item.method === method); if (index < 0) throw new Error('No held method: ' + method); state.pending.splice(index, 1)[0].run(); };

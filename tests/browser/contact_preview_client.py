@@ -105,7 +105,7 @@ def main():
         page.locator('#br-view-sources').click()
         assert 'Готовая база ЛПР' in page.locator('#br-contact-preview-title').inner_text()
         assert page.locator('#br-contact-preview-result').is_visible()
-        assert page.evaluate('backend.maxActive') == 1
+        assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
 
         # A prepared import is acknowledged before catalog refresh; optional later analysis stays separate.
         reset()
@@ -145,7 +145,7 @@ def main():
         idle()
         page.locator('#br-contact-preview-refresh').click()
         page.wait_for_selector('#br-contact-preview-result:not([hidden])')
-        assert page.evaluate('backend.maxActive') == 1
+        assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
 
         # Revoking the key while a private preview is pending clears both data and deferred work.
         page.evaluate("backend.holdMethods=['previewSourceBaseContacts']")

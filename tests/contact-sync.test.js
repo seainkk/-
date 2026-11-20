@@ -418,6 +418,25 @@ test('a lightweight dirty marker changes only private metadata and workspace rep
   assert.equal(workspace.fileVersion, f.resources.get(FILE).version);
 });
 
+test('an enrolled workspace opens no spreadsheet and reads no contact rows or source models', () => {
+  const f = fixture(); f.finish(); const stored = f.state();
+  stored.known = Array.from({ length: 25000 }, (_, index) => f.context.digest_('known-' + index)); f.saveState(stored);
+  const before = { opened: f.calls.opened.length, reads: f.calls.reads.length, models: f.calls.model, writes: f.calls.raw.length, updates: f.calls.updates.length };
+  const workspace = f.invoke('getContactWorkspace_', { id: FILE });
+  assert.equal(workspace.enrolled, true); assert.deepEqual(workspace.targets, stored.targets); assert.equal(workspace.counts.addedEmail, 1);
+  assert.equal(f.calls.opened.length, before.opened); assert.equal(f.calls.reads.length, before.reads); assert.equal(f.calls.model, before.models);
+  assert.equal(f.calls.raw.length, before.writes); assert.equal(f.calls.updates.length, before.updates); assert.equal(f.state().known.length, 25000, 'history is neither rebuilt nor rewritten for presentation');
+});
+
+test('unenrolled and legacy workspace discovery still opens the book lazily without enrollment or writes', () => {
+  for (const legacy of [false, true]) {
+    const f = fixture({ legacy }), workspace = f.invoke('getContactWorkspace_', { id: FILE });
+    assert.equal(workspace.enrolled, false); assert.equal(f.calls.opened.length, 1); assert.deepEqual(workspace.sourceSheetIds, [0]);
+    if (legacy) assert.deepEqual(workspace.targets, { emailSheetId: 1, phoneSheetId: 2 });
+    assert.equal(f.calls.model, 0); assert.equal(f.calls.raw.length, 0); assert.equal(f.calls.mutations.length, 0);
+  }
+});
+
 test('active jobs return their original request IDs and reject a forged continuation', () => {
   const f = fixture(); const first = f.start(), other = f.start('different_new_request_12345');
   assert.equal(other.jobId, first.jobId); assert.equal(other.requestId, first.requestId);

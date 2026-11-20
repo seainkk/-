@@ -66,7 +66,7 @@ def main():
         page.wait_for_function('backend.active===0')
         assert page.evaluate('backend.normalizedImports')==2
         assert page.evaluate('backend.segmentCount')==0
-        assert page.evaluate('backend.maxActive')==1
+        assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
         assert not errors,errors
         print('PASS: ready-only automatic segment preview, explicit confirmation, LPR-without-contacts preview, computer file→Ready Registry→same segment, serialized RPC.')
         browser.close()

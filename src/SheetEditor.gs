@@ -3,9 +3,20 @@ var GRID_EDITOR_LIMITS = Object.freeze({ readCells: 5000, writeCells: 5000, inpu
 
 function getGridWorkbook_(request) {
   return api_(function () {
-    var input = gridRequest_(request, ['id']), scope = gridFile_(input.id, false), book = SpreadsheetApp.openById(scope.file.getId());
+    var input = gridRequest_(request, ['id', 'includeInitialRange']);
+    if (input.includeInitialRange !== undefined && typeof input.includeInitialRange !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный запрос начального диапазона.');
+    var scope = gridFile_(input.id, false), book = SpreadsheetApp.openById(scope.file.getId()), sheets = book.getSheets(), metadata = sheets.map(gridSheetMetadata_), initial = null;
+    if (input.includeInitialRange && sheets.length) {
+      var area = gridArea_({ row: 1, column: 1, rowCount: Math.min(80, metadata[0].rowCount), columnCount: Math.min(50, metadata[0].columnCount) }, GRID_EDITOR_LIMITS.readCells);
+      gridCheckArea_(sheets[0], area);
+      initial = gridRead_(scope.file.getId(), sheets[0], area);
+    }
+    var name = scope.file.getName();
+    // Keep the final access check after all metadata and cell reads.
     scope = gridFile_(input.id, false, scope.context.rootId);
-    return { id: scope.file.getId(), name: scope.file.getName(), url: spreadsheetUrl_(scope.file.getId()), canEdit: scope.canEdit, sheets: book.getSheets().map(gridSheetMetadata_) };
+    var result = { id: scope.file.getId(), name: name, url: spreadsheetUrl_(scope.file.getId()), canEdit: scope.canEdit, sheets: metadata };
+    if (input.includeInitialRange) result.initialRange = initial;
+    return result;
   });
 }
 
