@@ -198,14 +198,7 @@ function preparedWorkbookAdvance_(context, draft, plan) {
     var sourceIndex = draft.freezeSourceIndex || 0, sourcePlan = plan.sources[sourceIndex], original = preparedSheet_(book, draft.copiedSheetIds[sourceIndex]);
     if (original.getName() !== sourcePlan.name) fail_('PREVIEW_CHANGED', 'Исходный лист результата переименован до завершения подготовки.');
     var end = Math.min(sourcePlan.formulas.length, (draft.freezeCursor || 0) + PREPARED_IMPORT.freezeCells);
-    for (var i = draft.freezeCursor || 0; i < end; i++) {
-      var formula = sourcePlan.formulas[i], cell = original.getRange(formula.row, formula.column), value = preparedDecodeValue_(formula.value);
-      if (!cell.getFormula() && JSON.stringify(cell.getValue()) !== JSON.stringify(value)) fail_('PREVIEW_CHANGED', 'Значение исходного листа изменено до завершения подготовки.');
-      if (typeof value === 'string') {
-        var link = formula.link && /^(?:https?:\/\/|mailto:|tel:)/i.test(formula.link) ? formula.link : '';
-        sheetWriteRawStrings_(book.getId(), original.getSheetId(), formula.row, formula.column, [[value]], undefined, [[link]]);
-      } else cell.setValue(value);
-    }
+    preparedFreezeFormulaBlock_(context, book, draft, original, sourcePlan.formulas, draft.freezeCursor || 0, end);
     SpreadsheetApp.flush(); draft.freezeCursor = end;
     if (end >= sourcePlan.formulas.length) { draft.freezeSourceIndex = sourceIndex + 1; draft.freezeCursor = 0; }
     if (draft.freezeSourceIndex >= plan.sources.length) { preparedWorkbookEnsureSheets_(book, draft, plan); draft.phase = 'emails'; draft.writeCursor = 0; }
@@ -228,6 +221,27 @@ function preparedWorkbookAdvance_(context, draft, plan) {
     preparedCleanupComplete_(context, draft); authorize_(); return complete;
   }
   fail_('PREVIEW_STORAGE', 'Неизвестный этап подготовки книги.');
+}
+
+/** A lost batch acknowledgement retries only snapshots that remain formulas. */
+function preparedFreezeFormulaBlock_(context, book, draft, sheet, formulas, start, end) {
+  var strings = [], typed = [];
+  for (var index = start; index < end; index++) {
+    var formula = formulas[index], cell = sheet.getRange(formula.row, formula.column), value = preparedDecodeValue_(formula.value), link = formula.link && /^(?:https?:\/\/|mailto:|tel:)/i.test(formula.link) ? formula.link : '';
+    if (!cell.getFormula()) {
+      if (JSON.stringify(cell.getValue()) !== JSON.stringify(value)) fail_('PREVIEW_CHANGED', 'Значение исходного листа изменено до завершения подготовки.');
+      if (typeof value !== 'string' || !value) continue;
+      var rich = typeof cell.getRichTextValue === 'function' ? cell.getRichTextValue() : null;
+      if (rich && typeof rich.getLinkUrl === 'function' && (rich.getLinkUrl() || '') === link || !rich && !link) continue;
+    }
+    if (typeof value === 'string') strings.push({ row: formula.row, column: formula.column, value: value, link: link });
+    else typed.push({ cell: cell, value: value });
+  }
+  if (!strings.length && !typed.length) return;
+  preparedOutput_(context, draft, false);
+  typed.forEach(function (entry) { entry.cell.setValue(entry.value); });
+  if (strings.length) sheetWriteRawStringCells_(book.getId(), sheet.getSheetId(), strings, function () { preparedOutput_(context, draft, false); });
+  else { SpreadsheetApp.flush(); preparedOutput_(context, draft, false); }
 }
 
 function preparedWorkbookUnclaimed_(book, draft) {
