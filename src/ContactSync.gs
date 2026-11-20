@@ -93,6 +93,7 @@ function contactSyncSegmentImportStep_(fileId, kind, segmentId, requestId) {
   return contactSyncWithLease_(fileId, function (claim) {
     var state = claim.state, role = kind === 'companies' ? 'segment-companies' : 'segment-lpr';
     if (state.role !== role || state.segmentId !== segmentId) fail_('SEGMENT_MASTER_CHANGED', 'Привязка контактов к сегменту изменилась.');
+    claim.importSegmentId = segmentId; contactSyncCheckSegmentParent_(claim, claim.metadata);
     var receipt = contactSyncReceipt_(state, requestId);
     if (receipt && receipt.status === 'complete') return true;
     if (state.job && state.job.requestId !== requestId) { contactSyncAdvancePrevious_(claim); return false; }
@@ -360,7 +361,7 @@ function contactSyncWithLease_(fileId, callback, create, options) {
     if (state.lease && state.lease.until > Date.now()) fail_('BUSY', 'Контакты этой базы уже обновляются. Повторите через несколько секунд.');
     state.lease = { id: Utilities.getUuid(), until: Date.now() + CONTACT_SYNC.leaseMillis };
     contactSyncSaveState_(fresh.context, state, true);
-    return { context: fresh.context, state: state, book: book, leaseId: state.lease.id };
+    return { context: fresh.context, state: state, book: book, metadata: metadata, leaseId: state.lease.id };
   });
   try { return callback(claim); }
   catch (error) {
@@ -386,8 +387,14 @@ function contactSyncRelease_(claim) {
   } catch (error) { console.warn('Contact synchronization lease could not be safely released.'); }
 }
 function contactSyncAssertLease_(claim) {
-  var latest = contactSyncReadState_(claim.context, contactSyncMetadata_(claim.state.fileId), false);
+  var metadata = contactSyncMetadata_(claim.state.fileId), latest = contactSyncReadState_(claim.context, metadata, false);
+  contactSyncCheckSegmentParent_(claim, metadata);
   if (!latest.lease || latest.lease.id !== claim.leaseId || latest.lease.until <= Date.now()) fail_('CONTACT_SYNC_LEASE_LOST', 'Обновление контактов уже выполняется в другом запросе.');
+}
+
+function contactSyncCheckSegmentParent_(claim, metadata) {
+  var state = claim.state, segmentId = claim.importSegmentId || (state.job && state.job.importOnly && state.segmentId);
+  if (segmentId && (metadata.parents || []).indexOf(segmentId) === -1) fail_('SEGMENT_MASTER_CHANGED', 'Рабочая таблица перемещена из папки сегмента.');
 }
 
 function contactSyncHeaders_(kind, state) {
@@ -787,6 +794,7 @@ function contactSyncInstallWorkingHistory_(fileId, kind, segmentId, history, set
   return contactSyncWithLease_(fileId, function (claim) {
     var state = claim.state, expectedRole = kind === 'companies' ? 'segment-companies' : 'segment-lpr';
     if (state.role !== expectedRole || state.segmentId !== segmentId) fail_('SEGMENT_MASTER_CHANGED', 'Привязка контактов к сегменту изменилась.');
+    if (settlePrevious) { claim.importSegmentId = segmentId; contactSyncCheckSegmentParent_(claim, claim.metadata); }
     if (state.job) {
       if (settlePrevious) { contactSyncAdvancePrevious_(claim); return false; }
       fail_('BUSY', 'Дождитесь завершения текущего обновления контактов сегмента.');
@@ -879,7 +887,14 @@ function contactSyncConfirmPending_(claim) {
   contactSyncSaveState_(claim.context, state);
 }
 function contactSyncComplete_(claim, plan) {
-  var state = claim.state, job = state.job;
+  var state = claim.state, job = state.job, importedSnapshot;
+  if (job.importOnly) {
+    // The enclosing segment publishes its relation after this receipt. Check
+    // the actual master before the receipt can survive a lost response.
+    importedSnapshot = contactSyncStableModel_(claim);
+    if (importedSnapshot.model.fingerprint !== job.sourceFingerprint || JSON.stringify(importedSnapshot.sourceSheetIds) !== JSON.stringify(job.sourceSheetIds)) fail_('CONTACT_SOURCE_CHANGED', 'Во время пополнения изменился основной лист сегмента. Обновите предпросмотр.');
+    contactSyncAssertLease_(claim);
+  }
   state.known = contactSyncUnion_(state.known, plan.knownHashes); state.lastSyncAt = new Date().toISOString(); state.lastFingerprint = job.sourceFingerprint; state.lastCounts = job.counts; state.dirty = false;
   delete state.selectionBaselinePending;
   var receipt = { status: 'complete', jobId: job.id, requestId: job.requestId, counts: job.counts, warnings: job.warnings, completedAt: state.lastSyncAt };
@@ -899,7 +914,7 @@ function contactSyncComplete_(claim, plan) {
   // even when the last observed version appears unchanged, before declaring
   // the workbook fully synchronized.
   try {
-    var stable = contactSyncStableModel_(claim);
+    var stable = importedSnapshot || contactSyncStableModel_(claim);
     state.dirty = stable.model.fingerprint !== job.sourceFingerprint || JSON.stringify(stable.sourceSheetIds) !== JSON.stringify(job.sourceSheetIds);
     state.lastObservedVersion = state.dirty ? '' : stable.version;
   } catch (error) { state.dirty = true; state.lastObservedVersion = ''; }

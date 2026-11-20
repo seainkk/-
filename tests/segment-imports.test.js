@@ -99,6 +99,22 @@ function fixture(options = {}) {
   return { context, calls, resources, books, properties, sourceBook, sourceSheet, companyBook, peopleBook, status, preview, start, next, finish, master, config, addSource };
 }
 
+test('dashboard recovery exposes only the live receipt belonging to this registry and actual segment', () => {
+  const f = fixture();
+  const processing = f.start(f.preview());
+  vm.runInContext(readFileSync(new URL('../src/Segments.gs', import.meta.url), 'utf8'), f.context);
+  const snapshot = Object.fromEntries(f.properties), pointer = 'SEGMENT_RECORD_ACTIVE_' + SEGMENT;
+  const project = (properties, root = ROOT) => plain(f.context.segmentDashboardPendingImport_({rootId: root}, SEGMENT, properties));
+  assert.deepEqual(project(snapshot), {jobId: processing.jobId, requestId: processing.requestId});
+  assert.equal(project(snapshot, 'another_root_123456789'), null);
+  const other = {...snapshot};
+  const key = 'SEGMENT_RECORD_JOB_' + snapshot[pointer], job = JSON.parse(other[key]);
+  for (const fields of [{segmentId:'another_segment_123456789'}, {requestId:'another_receipt_123456789'}, {expiresAt:'2001-01-01'}, {state:'complete'}]) {
+    other[key] = JSON.stringify({...job, ...fields}); assert.equal(project(other), null);
+  }
+  delete other[pointer]; assert.equal(project(other), null);
+});
+
 test('a confirmed strict target survives a lost reply and never edits the other table or source rows', () => {
   const rows = [['Компания', 'ИНН', 'Email', 'ФИО ЛПР', 'Должность ЛПР', 'Телефон ЛПР'], ['Компания Москва', '7707083893', 'sales@example.test', 'Иван Иванов', 'Директор', '+79990000001']];
   const f = fixture({ rows, writeFailure: { id: PEOPLE } });
@@ -192,6 +208,14 @@ const directoryRow = ['Тестовый каталог', 'Мебель', 'Лен
 
 test('all 17 directory values survive two independent uploads into one company and retain their original headings', () => {
   const f = fixture({ rows: [directoryHeaders, directoryRow] });
+  function prepareIds(sheet, sourceId) {
+    const model = f.context.preparedDataRead_(sheet, sourceId, 'companies', {});
+    const working = f.context.preparedWorkingLists_({ ...model, models: [model], sourceSheets: [model.source] }, sourceId);
+    const ids = working.sourceIds.get(sheet.getSheetId());
+    sheet.state.rows.forEach((row, index) => row.push(ids[index]));
+    return ids[1];
+  }
+  const firstId = prepareIds(f.sourceSheet, 'original_company_directory_001');
   f.context.segmentNormalizedMutation_('create', { name: 'Тестовый каталог', requestId: 'directory-create-001', loads: [] });
   const typed = id => f.context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [id], targetKind: 'companies' });
   const first = typed(SOURCE); assert.equal(first.sample.companies[0].length, first.headers.companies.length);
@@ -201,7 +225,8 @@ test('all 17 directory values survive two independent uploads into one company a
   assert.deepEqual(firstRow.slice(1,18), directoryRow);
   const secondId = 'independent_selection_file_0002', nextRow = [...directoryRow];
   nextRow[1] = 'Кухни'; nextRow[4] = 'Тестовая ул., 5'; nextRow[7] = 'office@example.test';
-  f.addSource(secondId, [directoryHeaders,nextRow]);
+  const secondSheet = f.addSource(secondId, [directoryHeaders,nextRow]);
+  assert.equal(prepareIds(secondSheet, 'another_independent_origin_002'), firstId);
   const shown = typed(secondId); assert.equal(shown.counts.companiesAdded, 0); assert.equal(shown.counts.companiesUpdated, 1);
   f.finish(f.start(shown, 'directory-batch-002'));
   assert.equal(sheet.state.rows.length, 2);
@@ -211,6 +236,10 @@ test('all 17 directory values survive two independent uploads into one company a
   assert.equal(sheet.state.rows[1][headers.indexOf('Индексы')], '019001');
   assert.equal(typed(secondId).counts.companiesUpdated, 0);
   assert.equal(f.master('lpr').state.rows.length, 1);
+  secondSheet.state.rows[1][directoryHeaders.length] = 'C-independent_explicit_manual_id';
+  const conflict = typed(secondId);
+  assert.equal(conflict.counts.companiesAdded, 0); assert.equal(conflict.counts.companiesUpdated, 0);
+  assert.ok(conflict.review.some(item => item.reason.includes('разные ID')));
 });
 
 test('an established working sheet appends directory columns beyond user data and preserves earlier previews and formulas', () => {

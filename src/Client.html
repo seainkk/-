@@ -605,7 +605,11 @@
       const replenish=button('','Пополнить базы');replenish.title='Выбрать готовые базы из реестра';replenish.dataset.editSegment=item.id;replenish.dataset.segmentFocus=item.id+'/replenish';replenish.addEventListener('click',()=>openSegmentEditor({segmentId:item.id,replenish:true}));
       const edit=button('','Редактировать сегмент');edit.dataset.editSegment=item.id;edit.dataset.segmentFocus=item.id+'/edit';edit.addEventListener('click',()=>openSegmentEditor({segmentId:item.id}));
       const campaigns=button('br-link-button','Рассылки →');campaigns.dataset.segmentFocus=item.id+'/mailings';campaigns.addEventListener('click',()=>{segmentBackScroll=window.scrollY;mailingSegmentId=item.id;if(mailings?.segment?.id!==item.id)mailings=null;mailingsError=null;setView('mailings');});
-      actions.append(upload,replenish,edit,campaigns);head.append(actions);row.append(head);
+      if(item.pendingImport){
+        const resume=button('br-primary','Продолжить пополнение');resume.dataset.editSegment=item.id;resume.dataset.segmentFocus=item.id+'/resume';
+        resume.addEventListener('click',()=>resumeDashboardImport(item));actions.append(resume);
+      }else actions.append(upload,replenish);
+      actions.append(edit,campaigns);head.append(actions);row.append(head);
       const inline=document.createElement('div');inline.className='br-segment-inline';const pills=document.createElement('div');pills.className='br-channel-pills';for(const channel of [['email','Email'],['telegram','Telegram'],['retargeting','Ретаргетинг']]){const info=channelStatus(item.channels?.[channel[0]]?.state);const pill=document.createElement('span');pill.className='br-channel-pill';pill.dataset.channel=channel[0];pill.dataset.state=info.id;pill.textContent=channel[1]+' '+info.mark;pill.setAttribute('aria-label',channel[1]+': '+info.label);pill.title=info.label;pills.append(pill);}inline.append(pills);
       const metrics=document.createElement('dl');metrics.className='br-segment-row-metrics';for(const entry of [['Email',item.channels?.email?.inWork],['Telegram',item.channels?.telegram?.inWork],['Ретаргетинг',item.channels?.retargeting?.inWork],['Компании ≥1 канал',item.companiesInWork]]){const group=document.createElement('div');const label=document.createElement('dt');label.textContent=entry[0];const value=document.createElement('dd');value.textContent=metricNumber(entry[1]);group.append(label,value);metrics.append(group);}inline.append(metrics);const info=segmentStatus(item.overallStatus),status=document.createElement('span');status.className='br-segment-status';status.dataset.status=info.id;status.textContent=info.label;inline.append(status);row.append(inline);
       const links=document.createElement('div');links.className='br-segment-sheet-links';for(const file of item.files||[]){const link=document.createElement('a');link.href=nativeUrl(file.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent=file.kind==='companies'?'Компании':file.kind==='lpr'?'ЛПР':file.name;link.title=file.name;links.append(link);if(['companies','lpr'].includes(file.kind)){const work=button('','Работать: '+(file.kind==='companies'?'компании':'ЛПР'));work.dataset.gridSource=file.id;work.addEventListener('click',()=>openGridWorkbook(file.id));links.append(work);}}row.append(links);
@@ -783,6 +787,33 @@
     // Let the acknowledged result paint before a potentially slow Drive scan.
     if(syncTimer!==null)clearTimeout(syncTimer);syncTimer=setTimeout(()=>{syncTimer=null;flushPendingView();},300);
   }
+  async function continueSegmentUntilComplete(result,segmentId,requestId,current,onProgress){
+    while(result.state==='processing'&&current()){
+      onProgress(result);await new Promise(resolve=>setTimeout(resolve,700));
+      if(!current())return null;
+      result=await rpc('continueSegmentRecords',{segmentId,jobId:result.jobId,requestId});
+    }
+    return current()?result:null;
+  }
+  async function resumeDashboardImport(item){
+    const saved=item.pendingImport;if(!saved||editingBlocked()||segmentEditor||importOpen)return;
+    const epoch=accessEpoch,current=()=>accessReady&&epoch===accessEpoch;
+    segmentSaving=true;updateControls();
+    try{
+      const result=await continueSegmentUntilComplete({state:'processing',jobId:saved.jobId},item.id,saved.requestId,current,
+        stage=>notice(stage.progress?.label||'Продолжаем подтверждённое пополнение…','info'));
+      if(!result)return;
+      if(result.state!=='complete')throw new Error('[SEGMENT_PREVIEW_CHANGED] Проверьте данные и выполните новый предпросмотр.');
+      const segment=segmentById(item.id);if(segment)delete segment.pendingImport;cacheSegmentResult(result,{id:item.id},[]);
+      showSegmentResult('Пополнение завершено.',false,result.segment,result.targetKind);scheduleViewSync();
+    }catch(error){
+      if(!current())return;
+      const problem=failure(error);notice(problem.message,'error');
+      if(['SEGMENT_JOB_MISSING','SEGMENT_JOB_EXPIRED','SEGMENT_PREVIEW_EXPIRED','SEGMENT_PREVIEW_CHANGED'].includes(problem.code)){
+        lastDashboardLoaded=0;pendingSyncViews.add('segments');scheduleViewSync();
+      }
+    }finally{if(current()){segmentSaving=false;updateControls();flushPendingView();}}
+  }
   async function submitSegment(){
     if(!segmentEditor||requesting()||segmentEditor.loadingLists)return;const editor=segmentEditor,name=$('br-segment-name').value.trim(),wasNew=!editor.id;if((wasNew||!editor.direct)&&(!name||name.length>100)){segmentError={message:'Введите название сегмента от 1 до 100 символов.'};renderSegmentError();return;}
     const ids=Array.from(editor.selected.keys());if(ids.some(id=>!readySource(sourceItem(id))||sourceDrafts.has(id))){segmentError={message:'Добавить можно только базы со статусом «Готова» без несохранённых правок.'};renderSegmentError();return;}
@@ -791,13 +822,13 @@
       if(editor.plan){
         editor.importRequestId=editor.importRequestId||globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);
         let result=await rpc(editor.job?'continueSegmentRecords':'importSegmentRecords',editor.job?{segmentId:editor.id,jobId:editor.job.jobId,requestId:editor.importRequestId}:{segmentId:editor.id,planToken:editor.plan.planToken,requestId:editor.importRequestId});
-        while(accessReady&&segmentEditor===editor&&result.state==='processing'){editor.job=result;editor.importRequestId=result.requestId||editor.importRequestId;updateSegmentSummary();await new Promise(resolve=>setTimeout(resolve,700));result=await rpc('continueSegmentRecords',{segmentId:editor.id,jobId:result.jobId,requestId:editor.importRequestId});}
+        result=await continueSegmentUntilComplete(result,editor.id,editor.importRequestId,()=>accessReady&&segmentEditor===editor,stage=>{editor.job=stage;updateSegmentSummary();});
         if(!accessReady||segmentEditor!==editor)return;
         if(result.state!=='complete'){editor.plan=null;editor.job=null;editor.importRequestId=null;throw new Error('[SEGMENT_PREVIEW_CHANGED] Состав данных изменился. Уже записанные строки сохранены. Повторите предпросмотр перед продолжением.');}
         cacheSegmentResult(result,editor,ids.map(sourceId=>({sourceId})));segmentEditor=null;formMode=null;segmentRequests.clear();renderSegmentEditor();
         const kind=editor.direct?.kind,counts=result.counts||{};
         const message=kind?'Таблица «'+(kind==='lpr'?'ЛПР':'Компании')+'» готова. Добавлено записей: '+Number((kind==='lpr'?counts.peopleAdded:counts.companiesAdded)||0)+'. Дополнено: '+Number((kind==='lpr'?counts.peopleUpdated:counts.companiesUpdated)||0)+'.':'Базы сегмента дополнены. Новых компаний: '+Number(counts.companiesAdded||0)+', новых ЛПР: '+Number(counts.peopleAdded||0)+'.';
-        showSegmentResult(message,false,result.segment,kind);scheduleViewSync();return;
+        showSegmentResult(message,false,result.segment,kind);if(editor.closeRequested)restoreSegmentFocus(editor.returnPoint);scheduleViewSync();return;
       }
       let segment=segmentById(editor.id);
       const nameChanged=name!==editor.baselineName,categoryChanged=editor.category!==editor.baselineCategory;
@@ -1086,7 +1117,9 @@
     }
     segmentEditor=null;formMode=null;segmentError=null;segmentEditorEpoch++;
     renderSegmentEditor();updateControls();flushPendingView();
-    const point=editor.returnPoint;
+    restoreSegmentFocus(editor.returnPoint);
+  }
+  function restoreSegmentFocus(point){
     if(!point)return;
     const opener=point.id?$(point.id):point.focus&&Array.from(root.querySelectorAll('[data-source-focus],[data-segment-focus]')).find(node=>node.dataset.sourceFocus===point.focus||node.dataset.segmentFocus===point.focus);
     opener?.focus({preventScroll:true});window.scrollTo(0,point.scroll);

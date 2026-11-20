@@ -226,11 +226,14 @@ test('curated records carry every owner decision into the segment and a replay p
 
   const dst = fixture({ realExtractor: true, rows: [['ID компании', 'Компания', 'Email', 'Телефон'], [id('a'), 'Альфа', email, phone], [id('b'), 'Бета', email, '']] });
   load(dst.context, 'SegmentImports.gs');
-  const segment = 'segment_demo_1234567890';
+  const segment = SOURCES;
   dst.context.enrollContactWorkbook_(dst.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies', segmentId: segment });
   dst.context.contactSyncInstallWorkingHistory_(FILE, 'companies', segment, accepted.companies);
-  const added = dst.finish();
-  assert.equal(added.counts.addedEmail, 1); assert.equal(added.counts.addedPhone, 1);
+  const settle = () => dst.context.contactSyncSegmentImportStep_(FILE, 'companies', segment, 'import_with_ready_history');
+  let ready = false;
+  for (let step = 0; !ready && step < 10; step++) ready = settle();
+  assert.equal(ready, true);
+  assert.equal(dst.state().lastCounts.addedEmail, 1); assert.equal(dst.state().lastCounts.addedPhone, 1);
   const matrix = dst.target('email').data, col = label => matrix[0].indexOf(label);
   assert.equal(matrix[0][0], 'Статус рассылки'); assert.equal(matrix[1][0], 'фильтр');
   assert.equal(matrix[1][col('Валидация')], 'Проверить историю контакта');
@@ -240,6 +243,7 @@ test('curated records carry every owner decision into the segment and a replay p
   matrix[1][col('Комментарий')] = 'Ручное решение'; matrix[1][0] = 'в рассылке';
   dst.context.contactSyncInstallWorkingHistory_(FILE, 'companies', segment, accepted.companies);
   assert.equal(matrix[1][0], 'в рассылке'); assert.equal(matrix[1][col('Комментарий')], 'Ручное решение');
+  assert.equal(settle(), true); assert.equal(matrix[1][0], 'в рассылке');
   assert.equal(dst.finish('working_history_repeat_1234').counts.addedEmail, 0);
 });
 
@@ -393,7 +397,7 @@ test('manually removed contacts remain excluded even after new source rows arriv
 });
 
 test('segment contact materialization resumes committed batches without validation or duplicate contacts', () => {
-  const segment = 'segment_direct_1234567890', request = 'segment_contact_request_1234567890';
+  const segment = SOURCES, request = 'segment_contact_request_1234567890';
   const rows = [['Email', 'Телефон', 'Telegram'], ...Array.from({ length: 1001 }, (_, index) => ['company' + index + '@example.test', '+79' + String(index).padStart(9, '0'), ''])];
   const f = fixture({ rows, provider: true });
   f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies', segmentId: segment });
@@ -414,7 +418,7 @@ test('segment contact materialization resumes committed batches without validati
 });
 
 test('a previous contact job finishes before the segment takes its own snapshot', () => {
-  const f = fixture({ provider: true }), segment = 'segment_direct_1234567890';
+  const f = fixture({ provider: true }), segment = SOURCES;
   f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies', segmentId: segment });
   assert.equal(f.start('previous_contact_request').state, 'processing');
   const step = () => f.context.contactSyncSegmentImportStep_(FILE, 'companies', segment, 'next_segment_request');
@@ -426,6 +430,36 @@ test('a previous contact job finishes before the segment takes its own snapshot'
     ['previous_contact_request', 'complete'], ['next_segment_request', 'complete']
   ]);
   assert.equal(f.calls.provider.length, 1);
+});
+
+test('a concurrent edit to the master cannot publish a completed import contact receipt', () => {
+  const segment = SOURCES, f = fixture(), complete = f.context.contactSyncComplete_;
+  f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies', segmentId: segment });
+  f.context.contactSyncComplete_ = (claim, plan) => {
+    f.context.contactSyncComplete_ = complete;
+    f.editSource([['changed@example.test', '', '']]);
+    return complete(claim, plan);
+  };
+  const step = requestId => f.context.contactSyncSegmentImportStep_(FILE, 'companies', segment, requestId);
+  assert.throws(() => { for (let index = 0; index < 15 && !step('changed_master_import'); index++) {} }, /CONTACT_SOURCE_CHANGED/);
+  assert.equal(f.state().receipts.some(entry => entry.requestId === 'changed_master_import'), false);
+  let done = false;
+  for (let index = 0; !done && index < 15; index++) done = step('refreshed_master_import');
+  assert.equal(done, true);
+  assert.equal(f.state().receipts.find(entry => entry.requestId === 'changed_master_import').status, 'superseded');
+});
+
+test('a workbook moved to another authorized folder stops before a segment contact append', () => {
+  const f = fixture(), append = f.context.contactSyncWritePending_, grid = f.context.gridFile_;
+  f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies', segmentId: SOURCES });
+  let moved = false;
+  f.context.gridFile_ = (...args) => moved ? { context: f.scope, canEdit: true } : grid(...args);
+  f.context.contactSyncWritePending_ = claim => {
+    f.resources.get(FILE).parents = [ROOT]; moved = true;
+    return append(claim);
+  };
+  assert.throws(() => f.context.contactSyncSegmentImportStep_(FILE, 'companies', SOURCES, 'relocated_book_import'), /SEGMENT_MASTER_CHANGED/);
+  assert.equal(f.target('email').getLastRow(), 1); assert.equal(f.state().receipts.length, 0);
 });
 
 test('lost RAW acknowledgement recovers the original range without a duplicate append', () => {

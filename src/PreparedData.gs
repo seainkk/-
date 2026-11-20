@@ -621,12 +621,19 @@ function preparedDataRowList_(rows) {
 /** Resolve working contact columns from exact source row references, never by display name. */
 function preparedWorkingLists_(model, sourceId) {
   var byRow = new Map(), links = new Map(), emailCounts = new Map(), sourceIds = new Map(), personIds = new Map();
-  var uploadLeaves = new Map();
+  var uploadLeaves = new Map(), siteKeys = new Map(), siteCounts = new Map();
   if (sourceId && sourceId.indexOf('upload:') === 0) {
     // GIDs are assigned anew by Drive when the same bytes are converted again.
     // The original tab order is independent of the user's selected subset.
     (model.allSourceSheets || model.sourceSheets || []).forEach(function (leaf, index) { uploadLeaves.set(leaf.sheetId, index); });
   }
+  if (sourceId && !model.workingReports && typeof segmentRecordsDomain_ === 'function') (model.records || []).forEach(function (record) {
+    var company = record.company || {}, domain = segmentRecordsDomain_(company.website), name = segmentRecordsName_(company.name), city = segmentRecordsCity_(company.city);
+    if (!domain || !name || !city || /[\s,;]/.test(String(company.website || '').trim())) return;
+    var key = 'site:' + domain + '|' + name + '|' + city, ref = record.source;
+    siteKeys.set(ref.sheetId + ':' + ref.row, key);
+    var localKey = ref.sheetId + ':' + key; siteCounts.set(localKey, (siteCounts.get(localKey) || 0) + 1);
+  });
   (model.models || []).forEach(function (leaf) {
     var source = leaf.source;
     if (sourceId && source.hasHeader && source.section === 'companies' && (leaf.records || []).length &&
@@ -651,7 +658,8 @@ function preparedWorkingLists_(model, sourceId) {
     if (!id && ids && (company.name || company.inn || company.ogrn || company.website)) {
       var inn = typeof segmentRecordsInn_ === 'function' && segmentRecordsInn_(company.inn);
       var ogrn = typeof segmentRecordsOgrn_ === 'function' && segmentRecordsOgrn_(company.ogrn);
-      var identity = inn ? 'inn:' + inn : ogrn ? 'ogrn:' + ogrn : rowIdentity;
+      var site = siteKeys.get(ref.sheetId + ':' + ref.row);
+      var identity = inn ? 'inn:' + inn : ogrn ? 'ogrn:' + ogrn : site && siteCounts.get(ref.sheetId + ':' + site) === 1 ? site : rowIdentity;
       id = 'C-' + digest_(JSON.stringify(identity)).slice(0, 24);
       ids[ref.row - 1] = id;
     }

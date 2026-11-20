@@ -3,7 +3,7 @@
  * No spreadsheet values, worksheet names or inferred outreach rules are read.
  * SEGMENTS_FOLDER_ID can override the source using an ID in this registry only.
  */
-function buildSegments_(context, registry, folders, files) {
+function buildSegments_(context, registry, folders, files, includePendingImports) {
   var result = {
     state: 'source_missing',
     source: null,
@@ -67,7 +67,7 @@ function buildSegments_(context, registry, folders, files) {
     }).map(function (file) {
       return { id: file.id, name: file.name, url: spreadsheetUrl_(file.id) };
     }).sort(byName_);
-    return {
+    var item = {
       id: segment.id,
       name: segment.name,
       url: segmentFolderUrl_(segment.id),
@@ -83,8 +83,24 @@ function buildSegments_(context, registry, folders, files) {
       overallStatus: null,
       companiesInWork: null
     };
+    if (includePendingImports) {
+      var pending = segmentDashboardPendingImport_(context, segment.id, categoryProperties);
+      if (pending) item.pendingImport = pending;
+    }
+    return item;
   });
   return result;
+}
+
+function segmentDashboardPendingImport_(context, segmentId, properties) {
+  var id = properties['SEGMENT_RECORD_ACTIVE_' + segmentId];
+  if (!id || !/^[A-Za-z0-9_-]{43}$/.test(id)) return null;
+  var job;
+  try { job = JSON.parse(properties[SEGMENT_RECORD_IMPORT.jobPrefix + id]); } catch (error) { return null; }
+  if (!job || job.id !== id || job.rootId !== context.rootId || job.segmentId !== segmentId || job.state !== 'processing' ||
+      !(Date.parse(job.expiresAt) > Date.now()) || typeof job.requestId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(job.requestId) ||
+      digest_([context.rootId, segmentId, job.requestId].join('|')) !== id) return null;
+  return { jobId: id, requestId: job.requestId };
 }
 
 function segmentFolderName_(value) {
@@ -180,7 +196,7 @@ function getSegmentNames_(context) {
 }
 
 /** Metadata for the Outreach subtree only; a large source catalog is unrelated. */
-function getSegmentsMetadata_(context) {
+function getSegmentsMetadata_(context, includePendingImports) {
   context = context || authorize_();
   var binding = segmentMetadataBinding_(context);
   if (binding.state !== 'ready') return binding;
@@ -208,5 +224,5 @@ function getSegmentsMetadata_(context) {
     }
   }
   visit(source, 0);
-  return buildSegments_(context, registry, folders, files);
+  return buildSegments_(context, registry, folders, files, includePendingImports);
 }

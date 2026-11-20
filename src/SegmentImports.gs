@@ -524,7 +524,7 @@ function segmentRecordsSaveJob_(context, job) { var value = JSON.stringify(job);
 function segmentRecordsActiveJob_(context, segmentId) {
   var id = context.properties.getProperty('SEGMENT_RECORD_ACTIVE_' + segmentId); if (!id) return null;
   var job; try { job = segmentRecordsReadJob_(context, id); } catch (error) { return null; }
-  return job.state === 'processing' && Date.parse(job.expiresAt) > Date.now() ? job : null;
+  return job.segmentId === segmentId && job.state === 'processing' && Date.parse(job.expiresAt) > Date.now() ? job : null;
 }
 
 function segmentRecordsAllocateJob_(context, plan, token, requestId) {

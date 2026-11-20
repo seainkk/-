@@ -186,6 +186,10 @@ function segmentRecordsPlanner_(input) {
           segmentRecordsName_(incoming.name) !== segmentRecordsName_(candidate.name);
         var sameRegistration = (segmentRecordsInn_(incoming.inn) && segmentRecordsInn_(incoming.inn) === segmentRecordsInn_(candidate.inn)) ||
           (segmentRecordsOgrn_(incoming.ogrn) && segmentRecordsOgrn_(incoming.ogrn) === segmentRecordsOgrn_(candidate.ogrn));
+        if (!incompatible && explicitId && candidate.id && explicitId !== candidate.id && selected[i].indexOf('site:') === 0 && segmentRecordsCity_(incoming.city)) {
+          issue('company', 'Совпадают сайт, название и город, но указаны разные ID компаний. Проверьте записи перед объединением.', incoming.source, incoming.name);
+          return null;
+        }
         if (incompatible || differentNames && !sameRegistration || explicitId && candidate.id && explicitId !== candidate.id) {
           if (strong) { issue('company', 'Сильные идентификаторы компании противоречат друг другу. Контакты не объединялись.', incoming.source, incoming.name); return null; }
           hardConflict = true; continue;
