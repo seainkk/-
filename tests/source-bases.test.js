@@ -154,11 +154,13 @@ function fixture(options = {}) {
   }
   const sourceSheet = sheet('SourceBases', options.sourceRows || [HEADERS], options.sourceLastRow);
   const relationSheet = sheet('SourceBaseSegments', options.relationRows || [RELATION_HEADERS], options.relationLastRow);
+  let originSheet = options.originRows ? sheet('SourceBaseOrigins', options.originRows) : null;
   const book = {
     getId: () => STORAGE,
     getUrl: () => `https://docs.google.com/spreadsheets/d/${STORAGE}/edit`,
     getName: () => 'Служебный реестр',
-    getSheetByName: name => name === 'SourceBases' ? sourceSheet : name === 'SourceBaseSegments' ? relationSheet : null,
+    getSheetByName: name => name === 'SourceBases' ? sourceSheet : name === 'SourceBaseSegments' ? relationSheet : name === 'SourceBaseOrigins' ? originSheet : null,
+    insertSheet(name) { assert.equal(name, 'SourceBaseOrigins'); assert.equal(originSheet, null); return originSheet = sheet(name, []); },
     getSheets: () => [sourceSheet, relationSheet],
   };
   const lock = {
@@ -195,9 +197,14 @@ function fixture(options = {}) {
       base64EncodeWebSafe: value => Buffer.from(value).toString('base64url'),
     },
   });
-  const source = ['Config.gs','Code.gs','Segments.gs','SourceBases.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
+  const source = ['Config.gs','Code.gs','Segments.gs','SourceBases.gs','SourceImport.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
   vm.runInContext(source, context, { filename: 'source-bases-backend.gs' });
   installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
+  context.sheetWriteRawStrings_ = (fileId, sheetId, firstRow, column, rows) => {
+    assert.ok(calls.lockDepth > 0); assert.equal(fileId, STORAGE); assert.equal(sheetId, originSheet.getSheetId()); assert.equal(column, 1);
+    rows.forEach((row, index) => { assert.ok(row.every(cell => typeof cell === 'string')); originSheet.state.rows[firstRow - 1 + index] = Array.from(row); });
+    if (options.loseOriginReply) { options.loseOriginReply = false; throw Error('Lost write acknowledgement'); }
+  };
   const list = () => plain(context.getSourceBases());
   const patch = payload => plain(context.updateSourceBase(payload));
   const record = id => {
@@ -219,6 +226,38 @@ test('source-base APIs authorize before Drive or service storage access', () => 
     assert.deepEqual(f.calls.drive, []);
     assert.deepEqual(f.calls.opens, []);
   }
+});
+
+test('immutable origins link multiple selections to one original without opening it, and recover a lost write', () => {
+  const f = fixture({ loseOriginReply: true });
+  const another = 'native_selection_1234567890', original = 'external_original_9876543210';
+  f.makeFile(another, 'Вторая выборка', SHEET_MIME, SOURCE);
+  const initial = f.list().items.find(item => item.id === NATIVE);
+  assert.equal(initial.origin, null); assert.equal(initial.originAvailable, true);
+  const spec = { url: 'https://docs.google.com/spreadsheets/d/' + original + '/edit?gid=0', name: '=Название исходника', criteria: 'Москва и область' };
+  const bind = (id, revision, origin = spec) => f.patch({ id, requestId: id, expectedRevision: revision, origin });
+  assert.throws(() => bind(NATIVE, 3), /CONFLICT/);
+  assert.throws(() => bind(NATIVE, 1), /GOOGLE_ERROR/);
+  const recovered = bind(NATIVE, 1).item;
+  assert.deepEqual(recovered.origin, { id: original, name: spec.name, criteria: spec.criteria, url: spec.url.split('?')[0] });
+  assert.equal(bind(another, 1).item.origin.id, original);
+  assert.throws(() => bind(NATIVE, 1, { ...spec, name: 'Подмена' }), /ORIGIN_CONFLICT/);
+  assert.throws(() => bind(NATIVE, 1, { ...spec, url: 'https://example.test' }), /INVALID_LINK/);
+  assert.throws(() => bind(NATIVE, 1, { ...spec, url: NATIVE }), /INVALID_REQUEST/);
+  assert.deepEqual(f.list().items.filter(item => item.origin?.id === original).map(item => item.id).sort(), [NATIVE, another].sort());
+  assert.equal(f.patch({ id: NATIVE, expectedRevision: 1, status: 'ready' }).item.origin.id, original);
+  assert.throws(() => f.patch({ id: NATIVE, expectedRevision: 2, requestId: NATIVE, origin: spec, status: 'ready' }), /INVALID_REQUEST/);
+  f.files.get(NATIVE).parent = OTHER;
+  assert.throws(() => bind(NATIVE, 1), /OUTSIDE_REGISTRY/);
+  assert.ok(!f.calls.drive.some(entry => entry.id === original));
+});
+
+test('unreadable optional origins preserve catalog data and cannot be overwritten', () => {
+  const f = fixture({ originRows: [['unexpected']] });
+  const item = f.list().items.find(entry => entry.id === NATIVE);
+  assert.equal(item.origin, null); assert.equal(item.originAvailable, false);
+  assert.equal(f.patch({ id: NATIVE, expectedRevision: 1, status: 'ready' }).item.status, 'ready');
+  assert.throws(() => f.patch({ id: NATIVE, requestId: NATIVE, expectedRevision: 2, origin: { url: 'external_original_9876543210', name: 'Оригинал' } }), /STORAGE_SCHEMA/);
 });
 
 test('discovery returns all nested file formats and the actual Drive URLs without opening business sheets', () => {
@@ -943,6 +982,44 @@ test('moved or trashed segment relations remain unknown and preserve their store
     assert.match(item.associationWarning, /недоступна/);
     assert.deepEqual(f.relationSheet.state.rows, [RELATION_HEADERS, relation]);
   }
+});
+
+test('recovers only verified completed selections, never opening the original or replacing a manual origin', () => {
+  const f = fixture(), other = 'second_selection_file_12345', original = 'outside_original_1234567890';
+  const draftId = 'test_prepared_recovery_000001', key = 'IMPORT_' + 'a'.repeat(32), fingerprint = 'original_verified_digest';
+  f.makeFile(other, 'Выборка 2', SHEET_MIME, SOURCE);
+  const tags = {
+    [NATIVE]: { registryPreparedRole: 'output', registryPreparedRoot: ROOT, registryPreparedDraft: draftId, registryPreparedFingerprint: fingerprint },
+    [other]: { registryImportKey: key, registryImportFingerprint: fingerprint },
+  }, metadataReads = [];
+  f.context.Drive = { Files: { get: id => { metadataReads.push(id); return { id, appProperties: tags[id], trashed: false }; } } };
+  const draft = { version: 1, draftId, rootId: ROOT, state: 'complete', metadataCommitted: true, kind: 'link', outputId: NATIVE, fingerprint, original: { id: original, name: 'Первичный файл' } };
+  const legacy = { version: 1, status: 'done', metadataCommitted: true, mode: 'copy', destination: SOURCE, fileId: other, fingerprint, original: { id: original, name: 'Первичный файл' } };
+  const items = f.list().items.filter(entry => [NATIVE, other].includes(entry.id)).map(entry => ({ id: entry.id, expectedRevision: entry.revision, requestId: entry.id }));
+  const run = (selected = items) => plain(f.context.callApp({ method: 'recoverSourceBaseOrigins', payload: { items: selected }, accessKey: TEST_ACCESS_KEY }));
+  const pending = { linked: 0, known: 0, unresolved: 2, changed: 0 };
+  assert.deepEqual(run(), pending);
+  f.properties.set('PREPARED_DRAFT_' + draftId, JSON.stringify({ ...draft, outputId: other }));
+  f.properties.set(key, JSON.stringify({ ...legacy, fingerprint: 'wrong' }));
+  assert.deepEqual(run(), pending);
+  f.properties.set('PREPARED_DRAFT_' + draftId, '{'); f.properties.set(key, '{');
+  assert.deepEqual(run(), pending);
+  f.properties.set('PREPARED_DRAFT_' + draftId, JSON.stringify(draft)); f.properties.set(key, JSON.stringify(legacy));
+  assert.deepEqual(run(), { linked: 2, known: 0, unresolved: 0, changed: 0 });
+  const known = metadataReads.length;
+  assert.deepEqual(run(), { linked: 0, known: 2, unresolved: 0, changed: 0 });
+  assert.equal(metadataReads.length, known);
+  for (const row of f.list().items.filter(entry => [NATIVE, other].includes(entry.id))) assert.equal(row.origin.id, original);
+  assert.ok(f.calls.opens.every(id => id === STORAGE)); assert.ok(metadataReads.every(id => [NATIVE,other].includes(id)));
+  assert.throws(() => run([items[0],items[0]]), /INVALID_REQUEST/);
+  assert.throws(() => run(Array(9).fill(items[0])), /INVALID_REQUEST/);
+  assert.equal(run([{ ...items[0], expectedRevision: items[0].expectedRevision + 1 }]).changed, 1);
+  f.files.get(items[0].id).parent = OTHER;
+  assert.equal(run([items[0]]).changed, 1);
+  const manual = fixture({ originRows: [['selectionFileId', 'sourceId', 'sourceName', 'criteria'], [NATIVE, original, 'Ручная связь', 'Отрасль']] });
+  const item = manual.list().items.find(row => row.id === NATIVE);
+  assert.equal(manual.context.callApp({ method: 'recoverSourceBaseOrigins', payload: { items: [{ id: NATIVE, requestId: NATIVE, expectedRevision: item.revision }] }, accessKey: TEST_ACCESS_KEY }).known, 1);
+  assert.equal(manual.list().items.find(row => row.id === NATIVE).origin.criteria, 'Отрасль');
 });
 
 test('a stale child iterator cannot invent a currently moved segment association', () => {
