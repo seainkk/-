@@ -3,20 +3,33 @@ var SEGMENT_RECORD_IMPORT = Object.freeze({ version: 1, ttlMillis: 24 * 60 * 60 
 
 function previewSegmentRecords_(request) {
   return api_(function () {
-    var context = authorize_(), input = segmentInput_(request, ['segmentId', 'sourceIds', 'loads']), sources = segmentRecordsInputSources_(input);
-    var bindings = segmentRecordsReadySources_(context, sources);
-    var targets = segmentRecordsTargets_(context, id_(input.segmentId), true);
+    var context = authorize_(), input = segmentInput_(request, ['segmentId', 'sourceIds', 'loads', 'targetKind']), sources = segmentRecordsInputSources_(input);
+    var targetKind = input.targetKind;
+    if (targetKind !== undefined && targetKind !== 'companies' && targetKind !== 'lpr') fail_('INVALID_REQUEST', 'Выберите таблицу компаний или ЛПР.');
+    var bindings = segmentRecordsReadySources_(context, sources, targetKind);
+    var targets = segmentRecordsTargets_(context, id_(input.segmentId), true, true);
     if (bindings.some(function (binding) { return binding.id === targets.tables.companies || binding.id === targets.tables.lpr; })) fail_('SOURCE_IS_TARGET', 'Рабочую таблицу сегмента нельзя загрузить саму в себя как исходную базу.');
-    var collected = segmentRecordsCollect_(context, bindings), masters = segmentRecordsReadMasters_(targets);
-    var planned = segmentRecordsPlanner_({ records: collected.records, companies: masters.companies.records, people: masters.lpr.records });
+    var collected = segmentRecordsCollect_(context, bindings);
+    targets.directory = targetKind !== 'lpr' && (targets.directory || collected.records.some(function (record) { return !!record.directory; }));
+    ['companies', 'lpr'].forEach(function (kind) { segmentRecordsMaster_(targets, kind, true); });
+    segmentRecordsEnroll_(targets, targetKind);
+    var masters = segmentRecordsReadMasters_(targets);
+    var planned = segmentRecordsPlanner_({ records: collected.records, companies: masters.companies.records, people: masters.lpr.records, targetKind: targetKind, directory: targets.directory });
     var companyStages = segmentRecordsSplitCompanyMarkers_(planned.companies);
     var plan = {
       version: SEGMENT_RECORD_IMPORT.version, rootId: context.rootId, segmentId: targets.folder.getId(),
       segmentName: targets.folder.getName(), createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + SEGMENT_RECORD_IMPORT.ttlMillis).toISOString(),
       sources: collected.sources, tables: targets.tables, masters: { companies: masters.companies.descriptor, lpr: masters.lpr.descriptor },
       companies: companyStages.companies, companyMarkers: companyStages.markers, people: planned.people, markers: planned.markers,
-      counts: planned.counts, review: planned.review, sample: planned.sample, warnings: collected.warnings, mode: 'registry'
+      counts: planned.counts, review: planned.review, sample: planned.sample, warnings: collected.warnings, mode: 'registry', materializeContacts: true
     };
+    if (Object.keys(collected.history || {}).length) plan.workingHistory = segmentSelectionAccepted_(collected.history, masters, planned);
+    if (targets.directory) plan.directory = true;
+    if (targetKind) {
+      plan.targetKind = targetKind;
+      if (Object.keys(planned.linkedCompanies).length) plan.linkedCompanies = planned.linkedCompanies;
+      if (plan.workingHistory) delete plan.workingHistory[targetKind === 'companies' ? 'lpr' : 'companies'];
+    }
     var saved = segmentRecordsSavePlan_(context, plan);
     return segmentRecordsPreview_(targets, saved.token, plan);
   });
@@ -50,6 +63,7 @@ function syncSegmentPeople_(request) {
     if (matches.length !== 1) fail_('SEGMENT_TABLE_UNKNOWN', 'Таблица не является связанной базой компаний сегмента.');
     var targets = segmentRecordsTargets_(context, matches[0].segmentId, true), active = segmentRecordsActiveJob_(context, targets.folder.getId());
     if (active) return segmentRecordsRunJob_(active.id, active.requestId);
+    targets.directory = false; // Manual transfers use only normalized master fields.
     var masters = segmentRecordsReadMasters_(targets), descriptor = masters.companies.descriptor;
     var source = segmentRecordsReadSource_(context, { id: companyFileId, section: 'companies', sheetIds: [descriptor.sheetId], mode: 'segment', expectedRevision: null }, targets);
     var planned = segmentRecordsPlanner_({ records: source.records, companies: masters.companies.records, people: masters.lpr.records });
@@ -96,15 +110,17 @@ function segmentRecordsInputSources_(input) {
   return sources;
 }
 
-function segmentRecordsReadySources_(context, sources) {
+function segmentRecordsReadySources_(context, sources, targetKind) {
   var storage = sourceBasesStorage_(context), database = sourceBasesReadDatabase_(storage);
   return sources.map(function (entry) {
     var source = requireReadySourceBase_(context, storage, database, entry.id, entry.expectedRevision);
-    return { id: entry.id, expectedRevision: source.record.revision, section: source.contents.length === 1 ? source.contents[0] : 'companies', sheetIds: entry.sheetIds, sheetOptions: entry.sheetOptions || null, mode: 'registry' };
+    var binding = { id: entry.id, expectedRevision: source.record.revision, section: source.contents.length === 1 ? source.contents[0] : targetKind || 'companies', sheetIds: entry.sheetIds, sheetOptions: entry.sheetOptions || null, mode: 'registry', workingSelectionVersion: 1 };
+    if (targetKind === 'lpr' && source.contents.length > 1) binding.mixedSource = true;
+    return binding;
   });
 }
 
-function segmentRecordsTargets_(context, segmentId, create) {
+function segmentRecordsTargets_(context, segmentId, create, deferMasters, newDirectory) {
   var folder = segmentFolder_(context, segmentSourceFolder_(context), segmentId), storage = sourceBasesStorage_(context), tracking = segmentTrackingStorage_(context, storage, false), tables = {};
   tracking.tables.filter(function (table) { return table.segmentId === segmentId; }).forEach(function (table) { tables[table.kind] = table.fileId; });
   if ((!tables.companies || !tables.lpr) && create) {
@@ -113,9 +129,12 @@ function segmentRecordsTargets_(context, segmentId, create) {
     tracking.tables.filter(function (table) { return table.segmentId === segmentId; }).forEach(function (table) { tables[table.kind] = table.fileId; });
   }
   if (!tables.companies || !tables.lpr || tables.companies === tables.lpr) fail_('SEGMENT_TABLE_UNKNOWN', 'У сегмента должны быть две разные связанные таблицы: компании и ЛПР.');
-  ['companies', 'lpr'].forEach(function (kind) { segmentRecordsTargetGuard_(context, folder, tables[kind]); });
-  var targets = { context: context, folder: folder, tables: tables };
-  if (create) {
+  var targets = { context: context, folder: folder, tables: tables, directory: !!newDirectory };
+  ['companies', 'lpr'].forEach(function (kind) {
+    var scope = segmentRecordsTargetGuard_(context, folder, tables[kind]);
+    if (kind === 'companies' && (scope.metadata.appProperties || {}).registrySegmentDirectoryMode) targets.directory = true;
+  });
+  if (create && !deferMasters) {
     ['companies', 'lpr'].forEach(function (kind) { segmentRecordsMaster_(targets, kind, true); });
     segmentRecordsEnroll_(targets);
   }
@@ -138,7 +157,7 @@ function segmentRecordsMaster_(targets, kind, create) {
     sheet = segmentFindSheet_(book, Number(tags.registrySegmentMasterSheetId));
     if (!sheet) fail_('SEGMENT_MASTER_CHANGED', 'Единый рабочий лист удалён. Автоматическая загрузка остановлена.');
   }
-  var schema = segmentRecordsSchema_(kind), title = kind === 'companies' ? 'Компании' : 'ЛПР';
+  var schema = segmentRecordsSchema_(kind), directory = kind === 'companies' && targets.directory, title = kind === 'companies' ? 'Компании' : 'ЛПР';
   if (!sheet) {
     var candidates = book.getSheets().filter(function (candidate) {
       if (!candidate.getLastRow()) return false;
@@ -152,24 +171,58 @@ function segmentRecordsMaster_(targets, kind, create) {
     var leaves = book.getSheets();
     if (leaves.length === 1 && leaves[0].getLastRow() === 0) sheet = leaves[0].setName(title);
     else { var name = title, suffix = 1; while (book.getSheetByName(name)) name = title + ' — единая база ' + (++suffix); sheet = book.insertSheet(name); }
-    if (sheet.getMaxColumns() < schema.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), schema.length - sheet.getMaxColumns());
+    var initial = directory ? ['ID компании'].concat(SOURCE_DIRECTORY_FIELDS.map(function (field) { return field[1]; }), schema.slice(1).map(function (field) { return field[0] === 'telegrams' ? 'Telegram для контактов' : field[1]; })) : schema.map(function (field) { return field[1]; });
+    if (sheet.getMaxColumns() < initial.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), initial.length - sheet.getMaxColumns());
     segmentRecordsTargetGuard_(targets.context, targets.folder, scope.file.getId());
-    sheetWriteRawStrings_(scope.file.getId(), sheet.getSheetId(), 1, 1, [schema.map(function (field) { return field[1]; })]);
+    sheetWriteRawStrings_(scope.file.getId(), sheet.getSheetId(), 1, 1, [initial]);
     if (typeof sheet.setFrozenRows === 'function') sheet.setFrozenRows(1);
   }
   if (!sheet) fail_('SEGMENT_MASTER_MISSING', 'Единый рабочий лист ещё не создан.');
-  var descriptor = segmentRecordsMasterDescriptor_(sheet, schema);
-  if (create && tags.registrySegmentMasterSheetId === undefined) {
+  var directoryMode = tags.registrySegmentDirectoryMode || '';
+  if (directory && create) directoryMode = segmentRecordsEnsureDirectory_(targets, sheet, directoryMode);
+  var descriptor = segmentRecordsMasterDescriptor_(sheet, segmentRecordsSchema_(kind, directory), directoryMode);
+  if (create && (tags.registrySegmentMasterSheetId === undefined || directoryMode && !tags.registrySegmentDirectoryMode)) {
     var properties = segmentRecordsCopy_(tags); properties.registrySegmentMasterSheetId = String(sheet.getSheetId()); properties.registrySegmentMasterRoot = targets.context.rootId; properties.registrySegmentMasterSegment = targets.folder.getId(); properties.registrySegmentMasterKind = kind;
+    if (directoryMode) properties.registrySegmentDirectoryMode = directoryMode;
     segmentRecordsTargetGuard_(targets.context, targets.folder, scope.file.getId());
     Drive.Files.update({ appProperties: properties }, scope.file.getId(), null, { fields: 'id', supportsAllDrives: true });
   }
   return { book: book, sheet: sheet, descriptor: descriptor };
 }
 
-function segmentRecordsMasterDescriptor_(sheet, schema) {
+function segmentRecordsDirectoryFirst_(headers) {
+  return headers.indexOf(segmentRecordsName_('Telegram для контактов')) >= 0 && SOURCE_DIRECTORY_FIELDS.every(function (field) { return headers.indexOf(segmentRecordsName_(field[1])) >= 0; });
+}
+
+function segmentRecordsFieldLabel_(field, directoryFirst) {
+  if (directoryFirst && field[0] === 'telegrams') return 'Telegram для контактов';
+  if (!directoryFirst && field[0] === 'directoryTelegram') return 'Telegram из исходника';
+  return field[1];
+}
+
+function segmentRecordsEnsureDirectory_(targets, sheet, mode) {
+  return locked_(function () {
+    segmentRecordsTargetGuard_(targets.context, targets.folder, targets.tables.companies);
+    var width = sheet.getLastColumn(), headers = sheet.getRange(1, 1, 1, width).getDisplayValues()[0].map(segmentRecordsName_);
+    var first = mode ? mode === 'originalFirst' : segmentRecordsDirectoryFirst_(headers), missing = [];
+    SOURCE_DIRECTORY_FIELDS.forEach(function (field) {
+      var label = segmentRecordsFieldLabel_(field, first), key = segmentRecordsName_(label), index = headers.indexOf(key);
+      if (index !== headers.lastIndexOf(key)) fail_('SEGMENT_MASTER_SCHEMA', 'В рабочей таблице повторяется заголовок «' + label + '».');
+      if (index === -1) missing.push(label);
+    });
+    if (!missing.length) return first ? 'originalFirst' : 'appended';
+    if (mode) fail_('SEGMENT_MASTER_CHANGED', 'Изменилась структура справочника в таблице компаний. Проверьте заголовки.');
+    var required = width + missing.length;
+    if (sheet.getMaxColumns() < required) sheet.insertColumnsAfter(sheet.getMaxColumns(), required - sheet.getMaxColumns());
+    sheetWriteRawStrings_(targets.tables.companies, sheet.getSheetId(), 1, width + 1, [missing]);
+    return 'appended';
+  });
+}
+
+function segmentRecordsMasterDescriptor_(sheet, schema, directoryMode) {
   var width = sheet.getLastColumn(), headers = width ? sheet.getRange(1, 1, 1, width).getDisplayValues()[0] : [], normalized = headers.map(segmentRecordsName_), columns = [];
-  schema.forEach(function (field) { var wanted = segmentRecordsName_(field[1]), found = []; normalized.forEach(function (label, index) { if (label === wanted) found.push(index); }); if (found.length !== 1) fail_('SEGMENT_MASTER_SCHEMA', 'В единой таблице отсутствует или повторяется заголовок «' + field[1] + '».'); columns.push(found[0]); });
+  var directoryFirst = directoryMode ? directoryMode === 'originalFirst' : segmentRecordsDirectoryFirst_(normalized);
+  schema.forEach(function (field) { var wanted = segmentRecordsName_(segmentRecordsFieldLabel_(field, directoryFirst)), found = []; normalized.forEach(function (label, index) { if (label === wanted) found.push(index); }); if (found.length !== 1) fail_('SEGMENT_MASTER_SCHEMA', 'В единой таблице отсутствует или повторяется заголовок «' + field[1] + '».'); columns.push(found[0]); });
   return { sheetId: sheet.getSheetId(), name: sheet.getName(), columns: columns, width: width, headerSignature: digest_(JSON.stringify(columns.map(function (index) { return headers[index]; }))) };
 }
 
@@ -177,13 +230,13 @@ function segmentRecordsCell_(value, displayed) { return typeof value === 'number
 function segmentRecordsReadMasters_(targets) {
   var result = {};
   ['companies', 'lpr'].forEach(function (kind) {
-    var master = segmentRecordsMaster_(targets, kind, false), sheet = master.sheet, schema = segmentRecordsSchema_(kind), records = [], lastRow = sheet.getLastRow();
+    var master = segmentRecordsMaster_(targets, kind, false), sheet = master.sheet, schema = segmentRecordsSchema_(kind, targets.directory), records = [], lastRow = sheet.getLastRow();
     if (lastRow > 100001) fail_('SEGMENT_LIMIT', 'В единой таблице превышен лимит 100 000 строк.');
     if (lastRow > 1) {
       var range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()), values = range.getValues(), display = range.getDisplayValues(), formulas = range.getFormulas();
       values.forEach(function (row, index) {
         var record = { row: index + 2, _formulaFields: {} }, populated = false;
-        schema.forEach(function (field, position) { var column = master.descriptor.columns[position]; record[field[0]] = segmentRecordsCell_(row[column], display[index][column]); populated = populated || record[field[0]] !== ''; if (formulas[index][column]) record._formulaFields[field[0]] = true; });
+        schema.forEach(function (field, position) { var column = master.descriptor.columns[position]; record[field[0]] = field[0].indexOf('directory') === 0 ? display[index][column] : segmentRecordsCell_(row[column], display[index][column]); populated = populated || record[field[0]] !== ''; if (formulas[index][column]) record._formulaFields[field[0]] = true; });
         if (populated) records.push(record);
       });
     }
@@ -192,9 +245,9 @@ function segmentRecordsReadMasters_(targets) {
   return result;
 }
 
-function segmentRecordsEnroll_(targets) {
+function segmentRecordsEnroll_(targets, targetKind) {
   if (typeof enrollContactWorkbook_ !== 'function') return;
-  ['companies', 'lpr'].forEach(function (kind) {
+  (targetKind ? [targetKind] : ['companies', 'lpr']).forEach(function (kind) {
     var master = segmentRecordsMaster_(targets, kind, false);
     enrollContactWorkbook_(targets.context, targets.tables[kind], { sourceSheetIds: [master.sheet.getSheetId()], section: kind, role: kind === 'companies' ? 'segment-companies' : 'segment-lpr', segmentId: targets.folder.getId(), relatedFileId: targets.tables[kind === 'companies' ? 'lpr' : 'companies'], seedExisting: true });
   });
@@ -209,6 +262,10 @@ function segmentRecordsSourceMetadata_(context, binding, targets) {
 
 function segmentRecordsSourceSheets_(book, binding, tags) {
   var ids = binding.sheetIds, excluded = [tags.registryContactEmailSheetId, tags.registryContactPhoneSheetId].filter(function (value) { return value !== undefined; }).map(Number);
+  if (!excluded.length && !tags.registryPreparedVersion && (!binding.models || binding.workingSelectionVersion === 1)) {
+    var selection = workingSelectionTargets_(book.getSheets());
+    if (selection) excluded = [selection.targets.emailSheetId, selection.targets.phoneSheetId];
+  }
   if (!ids || !ids.length) {
     if (tags.registryPreparedVersion === '1' && tags.registryPreparedOriginalSheetId !== undefined) ids = [Number(tags.registryPreparedOriginalSheetId)];
     else {
@@ -234,11 +291,14 @@ function segmentRecordsModelFingerprint_(model, tags, sheetId, mode, markerColum
 
 function segmentRecordsReadSource_(context, binding, targets) {
   for (var attempt = 0; attempt < 2; attempt++) {
-    var before = segmentRecordsSourceMetadata_(context, binding, targets), tags = before.appProperties || {}, book = SpreadsheetApp.openById(binding.id), sheets = segmentRecordsSourceSheets_(book, binding, tags), records = [], warnings = [], models = [];
+    var before = segmentRecordsSourceMetadata_(context, binding, targets), tags = before.appProperties || {}, book = SpreadsheetApp.openById(binding.id), sheets = segmentRecordsSourceSheets_(book, binding, tags), records = [], warnings = [], models = [], mainModel = null;
     sheets.forEach(function (sheet) {
       var selection = (binding.sheetOptions || []).filter(function (entry) { return entry.sheetId === sheet.getSheetId(); })[0] || {}, options = { guard: function () { segmentRecordsSourceMetadata_(context, binding, targets); }, sectionExplicit: selection.section !== undefined || binding.mode === 'segment' };
+      if (binding.mode === 'segment') { options.segmentMasterChannels = true; options.segmentMasterRequired = true; }
+      if (binding.mixedSource && !options.sectionExplicit) options.mixedCompanyContext = preparedDataSection_(sheet.getName(), 'companies', {}) === 'companies';
       if (selection.hasHeader !== undefined) { options.hasHeader = selection.hasHeader; if (selection.hasHeader) options.headerIndex = 0; }
       var model = preparedDataRead_(sheet, binding.id, selection.section || binding.section, options);
+      if (sheets.length === 1) mainModel = model;
       if (!model.complete || model.canConfirm === false) fail_('SOURCE_PARSE_INCOMPLETE', 'Исходный лист прочитан не полностью. Частичный перенос не выполняется.');
       if (!Array.isArray(model.records)) fail_('SOURCE_PARSE_UNAVAILABLE', 'Для единого формата нужен обновлённый распознаватель компаний и ЛПР.');
       records = records.concat(model.records); warnings = warnings.concat(model.warnings || []);
@@ -246,23 +306,171 @@ function segmentRecordsReadSource_(context, binding, targets) {
       var markerColumn = segmentRecordsMarkerColumn_(sheet, context.rootId, descriptor, false);
       descriptor.fingerprint = segmentRecordsModelFingerprint_(model, tags, sheet.getSheetId(), binding.mode, markerColumn); models.push(descriptor);
     });
+    var selection = binding.workingSelectionVersion === 1 && workingSelectionTargets_(book.getSheets()), history = null;
+    if (!selection && binding.workingSelectionVersion === 1 &&
+        (tags.registryContactRoot === context.rootId || tags.registryPreparedRoot === context.rootId) &&
+        /^\d+$/.test(tags.registryContactEmailSheetId || '') && /^\d+$/.test(tags.registryContactPhoneSheetId || '')) {
+      selection = { managed: true, targets: { emailSheetId: Number(tags.registryContactEmailSheetId), phoneSheetId: Number(tags.registryContactPhoneSheetId) } };
+    }
+    if (selection) {
+      if (!selection.managed && (sheets.length !== 1 || sheets[0].getSheetId() !== selection.sourceSheetIds[0])) fail_('SOURCE_CHANGED', 'Изменился исходный лист готовой выборки.');
+      history = segmentSelectionContacts_(book, selection, records, function () { segmentRecordsSourceMetadata_(context, binding, targets); }, mainModel);
+    }
     var after = segmentRecordsSourceMetadata_(context, binding, targets);
     if (!before.version || !after.version || String(before.version) === String(after.version)) {
       var saved = segmentRecordsCopy_(binding); saved.sheetIds = models.map(function (model) { return model.sheetId; }); saved.models = models; saved.fingerprint = digest_(JSON.stringify(models.map(function (model) { return [model.sheetId, model.fingerprint]; }))); saved.version = String(after.version || ''); saved.canMark = !!(after.capabilities && after.capabilities.canEdit === true);
-      return { binding: saved, records: records, warnings: warnings };
+      if (history) saved.fingerprint = digest_(JSON.stringify([saved.fingerprint, history.fingerprint]));
+      return { binding: saved, records: records, warnings: warnings, history: history && history.roles };
     }
   }
   fail_('SOURCE_CHANGED', 'Исходная база меняется во время чтения. Повторите предпросмотр.');
 }
 
 function segmentRecordsCollect_(context, bindings) {
-  var result = { sources: [], records: [], warnings: [] };
-  bindings.forEach(function (binding) { var read = segmentRecordsReadSource_(context, binding, null); result.sources.push(read.binding); result.records = result.records.concat(read.records); result.warnings = result.warnings.concat(read.warnings); });
+  var result = { sources: [], records: [], warnings: [], history: {} };
+  bindings.forEach(function (binding) {
+    var read = segmentRecordsReadSource_(context, binding, null); result.sources.push(read.binding); result.records = result.records.concat(read.records); result.warnings = result.warnings.concat(read.warnings);
+    Object.keys(read.history || {}).forEach(function (kind) {
+      var merged = result.history[kind] || {};
+      segmentSelectionMerge_(merged, read.history[kind]); result.history[kind] = merged;
+    });
+  });
+  return result;
+}
+
+/** Every evidence row retains its company, original status and check. A shared
+ * address can have more than one owner, validation or mailing decision. */
+function segmentSelectionMerge_(merged, additions) {
+  Object.keys(additions).forEach(function (key) {
+    var rows = merged[key] || (merged[key] = []);
+    additions[key].forEach(function (row) {
+      if (!rows.some(function (old) { return JSON.stringify(old) === JSON.stringify(row); })) rows.push(row);
+    });
+  });
+}
+
+function segmentSelectionContacts_(book, selection, records, guard, mainModel) {
+  var byRow = new Map(), byKey = new Map(), roles = {}, signatures = [], cells = 0;
+  records.forEach(function (record) {
+    var match = { record: record, people: new Map(), general: new Set() };
+    [record.general].concat(record.people || []).forEach(function (target) {
+      ['emails', 'phones', 'telegrams'].forEach(function (field) {
+        (target[field] || []).forEach(function (value) {
+          var key = field === 'telegrams' ? contactSyncKey_('phone', '', value) : contactSyncKey_(field === 'emails' ? 'email' : 'phone', value);
+          if (!byKey.has(key)) byKey.set(key, new Set()); byKey.get(key).add(match);
+          if (target === record.general) match.general.add(key);
+          else { if (!match.people.has(key)) match.people.set(key, []); match.people.get(key).push(target); }
+        });
+        target[field] = [];
+      });
+    });
+    byRow.set(record.source.sheetId + ':' + record.source.row, match);
+  });
+  ['email', 'phone'].forEach(function (kind) {
+    guard();
+    var sheet = segmentFindSheet_(book, selection.targets[kind + 'SheetId']);
+    if (!sheet || selection.targets.emailSheetId === selection.targets.phoneSheetId) fail_('SOURCE_CHANGED', 'Рабочие отчёты выборки были перемещены или удалены.');
+    var width = sheet.getLastColumn(), height = sheet.getLastRow();
+    cells += width * height;
+    if (!width || width > PREPARED_DATA_LIMITS.maxColumns || height > PREPARED_DATA_LIMITS.maxRows || cells > PREPARED_DATA_LIMITS.maxCells) fail_('SEGMENT_LOAD_LIMIT', 'Размер отчётов выборки не позволяет прочитать их полностью.');
+    var headers = sheet.getRange(1, 1, 1, width).getDisplayValues()[0];
+    function col(names) { for (var i = 0; i < names.length; i++) { var position = headers.indexOf(names[i]); if (position >= 0) return position; } return -1; }
+    var contact = kind === 'email' ? col(['Email']) : col(['Мобильный телефон', 'Телефон']), telegram = col(['Telegram']), validation = col(['Валидация']);
+    if (contact < 0) fail_('SOURCE_CHANGED', 'В отчёте отсутствует колонка контакта.');
+    var size = Math.max(1, Math.floor(50000 / width));
+    for (var start = 2; start <= height; start += size) {
+      guard();
+      var count = Math.min(size, height - start + 1), data = sheet.getRange(start, 1, count, width).getDisplayValues();
+      var notes = validation >= 0 ? sheet.getRange(start, validation + 1, count, 1).getNotes() : null;
+      data.forEach(function (line, index) {
+        if (!line[contact] && line.every(function (value) { return !value; })) return;
+        var key = contactSyncKey_(kind, line[contact], line[telegram]), handle = key.indexOf('telegram:') === 0;
+        var field = kind === 'email' ? 'emails' : handle ? 'telegrams' : 'phones';
+        var value = kind === 'email' ? pvEmail_(line[contact]) : handle ? String(line[telegram] || '') : pvPhone_(line[contact]);
+        if (selection.managed && !byKey.has(key)) return;
+        if (!value || !key) fail_('SOURCE_CHANGED', 'В отчёте выборки есть строка без однозначного контакта. Проверьте строку ' + (start + index) + ' на листе «' + sheet.getName() + '».');
+        var refText = String(line[col(['Строки в Лист1', 'Исходные строки'])] || '').trim();
+        var fields = {};
+        ['Статус', 'Комментарий', 'Компания', 'ID компании', 'Связанные ID компаний', 'Валидация', 'Дата проверки', 'Результат проверки', 'Валидатор', 'Провайдер', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Статус из источника'].forEach(function (label) {
+          var column = label === 'Статус' ? col(['Статус рассылки', 'Статус']) : label === 'Компания' ? col(['Компания', 'Компания / ЛПР']) : col([label]);
+          if (column >= 0 && line[column] !== '') fields[label] = String(line[column]);
+        });
+        var bound = notes && pvBinding_(notes[index][0]);
+        if (bound && bound !== pvKey_(kind === 'email' ? 'email' : handle ? 'telegram_username' : 'telegram', value)) fail_('SOURCE_CHANGED', 'Контакт и сохранённая проверка относятся к разным значениям. Обновите отчёт выборки.');
+        var matches;
+        if (selection.managed) matches = Array.from(byKey.get(key));
+        else {
+          if (!/^\d+(?:\s*[,;]\s*\d+)*$/.test(refText)) fail_('SOURCE_CHANGED', 'Проверьте номера исходных строк в отчёте выборки.');
+          matches = refText.split(/\s*[,;]\s*/).map(function (row) { return byRow.get(selection.sourceSheetIds[0] + ':' + Number(row)); });
+        }
+        var applied = false, entries = new Map();
+        matches.forEach(function (match) {
+          if (!match) fail_('SOURCE_CHANGED', 'Ссылка в отчёте ведёт на отсутствующую строку компании.');
+          if (fields['ID компании'] && match.record.company.id && fields['ID компании'] !== match.record.company.id) return;
+          if (!selection.managed && !match.general.has(key) && !match.people.has(key)) {
+            var dataRow = mainModel && mainModel.sourceDisplayValues[match.record.source.row - 1];
+            var confirmed = dataRow && mainModel.source.headers.some(function (label, column) {
+              if (kind === 'email') return /email|почт/i.test(label) && preparedDataEmails_(dataRow[column]).indexOf(value) >= 0;
+              if (!/телефон|whatsapp|telegram/i.test(label)) return false;
+              var phones = preparedDataPhones_(dataRow[column]);
+              preparedDataTextUrls_(dataRow[column]).forEach(function (url) { phones = phones.concat(preparedDataUrlPhones_(url)); });
+              return phones.some(function (phone) { return contactSyncKey_('phone', phone.value) === key; });
+            });
+            if (!confirmed) fail_('SOURCE_CHANGED', 'Контакт из отчёта отсутствует в указанных исходных строках. Проверьте связь перед переносом.');
+          }
+          var ref = match.record.source, evidence = entries.get(ref.sheetId);
+          if (!evidence) { evidence = { source: book.getId(), sourceSheet: ref.sheetId, sheet: sheet.getSheetId(), row: start + index, refs: [], fields: fields }; entries.set(ref.sheetId, evidence); }
+          evidence.refs.push(ref.row);
+          var people = match.people.get(key) || [], targets = people.slice();
+          if (!people.length || match.general.has(key)) targets.push(match.record.general);
+          targets.forEach(function (target) {
+            if (target[field].indexOf(value) < 0) target[field].push(value);
+            var role = target === match.record.general ? 'companies' : 'lpr', history = roles[role] || (roles[role] = {}), rows = history[key] || (history[key] = []);
+            if (rows.indexOf(evidence) < 0) rows.push(evidence);
+          });
+          applied = true;
+        });
+        if (!applied && !selection.managed) fail_('SOURCE_CHANGED', 'ID компании в отчёте не соответствует указанным исходным строкам.');
+        entries.forEach(function (evidence) { evidence.refs = evidence.refs.join(', '); signatures.push([key, evidence]); });
+      });
+    }
+  });
+  return { roles: roles, fingerprint: digest_(JSON.stringify(signatures)) };
+}
+
+function segmentSelectionAccepted_(history, masters, planned) {
+  var result = {};
+  Object.keys(history).forEach(function (kind) {
+    var schema = segmentRecordsSchema_(kind).map(function (field) { return field[0]; });
+    var byRow = new Map(), accepted = new Map();
+    masters[kind].records.forEach(function (record) { byRow.set(record.row, segmentRecordsValues_(record, kind)); });
+    (kind === 'companies' ? planned.companies : planned.people).forEach(function (action) { byRow.set(action.row, action.after); });
+    byRow.forEach(function (row) {
+      var refs = String(row[schema.indexOf('sources')] || '').split('\n');
+      ['emails', 'phones', 'telegrams'].forEach(function (field) {
+        var channel = field === 'emails' ? 'email' : field === 'phones' ? 'phone' : 'telegram';
+        segmentRecordsList_(row[schema.indexOf(field)], channel).forEach(function (value) {
+          var key = channel === 'telegram' ? contactSyncKey_('phone', '', value) : contactSyncKey_(channel, value); if (!history[kind][key]) return;
+          if (!accepted.has(key)) accepted.set(key, new Set());
+          refs.forEach(function (ref) { accepted.get(key).add(ref.trim()); });
+        });
+      });
+    });
+    Object.keys(history[kind]).forEach(function (key) {
+      var refs = accepted.get(key); if (!refs) return;
+      var rows = history[kind][key].filter(function (entry) {
+        return entry.refs.split(/\s*[,;]\s*/).some(function (row) {
+          return refs.has(segmentRecordsSourceLabel_({ fileId: entry.source, sheetId: entry.sourceSheet, row: Number(row) }));
+        });
+      });
+      if (rows.length) { if (!result[kind]) result[kind] = {}; result[kind][key] = rows; }
+    });
+  });
   return result;
 }
 
 function segmentRecordsPreview_(targets, token, plan) {
-  return { state: 'preview', segmentId: plan.segmentId, segment: segmentActionResult_(targets.context, targets.folder, targets.tables), planToken: token, counts: plan.counts, sample: plan.sample, headers: { companies: SEGMENT_RECORDS_SCHEMA.company.map(function (field) { return field[1]; }), people: SEGMENT_RECORDS_SCHEMA.person.map(function (field) { return field[1]; }) }, review: plan.review, warnings: plan.warnings, canConfirm: true };
+  return { state: 'preview', segmentId: plan.segmentId, segment: segmentActionResult_(targets.context, targets.folder, targets.tables), targetKind: plan.targetKind || null, planToken: token, counts: plan.counts, sample: plan.sample, headers: { companies: segmentRecordsSchema_('companies', plan.directory).map(function (field) { return segmentRecordsFieldLabel_(field, false); }), people: SEGMENT_RECORDS_SCHEMA.person.map(function (field) { return field[1]; }) }, review: plan.review, warnings: plan.warnings, canConfirm: true };
 }
 
 function segmentRecordsSavePlan_(context, plan) {
@@ -331,7 +539,7 @@ function segmentRecordsAllocateJob_(context, plan, token, requestId) {
       if (position < 0) fail_('BUSY', 'Слишком много незавершённых загрузок сегментов.');
       current.properties.deleteProperty(SEGMENT_RECORD_IMPORT.jobPrefix + index.splice(position, 1)[0]);
     }
-    var job = { id: id, rootId: current.rootId, segmentId: plan.segmentId, planToken: token, requestId: requestId, state: 'processing', phase: 'companies', cursor: 0, pending: null, sourceVersions: {}, expiresAt: plan.expiresAt, warnings: [] };
+    var job = { id: id, rootId: current.rootId, segmentId: plan.segmentId, planToken: token, requestId: requestId, state: 'processing', phase: plan.targetKind === 'lpr' ? 'people' : 'companies', cursor: 0, pending: null, sourceVersions: {}, expiresAt: plan.expiresAt, warnings: [] };
     segmentRecordsSaveJob_(current, job); index.push(id); current.properties.setProperty(SEGMENT_RECORD_IMPORT.indexKey, JSON.stringify(index)); current.properties.setProperty('SEGMENT_RECORD_ACTIVE_' + plan.segmentId, id); return job;
   });
 }
@@ -345,14 +553,23 @@ function segmentRecordsRunJob_(jobId, requestId) {
   });
   try {
     var context = claim.context, job = claim.job, plan = segmentRecordsLoadPreview_(context, job.planToken, job.segmentId), targets = segmentRecordsTargets_(context, job.segmentId, false);
+    targets.directory = plan.directory === true;
     if (job.state === 'complete') return segmentRecordsJobResult_(context, targets, job, plan);
     if (job.state !== 'processing' || Date.parse(job.expiresAt) <= Date.now()) fail_('SEGMENT_JOB_EXPIRED', 'Загрузка остановлена. Получите новый предпросмотр.');
     if (targets.tables.companies !== plan.tables.companies || targets.tables.lpr !== plan.tables.lpr) fail_('SEGMENT_MASTER_CHANGED', 'Рабочие таблицы сегмента были перепривязаны.');
     segmentRecordsCheckSources_(context, plan, job, targets);
+    if (plan.workingHistory && !job.historyInstalled) {
+      var waiting = Object.keys(plan.workingHistory).some(function (kind) {
+        segmentRecordsTargetGuard_(context, targets.folder, targets.tables[kind]);
+        return contactSyncInstallWorkingHistory_(targets.tables[kind], kind, plan.segmentId, plan.workingHistory[kind], plan.materializeContacts) === false;
+      });
+      if (waiting) return segmentRecordsJobResult_(context, targets, job, plan);
+      job.historyInstalled = true; segmentRecordsSaveJob_(context, job);
+    }
     segmentRecordsAdvance_(context, targets, plan, job);
     return segmentRecordsJobResult_(context, targets, job, plan);
   } catch (error) {
-    if (error && ['SOURCE_CHANGED', 'SOURCE_SHEET_CHANGED', 'SEGMENT_MASTER_CHANGED', 'SEGMENT_TARGET_CONFLICT', 'SOURCE_NOT_READY', 'CONFLICT'].indexOf(error.registryCode) !== -1) {
+    if (error && (['SOURCE_CHANGED', 'SOURCE_SHEET_CHANGED', 'SEGMENT_MASTER_CHANGED', 'SEGMENT_TARGET_CONFLICT', 'SOURCE_NOT_READY', 'CONFLICT'].indexOf(error.registryCode) !== -1 || (plan && plan.materializeContacts && error.registryCode === 'CONTACT_SOURCE_CHANGED'))) {
       try { claim.job.state = 'needs_review'; claim.job.errorCode = 'SEGMENT_PREVIEW_CHANGED'; segmentRecordsSaveJob_(claim.context, claim.job); if (claim.context.properties.getProperty('SEGMENT_RECORD_ACTIVE_' + claim.job.segmentId) === claim.job.id) claim.context.properties.deleteProperty('SEGMENT_RECORD_ACTIVE_' + claim.job.segmentId); } catch (cleanupError) { /* Existing rows stay authoritative if journaling is unavailable. */ }
       fail_('SEGMENT_PREVIEW_CHANGED', 'Данные изменились после предпросмотра. Уже подтверждённые строки сохранены. Обновите предпросмотр перед продолжением.');
     }
@@ -376,6 +593,15 @@ function segmentRecordsAdvance_(context, targets, plan, job) {
   if (job.phase === 'companies' || job.phase === 'people' || job.phase === 'companyMarkers') {
     var kind = job.phase === 'people' ? 'lpr' : 'companies', actions = job.phase === 'companies' ? plan.companies : job.phase === 'people' ? plan.people : plan.companyMarkers || [], master = segmentRecordsMaster_(targets, kind, false), expected = plan.masters[kind];
     if (master.sheet.getSheetId() !== expected.sheetId || master.descriptor.headerSignature !== expected.headerSignature || JSON.stringify(master.descriptor.columns) !== JSON.stringify(expected.columns)) fail_('SEGMENT_MASTER_CHANGED', 'Столбцы единой таблицы изменены. Перенос остановлен.');
+    if (plan.linkedCompanies && kind === 'lpr') {
+      var companyMaster = segmentRecordsMaster_(targets, 'companies', false);
+      var ids = Object.keys(plan.linkedCompanies), column = companyMaster.descriptor.columns[0] + 1;
+      var count = companyMaster.sheet.getLastRow() - 1;
+      var currentIds = count ? companyMaster.sheet.getRange(2, column, count, 1).getDisplayValues() : [];
+      var seen = new Set(), repeated = new Set();
+      currentIds.forEach(function (row) { if (seen.has(row[0])) repeated.add(row[0]); else seen.add(row[0]); });
+      if (ids.some(function (id) { return !seen.has(id) || repeated.has(id); })) fail_('SEGMENT_MASTER_CHANGED', 'Изменились компании, указанные в предпросмотре ЛПР. Обновите предпросмотр.');
+    }
     if (job.pending) {
       var pending = actions.slice(job.pending.start, job.pending.start + job.pending.count);
       var check = segmentRecordsApplyActions_(context, targets, kind, master, pending, true);
@@ -383,7 +609,7 @@ function segmentRecordsAdvance_(context, targets, plan, job) {
       else { job.cursor = job.pending.start + job.pending.count; job.pending = null; segmentRecordsSaveJob_(context, job); }
       if (job.pending) return;
     }
-    if (job.cursor >= actions.length) { job.phase = job.phase === 'companies' ? 'people' : job.phase === 'people' ? 'companyMarkers' : 'markers'; job.cursor = 0; segmentRecordsSaveJob_(context, job); return; }
+    if (job.cursor >= actions.length) { job.phase = plan.targetKind ? (plan.materializeContacts ? 'contacts' : 'relations') : job.phase === 'companies' ? 'people' : job.phase === 'people' ? 'companyMarkers' : 'markers'; job.cursor = 0; segmentRecordsSaveJob_(context, job); return; }
     var first = actions[job.cursor], limit = first.added ? SEGMENT_RECORD_IMPORT.newRowsPerStep : SEGMENT_RECORD_IMPORT.changedRowsPerStep;
     var batch = actions.slice(job.cursor, job.cursor + limit);
     while (batch.length > 1 && ((batch[batch.length - 1].row - batch[0].row + 1) * master.descriptor.width > 50000 || (first.added && batch.some(function (action, index) { return !action.added || action.row !== first.row + index; })))) batch.pop();
@@ -392,14 +618,25 @@ function segmentRecordsAdvance_(context, targets, plan, job) {
   }
   if (job.phase === 'markers') {
     segmentRecordsMarkSources_(context, targets, plan, job);
-    job.phase = 'relations'; segmentRecordsSaveJob_(context, job); return;
+    job.phase = plan.materializeContacts ? 'contacts' : 'relations'; job.cursor = 0; segmentRecordsSaveJob_(context, job); return;
+  }
+  if (job.phase === 'contacts') {
+    var kinds = plan.targetKind ? [plan.targetKind] : ['companies', 'lpr'], contactKind = kinds[job.cursor];
+    segmentRecordsTargetGuard_(context, targets.folder, targets.tables[contactKind]);
+    var contactRequest = digest_(JSON.stringify(['segment-contacts', job.id, contactKind]));
+    if (contactSyncSegmentImportStep_(targets.tables[contactKind], contactKind, plan.segmentId, contactRequest)) {
+      job.cursor++;
+      if (job.cursor === kinds.length) { job.phase = 'relations'; job.cursor = 0; }
+      segmentRecordsSaveJob_(context, job);
+    }
+    return;
   }
   if (job.phase === 'relations') {
     locked_(function () {
       var fresh = authorize_(), storage = sourceBasesStorage_(fresh), database = sourceBasesReadDatabase_(storage);
       if (plan.mode === 'registry') plan.sources.forEach(function (binding) { requireReadySourceBase_(fresh, storage, database, binding.id, binding.expectedRevision); segmentRememberRelation_(fresh, storage, database, binding.id, plan.segmentId); });
     });
-    segmentRecordsEnroll_(targets); job.state = 'complete'; job.phase = 'complete'; segmentRecordsSaveJob_(context, job);
+    segmentRecordsEnroll_(targets, plan.targetKind); job.state = 'complete'; job.phase = 'complete'; segmentRecordsSaveJob_(context, job);
     if (context.properties.getProperty('SEGMENT_RECORD_ACTIVE_' + job.segmentId) === job.id) context.properties.deleteProperty('SEGMENT_RECORD_ACTIVE_' + job.segmentId);
     return;
   }
@@ -414,7 +651,7 @@ function segmentRecordsApplyActions_(context, targets, kind, master, actions, ve
   var range = sheet.getRange(start, 1, end - start + 1, width), raw = range.getValues(), display = range.getDisplayValues(), formulas = range.getFormulas(), values = [], masks = [], allAfter = true, anyBefore = false;
   for (var i = 0; i < raw.length; i++) { values.push(Array(width).fill('')); masks.push(Array(width).fill(false)); }
   actions.forEach(function (action) {
-    var index = action.row - start, current = columns.map(function (column) { return segmentRecordsCell_(raw[index][column], display[index][column]); });
+    var index = action.row - start, current = columns.map(function (column, position) { return kind === 'companies' && position >= SEGMENT_RECORDS_SCHEMA.company.length ? display[index][column] : segmentRecordsCell_(raw[index][column], display[index][column]); });
     var changed = action.after.map(function (value, position) { return !action.before.length || value !== action.before[position]; });
     if (current[0] && current[0] !== action.id) fail_('SEGMENT_TARGET_CONFLICT', 'Строки рабочей таблицы изменены или отсортированы после предпросмотра. Правки пользователя сохранены.');
     var isAfter = changed.every(function (flag, position) { return !flag || (!formulas[index][columns[position]] && current[position] === action.after[position]); });
@@ -495,8 +732,8 @@ function segmentRecordsWithMarkerLease_(context, fileId, callback) {
 
 function segmentRecordsJobResult_(context, targets, job, plan) {
   var total = plan.companies.length + plan.people.length + (plan.companyMarkers || []).length, completed = job.phase === 'companies' ? job.cursor : job.phase === 'people' ? plan.companies.length + job.cursor : job.phase === 'companyMarkers' ? plan.companies.length + plan.people.length + job.cursor : total;
-  var labels = { companies: 'Дополняем единую базу компаний…', people: 'Дополняем связанную базу ЛПР…', companyMarkers: 'Подтверждаем перенос в таблице компаний…', markers: 'Отмечаем перенос в исходных строках…', relations: 'Сохраняем связи и подключаем вкладки контактов…', complete: 'Базы сегмента обновлены.' };
-  return { state: job.state, segmentId: job.segmentId, segment: segmentActionResult_(context, targets.folder, targets.tables), jobId: job.id, requestId: job.requestId, counts: plan.counts, review: plan.review, warnings: (plan.warnings || []).concat(job.warnings || []), progress: { phase: job.phase, completed: completed, total: total, label: labels[job.phase] || 'Продолжаем загрузку…' } };
+  var labels = { companies: 'Дополняем единую базу компаний…', people: 'Дополняем связанную базу ЛПР…', companyMarkers: 'Подтверждаем перенос в таблице компаний…', markers: 'Отмечаем перенос в исходных строках…', contacts: 'Заполняем вкладки Email и телефонов в таблице ' + (plan.targetKind === 'lpr' || job.cursor === 1 ? 'ЛПР…' : 'компаний…'), relations: 'Сохраняем связи с исходными базами…', complete: 'Базы сегмента обновлены.' };
+  return { state: job.state, segmentId: job.segmentId, segment: segmentActionResult_(context, targets.folder, targets.tables), targetKind: plan.targetKind || null, jobId: job.id, requestId: job.requestId, counts: plan.counts, review: plan.review, warnings: (plan.warnings || []).concat(job.warnings || []), progress: { phase: job.phase, completed: completed, total: total, label: labels[job.phase] || 'Продолжаем загрузку…' } };
 }
 
 /** A transfer marker becomes true only after all corresponding person writes were verified. */
@@ -524,7 +761,7 @@ function segmentNormalizedMutation_(kind, request) {
   }
   var result = segmentMutation_(kind, empty);
   if (segmentCategoryOnly_(kind, input, loads)) return result;
-  var context = authorize_(), targets = segmentRecordsTargets_(context, result.segment.id, true);
+  var context = authorize_(), targets = segmentRecordsTargets_(context, result.segment.id, true, false, kind === 'create');
   result.segment = segmentActionResult_(context, targets.folder, targets.tables); result.loadedSheets = [];
   if (loads.length) {
     var preview = previewSegmentRecords_({ segmentId: result.segment.id, loads: loads });

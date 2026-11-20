@@ -12,6 +12,13 @@ const digest = value => crypto.createHash('sha256').update(value).digest('base64
 const HEADERS = ['Email', 'Компания / ЛПР', 'Исходные строки', 'Проверить принадлежность', 'Валидация', 'Статус рассылки'];
 const valid = (email, extra = {}) => ({ email, owner: 'Кухни', status: 'Валиден', ...extra });
 
+test('a filtered row excludes the address even when another validated copy is eligible', () => {
+  const blocked = ['Рассылка', 'в рассылке', 'Фильтр', 'Не совпал', 'Невалид', 'Нецелевой', 'Срок > 30', 'В плане запис книжка', 'Дубль'];
+  const f = fixture({ companies: [valid('skip@example.test'), valid('skip@example.test', {manual:'фильтр'}), valid('ok@example.test')].concat(blocked.map((manual, index) => valid('blocked' + index + '@example.test', { manual }))) });
+  const preview = f.preview(f.bind());
+  assert.equal(preview.counts.eligible, 1); assert.equal(preview.counts.excluded, blocked.length + 1);
+});
+
 function fixture(options = {}) {
   let uuid = 0, locked = false;
   const calls = { api: [], saves: [], writes: [], guards: [], workspaces: [], folders: [] }, storage = new Map();

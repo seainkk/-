@@ -55,6 +55,7 @@ function fixture(options = {}) {
             return values().map(line => line.map(v => v === null || v === undefined ? '' : String(v)));
           },
           getFormulas: () => Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => formulas[(row + y) + ':' + (column + x)] || '')),
+          getNotes: () => Array.from({ length: height }, () => Array(width).fill('')),
           getDataValidations: () => Array.from({ length: height }, (_, y) => [validations[(row + y) + ':' + column] || null]),
           setDataValidations: rules => rules.forEach((line, y) => { validations[(row + y) + ':' + column] = line[0]; }),
           getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null))
@@ -71,11 +72,12 @@ function fixture(options = {}) {
     book.tabs.push(makeSheet(2, 'Телефоны', options.phoneRows || [PHONE.slice(0, 5)]));
   } else {
     if (options.emailRows) book.tabs.push(makeSheet(options.emailSheetId ?? 1, 'Email', options.emailRows));
-    if (options.phoneRows) book.tabs.push(makeSheet(2, 'Телефоны', options.phoneRows));
+    if (options.phoneRows) book.tabs.push(makeSheet(2, options.phoneName || 'Телефоны', options.phoneRows));
   }
   const scope = { rootId: ROOT, properties: store };
   const context = vm.createContext({ console: { warn() {} }, Date, JSON, Object, Array, Number, String, Boolean, RegExp, Math, Error, Set, Map });
   vm.runInContext(readFileSync(new URL('../src/Config.gs', import.meta.url), 'utf8'), context, { filename: 'Config.gs' });
+  vm.runInContext(readFileSync(new URL('../src/ContactPreview.gs', import.meta.url), 'utf8'), context, { filename: 'ContactPreview.gs' });
   context.authorize_ = () => { if (options.revoked) context.fail_('LINK_ACCESS_REQUIRED', 'revoked'); return scope; };
   context.object_ = value => { if (!value || typeof value !== 'object' || Array.isArray(value)) context.fail_('INVALID_REQUEST', 'request'); return value; };
   context.id_ = id => { if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{10,200}$/.test(id)) context.fail_('INVALID_ID', 'id'); return id; };
@@ -195,6 +197,68 @@ function fixture(options = {}) {
   return { context, options, resources, book, properties, calls, invoke, start, next, finish, state, saveState, target, editSource, scope };
 }
 
+test('curated records carry every owner decision into the segment and a replay preserves manual changes', () => {
+  const id = suffix => 'C-' + suffix.repeat(24), email = 'shared@example.test', phone = '+79990000001';
+  const src = fixture({ realExtractor: true, phoneName: 'Мобильные телефоны',
+    rows: [['ID компании', 'Названия', 'Email-адреса', 'Мобильные телефоны'], [id('a'), 'Альфа', email + '; omitted@example.test', phone], [id('b'), 'Бета', email, '']],
+    emailRows: [['Статус', 'Комментарий', 'Почт на компанию', 'Строки в Лист1', 'Компания', 'Email', 'Валидация', 'Провайдер', 'Сайты', 'ID компании'],
+      ['Рассылка', 'Первое решение', '1', '2, 3', 'Альфа', email, 'valid', 'provider A', '', id('a')],
+      ['Нецелевой', 'Второе решение', '1', '2, 3', 'Бета', email, 'invalid', 'provider B', '', id('b')]],
+    phoneRows: [['Статус', 'Строки в Лист1', 'Компания', 'Мобильный телефон', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Сайты'], ['Срок > 30', '2', 'Альфа', phone, '799', 'example_user', '34', '']]
+  });
+  const load = (ctx, name) => vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), ctx, { filename: name });
+  for (const name of ['SegmentImports.gs', 'SegmentRecords.gs', 'Promouser.gs']) load(src.context, name);
+  src.context.segmentFindSheet_ = (book, gid) => book.tabs.find(sheet => sheet.getSheetId() === gid);
+  const selection = src.context.workingSelectionTargets_(src.book.tabs), read = () => {
+    const model = src.context.preparedDataReadWorkbook_(src.book, FILE, 'companies', { sourceSheetIds: [0], guard() {} });
+    const history = src.context.segmentSelectionContacts_(src.book, selection, model.records, () => {});
+    return { history, records: model.records };
+  };
+  const { history, records } = read();
+  assert.deepEqual(plain(records.map(record => record.general.emails)), [[email], [email]]);
+  assert.deepEqual(plain(records.map(record => record.general.phones)), [[phone], []]);
+  const planned = src.context.segmentRecordsPlanner_({ records });
+  const accepted = src.context.segmentSelectionAccepted_(history.roles, { companies: { records: [] } }, planned);
+  assert.equal(accepted.companies['email:' + email].length, 2);
+  src.book.tabs[1].data[2][1] = 'Изменено';
+  assert.notEqual(read().history.fingerprint, history.fingerprint);
+  assert.deepEqual(Object.keys(src.context.segmentSelectionAccepted_(history.roles, { companies: { records: [] } }, { companies: [] })), []);
+
+  const dst = fixture({ realExtractor: true, rows: [['ID компании', 'Компания', 'Email', 'Телефон'], [id('a'), 'Альфа', email, phone], [id('b'), 'Бета', email, '']] });
+  load(dst.context, 'SegmentImports.gs');
+  const segment = 'segment_demo_1234567890';
+  dst.context.enrollContactWorkbook_(dst.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies', segmentId: segment });
+  dst.context.contactSyncInstallWorkingHistory_(FILE, 'companies', segment, accepted.companies);
+  const added = dst.finish();
+  assert.equal(added.counts.addedEmail, 1); assert.equal(added.counts.addedPhone, 1);
+  const matrix = dst.target('email').data, col = label => matrix[0].indexOf(label);
+  assert.equal(matrix[0][0], 'Статус рассылки'); assert.equal(matrix[1][0], 'фильтр');
+  assert.equal(matrix[1][col('Валидация')], 'Проверить историю контакта');
+  assert.match(matrix[1][col('История контакта')], /Первое решение/); assert.match(matrix[1][col('История контакта')], /Второе решение/);
+  const mobile = dst.target('phone').data;
+  assert.equal(mobile[1][0], 'фильтр'); assert.equal(mobile[1][mobile[0].indexOf('Active_days_ago')], '34');
+  matrix[1][col('Комментарий')] = 'Ручное решение'; matrix[1][0] = 'в рассылке';
+  dst.context.contactSyncInstallWorkingHistory_(FILE, 'companies', segment, accepted.companies);
+  assert.equal(matrix[1][0], 'в рассылке'); assert.equal(matrix[1][col('Комментарий')], 'Ручное решение');
+  assert.equal(dst.finish('working_history_repeat_1234').counts.addedEmail, 0);
+});
+
+test('company and LPR masters keep original directory values out of the three verified working channels', () => {
+  for (const role of ['segment-companies', 'segment-lpr']) {
+    const headers = ['ID компании', 'Компания', 'Источники', 'Статус', 'Email', 'Телефон', 'Telegram', 'Telegram для контактов', 'Email-адреса', 'Городские телефоны', 'WhatsApp'];
+    if (role === 'segment-lpr') headers.push('ФИО ЛПР');
+    const row = ['C-' + 'a'.repeat(24), 'Альфа', '', '', 'allowed@example.test', '+79990000001', '@raw_dir', '@working_user', 'hidden@example.test', '+74950000002', 'https://wa.me/79990000003'];
+    if (role === 'segment-lpr') row.push('Иван Иванов');
+    const f = fixture({ realExtractor: true, rows: [headers, row] });
+    f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role, section: role === 'segment-lpr' ? 'lpr' : 'companies' });
+    const result = f.finish();
+    assert.equal(result.counts.addedEmail, 1); assert.equal(result.counts.addedPhone, 1); assert.equal(result.counts.addedTelegram, 1);
+    const actual = JSON.stringify([f.target('email').data, f.target('phone').data]);
+    assert.match(actual, /allowed@example\.test/); assert.match(actual, /@working_user/);
+    assert.doesNotMatch(actual, /hidden@example|raw_dir|74950000002|79990000003/);
+  }
+});
+
 function slowWholeSourceFixture(chunkMillis) {
   const clock = { now: 0, reading: false }, modelReads = [];
   const f = fixture({ realExtractor: true,
@@ -224,6 +288,32 @@ test('an unmanaged workbook keeps an original tab named Email and creates separa
   assert.equal(f.book.tabs.length, 3);
   assert.equal(f.target('phone').data[1][0], '+79990000001');
   assert.equal(f.target('phone').data[2][5], '@person_1');
+});
+
+test('a completed selection keeps its row filtering and existing phone and email results on enrollment and append', () => {
+  const email = ['Статус', 'Комментарий', 'Почт на компанию', 'Строки в Лист1', 'Компания', 'Email', 'Валидация', 'Провайдер', 'Сайты', 'ID компании'];
+  const phone = ['Статус', 'Строки в Лист1', 'Компания', 'Мобильный телефон', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Сайты', 'ID компании'];
+  const companyId = 'C-' + 'g'.repeat(24);
+  const rows = [['Названия', 'Email-адреса', 'Мобильные телефоны', 'Городские телефоны', 'ID компании'],
+    ['One', 'one@example.test', '+79990000001', '+74951234567', companyId],
+    ['Omitted', 'excluded@example.test', '+79990000002', '', '']];
+  const oldEmail = ['в рассылке', 'Manual', '1', '2', 'One', 'one@example.test', 'valid', 'Example', '', companyId];
+  const oldPhone = ['фильтр', '2', 'One', '+79990000001', '0', '', '0', '', companyId];
+  const f = fixture({ realExtractor: true, rows, phoneName: 'Мобильные телефоны', emailRows: [email, oldEmail], phoneRows: [phone, oldPhone] });
+  assert.deepEqual(f.invoke('getContactWorkspace_', {id: FILE}).sourceSheetIds, [0]);
+  f.finish();
+  assert.equal(f.book.tabs.length, 3);
+  assert.deepEqual(f.target('email').data.slice(1), [oldEmail]);
+  assert.deepEqual(f.target('phone').data.slice(1), [oldPhone]);
+  f.editSource(rows.slice(1).concat([['One', 'two@example.test', '+79990000003', '+74959876543', companyId]]));
+  f.finish('sync_selection_second');
+  for (const [kind, key, value] of [['email', 'Email', 'two@example.test'], ['phone', 'Мобильный телефон', '+79990000003']]) {
+    const [headers, , added] = f.target(kind).data;
+    assert.equal(f.target(kind).data.length, 3);
+    assert.equal(added[headers.indexOf(key)], value);
+    assert.equal(added[headers.indexOf('ID компании')], companyId);
+    assert.equal(added[headers.indexOf('Статус')], 'новый');
+  }
 });
 
 test('source changes append only new contacts while existing validation, campaign statuses and dates survive', () => {
@@ -300,6 +390,42 @@ test('manually removed contacts remain excluded even after new source rows arriv
   assert.equal(r.counts.excluded, 1); assert.equal(r.counts.addedEmail, 1);
   assert.deepEqual(f.target('email').data.slice(1).map(r => r[0]), ['two@example.test']);
   f.finish('after_another_scan_12345'); assert.equal(f.target('email').getLastRow(), 2);
+});
+
+test('segment contact materialization resumes committed batches without validation or duplicate contacts', () => {
+  const segment = 'segment_direct_1234567890', request = 'segment_contact_request_1234567890';
+  const rows = [['Email', 'Телефон', 'Telegram'], ...Array.from({ length: 1001 }, (_, index) => ['company' + index + '@example.test', '+79' + String(index).padStart(9, '0'), ''])];
+  const f = fixture({ rows, provider: true });
+  f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies', segmentId: segment });
+  f.context.emailValidationProvider_ = () => 'coldy'; f.context.queueColdyWorkbookValidation_ = () => assert.fail('unexpected provider scan');
+  const step = () => f.context.contactSyncSegmentImportStep_(FILE, 'companies', segment, request);
+  assert.throws(() => f.context.contactSyncSegmentImportStep_(FILE, 'lpr', segment, request), /SEGMENT_MASTER_CHANGED/);
+  f.options.writeFault = 'after';
+  assert.throws(step, /write reply lost/); assert.ok(f.state().job.pending);
+  let done = false, calls = 0;
+  while (!done && calls++ < 15) done = step();
+  assert.equal(done, true); assert.equal(f.calls.provider.length, 0);
+  for (const [kind, label] of [['email', 'Email'], ['phone', 'Телефон']]) {
+    const [headers, ...contacts] = f.target(kind).data;
+    assert.equal(contacts.length, 1001); assert.equal(new Set(contacts.map(row => row[headers.indexOf(label)])).size, 1001);
+    assert.ok(contacts.every(row => row[headers.indexOf('Статус рассылки')] === 'новый'));
+  }
+  const writes = f.calls.raw.length; assert.equal(step(), true); assert.equal(f.calls.raw.length, writes);
+});
+
+test('a previous contact job finishes before the segment takes its own snapshot', () => {
+  const f = fixture({ provider: true }), segment = 'segment_direct_1234567890';
+  f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies', segmentId: segment });
+  assert.equal(f.start('previous_contact_request').state, 'processing');
+  const step = () => f.context.contactSyncSegmentImportStep_(FILE, 'companies', segment, 'next_segment_request');
+  assert.equal(step(), false);
+  let done = false;
+  for (let index = 0; !done && index < 20; index++) done = step();
+  assert.equal(done, true);
+  assert.deepEqual(f.state().receipts.map(receipt => [receipt.requestId, receipt.status]), [
+    ['previous_contact_request', 'complete'], ['next_segment_request', 'complete']
+  ]);
+  assert.equal(f.calls.provider.length, 1);
 });
 
 test('lost RAW acknowledgement recovers the original range without a duplicate append', () => {
@@ -453,7 +579,8 @@ test('only general company contacts enter a segment-company contact list', () =>
   f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], section: 'companies', role: 'segment-companies', relatedFileId: 'lpr_related_workbook_1234567890' });
   f.options.adjustModel = model => { model.records = [{ general: { emails: ['company@example.test'], phones: ['+79990000001'], telegrams: [] }, people: [{ name: 'Person', emails: ['person@example.test'] }] }]; };
   const r = f.finish(); assert.equal(r.counts.addedEmail, 1); assert.equal(r.counts.addedPhone, 1);
-  assert.equal(f.target('email').data[1][0], 'company@example.test'); assert.equal(f.target('phone').data[1][0], '+79990000001');
+  assert.equal(f.target('email').data[1][f.target('email').data[0].indexOf('Email')], 'company@example.test');
+  assert.equal(f.target('phone').data[1][f.target('phone').data[0].indexOf('Телефон')], '+79990000001');
 });
 
 test('automation enumeration does not create a folder and uses metadata-only opaque cursors', () => {
@@ -616,7 +743,7 @@ test('real company-role filtering keeps personal email only for the linked LPR w
   const f = fixture({ realExtractor: true, rows });
   f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies' });
   const r = f.finish(); assert.equal(r.counts.addedEmail, 1);
-  assert.deepEqual(f.target('email').data.slice(1).map(row => row[0]), ['general@example.test']);
+  assert.deepEqual(f.target('email').data.slice(1).map(row => row[f.target('email').data[0].indexOf('Email')]), ['general@example.test']);
   assert.deepEqual(f.book.tabs[0].data, rows);
 });
 
@@ -626,8 +753,8 @@ test('a renamed fixed company master keeps generic contacts general despite an L
   f.context.enrollContactWorkbook_(f.scope, FILE, { sourceSheetIds: [0], role: 'segment-companies', section: 'companies' });
   const r = f.finish();
   assert.equal(r.counts.addedEmail, 1); assert.equal(r.counts.addedPhone, 1);
-  assert.deepEqual(f.target('email').data.slice(1).map(row => row[0]), ['general@example.test']);
-  assert.deepEqual(f.target('phone').data.slice(1).map(row => row[0]), ['+79990000001']);
+  assert.deepEqual(f.target('email').data.slice(1).map(row => row[f.target('email').data[0].indexOf('Email')]), ['general@example.test']);
+  assert.deepEqual(f.target('phone').data.slice(1).map(row => row[f.target('phone').data[0].indexOf('Телефон')]), ['+79990000001']);
   assert.deepEqual(f.book.tabs[0].data, rows);
 });
 

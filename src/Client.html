@@ -784,7 +784,7 @@
     if(syncTimer!==null)clearTimeout(syncTimer);syncTimer=setTimeout(()=>{syncTimer=null;flushPendingView();},300);
   }
   async function submitSegment(){
-    if(!segmentEditor||requesting()||segmentEditor.loadingLists)return;const editor=segmentEditor,name=$('br-segment-name').value.trim(),wasNew=!editor.id;if(!name||name.length>100){segmentError={message:'Введите название сегмента от 1 до 100 символов.'};renderSegmentError();return;}
+    if(!segmentEditor||requesting()||segmentEditor.loadingLists)return;const editor=segmentEditor,name=$('br-segment-name').value.trim(),wasNew=!editor.id;if((wasNew||!editor.direct)&&(!name||name.length>100)){segmentError={message:'Введите название сегмента от 1 до 100 символов.'};renderSegmentError();return;}
     const ids=Array.from(editor.selected.keys());if(ids.some(id=>!readySource(sourceItem(id))||sourceDrafts.has(id))){segmentError={message:'Добавить можно только базы со статусом «Готова» без несохранённых правок.'};renderSegmentError();return;}
     segmentSaving=true;segmentError=null;renderSegmentError();updateControls();
     try{

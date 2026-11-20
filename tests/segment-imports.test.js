@@ -37,6 +37,8 @@ function fixture(options = {}) {
   resource(SOURCE, 'Исходная база'); resource(COMPANIES, 'Кухни: компании', SEGMENT); resource(PEOPLE, 'Кухни: ЛПР', SEGMENT);
   const sourceBook = book(SOURCE), companyBook = book(COMPANIES), peopleBook = book(PEOPLE);
   const sourceSheet = sheet(sourceBook, 'Исходная база', options.rows || [['Компания', 'ИНН', 'Email', 'ФИО ЛПР', 'Должность ЛПР', 'Телефон ЛПР'], ['ООО Пример', '7707083893', 'sales@example.test', 'Иван Иванов', 'Директор', '']], 11);
+  const registered = new Set([SOURCE]);
+  function addSource(id, rows) { registered.add(id); resource(id, 'Ещё одна база'); return sheet(book(id), 'Исходная база', rows); }
   if (options.legacy) sheet(companyBook, 'Не трогать', [['Доход', 'Особые заметки'], ['100', 'Оставить в исходном виде']], 12); else sheet(companyBook, 'Лист1', [], 12);
   sheet(peopleBook, 'Лист1', [], 13);
   const status = { value: options.status || 'ready', revision: 1 }, tracking = { tables: [{ segmentId: SEGMENT, kind: 'companies', fileId: COMPANIES }, { segmentId: SEGMENT, kind: 'lpr', fileId: PEOPLE }] };
@@ -54,7 +56,7 @@ function fixture(options = {}) {
   context.segmentRevision_ = value => { if (value !== undefined && (!Number.isInteger(value) || value < 1)) context.fail_('INVALID_REQUEST', 'revision'); };
   context.sourceBasesStorage_ = () => ({ public: { id: STORE }, book: {} });
   context.sourceBasesReadDatabase_ = () => ({ records: { [SOURCE]: { status: status.value, revision: status.revision, present: true } }, relations: [] });
-  context.requireReadySourceBase_ = (_scope, _storage, _db, id, revision) => { if (id !== SOURCE) context.fail_('OUTSIDE_REGISTRY', 'Outside source folder'); if (status.value !== 'ready') context.fail_('SOURCE_NOT_READY', 'Not ready'); if (revision !== undefined && revision !== status.revision) context.fail_('CONFLICT', 'Stale revision'); return { record: { revision: status.revision }, contents: ['companies', 'lpr'] }; };
+  context.requireReadySourceBase_ = (_scope, _storage, _db, id, revision) => { if (!registered.has(id)) context.fail_('OUTSIDE_REGISTRY', 'Outside source folder'); if (status.value !== 'ready') context.fail_('SOURCE_NOT_READY', 'Not ready'); if (revision !== undefined && revision !== status.revision) context.fail_('CONFLICT', 'Stale revision'); return { record: { revision: status.revision }, contents: ['companies', 'lpr'] }; };
   context.segmentSourceFolder_ = () => resources.get(ROOT);
   context.segmentFolder_ = (_scope, _parent, id) => { if (id !== SEGMENT) context.fail_('OUTSIDE_SEGMENTS', 'Wrong folder'); return resources.get(SEGMENT); };
   context.segmentTrackingStorage_ = () => tracking;
@@ -65,6 +67,7 @@ function fixture(options = {}) {
   context.spreadsheetUrl_ = id => 'https://docs.google.com/spreadsheets/d/' + id + '/edit';
   context.preparedEnsureFolder_ = () => resources.get(PRIVATE); context.preparedFolder_ = (_scope, id) => { if (id !== PRIVATE) context.fail_('OUTSIDE_REGISTRY', 'Wrong private folder'); return resources.get(PRIVATE); };
   context.enrollContactWorkbook_ = (_scope, fileId, settings) => { calls.enrollments.push({ fileId, settings: plain(settings) }); };
+  context.contactSyncSegmentImportStep_ = () => true;
   vm.runInContext(readFileSync(new URL('../src/Config.gs', import.meta.url), 'utf8'), context, { filename: 'Config.gs' });
   context.REGISTRY_CONFIG = { defaultSourceBasesStorageId: STORE };
   context.Utilities = { getUuid: () => 'lease-' + ++sequence, newBlob: value => ({ value }) };
@@ -93,13 +96,155 @@ function fixture(options = {}) {
   const next = state => context.continueSegmentRecords_({ segmentId: SEGMENT, jobId: state.jobId, requestId: state.requestId });
   const finish = initial => { let result = initial; for (let i = 0; i < 100 && result.state === 'processing'; i++) result = next(result); assert.equal(result.state, 'complete'); return result; };
   const master = kind => context.segmentRecordsMaster_({ context: config, folder: resources.get(SEGMENT), tables: { companies: COMPANIES, lpr: PEOPLE } }, kind, false).sheet;
-  return { context, calls, resources, books, properties, sourceBook, sourceSheet, companyBook, peopleBook, status, preview, start, next, finish, master, config };
+  return { context, calls, resources, books, properties, sourceBook, sourceSheet, companyBook, peopleBook, status, preview, start, next, finish, master, config, addSource };
 }
+
+test('a confirmed strict target survives a lost reply and never edits the other table or source rows', () => {
+  const rows = [['Компания', 'ИНН', 'Email', 'ФИО ЛПР', 'Должность ЛПР', 'Телефон ЛПР'], ['Компания Москва', '7707083893', 'sales@example.test', 'Иван Иванов', 'Директор', '+79990000001']];
+  const f = fixture({ rows, writeFailure: { id: PEOPLE } });
+  const show = targetKind => f.context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [SOURCE], targetKind });
+  assert.throws(() => show('mixed'), /INVALID_REQUEST/);
+  assert.equal(f.calls.created.length, 0);
+  const companies = show('companies');
+  assert.equal(companies.counts.companiesAdded, 1); assert.equal(companies.counts.peopleAdded, 0);
+  assert.deepEqual(plain(companies.sample.people), []);
+  assert.equal(f.finish(f.start(companies)).targetKind, 'companies');
+  assert.deepEqual(f.master('companies').state.rows[1].filter(value => value === 'Иван Иванов' || value === '+79990000001'), []);
+  assert.equal(f.master('lpr').state.rows.length, 1);
+  assert.ok(f.calls.enrollments.every(entry => entry.fileId === COMPANIES));
+  const before = plain(f.master('companies').state.rows), people = show('lpr');
+  assert.equal(people.counts.companiesAdded + people.counts.companiesUpdated, 0); assert.equal(people.counts.peopleAdded, 1);
+  const sample = people.sample.people[0];
+  assert.ok(sample.includes(before[1][0])); assert.ok(sample.includes('+79990000001')); assert.ok(!sample.includes('sales@example.test'));
+  assert.throws(() => f.start(people, 'strict-people-request-01'), /SHEETS_RAW_UNCERTAIN/);
+  const done = f.finish(f.start(people, 'strict-people-request-01'));
+  assert.equal(done.targetKind, 'lpr'); assert.equal(f.master('lpr').state.rows.length, 2);
+  assert.deepEqual(f.master('companies').state.rows, before);
+  assert.deepEqual(f.sourceSheet.state.rows, rows); assert.equal(f.calls.segmentMutations.length, 0);
+  assert.equal(f.calls.relations.length, 1);
+  assert.throws(() => f.context.importSegmentRecords_({ segmentId: SEGMENT, planToken: people.planToken, requestId: 'strict-people-request-01', targetKind: 'companies' }), /INVALID_REQUEST/);
+});
+
+test('a segment import waits for contact receipts and reuses the same per-book request after a lost reply', () => {
+  for (const targetKind of ['companies', 'lpr', undefined]) {
+    const f = fixture(), steps = [], pending = new Map(), receipts = new Set();
+    const kinds = targetKind ? [targetKind] : ['companies', 'lpr'];
+    const shown = f.context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [SOURCE], ...(targetKind && { targetKind }) });
+    f.context.contactSyncSegmentImportStep_ = (fileId, kind, segmentId, requestId) => {
+      assert.equal(segmentId, SEGMENT); assert.equal(fileId, kind === 'companies' ? COMPANIES : PEOPLE);
+      assert.equal(f.calls.relations.length, 0);
+      steps.push([kind, requestId]);
+      if (receipts.has(requestId)) return true;
+      if (!pending.has(requestId)) { pending.set(requestId, kind); return false; }
+      receipts.add(requestId);
+      throw Error('Contact receipt acknowledgement lost');
+    };
+    let state = f.start(shown);
+    for (let tries = 0; state.state === 'processing' && tries < 45; tries++) {
+      try { state = f.next(state); } catch (error) { assert.match(error.message, /Contact receipt acknowledgement lost/); state = f.start(shown); }
+    }
+    assert.equal(state.state, 'complete'); assert.equal(f.calls.relations.length, 1);
+    assert.deepEqual([...new Set(steps.map(entry => entry[0]))], kinds);
+    assert.deepEqual([...pending.values()], kinds); assert.equal(receipts.size, kinds.length);
+    const count = steps.length;
+    assert.equal(f.start(shown).state, 'complete'); assert.equal(steps.length, count);
+  }
+});
+
+test('an outstanding plan from the previous release finishes using its original phases', () => {
+  const f = fixture(), shown = f.preview(), plan = f.context.segmentRecordsLoadPreview_(f.config, shown.planToken, SEGMENT);
+  delete plan.materializeContacts;
+  const legacy = f.context.segmentRecordsSavePlan_(f.config, plan);
+  f.context.contactSyncSegmentImportStep_ = () => assert.fail('a legacy plan cannot acquire a new contact request');
+  assert.equal(f.finish(f.start({ planToken: legacy.token })).state, 'complete');
+});
+
+test('strict people keep a named person without contacts or a company link and recheck referenced IDs', () => {
+  const f = fixture(), show = targetKind => f.context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [SOURCE], targetKind });
+  let people = show('lpr'); assert.equal(people.counts.peopleWithoutContacts, 1);
+  assert.equal(people.sample.people[0][1], ''); assert.equal(people.sample.people[0][2], 'ООО Пример');
+  f.finish(f.start(people)); assert.equal(f.master('companies').state.rows.length, 1);
+  f.finish(f.start(show('companies'), 'strict-company-request-02'));
+  people = show('lpr');
+  assert.ok(people.sample.people[0][1].startsWith('C-'));
+  f.master('companies').state.rows.splice(1);
+  assert.throws(() => f.start(people, 'strict-people-request-03'), /SEGMENT_PREVIEW_CHANGED/);
+  assert.equal(f.master('lpr').state.rows[1][1], '');
+});
+
+test('strict destination interprets an unlabelled Name and Email while explicit source sheet meaning wins', () => {
+  const f = fixture({ rows: [['Name','Email'],['Example Name','hello@example.test']] });
+  const show = targetKind => f.context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [SOURCE], targetKind });
+  let shown = show('lpr'); assert.equal(shown.counts.peopleAdded, 1); assert.ok(shown.sample.people[0].includes('hello@example.test'));
+  shown = show('companies'); assert.equal(shown.counts.companiesAdded, 1); assert.ok(shown.sample.companies[0].includes('hello@example.test'));
+  f.sourceSheet.setName('Компании'); shown = show('lpr'); assert.equal(shown.counts.peopleAdded, 0);
+  f.sourceSheet.setName('ЛПР'); shown = show('companies'); assert.equal(shown.counts.companiesAdded, 0);
+});
 
 test('preview rejects unready files before creating masters or plans', () => {
   const f = fixture({ status: 'collection' });
   assert.throws(f.preview, /SOURCE_NOT_READY/);
   assert.equal(f.calls.raw.length, 0); assert.equal(f.calls.created.length, 0);
+});
+
+const directoryHeaders = ['Названия', 'Категории', 'Регионы, области', 'Населенные пункты', 'Полные адреса', 'Мобильные телефоны', 'Городские телефоны', 'Email-адреса', 'Telegram', 'WhatsApp', 'Вконтакте', 'Одноклассники', 'Сайты', 'Max', 'Филиалов', 'Индексы', 'Дата парсинга'];
+const directoryRow = ['Тестовый каталог', 'Мебель', 'Ленинградская область', 'Санкт-Петербург', 'Тестовая ул., 2', '+7 (999) 100-02-01', '+7 (812) 100-02-01', 'shop@example.test', 'https://t.me/test_catalog', 'https://wa.me/79991000201', 'https://vk.com/test_catalog', 'https://ok.ru/test_catalog', 'https://shop.example.test', 'https://max.ru/test_catalog', '2', '019001', '01.11.2026'];
+
+test('all 17 directory values survive two independent uploads into one company and retain their original headings', () => {
+  const f = fixture({ rows: [directoryHeaders, directoryRow] });
+  f.context.segmentNormalizedMutation_('create', { name: 'Тестовый каталог', requestId: 'directory-create-001', loads: [] });
+  const typed = id => f.context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [id], targetKind: 'companies' });
+  const first = typed(SOURCE); assert.equal(first.sample.companies[0].length, first.headers.companies.length);
+  f.finish(f.start(first, 'directory-batch-001'));
+  const sheet = f.master('companies'), headers = sheet.state.rows[0], firstRow = sheet.state.rows[1];
+  assert.deepEqual(headers.slice(0,18), ['ID компании', ...directoryHeaders]);
+  assert.deepEqual(firstRow.slice(1,18), directoryRow);
+  const secondId = 'independent_selection_file_0002', nextRow = [...directoryRow];
+  nextRow[1] = 'Кухни'; nextRow[4] = 'Тестовая ул., 5'; nextRow[7] = 'office@example.test';
+  f.addSource(secondId, [directoryHeaders,nextRow]);
+  const shown = typed(secondId); assert.equal(shown.counts.companiesAdded, 0); assert.equal(shown.counts.companiesUpdated, 1);
+  f.finish(f.start(shown, 'directory-batch-002'));
+  assert.equal(sheet.state.rows.length, 2);
+  assert.equal(sheet.state.rows[1][0], firstRow[0]);
+  assert.equal(sheet.state.rows[1][headers.indexOf('Категории')], 'Мебель\nКухни');
+  assert.equal(sheet.state.rows[1][headers.indexOf('Полные адреса')], 'Тестовая ул., 2\nТестовая ул., 5');
+  assert.equal(sheet.state.rows[1][headers.indexOf('Индексы')], '019001');
+  assert.equal(typed(secondId).counts.companiesUpdated, 0);
+  assert.equal(f.master('lpr').state.rows.length, 1);
+});
+
+test('an established working sheet appends directory columns beyond user data and preserves earlier previews and formulas', () => {
+  const f = fixture(), old = f.preview(), sheet = f.master('companies');
+  const oldHeaders = [...sheet.state.rows[0], 'Заметка пользователя', 'Категории'];
+  sheet.state.rows[0] = [...oldHeaders];
+  const secondId = 'independent_directory_0003';
+  const incoming = [...directoryRow]; incoming[0] = 'ООО Пример';
+  f.addSource(secondId, [[...directoryHeaders,'ИНН'], [...incoming,'7707083893']]);
+  const typed = () => f.context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [secondId], targetKind: 'companies' });
+  typed(); f.finish(f.start(old));
+  assert.deepEqual(sheet.state.rows[0].slice(0,oldHeaders.length),oldHeaders);
+  const note = oldHeaders.indexOf('Заметка пользователя'), category = oldHeaders.indexOf('Категории');
+  sheet.state.rows[1][note] = 'Сохранить'; sheet.state.rows[1][category] = 'Ручное значение'; sheet.state.formulas['2:' + (category+1)] = '=A5';
+  const shown = typed(); assert.equal(shown.counts.companiesAdded, 0); f.finish(f.start(shown, 'directory-batch-003'));
+  assert.equal(sheet.state.rows.length, 2); assert.equal(sheet.state.rows[1][note], 'Сохранить');
+  assert.equal(sheet.state.rows[1][category], 'Ручное значение'); assert.equal(sheet.state.formulas['2:' + (category+1)], '=A5');
+  assert.equal(sheet.state.rows[1][sheet.state.rows[0].indexOf('Telegram из исходника')], directoryRow[8]);
+  const saved = plain(sheet.state.rows); typed(); assert.deepEqual(sheet.state.rows,saved);
+});
+
+test('partial and reordered directory headings preserve company evidence and keep personal contacts out of company fields', () => {
+  const rows = [
+    ['Юридический адрес','ФИО ЛПР','Регион','Почта компании','Компания','Email ЛПР','Категория','Город','Фактический адрес','Моя колонка','Сайт'],
+    ['  ул. Юридическая, 1','Анна Тестова','Московская область','info@example.test','Тестовый завод','anna@example.test','Производство','Москва','ул. Фактическая, 2','Текст сотрудника','https://company.example.test']
+  ];
+  const f = fixture({ rows }), preview = f.context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [SOURCE], targetKind: 'companies' });
+  f.finish(f.start(preview));
+  const [headers, row] = f.master('companies').state.rows;
+  assert.equal(row[headers.indexOf('Полные адреса')], '  ул. Юридическая, 1\nул. Фактическая, 2');
+  assert.equal(row[headers.indexOf('Категории')], 'Производство'); assert.equal(row[headers.indexOf('Регионы, области')], 'Московская область');
+  assert.equal(row[headers.indexOf('Названия')], 'Тестовый завод'); assert.equal(row[headers.indexOf('Населенные пункты')], 'Москва');
+  assert.equal(row[headers.indexOf('Email-адреса')], 'info@example.test'); assert.equal(row[headers.indexOf('Сайты')], 'https://company.example.test');
+  assert.ok(!row.includes('anna@example.test')); assert.equal(f.sourceSheet.state.rows[1][9], 'Текст сотрудника');
 });
 
 test('creates lean masters, transfers a person without contacts and marks original only after verified LPR write', () => {

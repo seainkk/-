@@ -143,7 +143,7 @@ function fixture(options = {}) {
     if (options.rawBatchFault === 'after') { options.rawBatchFault = null; throw Error('Lost batch after apply'); }
     return { spreadsheetId: fileId, replies: request.requests.map(() => ({})) };
   } } };
-  const storage = { public: { id: SERVICE }, basesSheet: {} };
+  const storage = { public: { id: SERVICE }, basesSheet: {}, book: book(SERVICE) };
   const database = () => ({ records: Object.fromEntries(records), relations: [], lastRow: Math.max(1, ...[...records.values()].map(row => row.row || 1)) });
   context.sourceBasesReadDatabase_ = database;
   context.sourceBasesStorage_ = () => storage;
@@ -176,6 +176,9 @@ test('staging and preview publish no output; confirmation creates exactly three 
   assert.deepEqual(shown.sheets.map(tab => tab.name), ['Исходная база', 'Email', 'Телефоны']);
   assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
   const result = f.finish(draft, shown), output = f.books.get(result.file.id);
+  assert.equal(result.item.origin.id, ORIGINAL);
+  assert.equal(result.item.origin.name, 'Источник');
+  assert.equal(result.item.origin.url, 'https://docs.google.com/spreadsheets/d/' + ORIGINAL + '/edit');
   assert.deepEqual(output.getSheets().map(tab => tab.getName()), ['Исходная база', 'Email', 'Телефоны']);
   assert.equal(output.getSheetByName('Исходная база').state.data[1][2], 'person@example.test');
   assert.equal(output.getSheetByName('Email').state.data[1][0], 'person@example.test');
@@ -189,6 +192,9 @@ test('file uploads stage a native copy and classify the confirmed output into ex
   const draft = f.invoke('stagePreparedUpload_', { name: 'ЛПР', section: 'lpr', status: 'ready', requestId: 'upload_stage_1234567890', file: f.blob() });
   assert.equal(f.records.size, 0);
   const result = f.finish(draft);
+  assert.match(result.item.origin.id, /^upload:[A-Za-z0-9_-]{43}$/);
+  assert.equal(result.item.origin.url, null);
+  assert.equal(result.item.origin.name, 'base.csv');
   assert.deepEqual(f.records.get(result.file.id).contents, ['lpr']); assert.equal(f.records.get(result.file.id).status, 'ready');
   assert.equal(f.calls.actions.filter(action => action.role === 'output').length, 1);
 });
@@ -372,7 +378,8 @@ test('V2 real reader aggregates all original leaves and keeps exactly two derive
   assert.equal(shown.sourceSheetCount, 2);
   const result = f.finish(draft, shown), output = f.books.get(result.file.id);
   assert.equal(output.getSheetByName('Email').getLastRow(), 3); assert.equal(output.getSheetByName('Телефоны и Telegram').getLastRow(), 3);
-  assert.deepEqual(output.getSheetByName('Телефоны и Telegram').state.data.slice(1).map(row => row[0]).sort(), ['+79991112233', '+79994445566']);
+  const phones = output.getSheetByName('Телефоны и Telegram').state.data;
+  assert.deepEqual(phones.slice(1).map(row => row[phones[0].indexOf('Телефон')]).sort(), ['+79991112233', '+79994445566']);
   for (const name of ['Email', 'Телефоны и Telegram']) {
     const data = output.getSheetByName(name).state.data, status = data[0].indexOf('Статус рассылки');
     assert.notEqual(status, -1); assert.deepEqual(data.slice(1).map(line => line[status]), ['новый', 'новый']);
@@ -392,6 +399,38 @@ test('confirmed unfinished jobs survive a reload and list only current nonexpire
   assert.equal(result.state, 'complete'); assert.deepEqual(f.invoke('listPreparedJobs_', {}).items, []);
   assert.throws(() => f.invoke('listPreparedJobs_', {}, 'Z'.repeat(43)), /LINK_ACCESS_REQUIRED/);
   assert.throws(() => f.invoke('listPreparedJobs_', { rootId: ROOT }), /INVALID_REQUEST/);
+});
+
+test('a direct upload pins its ready section and destination through confirmation, reload and replay', () => {
+  const f = fixture(), draft = f.stage({status: 'ready'}), shown = f.preview(draft);
+  const destination = {name: 'Партнёры', category: 'partners', kind: 'companies'};
+  assert.throws(() => f.confirm(draft, shown, {destination: {...destination, kind: 'lpr'}}), /INVALID_REQUEST/);
+  assert.throws(() => f.confirm(draft, shown, {destination: {...destination, category: 'unknown'}}), /INVALID_REQUEST/);
+  assert.equal(f.confirm(draft, shown, {destination}).state, 'processing');
+  assert.deepEqual(f.invoke('listPreparedJobs_', {}).items[0].destination, destination);
+  assert.throws(() => f.confirm(draft, shown, {destination: {...destination, name: 'Другой'}}), /REQUEST_REUSED/);
+  assert.throws(() => f.confirm(draft, shown), /REQUEST_REUSED/);
+  let result;
+  do { result = f.next(draft); } while (result.state === 'processing');
+  assert.deepEqual(result.destination, destination);
+  assert.deepEqual(f.confirm(draft, shown, {destination}).destination, destination);
+  const unready = fixture(), other = unready.stage();
+  assert.throws(() => unready.confirm(other, unready.preview(other), {destination}), /INVALID_REQUEST/);
+});
+
+test('an existing direct destination must belong to the segments folder before any output is created', () => {
+  const f = fixture(), draft = f.stage({status: 'ready'}), shown = f.preview(draft);
+  const destination = {segmentId: 'existing_segment_0001', name: 'Сегмент', kind: 'companies'};
+  const parent = {getId: () => 'segments_folder'};
+  f.context.segmentSourceFolder_ = () => parent;
+  f.context.segmentFolder_ = (context, folder, id) => {
+    assert.equal(folder, parent);
+    assert.equal(id, destination.segmentId);
+    f.context.fail_('OUTSIDE_SEGMENTS', 'Папка вне сегментов.');
+  };
+  assert.throws(() => f.confirm(draft, shown, {destination}), /OUTSIDE_SEGMENTS/);
+  assert.equal(f.drafts()[0].confirmRequestId, undefined);
+  assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
 });
 
 test('job listing omits expired, cancelled, unconfirmed and different-root receipts', () => {
@@ -656,9 +695,94 @@ test('V2 never adopts originals whose names collide with managed contact tabs', 
   const draft = f.stage(), shown = f.preview(draft), result = f.finish(draft, shown), output = f.books.get(result.file.id);
   assert.deepEqual(output.tabs.map(tab => tab.getName()), ['Email', 'Телефоны и Telegram', 'Email (2)', 'Телефоны и Telegram (2)']);
   assert.equal(output.getSheetByName('Email').state.data[0][0], 'Company_ID');
-  assert.equal(output.getSheetByName('Email (2)').state.data[0][0], 'Email');
-  assert.equal(output.getSheetByName('Телефоны и Telegram (2)').state.data[1][0], '+79991112233');
+  assert.equal(output.getSheetByName('Email (2)').state.data[0][0], 'Статус рассылки');
+  const phones = output.getSheetByName('Телефоны и Telegram (2)').state.data;
+  assert.equal(phones[1][phones[0].indexOf('Телефон')], '+79991112233');
   assert.deepEqual(shown.sheets.map(tab => tab.name), ['Email', 'Email (2)', 'Телефоны и Telegram (2)']);
+});
+
+test('two conversions of the same upload with different staging files and GIDs keep the same company ID in the segment', () => {
+  const f = workbookReader(fixture());
+  vm.runInContext(readFileSync(new URL('../src/SegmentRecords.gs', import.meta.url), 'utf8'), f.context);
+  const generated = [];
+  f.books.get(ORIGINAL).tabs[0].state.data.splice(0, Infinity, ['Компания', 'Email'], ['Без ИНН', 'a@example.test']);
+  for (const gid of [84, 93]) {
+    const draft = f.invoke('stagePreparedUpload_', { name: 'Копия ' + gid, section: 'companies', status: 'ready', requestId: 'upload_history_request_' + gid, file: f.blob() });
+    const state = f.drafts().find(entry => entry.draftId === draft.draftId);
+    f.books.get(state.stageFileId).tabs[0].getSheetId = () => gid;
+    const shown = selectedPreview(f, draft, [gid]), result = f.finish(draft, shown);
+    const master = f.books.get(result.file.id).tabs[0].state.data;
+    generated.push({ id: master[1][master[0].indexOf('ID компании')], file: result.file.id, stage: state.stageFileId });
+  }
+  assert.notEqual(generated[0].stage, generated[1].stage); assert.notEqual(generated[0].file, generated[1].file);
+  assert.match(generated[0].id, /^C-[\w-]{24}$/); assert.equal(generated[0].id, generated[1].id);
+  const segment = f.context.segmentRecordsPlanner_({ records: generated.map(entry => ({
+    source: { fileId: entry.file, sheetId: 0, row: 2 }, company: { id: entry.id, name: 'Без ИНН' }, general: { emails: ['a@example.test'] }
+  })) });
+  assert.equal(segment.companies.length, 1); assert.equal(segment.companies[0].id, generated[0].id);
+});
+
+test('separate uploads and repeated Google links preserve a contact-free LPR from source row through segment upsert', () => {
+  for (const kind of ['upload', 'link']) {
+    const f = workbookReader(fixture()), original = f.books.get(ORIGINAL); original.tabs.pop();
+    original.tabs[0].setName('Кадры');
+    original.tabs[0].state.data.splice(0, Infinity, ['ФИО ЛПР', 'Должность'], ['Иван Иванов', 'Директор']);
+    vm.runInContext(readFileSync(new URL('../src/SegmentRecords.gs', import.meta.url), 'utf8'), f.context);
+    const people = [], stable = [];
+    for (const run of [1, 2]) {
+      const opts = { name: 'Проверка ' + run, section: 'lpr', status: 'ready', requestId: 'person_source_request_' + run };
+      const draft = kind === 'link' ? f.stage(opts) : f.invoke('stagePreparedUpload_', { ...opts, file: f.blob() });
+      const state = f.drafts().find(entry => entry.draftId === draft.draftId), tab = f.books.get(state.stageFileId).tabs[0];
+      if (kind === 'upload') { tab.setName('Кадры'); tab.getSheetId = () => run * 10; }
+      const gid = tab.getSheetId(), shown = selectedPreview(f, draft, [gid]), result = f.finish(draft, shown);
+      const master = f.books.get(result.file.id).tabs[0], idCol = master.state.data[0].indexOf('ID ЛПР');
+      assert.ok(idCol >= 0); stable.push(master.state.data[1][idCol]);
+      const model = f.context.preparedDataRead_(master, result.file.id, 'lpr', { guard() {}, sectionExplicit: true });
+      assert.equal(model.records[0].people[0].id, stable.at(-1)); people.push(...model.records);
+    }
+    assert.match(stable[0], /^P-[\w-]{24}$/); assert.equal(stable[0], stable[1]);
+    const result = f.context.segmentRecordsPlanner_({ records: people, targetKind: 'lpr' });
+    assert.equal(result.people.length, 1); assert.equal(result.people[0].id, stable[0]);
+    assert.equal(result.counts.peopleWithoutContacts, 1);
+  }
+});
+
+test('reimport of a curated book preserves both separate owner rows, validation and exclusions without promoting extra raw contacts', () => {
+  const f = workbookReader(fixture());
+  const enrollment = f.context.enrollContactWorkbook_;
+  for (const name of ['Promouser.gs', 'ContactSync.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), f.context);
+  f.context.enrollContactWorkbook_ = enrollment;
+  const book = f.books.get(ORIGINAL), primary = book.tabs[0], mobile = book.tabs[1].setName('Мобильные телефоны'), email = book.insertSheet('Email');
+  primary.state.data.splice(0, Infinity, ['Названия', 'Email-адреса', 'Мобильные телефоны', 'Городские телефоны'], ['One', 'one@example.test; omit@example.test', '+79990000001', '+74950000000'], ['Two', 'one@example.test', '', '']);
+  mobile.state.data.splice(0, Infinity, ['Статус', 'Строки в Лист1', 'Компания', 'Мобильный телефон', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Сайты'], ['Срок > 30', '2', 'One', '+79990000001', '99', '', '44', '']);
+  email.state.data.splice(0, Infinity, ['Статус', 'Комментарий', 'Почт на компанию', 'Строки в Лист1', 'Компания', 'Email', 'Валидация', 'Провайдер', 'Сайты'],
+    ['Невалид', 'confirm', '1', '2', 'One', 'one@example.test', 'invalid', 'test', ''], ['Рассылка', 'second', '1', '3', 'Two', 'one@example.test', 'valid', 'another', '']);
+  const draft = f.stage(), shown = selectedPreview(f, draft, [0]);
+  assert.equal(shown.counts.emails, 1); assert.equal(shown.counts.phones, 1);
+  assert.equal(shown.sheets[1].rowCount, 3); assert.equal(shown.sheets[2].rowCount, 2);
+  const final = f.finish(draft, shown), result = f.books.get(final.file.id);
+  const data = result.getSheetByName('Email').state.data;
+  assert.deepEqual(data.map(row => row.slice(0, -1)), email.state.data);
+  assert.notEqual(data[1].at(-1), data[2].at(-1));
+  assert.deepEqual(result.getSheetByName('Мобильные телефоны').state.data.map(row => row.slice(0, -1)), mobile.state.data);
+});
+
+test('new working books keep stable company IDs across their master, email and phone rows and leave ambiguous ownership open', () => {
+  const f = workbookReader(fixture()), originals = f.books.get(ORIGINAL).tabs;
+  originals[0].state.data.splice(0, Infinity, ['Названия', 'Email-адреса', 'Мобильные телефоны', 'Сайты'],
+    ['One', 'one@example.test; shared@example.test', '+79990000001', 'one.example.test'],
+    ['Two', 'shared@example.test', '+79990000002', 'two.example.test']);
+  const draft = f.stage(), preview = selectedPreview(f, draft, [0]);
+  const result = f.finish(draft, preview), output = f.books.get(result.file.id);
+  const master = output.getSheetByName('Исходная база').state.data, email = output.getSheetByName('Email').state.data, phone = output.getSheetByName('Телефоны и Telegram').state.data;
+  assert.equal(master[0].at(-1), 'ID компании'); assert.match(master[1].at(-1), /^C-[\w-]{24}$/); assert.notEqual(master[1].at(-1), master[2].at(-1));
+  assert.equal(originals[0].state.data[0].includes('ID компании'), false);
+  const row = (list, column, value) => list.slice(1).map(line => Object.fromEntries(list[0].map((k, i) => [k, line[i]]))).find(line => line[column] === value);
+  const unique = row(email, 'Email', 'one@example.test'), shared = row(email, 'Email', 'shared@example.test');
+  assert.equal(unique['ID компании'], master[1].at(-1)); assert.equal(unique['Сайты'], 'one.example.test');
+  assert.equal(unique['Статус рассылки'], 'новый'); assert.equal(unique['Валидация'], ''); assert.equal(unique['Провайдер'], '');
+  assert.equal(shared['ID компании'], ''); assert.equal(shared['Проверить принадлежность'], 'Да');
+  assert.equal(row(phone, 'Телефон', '+79990000002')['ID компании'], master[2].at(-1));
 });
 
 test('V2 freezes Date, numeric and literal linked formula snapshots on every original leaf', () => {

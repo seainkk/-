@@ -16,6 +16,12 @@ const source = (row = 2, fileId = 'source_file_1234567890') => ({ fileId, sheetI
 const company = (overrides = {}, row = 2) => ({ source: source(row), company: { name: 'ООО Пример', inn: '7707083893', city: 'Москва', ...overrides }, general: { emails: ['sales@example.test'], phones: ['+79990000001'] }, people: [] });
 const rowRecord = (f, action, kind) => Object.fromEntries(f.fields(kind).map((key, i) => [key, action.after[i]]).concat([['row', action.row]]));
 
+test('a working company ID follows its row into the segment and two distinct IDs survive a shared name and city', () => {
+  const f = fixture(), a = 'C-' + 'a'.repeat(24), b = 'C-' + 'b'.repeat(24);
+  const result = f.plan({ records: [company({id:a, inn:''}), company({id:b, inn:''}, 3)] });
+  assert.deepEqual(result.companies.map(change => change.after[0]), [a, b]);
+});
+
 test('normalizes companies into lean fields, unions contacts and never duplicates a repeated source', () => {
   const f = fixture(), first = company(), second = company({}, 3);
   second.general.emails.push('new@example.test');

@@ -88,19 +88,41 @@ function contactPreviewFile_(context, fileId) {
 
 function contactPreviewHeader_(value) { return String(value || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]/g, ''); }
 
+/** A pair of completed working lists can be recognized without registry metadata. */
+function workingSelectionTargets_(sheets) {
+  if (sheets.length !== 3) return null;
+  var targets = {}, specs = [
+    ['emailSheetId', 'Email', ['Статус', 'Комментарий', 'Почт на компанию', 'Строки в Лист1', 'Компания', 'Email', 'Валидация', 'Провайдер', 'Сайты']],
+    ['phoneSheetId', 'Мобильные телефоны', ['Статус', 'Строки в Лист1', 'Компания', 'Мобильный телефон', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Сайты']]
+  ];
+  for (var i = 0; i < specs.length; i++) {
+    var spec = specs[i], sheet = sheets.find(function (candidate) { return candidate.getName() === spec[1]; });
+    if (!sheet || !sheet.getLastRow()) return null;
+    var width = sheet.getLastColumn();
+    if (width < spec[2].length || width > 100) return null;
+    var headers = sheet.getRange(1, 1, 1, width).getDisplayValues()[0];
+    if (!spec[2].every(function (header) { return headers.indexOf(header) >= 0 && headers.indexOf(header) === headers.lastIndexOf(header); })) return null;
+    targets[spec[0]] = sheet.getSheetId();
+  }
+  return { targets: targets, sourceSheetIds: sheets.map(function (sheet) { return sheet.getSheetId(); }).filter(function (id) { return id !== targets.emailSheetId && id !== targets.phoneSheetId; }), workingSelection: true };
+}
+
 /** Prepared books contain derived lists; never count their contacts a second time. */
 function contactPreviewSourceSheets_(context, fileId, sheets) {
   authorize_();
   if (typeof Drive === 'undefined' || !Drive.Files || typeof Drive.Files.get !== 'function') return sheets;
   var metadata = Drive.Files.get(fileId, { fields: 'appProperties', supportsAllDrives: true });
   var properties = metadata && metadata.appProperties || {};
-  if (properties.registryPreparedVersion === '2') {
+  if (properties.registryPreparedVersion === '2' || properties.registryContactStateId && properties.registryContactEmailSheetId !== undefined && properties.registryContactPhoneSheetId !== undefined) {
     var emailId = properties.registryContactEmailSheetId, phoneId = properties.registryContactPhoneSheetId;
     if (!/^\d+$/.test(emailId || '') || !/^\d+$/.test(phoneId || '') || emailId === phoneId) fail_('PREPARED_SCHEMA', 'Не удалось определить контактные листы подготовленной базы.');
     if (sheets.filter(function (sheet) { return String(sheet.getSheetId()) === emailId || String(sheet.getSheetId()) === phoneId; }).length !== 2) fail_('PREPARED_SCHEMA', 'Контактные листы подготовленной базы недоступны.');
     return sheets.filter(function (sheet) { var id = String(sheet.getSheetId()); return id !== emailId && id !== phoneId; });
   }
-  if (properties.registryPreparedVersion !== '1') return sheets;
+  if (properties.registryPreparedVersion !== '1') {
+    var working = workingSelectionTargets_(sheets);
+    return working ? sheets.filter(function (sheet) { return working.sourceSheetIds.indexOf(sheet.getSheetId()) !== -1; }) : sheets;
+  }
   var originalId = properties.registryPreparedOriginalSheetId;
   if (typeof originalId !== 'string' || !/^\d+$/.test(originalId)) fail_('PREPARED_SCHEMA', 'Не удалось определить исходный лист подготовленной базы.');
   var original = sheets.filter(function (sheet) { return String(sheet.getSheetId()) === originalId; });

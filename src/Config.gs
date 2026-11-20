@@ -32,6 +32,19 @@ var CONTACT_MAILING_STATUS = Object.freeze({
   values: ['новый', 'в рассылке', 'фильтр']
 });
 
+/** Visible working fields; technical ownership fields are retained after these. */
+var WORKING_CONTACT_COLUMNS = Object.freeze({
+  email: ['Статус рассылки', 'Комментарий', 'Почт на компанию', 'Исходные строки', 'Компания / ЛПР', 'Email', 'Валидация', 'Провайдер', 'Сайты', 'ID компании'],
+  phone: ['Статус рассылки', 'Исходные строки', 'Компания / ЛПР', 'Телефон', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Сайты', 'ID компании']
+});
+
+function workingSelectionStatus_(value) {
+  var status = String(value || '').trim().toLowerCase();
+  if (!status || status === 'новый') return CONTACT_MAILING_STATUS.initial;
+  if (status === 'рассылка' || status === 'в рассылке' || status === 'запущен') return 'в рассылке';
+  return 'фильтр';
+}
+
 function contactMailingStatusFromHistory_(history) {
   var statuses = (Array.isArray(history) ? history : String(history || '').split(';')).map(function (value) {
     var status = String(value || '').trim().toLowerCase();
