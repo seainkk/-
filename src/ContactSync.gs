@@ -7,7 +7,7 @@ var CONTACT_SYNC = Object.freeze({
   version: 1, folderProperty: 'CONTACT_SYNC_FOLDER_ID',
   fields: 'id,name,mimeType,parents,trashed,appProperties,version,modifiedTime,capabilities(canEdit,canAddChildren)',
   stateProperty: 'registryContactStateId', leaseMillis: 10 * 60 * 1000,
-  releaseGuardMillis: 60 * 1000, writeRows: 1000, maxTargetRows: 100000,
+  releaseGuardMillis: 60 * 1000, sourceReadMillis: 120000, writeRows: 1000, maxTargetRows: 100000,
   maxHeaderColumns: 512, maxStateCharacters: 12000000, receiptLimit: 20
 });
 
@@ -463,10 +463,12 @@ function contactSyncRowKeys_(kind, value, telegram) {
   return keys;
 }
 function contactSyncStableModel_(claim) {
-  var state = claim.state, ids = contactSyncSources_(state, claim.book), before = contactSyncMetadata_(state.fileId);
+  var state = claim.state, ids = contactSyncSources_(state, claim.book), before = contactSyncMetadata_(state.fileId), deadline = Date.now() + CONTACT_SYNC.sourceReadMillis;
   for (var attempt = 0; attempt < 2; attempt++) {
     if (attempt) before = contactSyncMetadata_(state.fileId);
     var model = preparedDataReadWorkbook_(claim.book, state.fileId, state.section, { sourceSheetIds: ids, managedSheetIds: [state.targets.emailSheetId, state.targets.phoneSheetId],
+      // One bounded budget for every leaf/chunk, including a source-version retry.
+      deadline: deadline,
       sectionExplicit: state.sourceMode === 'fixed' && (state.role === 'segment-companies' || state.role === 'segment-lpr'),
       guard: function () { gridFile_(state.fileId, false, state.rootId); } });
     var after = contactSyncMetadata_(state.fileId);
