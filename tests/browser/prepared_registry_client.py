@@ -1,10 +1,47 @@
 """Three-sheet import preview and registry-section checks against fake RPCs only."""
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 ROOT=Path(__file__).resolve().parents[2]
 FIXTURE=Path(__file__).with_name('performance-fixture.js').read_text()
 GRID_STUB="""window.RegistryGrid={opened:[],open(o){this.opened.push(o.id);this.transport=o.transport;this.closed=o.onClose;this.openedNow=true;},isOpen(){return !!this.openedNow;},hasPending(){return false;},lock(){this.openedNow=false;this.locked=true;}};"""
 HTML=(ROOT/'src/Index.html').read_text().replace("<?!= include_('Styles'); ?>",(ROOT/'src/Styles.html').read_text()).replace("<?!= include_('Client'); ?>",'<script>'+FIXTURE+GRID_STUB+'</script>'+(ROOT/'src/Client.html').read_text())
+
+def check_source_card(page):
+    card = page.locator('[data-source-id="source-companies"]')
+    summary = card.locator('.br-source-settings > summary')
+    status = card.locator('[data-source-field="status"]')
+    badge = card.locator('.br-source-status')
+
+    expect(summary).to_have_text('Настройки базы')
+    expect(status).to_be_hidden()
+    expect(card.locator('h2')).to_be_visible()
+    expect(badge).to_have_text('Готова')
+    expect(card.locator('[data-grid-source]')).to_be_visible()
+    expect(card.locator('[data-preview-source]')).to_be_visible()
+    expect(card.locator('[data-add-source]')).to_be_enabled()
+    expect(card.get_by_role('link', name='Существующий сегмент')).to_be_visible()
+
+    summary.press('Enter')
+    expect(status).to_be_visible()
+    status.press('ArrowDown')
+    expect(status).to_have_value('rework')
+    expect(status).to_be_focused()
+    expect(card.locator('[data-add-source]')).to_be_disabled()
+    expect(page.locator('[data-source-id="source-mixed"] [data-source-field="status"]')).to_be_hidden()
+    card.locator('[data-source-cancel]').click()
+    expect(status).to_have_value('ready')
+    expect(card.locator('[data-add-source]')).to_be_enabled()
+    assert not page.evaluate("backend.calls.some(call => call.name === 'updateSourceBase')")
+
+    status.press('ArrowUp')
+    expect(status).to_have_value('collection')
+    card.locator('[data-source-save]').click()
+    expect(badge).to_have_text('Сбор')
+    expect(card.locator('[data-add-source]')).to_be_disabled()
+    assert page.evaluate("backend.calls.filter(call => call.name === 'updateSourceBase').length") == 1
+    summary.click()
+    expect(status).to_be_hidden()
+    expect(badge).to_be_visible()
 
 def main():
  with sync_playwright() as p:
@@ -21,7 +58,8 @@ def main():
   def stage_link(name='Кухни',section='companies'):
    if section=='lpr':page.locator('#br-section-lpr').click()
    page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
-  reset()
+  reset(boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});")
+  check_source_card(page)
   assert page.locator('[data-source-id="source-lpr"]').count()==0
   assert page.locator('[data-source-id="source-mixed"]').is_visible()
   page.locator('#br-section-lpr').click();assert page.locator('[data-source-id="source-lpr"]').is_visible();assert page.locator('[data-source-id="source-companies"]').count()==0;assert page.locator('[data-source-id="source-mixed"]').is_visible()
@@ -91,6 +129,6 @@ def main():
   # Revocation clears staged preview contents and no late result restores them.
   reset();page.evaluate("backend.holdMethods=['previewPreparedBase']");page.locator('#br-import-open').click();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Отзыв');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();held('previewPreparedBase');page.evaluate('backend.revoked=true');release('previewPreparedBase');page.wait_for_selector('#bases-registry-app[data-access="locked"]');idle();assert page.locator('#br-prepared-table').inner_text()=='';assert page.evaluate('RegistryGrid.locked')
   assert not errors,errors
-  print('PASS: two registry sections, live-form staging, single-sheet three-tab preview, confirm-only publish, cancellation, stale preview, chunk continuation, stable retry, Grid bridge, revocation and mobile/XSS safety; RPC concurrency1')
+  print('PASS: compact card settings and focus, two registry sections, live-form staging, single-sheet three-tab preview, confirm-only publish, cancellation, stale preview, chunk continuation, stable retry, Grid bridge, revocation and mobile/XSS safety; RPC concurrency1')
   browser.close()
 if __name__=='__main__':main()
