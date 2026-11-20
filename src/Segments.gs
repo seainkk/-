@@ -93,9 +93,8 @@ function segmentFolderUrl_(folderId) {
   return 'https://drive.google.com/drive/folders/' + id_(folderId);
 }
 
-/** Metadata for the Outreach subtree only; a large source catalog is unrelated. */
-function getSegmentsMetadata_(context) {
-  context = context || authorize_();
+/** Resolve current Outreach binding without reading the files below it. */
+function segmentMetadataBinding_(context) {
   var root = registryRoot_(context), registry = { id: root.getId(), name: root.getName() };
   var empty = { state: 'source_missing', source: null, generatedAt: new Date().toISOString(), rulesConfigured: false, items: [] };
   var configured = context.properties.getProperty('SEGMENTS_FOLDER_ID');
@@ -120,6 +119,43 @@ function getSegmentsMetadata_(context) {
     if (!source) return empty;
     if (source.getId() === context.rootId) { empty.state = 'source_outside_registry'; return empty; }
   }
+  return { state: 'ready', registry: registry, folder: source };
+}
+
+/** Source cards need only direct segment names, not every Outreach spreadsheet. */
+function getSegmentNames_(context) {
+  context = context || authorize_();
+  var binding = segmentMetadataBinding_(context);
+  if (binding.state !== 'ready') return binding;
+  var source = binding.folder, sourceId = source.getId(), items = [], seen = Object.create(null);
+  var children = source.getFolders(), count = 0;
+  while (children.hasNext()) {
+    var child = children.next(), childId = child.getId();
+    if (seen[childId] || child.isTrashed() || childId === sourceId || childId === context.rootId) continue;
+    if (++count > REGISTRY_CONFIG.maxTreeEntries) fail_('REGISTRY_LIMIT', 'В папке сегментов превышен лимит папок.');
+    seen[childId] = true;
+    var name = child.getName(), parents = child.getParents(), direct = false, examined = 0;
+    while (parents.hasNext()) {
+      if (++examined > REGISTRY_CONFIG.maxAncestryNodes) break;
+      var parent = parents.next();
+      if (parent.getId() === sourceId && !parent.isTrashed()) { direct = true; break; }
+    }
+    if (direct && !child.isTrashed()) items.push({ id: childId, name: name, url: segmentFolderUrl_(childId) });
+  }
+  var descriptor = { id: sourceId, name: source.getName(), url: segmentFolderUrl_(sourceId) };
+  // A stale child iterator cannot keep associations alive after its source moves.
+  if (source.isTrashed() || !insideRegistry_(source, context.rootId)) {
+    return { state: 'source_outside_registry', source: null, items: [] };
+  }
+  return { state: 'ready', source: descriptor, items: items.sort(byName_) };
+}
+
+/** Metadata for the Outreach subtree only; a large source catalog is unrelated. */
+function getSegmentsMetadata_(context) {
+  context = context || authorize_();
+  var binding = segmentMetadataBinding_(context);
+  if (binding.state !== 'ready') return binding;
+  var registry = binding.registry, source = binding.folder;
   var folders = [{ id: source.getId(), name: source.getName(), parentId: registry.id }], files = [], visited = Object.create(null), count = 0;
   var serviceId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
   function visit(folder, depth) {

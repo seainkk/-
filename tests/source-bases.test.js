@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 const sourceDir = fileURLToPath(new URL('../src/', import.meta.url));
 const ROOT = '1WKcvDDKqYBo94eXsYc5vKp6OPtOzv6Wh';
 const SOURCE = '1deuP0ovOC70PrElQKZjSjuvSMgPF0J7r';
+const OUTREACH = '1sQ8WrTgdEOPTPYLIwoBwHb6gL_ULT4yu';
 const STORAGE = '1lzbjoPNnrVn5-8GoAhaLZPS_S8J0lfcaoO8Ybxw396M';
 const OTHER = 'other_root_1234567890';
 const CHILD = 'source_child_1234567890';
@@ -33,7 +34,7 @@ const rowFor = (id, overrides = {}) => HEADERS.map(key => ({
 
 function fixture(options = {}) {
   const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
-  const calls = { drive: [], opens: [], writes: [], reads: [], grows: [], events: [], flushes: 0, lockDepth: 0 };
+  const calls = { drive: [], opens: [], writes: [], reads: [], grows: [], events: [], folderLists: [], typedScans: [], ancestryReads: [], flushes: 0, lockDepth: 0 };
   const folders = new Map(), files = new Map();
   const propertiesStore = {
     getProperty: key => properties.get(key) ?? null,
@@ -47,14 +48,14 @@ function fixture(options = {}) {
       id, name, parent, trashed,
       getId: () => id, getName: () => item.name, isTrashed: () => item.trashed,
       getUrl: () => `https://drive.google.com/drive/folders/${id}`,
-      getParents: () => iterator(item.parent ? [folders.get(item.parent)] : []),
+      getParents: () => { calls.ancestryReads.push(id); return iterator(item.parent ? [folders.get(item.parent)] : []); },
       getFiles: () => {
         calls.events.push({ kind: 'scan', id, locked: calls.lockDepth > 0 });
         if (options.failScanFolder === id) throw new Error('Source scan failed');
         return iterator([...files.values()].filter(file => file.parent === id));
       },
-      getFilesByType: mime => iterator([...files.values()].filter(file => file.parent === id && file.mime === mime)),
-      getFolders: () => iterator([...folders.values()].filter(child => child.parent === id)),
+      getFilesByType: mime => { calls.typedScans.push(id); return iterator([...files.values()].filter(file => file.parent === id && file.mime === mime)); },
+      getFolders: () => { calls.folderLists.push(id); return iterator([...folders.values()].filter(child => child.parent === id)); },
     };
     folders.set(id, item);
     return item;
@@ -64,7 +65,7 @@ function fixture(options = {}) {
       id, name, mime, parent, url: url || `https://drive.google.com/file/d/${id}/view`, trashed,
       getId: () => id, getName: () => item.name, getMimeType: () => item.mime,
       getUrl: () => item.url, isTrashed: () => item.trashed,
-      getParents: () => iterator(item.parent ? [folders.get(item.parent)] : []),
+      getParents: () => { calls.ancestryReads.push(id); return iterator(item.parent ? [folders.get(item.parent)] : []); },
       getLastUpdated: () => new Date('2026-11-15T10:00:00Z'),
       getDateCreated: () => new Date('2026-11-14T10:00:00Z'),
     };
@@ -850,18 +851,144 @@ test('only a currently ready native source inside the bound folder may expose sh
   assert.ok(f.calls.opens.every(id => id === STORAGE), 'the readiness gate itself never reads business cells');
 });
 
-test('source associations resolve only outreach metadata without scanning the full registry tree', () => {
+test('source associations resolve direct segment names without walking Outreach tables or descendants', () => {
   const segmentId = 'segment_existing_1234567890';
   const f = fixture({ relationRows: [RELATION_HEADERS, [CSV, segmentId, '2026-11-15T10:00:00Z', MEMBER]] });
-  let lookups = 0;
   f.context.getBootstrap = () => { throw new Error('Full registry tree must not be consulted'); };
-  f.context.getSegmentsMetadata_ = context => {
-    assert.equal(context.email, SHARED_ACTOR);
-    lookups++;
-    return { state: 'ready', items: [{ id: segmentId, name: 'Действующий сегмент', url: 'https://drive.google.com/drive/folders/' + segmentId }] };
-  };
+  f.context.getSegmentsMetadata_ = () => { throw new Error('Full Outreach subtree must not be consulted'); };
+  f.makeFolder(OUTREACH, 'Аутричи', ROOT);
+  f.makeFolder(segmentId, 'Действующий сегмент', OUTREACH);
+  const nested = f.makeFolder('segment_nested_1234567890', 'Архив', segmentId);
+  nested.getFolders = () => { throw new Error('Segment descendants must not be enumerated'); };
+  for (let index = 0; index < 6; index++) f.makeFile('outreach_book_' + index + '_1234567890', 'Книга ' + index, SHEET_MIME, segmentId);
   const item = f.list().items.find(item => item.id === CSV);
-  assert.equal(lookups, 1);
   assert.equal(item.associationsAvailable, true);
-  assert.deepEqual(item.segments.map(segment => segment.id), [segmentId]);
+  assert.deepEqual(item.segments, [{ id: segmentId, name: 'Действующий сегмент', url: 'https://drive.google.com/drive/folders/' + segmentId }]);
+  assert.equal(f.calls.folderLists.filter(id => id === OUTREACH).length, 1);
+  assert.equal(f.calls.folderLists.includes(segmentId), false);
+  assert.deepEqual(f.calls.typedScans, []);
+  assert.ok(f.calls.opens.every(id => id === STORAGE));
+  const updated = f.patch({ id: CSV, status: 'ready', expectedRevision: item.revision }).item;
+  assert.equal(updated.associationsAvailable, true);
+  assert.deepEqual(updated.segments, item.segments);
+  assert.equal(f.calls.folderLists.filter(id => id === OUTREACH).length, 2);
+  assert.deepEqual(f.calls.typedScans, []);
+});
+
+const segmentNames = f => plain(runShared(f.context, () => f.context.getSegmentNames_(f.context.authorize_())));
+
+test('lightweight segment names authorize before any Drive lookup', () => {
+  const f = fixture();
+  assert.throws(() => f.context.getSegmentNames_(), /LINK_ACCESS_REQUIRED/);
+  assert.deepEqual(f.calls.drive, []);
+});
+
+test('segment names honor the default binding and explicit in-registry override', () => {
+  const f = fixture();
+  f.makeFolder(OUTREACH, 'Переименованные аутричи', ROOT);
+  f.makeFolder('named_outreach_1234567890', 'Аутричи', ROOT);
+  f.makeFolder('segment_default_1234567890', 'По умолчанию', OUTREACH);
+  f.makeFolder('segment_override_1234567890', 'Другой сегмент', 'named_outreach_1234567890');
+  assert.equal(segmentNames(f).source.id, OUTREACH);
+  assert.deepEqual(segmentNames(f).items.map(item => item.id), ['segment_default_1234567890']);
+  f.properties.set('SEGMENTS_FOLDER_ID', ' named_outreach_1234567890 ');
+  assert.equal(segmentNames(f).source.id, 'named_outreach_1234567890');
+  assert.deepEqual(segmentNames(f).items.map(item => item.id), ['segment_override_1234567890']);
+  assert.deepEqual(f.calls.typedScans, []);
+  assert.deepEqual(f.calls.opens, []);
+});
+
+test('segment name fallback preserves missing, normalized-name, and ambiguous binding states', () => {
+  const f = fixture();
+  assert.equal(segmentNames(f).state, 'source_missing');
+  f.makeFolder('fallback_outreach_1234567890', '  АУТРИЧИ  ', ROOT);
+  f.makeFolder('fallback_segment_1234567890', 'Сегмент', 'fallback_outreach_1234567890');
+  const unique = segmentNames(f);
+  assert.equal(unique.state, 'ready');
+  assert.equal(unique.source.id, 'fallback_outreach_1234567890');
+  assert.deepEqual(unique.items.map(item => item.id), ['fallback_segment_1234567890']);
+  f.makeFolder('duplicate_outreach_1234567890', 'Аутричи', ROOT);
+  const ambiguous = segmentNames(f);
+  assert.equal(ambiguous.state, 'source_ambiguous');
+  assert.equal(ambiguous.source, null);
+  assert.deepEqual(ambiguous.items, []);
+});
+
+test('explicit missing, outside, root, or trashed Outreach bindings never expose a segment', () => {
+  for (const binding of ['missing_outreach_1234567890', OTHER, ROOT, OUTREACH]) {
+    const f = fixture({ properties: { SEGMENTS_FOLDER_ID: binding } });
+    f.makeFolder(OUTREACH, 'Закрытые аутричи', ROOT, true);
+    f.makeFolder('hidden_segment_1234567890', 'Закрытый сегмент', binding);
+    const result = segmentNames(f);
+    assert.equal(result.state, 'source_outside_registry');
+    assert.equal(result.source, null);
+    assert.deepEqual(result.items, []);
+    assert.deepEqual(f.calls.opens, []);
+    assert.equal(JSON.stringify(result).includes('Закрытый сегмент'), false);
+  }
+});
+
+test('moved or trashed segment relations remain unknown and preserve their stored history', () => {
+  const segmentId = 'segment_existing_1234567890';
+  const relation = [CSV, segmentId, '2026-11-15T10:00:00Z', MEMBER];
+  const f = fixture({ relationRows: [RELATION_HEADERS, relation] });
+  f.makeFolder(OUTREACH, 'Аутричи', ROOT);
+  const child = f.makeFolder(segmentId, 'Сегмент', OUTREACH);
+  assert.equal(f.list().items.find(item => item.id === CSV).associationsAvailable, true);
+  for (const change of [() => { child.parent = OTHER; }, () => { child.parent = OUTREACH; child.trashed = true; }]) {
+    change();
+    const item = f.list().items.find(item => item.id === CSV);
+    assert.equal(item.associationsAvailable, false);
+    assert.deepEqual(item.segments, []);
+    assert.match(item.associationWarning, /недоступна/);
+    assert.deepEqual(f.relationSheet.state.rows, [RELATION_HEADERS, relation]);
+  }
+});
+
+test('a stale child iterator cannot invent a currently moved segment association', () => {
+  const segmentId = 'segment_existing_1234567890';
+  const f = fixture({ relationRows: [RELATION_HEADERS, [CSV, segmentId, '2026-11-15T10:00:00Z', MEMBER]] });
+  const source = f.makeFolder(OUTREACH, 'Аутричи', ROOT);
+  const child = f.makeFolder(segmentId, 'Сегмент', OUTREACH);
+  const listChildren = source.getFolders;
+  source.getFolders = () => { const stale = listChildren(); child.parent = OTHER; return stale; };
+  const item = f.list().items.find(item => item.id === CSV);
+  assert.equal(item.associationsAvailable, false);
+  assert.deepEqual(item.segments, []);
+  assert.deepEqual(f.calls.typedScans, []);
+});
+
+test('Outreach scope is checked again after listing before returning any segment names', () => {
+  for (const move of ['outside', 'trash']) {
+    const f = fixture();
+    const source = f.makeFolder(OUTREACH, 'Аутричи', ROOT);
+    f.makeFolder('private_segment_1234567890', 'Скрытый сегмент', OUTREACH);
+    const listChildren = source.getFolders;
+    source.getFolders = () => { const stale = listChildren(); if (move === 'outside') source.parent = OTHER; else source.trashed = true; return stale; };
+    const result = segmentNames(f);
+    assert.equal(result.state, 'source_outside_registry');
+    assert.equal(result.source, null);
+    assert.deepEqual(result.items, []);
+    assert.equal(JSON.stringify(result).includes('Скрытый сегмент'), false);
+  }
+});
+
+test('source binding performs one final ancestry check and rejects a source moved during resolution', () => {
+  const f = fixture();
+  const result = plain(runShared(f.context, () => {
+    const binding = f.context.sourceBasesSource_(f.context.authorize_());
+    return { state: binding.state, source: binding.source };
+  }));
+  assert.equal(result.state, 'ready');
+  assert.equal(f.calls.ancestryReads.filter(id => id === SOURCE).length, 1);
+  const moved = fixture();
+  moved.folders.delete(SOURCE);
+  const fallback = moved.makeFolder('fallback_source_1234567890', 'Исходные базы', ROOT);
+  const name = fallback.getName;
+  fallback.getName = () => { fallback.parent = OTHER; return name(); };
+  const denied = moved.list();
+  assert.equal(denied.state, 'source_outside_registry');
+  assert.equal(denied.source, null);
+  assert.deepEqual(denied.items, []);
+  assert.deepEqual(moved.calls.opens, []);
 });

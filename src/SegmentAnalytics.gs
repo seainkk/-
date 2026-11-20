@@ -5,11 +5,15 @@
  * row is ambiguous, so it never proves a segment empty. Coldy mailing metrics
  * are read from the last explicit refresh; NSA and launch detection are pending.
  */
-function getSegmentsDashboard_() {
+function getSegmentsDashboard_(request) {
   return api_(function () {
     var context = authorize_();
+    var input = request === undefined ? {} : object_(request);
+    if (Object.keys(input).some(function (key) { return key !== 'includeAnalysis'; }) ||
+        (input.includeAnalysis !== undefined && typeof input.includeAnalysis !== 'boolean')) fail_('INVALID_REQUEST', 'Некорректный режим загрузки сегментов.');
     var projection = getSegmentsMetadata_(context);
     if (projection.state !== 'ready') return projection;
+    if (input.includeAnalysis === false) return segmentDashboardOverview_(context, projection);
     var budget = segmentAnalysisBudget_(), trackingRequest = { loaded: false, snapshot: null };
     projection.items = projection.items.map(function (item) {
       return segmentAnalyzeItem_(context, projection.source, item, budget, trackingRequest);
@@ -17,6 +21,34 @@ function getSegmentsDashboard_() {
     projection.generatedAt = new Date().toISOString();
     return projection;
   });
+}
+
+/** Render the usable catalog before reading contact-presence data from books. */
+function segmentDashboardOverview_(context, projection) {
+  var tracking;
+  try { tracking = segmentReadTrackingSnapshot_(context); }
+  catch (error) { tracking = { available: false, tables: [], loads: [] }; }
+  var kinds = Object.create(null);
+  if (tracking && tracking.available === true) (tracking.tables || []).forEach(function (table) {
+    if (table && (table.kind === 'companies' || table.kind === 'lpr')) kinds[table.segmentId + '|' + table.fileId] = table.kind;
+  });
+  projection.items.forEach(function (item) {
+    (item.files || []).forEach(function (file) {
+      var kind = kinds[item.id + '|' + file.id];
+      if (kind) file.kind = kind;
+    });
+    item.overallStatus = null;
+    item.contactPresence = 'unknown';
+    item.analysis = { state: 'pending', hasContacts: null, warnings: [] };
+  });
+  // No business-sheet contents or versions are cached. Reject a revoked key,
+  // changed registry or moved source before any catalog metadata escapes.
+  var fresh = authorize_();
+  if (fresh.rootId !== context.rootId) fail_('SOURCE_CHANGED', 'Привязка реестра изменилась. Обновите страницу.');
+  registryFolder_(fresh, projection.source.id);
+  projection.analysisPending = true;
+  projection.generatedAt = new Date().toISOString();
+  return projection;
 }
 
 function getSegmentMailings_(request) {
@@ -194,8 +226,11 @@ function segmentAnalyzeSheet_(sheet, hasHeader, budget) {
   var lastRow = sheet.getLastRow(), lastColumn = sheet.getLastColumn(), firstRow = hasHeader ? 2 : 1;
   if (lastRow < firstRow || lastColumn < 1) return { state: 'ready', hasContacts: false };
   var rowsPerChunk = Math.max(1, Math.floor(budget.chunkCells / Math.min(lastColumn, budget.chunkCells)));
-  for (var row = firstRow; row <= lastRow; row += rowsPerChunk) {
-    var rowCount = Math.min(rowsPerChunk, lastRow - row + 1);
+  for (var row = firstRow; row <= lastRow;) {
+    // Most working books have data in their first body row. A one-row probe
+    // proves presence without transferring up to 10,000 cells. Blank probes
+    // continue the same bounded complete scan, without reading cells twice.
+    var rowCount = row === firstRow ? 1 : Math.min(rowsPerChunk, lastRow - row + 1);
     var columnsPerChunk = Math.max(1, Math.floor(budget.chunkCells / rowCount));
     for (var column = 1; column <= lastColumn; column += columnsPerChunk) {
       var columnCount = Math.min(columnsPerChunk, lastColumn - column + 1), cellCount = rowCount * columnCount;
@@ -208,6 +243,7 @@ function segmentAnalyzeSheet_(sheet, hasHeader, budget) {
         }
       }
     }
+    row += rowCount;
   }
   return { state: 'ready', hasContacts: false };
 }

@@ -14,9 +14,10 @@ var CONTACT_SYNC = Object.freeze({
 function getContactWorkspace_(request) {
   return api_(function () {
     var input = contactSyncInput_(request, ['id']), scope = gridFile_(input.id, false);
-    var book = SpreadsheetApp.openById(input.id), metadata = contactSyncMetadata_(input.id);
+    var metadata = contactSyncMetadata_(input.id);
     var state = contactSyncReadState_(scope.context, metadata, true);
     if (!state) {
+      var book = SpreadsheetApp.openById(input.id);
       var legacy = contactSyncLegacy_(book, metadata);
       return { enrolled: false, canSync: scope.canEdit === true, targets: legacy ? legacy.targets : null,
         sourceSheetIds: legacy ? legacy.sourceSheetIds : book.getSheets().map(function (s) { return s.getSheetId(); }),
