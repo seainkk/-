@@ -36,8 +36,12 @@ function preparedDataRead_(sheet, sourceId, section, options) {
     guard();
     var count = Math.min(chunk, readableRows - firstRow + 1), range = sheet.getRange(firstRow, 1, count, readableWidth);
     var raw = range.getValues(), shown = range.getDisplayValues(), expression = range.getFormulas();
-    var rich = typeof range.getRichTextValues === 'function' ? range.getRichTextValues() : null;
-    if (!rich) { complete = false; warn('Не удалось проверить ссылки, скрытые за текстом ячеек. Повторите предпросмотр.'); }
+    // RichTextValue methods cross the Apps Script host bridge for every cell/run.
+    // Read link metadata as plain Sheets JSON once per bounded range instead.
+    var richApi = preparedDataRichApi_(sourceId, sheetId, sheetName, firstRow, count, readableWidth, shown, guard);
+    var needsNativeRich = !richApi || richApi.fallbackCells;
+    var rich = needsNativeRich && typeof range.getRichTextValues === 'function' ? range.getRichTextValues() : null;
+    if (needsNativeRich && !rich) { complete = false; warn('Не удалось проверить ссылки, скрытые за текстом ячеек. Повторите предпросмотр.'); }
     if (!preparedDataRectangle_(raw, count, readableWidth) || !preparedDataRectangle_(shown, count, readableWidth) || !preparedDataRectangle_(expression, count, readableWidth) || (rich && !preparedDataRectangle_(rich, count, readableWidth))) {
       complete = false; warn('Google вернул неполный диапазон. Частичный результат нельзя использовать для создания базы.'); break;
     }
@@ -45,7 +49,8 @@ function preparedDataRead_(sheet, sourceId, section, options) {
       var absoluteRow = firstRow + y;
       values.push(raw[y]); displays.push(shown[y].map(function (v) { return String(v === null || v === undefined ? '' : v); })); formulas.push(expression[y]);
       for (var x = 0; x < readableWidth; x++) {
-        var cellLinks = preparedDataRichLinks_(rich && rich[y][x], shown[y][x]);
+        var apiLinks = richApi && richApi.links[y][x];
+        var cellLinks = Array.isArray(apiLinks) ? apiLinks : preparedDataRichLinks_(rich && rich[y][x], shown[y][x]);
         var literalLink = preparedDataFormulaLink_(expression[y][x]);
         if (literalLink && cellLinks.every(function (link) { return link.url !== literalLink; })) cellLinks.push({ start: 0, end: String(shown[y][x] || '').length, url: literalLink });
         if (cellLinks.length) links.push({ row: absoluteRow, column: x + 1, text: String(shown[y][x] || ''), runs: cellLinks });
@@ -369,6 +374,89 @@ function preparedDataRichLinks_(rich, shown) {
   });
   var url = typeof rich.getLinkUrl === 'function' ? rich.getLinkUrl() : null;
   if (url && links.every(function (link) { return link.url !== String(url); })) links.push({ start: 0, end: String(shown || '').length, url: String(url) });
+  return links;
+}
+
+/**
+ * Only hyperlink metadata uses the JSON fast path. Raw values, displayed values,
+ * formulas and Date snapshots still come from the caller's SpreadsheetApp range.
+ * https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/cells
+ * https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/get
+ */
+function preparedDataRichApi_(sourceId, sheetId, sheetName, firstRow, height, width, shown, guard) {
+  if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets || typeof Sheets.Spreadsheets.get !== 'function') return null;
+  if (!Number.isSafeInteger(sheetId) || sheetId < 0 || !Number.isSafeInteger(firstRow) || firstRow < 1 || !Number.isSafeInteger(height) || height < 1 || !Number.isSafeInteger(width) || width < 1 || !preparedDataRectangle_(shown, height, width)) return null;
+  var name = "'" + String(sheetName).replace(/'/g, "''") + "'";
+  var address = name + '!A' + firstRow + ':' + preparedDataColumn_(width) + (firstRow + height - 1), response, failed = false;
+  guard();
+  try {
+    response = Sheets.Spreadsheets.get(sourceId, { ranges: [address], fields: 'spreadsheetId,sheets(properties(sheetId,title),data(startRow,startColumn,rowData(values(formattedValue,hyperlink,userEnteredFormat(textFormat(link)),effectiveFormat(textFormat(link)),textFormatRuns(startIndex,format(link)),chipRuns(startIndex)))))' });
+  } catch (error) { failed = true; }
+  // A scope failure is never converted into a native fallback.
+  guard();
+  if (failed) return null;
+  return preparedDataRichApiGrid_(response, sourceId, sheetId, sheetName, firstRow, height, width, shown);
+}
+
+/** Validate the requested grid before accepting sparse/trailing omissions as no link. */
+function preparedDataRichApiGrid_(response, sourceId, sheetId, sheetName, firstRow, height, width, shown) {
+  if (!response || response.spreadsheetId !== sourceId || !Array.isArray(response.sheets) || response.sheets.length !== 1) return null;
+  var sheet = response.sheets[0], properties = sheet && sheet.properties;
+  if (!properties || properties.sheetId !== sheetId || properties.title !== sheetName || !Array.isArray(sheet.data) || sheet.data.length !== 1) return null;
+  var grid = sheet.data[0];
+  if (!grid || (grid.startRow === undefined ? 0 : grid.startRow) !== firstRow - 1 || (grid.startColumn === undefined ? 0 : grid.startColumn) !== 0 || grid.rowData !== undefined && !Array.isArray(grid.rowData)) return null;
+  var rows = grid.rowData || []; if (rows.length > height) return null;
+  var links = [], fallbackCells = false;
+  for (var y = 0; y < height; y++) {
+    var row = rows[y];
+    if (row !== undefined && (!row || typeof row !== 'object' || Array.isArray(row) || row.values !== undefined && !Array.isArray(row.values))) return null;
+    var cells = row && row.values || []; if (cells.length > width) return null;
+    var line = [];
+    for (var x = 0; x < width; x++) {
+      var cell = cells[x], text = String(shown[y][x] === null || shown[y][x] === undefined ? '' : shown[y][x]);
+      if (cell !== undefined && (!cell || typeof cell !== 'object' || Array.isArray(cell))) return null;
+      // formattedValue is a cheap completeness/identity anchor in the same JSON
+      // request; a missing populated cell must not silently lose a hidden link.
+      if (cell && cell.formattedValue !== undefined && (typeof cell.formattedValue !== 'string' || cell.formattedValue !== text) || (!cell || cell.formattedValue === undefined) && text !== '') return null;
+      var parsed = preparedDataRichApiLinks_(cell || {}, text);
+      if (parsed === null) fallbackCells = true;
+      line.push(parsed);
+    }
+    links.push(line);
+  }
+  return { links: links, fallbackCells: fallbackCells };
+}
+
+/** Run indices are UTF-16 offsets, matching native RichTextValue offsets. */
+function preparedDataRichApiLinks_(cell, text) {
+  // Smart-chip display indices can differ from their user-entered @ placeholders.
+  // Preserve native semantics for those cells only, without scanning other cells.
+  if (cell.chipRuns !== undefined && (!Array.isArray(cell.chipRuns) || cell.chipRuns.length)) return null;
+  var runs = cell.textFormatRuns === undefined ? [] : cell.textFormatRuns;
+  if (!Array.isArray(runs) || cell.hyperlink !== undefined && typeof cell.hyperlink !== 'string') return null;
+  var links = [], baseline = '', formats = [cell.userEnteredFormat, cell.effectiveFormat];
+  for (var f = 0; f < formats.length; f++) {
+    var format = formats[f], link = format && format.textFormat && format.textFormat.link;
+    if (link && typeof link.uri === 'string' && link.uri) { baseline = link.uri; break; }
+  }
+  var previous = -1;
+  for (var index = 0; index < runs.length; index++) {
+    var run = runs[index], start = run && run.startIndex === undefined ? 0 : run && run.startIndex;
+    var next = index + 1 < runs.length ? runs[index + 1] : null, end = next ? (next.startIndex === undefined ? 0 : next.startIndex) : text.length;
+    if (!run || typeof run !== 'object' || !Number.isSafeInteger(start) || start < 0 || start <= previous || start > text.length || !Number.isSafeInteger(end) || end < start || end > text.length || run.format !== undefined && (!run.format || typeof run.format !== 'object' || Array.isArray(run.format))) return null;
+    if (index === 0 && start > 0 && baseline) links.push({ start: 0, end: start, url: baseline });
+    var url = baseline;
+    if (run.format && Object.prototype.hasOwnProperty.call(run.format, 'link')) {
+      var override = run.format.link;
+      if (override !== null && (typeof override !== 'object' || Array.isArray(override) || override.uri !== undefined && typeof override.uri !== 'string')) return null;
+      url = override && override.uri || '';
+    }
+    if (url) links.push({ start: start, end: end, url: url });
+    previous = start;
+  }
+  if (!runs.length && baseline) links.push({ start: 0, end: text.length, url: baseline });
+  var whole = cell.hyperlink || '';
+  if (whole && links.every(function (item) { return item.url !== whole; })) links.push({ start: 0, end: text.length, url: whole });
   return links;
 }
 function preparedDataFormulaLink_(formula) { var match = String(formula || '').match(/^\s*=\s*(?:HYPERLINK|ГИПЕРССЫЛКА)\s*\(\s*"((?:[^"]|"")*)"\s*[,;]/i); return match ? match[1].replace(/""/g, '"') : ''; }
