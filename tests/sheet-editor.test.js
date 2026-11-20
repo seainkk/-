@@ -196,6 +196,29 @@ test('RAW hyperlinks use text runs and provider errors never disclose response b
   }
 });
 
+test('sparse literal snapshots use one batch, preserve exact text and links, and do not overwrite unrelated formatting', () => {
+  const f = fixture({ directRaw: true }); let guards = 0;
+  const cells = Array.from({ length: 150 }, (_, index) => ({ row: index + 2, column: 3, value: ['+79990000001', '=IMPORTXML("https://example.invalid","//*")', '000123', "'literal"][index % 4], link: 'https://example.test/contact/' + index }));
+  f.run(() => f.context.sheetWriteRawStringCells_(FILE, 0, cells, () => { guards++; }));
+  assert.equal(f.calls.rawRequests.length, 1); assert.equal(f.calls.rawRequests[0].requests.length, 1);
+  const update = f.calls.rawRequests[0].requests[0].updateCells;
+  assert.equal(update.rows.length, 150); assert.equal(update.fields, 'userEnteredValue,textFormatRuns,userEnteredFormat.textFormat.link');
+  cells.forEach((cell, index) => {
+    assert.equal(f.cells[index + 1][2].value, cell.value); assert.equal(f.cells[index + 1][2].formula, '');
+    assert.deepEqual(update.rows[index].values[0].textFormatRuns, [{ startIndex: 0, format: { link: { uri: cell.link } } }]);
+  });
+  assert.equal(guards, 3, 'caller scope is checked before flush, before dispatch and after acknowledgement');
+});
+
+test('sparse literal batches reject duplicates, non-string values and a changed scope before any API request', () => {
+  for (const cells of [[{ row: 2, column: 1, value: 'a' }, { row: 2, column: 1, value: 'b' }], [{ row: 2, column: 1, value: 42 }], [{ row: 2, column: 1, value: 'text', link: 'javascript:private' }]]) {
+    const f = fixture({ directRaw: true }); assert.throws(() => f.run(() => f.context.sheetWriteRawStringCells_(FILE, 0, cells)), /INVALID_REQUEST/); assert.equal(f.calls.rawRequests.length, 0);
+  }
+  const f = fixture({ directRaw: true }); let checks = 0;
+  assert.throws(() => f.run(() => f.context.sheetWriteRawStringCells_(FILE, 0, [{ row: 2, column: 1, value: 'safe' }], () => { if (++checks === 2) throw Error('scope changed'); })), /scope changed/);
+  assert.equal(f.calls.rawRequests.length, 0);
+});
+
 test('controlled RAW diagnostics distinguish API setup, masks and scopes without provider text', () => {
   const examples = [
     [403, { error: { status: 'PERMISSION_DENIED', message: 'private-project-998877 and OAuth secret', details: [{ reason: 'SERVICE_DISABLED', metadata: { consumer: 'projects/private-project-998877' } }] } }, 'HTTP 403, SERVICE_DISABLED'],

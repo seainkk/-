@@ -494,15 +494,7 @@ function preparedAdvance_(context, draft) {
   if (originalSheet.getName() !== 'Исходная база') fail_('PREVIEW_CHANGED', 'Название исходного листа результата изменено во время подготовки.');
   if (draft.phase === 'freeze') {
     var end = Math.min(plan.formulas.length, draft.freezeCursor + PREPARED_IMPORT.freezeCells);
-    for (var i = draft.freezeCursor; i < end; i++) {
-      var formula = plan.formulas[i], cell = originalSheet.getRange(formula.row, formula.column), value = preparedDecodeValue_(formula.value);
-      var currentFormula = cell.getFormula(), currentValue = cell.getValue();
-      if (!currentFormula && JSON.stringify(currentValue) !== JSON.stringify(value)) fail_('PREVIEW_CHANGED', 'Значение результата изменено вручную до завершения подготовки.');
-      if (typeof value === 'string') {
-        var link = formula.link && /^(?:https?:\/\/|mailto:|tel:)/i.test(formula.link) ? formula.link : '';
-        sheetWriteRawStrings_(book.getId(), originalSheet.getSheetId(), formula.row, formula.column, [[value]], undefined, [[link]]);
-      } else cell.setValue(value);
-    }
+    preparedFreezeFormulaBlock_(context, book, draft, originalSheet, plan.formulas, draft.freezeCursor, end);
     SpreadsheetApp.flush(); draft.freezeCursor = end;
     if (end >= plan.formulas.length) {
       preparedEnsureSheets_(book, draft, plan); draft.phase = 'emails'; draft.writeCursor = 0;

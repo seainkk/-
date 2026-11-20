@@ -19,7 +19,7 @@ function fixture(options = {}) {
   let serial = 0, sheetSerial = 100;
   const resources = new Map(), books = new Map(), records = new Map();
   const properties = new Map([['ROOT_FOLDER_ID', ROOT], ['SOURCE_BASES_FOLDER_ID', SOURCE], ['SHARED_ACCESS_KEY_SHA256', crypto.createHash('sha256').update(KEY).digest('base64url')]]);
-  const calls = { actions: [], opens: [], writes: [], copies: 0, locks: 0 };
+  const calls = { actions: [], opens: [], writes: [], copies: 0, locks: 0, rawBatches: [] };
   const store = { getProperty: name => properties.get(name) ?? null, setProperty: (name, value) => { properties.set(name, String(value)); return store; }, deleteProperty: name => properties.delete(name) };
   const context = vm.createContext({ console, Date, JSON, Object, Array, Number, String, Boolean, RegExp, Math, Error, Set, Map, encodeURIComponent, decodeURIComponent });
   function resource(id, name, mime, parents, extra = {}) {
@@ -29,11 +29,11 @@ function fixture(options = {}) {
   resource(ROOT, 'Реестр баз', FOLDER, []); resource(SOURCE, 'Исходные базы', FOLDER, [ROOT]);
   resource(OUTSIDE, 'Внешняя папка', FOLDER, []); resource(SERVICE, 'Служебный реестр', MIME, [ROOT]);
   resource(ORIGINAL, 'Источник', MIME, [options.outside ? OUTSIDE : SOURCE]);
-  function sheet(id, name, rows, book, formulas = {}, notes = {}) {
+  function sheet(id, name, rows, book, formulas = {}, notes = {}, links = {}, styles = {}) {
     const data = rows.map(row => row.slice()); let maxRows = Math.max(1000, data.length), maxColumns = Math.max(26, ...data.map(row => row.length));
-    const formulaMap = { ...formulas }, noteMap = { ...notes };
+    const formulaMap = { ...formulas }, noteMap = { ...notes }, linkMap = { ...links }, styleMap = plain(styles);
     const api = {
-      state: { data, formulaMap, noteMap }, getSheetId: () => id, getName: () => name, getParent: () => book,
+      state: { data, formulaMap, noteMap, linkMap, styleMap }, getSheetId: () => id, getName: () => name, getParent: () => book,
       getLastRow: () => { for (let i = data.length - 1; i >= 0; i--) if (data[i]?.some(value => value !== '' && value !== null && value !== undefined)) return i + 1; return 0; },
       getLastColumn: () => Math.max(0, ...data.map(row => { for (let i = row.length - 1; i >= 0; i--) if (row[i] !== '' && row[i] !== null && row[i] !== undefined) return i + 1; return 0; })),
       getMaxRows: () => maxRows, getMaxColumns: () => maxColumns,
@@ -42,7 +42,7 @@ function fixture(options = {}) {
       setFrozenRows() { return api; },
       copyTo(destination) {
         calls.copies++;
-        const copied = sheet(++sheetSerial, 'Копия ' + name, data, destination, formulaMap, noteMap); destination.tabs.push(copied);
+        const copied = sheet(++sheetSerial, 'Копия ' + name, data, destination, formulaMap, noteMap, linkMap, styleMap); destination.tabs.push(copied);
         if (options.loseSheetCopy) { options.loseSheetCopy = false; throw Error('Lost copy reply'); }
         return copied;
       },
@@ -50,10 +50,10 @@ function fixture(options = {}) {
         const values = () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => data[row - 1 + r]?.[column - 1 + c] ?? ''));
         const write = (rows, rich) => {
           calls.writes.push({ sheet: id, row, column, rows: plain(rows), rich });
-          for (let r = 0; r < height; r++) { while (data.length < row + r) data.push([]); for (let c = 0; c < width; c++) { const value = rows[r][c], text = rich ? value.getText() : value; data[row - 1 + r][column - 1 + c] = rich && options.nativeRichTextPrefix && /^\+/.test(text) ? '=' + text : text; delete formulaMap[(row + r) + ':' + (column + c)]; } }
+          for (let r = 0; r < height; r++) { while (data.length < row + r) data.push([]); for (let c = 0; c < width; c++) { const value = rows[r][c], text = rich ? value.getText() : value; data[row - 1 + r][column - 1 + c] = rich && options.nativeRichTextPrefix && /^\+/.test(text) ? '=' + text : text; delete formulaMap[(row + r) + ':' + (column + c)]; delete linkMap[(row + r) + ':' + (column + c)]; } }
           if (options.loseWrite) { options.loseWrite = false; throw Error('Lost write reply'); }
         };
-        const range = { getValues: values, getDisplayValues: () => values().map(line => line.map(value => value === null || value === undefined ? '' : String(value))), getNotes: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => noteMap[(row + r) + ':' + (column + c)] || '')), getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null)), getFormulas: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => formulaMap[(row + r) + ':' + (column + c)] || '')), getFormula: () => formulaMap[row + ':' + column] || '', getValue: () => values()[0][0], setNumberFormat: () => range, setValues(rows) { write(rows, false); return range; }, setValue(value) { write([[value]], false); return range; }, setRichTextValues(rows) { write(rows, true); return range; }, setRichTextValue(value) { write([[value]], true); return range; } };
+        const range = { getValues: values, getDisplayValues: () => values().map(line => line.map(value => value === null || value === undefined ? '' : String(value))), getNotes: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => noteMap[(row + r) + ':' + (column + c)] || '')), getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null)), getFormulas: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => formulaMap[(row + r) + ':' + (column + c)] || '')), getRichTextValue: () => ({ getLinkUrl: () => linkMap[row + ':' + column] || null }), getFormula: () => formulaMap[row + ':' + column] || '', getValue: () => values()[0][0], setNumberFormat: () => range, setValues(rows) { write(rows, false); return range; }, setValue(value) { write([[value]], false); return range; }, setRichTextValues(rows) { write(rows, true); return range; }, setRichTextValue(value) { write([[value]], true); return range; } };
         return range;
       }
     };
@@ -89,7 +89,7 @@ function fixture(options = {}) {
     copy(metadata, originalId) {
       const original = resources.get(originalId), id = 'prepared_file_' + (++serial) + '_1234567890';
       const item = resource(id, metadata.name, original.mimeType, metadata.parents, { appProperties: plain(metadata.appProperties) });
-      const output = book(id); output.tabs = books.get(originalId).tabs.map(tab => sheet(tab.getSheetId(), tab.getName(), tab.state.data, output, tab.state.formulaMap, tab.state.noteMap));
+      const output = book(id); output.tabs = books.get(originalId).tabs.map(tab => sheet(tab.getSheetId(), tab.getName(), tab.state.data, output, tab.state.formulaMap, tab.state.noteMap, tab.state.linkMap, tab.state.styleMap));
       calls.actions.push({ kind: 'copy', id, originalId });
       if (options.loseStageCopy) { options.loseStageCopy = false; throw Error('Lost stage copy reply'); }
       return plain(item);
@@ -114,11 +114,35 @@ function fixture(options = {}) {
     const target = books.get(fileId)?.tabs.find(sheet => sheet.getSheetId() === sheetId); assert.ok(target, 'RAW string writer receives the owned output book and exact sheet id');
     assert.ok(Number.isSafeInteger(row) && row >= 1 && Number.isSafeInteger(column) && column >= 1);
     calls.writes.push({ sheet: sheetId, row, column, rows: plain(values), raw: true, links: links ? plain(links) : null });
-    for (let r = 0; r < values.length; r++) { while (target.state.data.length < row + r) target.state.data.push([]); for (let c = 0; c < values[r].length; c++) { if (mask && !mask[r][c]) continue; assert.equal(typeof values[r][c], 'string'); target.state.data[row - 1 + r][column - 1 + c] = values[r][c]; delete target.state.formulaMap[(row + r) + ':' + (column + c)]; } }
+    for (let r = 0; r < values.length; r++) { while (target.state.data.length < row + r) target.state.data.push([]); for (let c = 0; c < values[r].length; c++) { if (mask && !mask[r][c]) continue; assert.equal(typeof values[r][c], 'string'); target.state.data[row - 1 + r][column - 1 + c] = values[r][c]; delete target.state.formulaMap[(row + r) + ':' + (column + c)]; if (links) target.state.linkMap[(row + r) + ':' + (column + c)] = links[r][c] || '';  } }
     if (options.loseWrite) { options.loseWrite = false; throw Error('Lost RAW write reply'); }
   };
   context.Utilities = { getUuid: () => crypto.randomUUID(), DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' }, computeDigest: (_kind, value) => [...crypto.createHash('sha256').update(typeof value === 'string' ? value : Buffer.from(value)).digest()], base64EncodeWebSafe: value => Buffer.from(value).toString('base64url'), newBlob: (value, type, name) => ({ getBytes: () => [...Buffer.from(value)], getDataAsString: () => String(value), getContentType: () => type, getName: () => name }) };
   for (const name of ['Config.gs', 'Code.gs', 'Segments.gs', 'SourceBases.gs', 'SourceImport.gs', 'PreparedImport.gs', 'PreparedWorkbookImport.gs', 'Access.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
+  const rectangleWriter = context.sheetWriteRawStrings_;
+  vm.runInContext(readFileSync(new URL('../src/SheetEditor.gs', import.meta.url), 'utf8'), context, { filename: 'SheetEditor.gs' });
+  context.sheetWriteRawStrings_ = rectangleWriter;
+  context.Sheets = { Spreadsheets: { batchUpdate(body, fileId) {
+    const request = plain(body); calls.rawBatches.push({ fileId, ...request });
+    if (options.rawQuota && calls.rawBatches.length > options.rawQuota) { const error = new Error('Private quota response'); error.details = { code: 429, status: 'RATE_LIMITED' }; throw error; }
+    if (options.rawBatchFault === 'before') { options.rawBatchFault = null; throw Error('Lost batch before apply'); }
+    let cells = 0;
+    for (const item of request.requests) {
+      const update = item.updateCells, area = update.range, target = books.get(fileId).tabs.find(tab => tab.getSheetId() === area.sheetId);
+      const values = update.rows.map(line => line.values.map(cell => cell.userEnteredValue.stringValue)), links = update.rows.map(line => line.values.map(cell => cell.textFormatRuns?.[0]?.format?.link?.uri || ''));
+      calls.writes.push({ sheet: area.sheetId, row: area.startRowIndex + 1, column: area.startColumnIndex + 1, rows: values, raw: true, links });
+      for (let y = 0; y < values.length; y++) for (let x = 0; x < values[y].length; x++) {
+        assert.equal(typeof values[y][x], 'string');
+        while (target.state.data.length <= area.startRowIndex + y) target.state.data.push([]);
+        target.state.data[area.startRowIndex + y][area.startColumnIndex + x] = values[y][x];
+        const coordinate = (area.startRowIndex + y + 1) + ':' + (area.startColumnIndex + x + 1);
+        delete target.state.formulaMap[coordinate]; target.state.linkMap[coordinate] = links[y][x];
+        if (options.rawBatchFault === 'partial' && ++cells === options.rawPartialCells) { options.rawBatchFault = null; throw Error('Lost partial batch acknowledgement'); }
+      }
+    }
+    if (options.rawBatchFault === 'after') { options.rawBatchFault = null; throw Error('Lost batch after apply'); }
+    return { spreadsheetId: fileId, replies: request.requests.map(() => ({})) };
+  } } };
   const storage = { public: { id: SERVICE }, basesSheet: {} };
   const database = () => ({ records: Object.fromEntries(records), relations: [], lastRow: Math.max(1, ...[...records.values()].map(row => row.row || 1)) });
   context.sourceBasesReadDatabase_ = database;
@@ -514,6 +538,97 @@ function workbookReader(f) {
   for (const name of ['ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), f.context, { filename: name });
   return f;
 }
+
+function hyperlinkFreezeFixture(count, options = {}) {
+  const values = Array.from({ length: count }, (_, index) => ['+79990000001', '=IMPORTXML("https://example.invalid","//*")', '000123', "'literal"][index % 4]);
+  const snapshots = values.map((value, index) => ({ row: index + 2, column: 2, value, link: 'https://example.test/contact/' + index }));
+  const f = fixture({ ...options, formulaSnapshots: snapshots });
+  if (options.v2) workbookReader(f);
+  const original = f.books.get(ORIGINAL).tabs[0];
+  original.state.data.splice(1, Infinity, ...values.map((value, index) => ['Company_' + index, value, '', '']));
+  snapshots.forEach(formula => { original.state.formulaMap[formula.row + ':2'] = '=HYPERLINK(' + JSON.stringify(formula.link) + ',' + JSON.stringify(formula.value) + ')'; });
+  if (options.typed) {
+    const typed = [new Date('2026-11-01T00:00:00.000Z'), 42, true];
+    original.state.data[0].push('Дата', 'Количество', 'Флаг'); original.state.data[1].push(...typed);
+    typed.forEach((value, index) => { snapshots.push({ row: 2, column: index + 5, value }); original.state.formulaMap['2:' + (index + 5)] = ['=DATE(2026,11,1)', '=6*7', '=TRUE()'][index]; });
+  }
+  original.state.styleMap['2:2'] = { backgroundColor: { red: 1 }, textFormat: { bold: true, fontSize: 14 } };
+  const draft = f.stage(), shown = f.preview(draft); f.confirm(draft, shown);
+  while (f.drafts()[0].phase !== 'freeze') f.next(draft);
+  const output = f.books.get(f.drafts()[0].outputId), frozen = output.tabs.find(sheet => sheet.getSheetId() === (options.v2 ? f.drafts()[0].copiedSheetIds[0] : f.drafts()[0].originalSheetId));
+  return { ...f, draft, shown, output, frozen, snapshots };
+}
+
+test('V1 and V2 freeze more than sixty linked formula captions in one literal Sheets batch per bounded step', () => {
+  for (const v2 of [false, true]) {
+    const f = hyperlinkFreezeFixture(100, { v2, rawQuota: 1 });
+    f.next(f.draft);
+    assert.equal(f.calls.rawBatches.length, 1, '100 hyperlinks consume one Advanced Sheets write, not 100 writes');
+    const updates = f.calls.rawBatches[0].requests.map(request => request.updateCells);
+    assert.equal(updates.length, 1); assert.equal(updates[0].rows.length, 100);
+    assert.equal(updates[0].fields, 'userEnteredValue,textFormatRuns,userEnteredFormat.textFormat.link');
+    f.snapshots.forEach(formula => {
+      assert.equal(f.frozen.state.data[formula.row - 1][1], formula.value);
+      assert.equal(f.frozen.state.formulaMap[formula.row + ':2'], undefined);
+      assert.equal(f.frozen.state.linkMap[formula.row + ':2'], formula.link);
+    });
+    assert.deepEqual(f.frozen.state.styleMap['2:2'], { backgroundColor: { red: 1 }, textFormat: { bold: true, fontSize: 14 } });
+  }
+});
+
+test('a lost freeze batch acknowledgement preserves the cursor and reuses frozen values and links without another write', () => {
+  const f = hyperlinkFreezeFixture(100, { v2: true }); f.options.rawBatchFault = 'after';
+  assert.throws(() => f.next(f.draft), /SHEETS_RAW_UNCERTAIN/);
+  assert.equal(f.drafts()[0].freezeCursor, 0); assert.equal(f.calls.rawBatches.length, 1);
+  assert.equal(f.frozen.state.linkMap['2:2'], f.snapshots[0].link);
+  f.next(f.draft);
+  assert.equal(f.calls.rawBatches.length, 1, 'the already frozen prefix, including its links, is not replayed');
+  assert.equal(f.drafts()[0].freezeSourceIndex, 1);
+  assert.equal(Object.keys(f.frozen.state.formulaMap).length, 0);
+});
+
+test('batched string freezing keeps Date, number and boolean snapshots typed in V1 and V2', () => {
+  for (const v2 of [false, true]) {
+    const f = hyperlinkFreezeFixture(100, { v2, typed: true }); f.next(f.draft);
+    const row = f.frozen.state.data[1];
+    assert.equal(Object.prototype.toString.call(row[4]), '[object Date]'); assert.equal(row[4].toISOString(), '2026-11-01T00:00:00.000Z');
+    assert.equal(row[5], 42); assert.equal(typeof row[5], 'number'); assert.equal(row[6], true); assert.equal(typeof row[6], 'boolean');
+    assert.equal(f.calls.rawBatches.length, 1); assert.equal(f.calls.rawBatches[0].requests[0].updateCells.rows.length, 100);
+    assert.equal(Object.keys(f.frozen.state.formulaMap).length, 0);
+  }
+});
+
+test('formula freeze steps retain the 150-cell cursor boundary while batching each remaining string step', () => {
+  const f = hyperlinkFreezeFixture(160, { v2: true }); f.next(f.draft);
+  assert.equal(f.drafts()[0].freezeCursor, 150); assert.equal(f.drafts()[0].freezeSourceIndex, 0);
+  assert.equal(f.calls.rawBatches.length, 1); assert.equal(f.calls.rawBatches[0].requests[0].updateCells.rows.length, 150);
+  f.next(f.draft);
+  assert.equal(f.calls.rawBatches.length, 2); assert.equal(f.calls.rawBatches[1].requests[0].updateCells.rows.length, 10);
+  assert.equal(f.drafts()[0].freezeSourceIndex, 1); assert.equal(f.drafts()[0].freezeCursor, 0);
+});
+
+test('a partial unknown freeze result retries only remaining formulas and repairs a missing planned hyperlink', () => {
+  const f = hyperlinkFreezeFixture(100, { v2: true }); f.options.rawBatchFault = 'partial'; f.options.rawPartialCells = 70;
+  assert.throws(() => f.next(f.draft), /SHEETS_RAW_UNCERTAIN/);
+  assert.equal(f.drafts()[0].freezeCursor, 0);
+  delete f.frozen.state.linkMap['2:2'];
+  f.next(f.draft);
+  assert.equal(f.calls.rawBatches.length, 2);
+  const retried = f.calls.rawBatches[1].requests.flatMap(request => request.updateCells.rows);
+  assert.equal(retried.length, 31, 'thirty formulas plus one caption whose planned link needs restoration');
+  assert.equal(f.frozen.state.linkMap['2:2'], f.snapshots[0].link);
+  f.snapshots.forEach(formula => assert.equal(f.frozen.state.linkMap[formula.row + ':2'], formula.link));
+  assert.equal(Object.keys(f.frozen.state.formulaMap).length, 0);
+  assert.equal(f.drafts()[0].freezeSourceIndex, 1);
+});
+
+test('a freeze retry never replaces a changed literal with its old snapshot', () => {
+  const f = hyperlinkFreezeFixture(100, { v2: true }); f.options.rawBatchFault = 'after';
+  assert.throws(() => f.next(f.draft), /SHEETS_RAW_UNCERTAIN/);
+  f.frozen.state.data[50][1] = 'Changed manually after unknown acknowledgement';
+  assert.throws(() => f.next(f.draft), /PREVIEW_CHANGED/);
+  assert.equal(f.calls.rawBatches.length, 1); assert.equal(f.drafts()[0].freezeCursor, 0);
+});
 
 test('V2 deduplicates contacts across all leaves while selected leaf changes only the preview', () => {
   const f = workbookReader(fixture()), originals = f.books.get(ORIGINAL).tabs;

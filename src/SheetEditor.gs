@@ -279,15 +279,49 @@ function sheetWriteRawStrings_(fileId, sheetId, row, column, values, mask, links
     }
     return { updateCells: { range: { sheetId: sheetId, startRowIndex: row - 1 + group.row, endRowIndex: row - 1 + group.row + group.height, startColumnIndex: column - 1 + group.column, endColumnIndex: column - 1 + group.column + group.width }, rows: rows, fields: 'userEnteredValue,textFormatRuns,userEnteredFormat.textFormat.link' } };
   });
+  return sheetRawBatchWrite_(fileId, requests);
+}
+
+/** Sparse formula snapshots stay literal without one Sheets API call per cell. */
+function sheetWriteRawStringCells_(fileId, sheetId, cells, guard) {
+  authorize_(); id_(fileId); gridSheetId_(sheetId);
+  if (!Array.isArray(cells) || cells.length > 1000 || guard !== undefined && typeof guard !== 'function') fail_('INVALID_REQUEST', 'Некорректный список текстовых ячеек.');
+  var characters = 0, seen = Object.create(null), sorted = cells.slice();
+  sorted.forEach(function (cell) {
+    if (!cell || typeof cell !== 'object') fail_('INVALID_REQUEST', 'Некорректная текстовая ячейка.');
+    gridInteger_(cell.row, 1, GRID_EDITOR_LIMITS.gridCells); gridInteger_(cell.column, 1, 18278);
+    if (typeof cell.value !== 'string' || cell.value.length > 50000 || /\u0000/.test(cell.value)) fail_('INVALID_REQUEST', 'Недопустимое текстовое значение.');
+    characters += cell.value.length; if (characters > 5000000) fail_('GRID_LIMIT', 'В текстовых ячейках слишком много данных.');
+    var link = cell.link === undefined ? '' : cell.link;
+    if (typeof link !== 'string' || link.length > 4000 || /[\u0000-\u001f]/.test(link) || link && !/^(?:https?:\/\/|mailto:|tel:)/i.test(link)) fail_('INVALID_REQUEST', 'Недопустимая ссылка ячейки.');
+    var key = cell.row + ':' + cell.column; if (seen[key]) fail_('INVALID_REQUEST', 'Текстовая ячейка указана повторно.'); seen[key] = true;
+  });
+  sorted.sort(function (a, b) { return a.column - b.column || a.row - b.row; });
+  var requests = [];
+  sorted.forEach(function (source) {
+    var cell = { userEnteredValue: { stringValue: source.value }, textFormatRuns: [], userEnteredFormat: { textFormat: {} } };
+    if (source.link && source.value) cell.textFormatRuns = [{ startIndex: 0, format: { link: { uri: source.link } } }];
+    var last = requests[requests.length - 1], previous = last && last.updateCells;
+    if (previous && previous.range.startColumnIndex === source.column - 1 && previous.range.endRowIndex === source.row - 1) { previous.range.endRowIndex++; previous.rows.push({ values: [cell] }); }
+    else requests.push({ updateCells: { range: { sheetId: sheetId, startRowIndex: source.row - 1, endRowIndex: source.row, startColumnIndex: source.column - 1, endColumnIndex: source.column }, rows: [{ values: [cell] }], fields: 'userEnteredValue,textFormatRuns,userEnteredFormat.textFormat.link' } });
+  });
+  return sheetRawBatchWrite_(fileId, requests, guard);
+}
+
+function sheetRawBatchWrite_(fileId, requests, guard) {
+  if (!requests.length) return { spreadsheetId: fileId, requests: 0 };
+  if (guard) guard();
   // Make SDK-created sheets/grid sizes visible and prevent queued SDK writes
   // from overwriting the subsequent explicit Sheets API values.
   SpreadsheetApp.flush(); authorize_();
+  if (guard) guard();
   if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets || typeof Sheets.Spreadsheets.batchUpdate !== 'function') sheetRawFailure_('ADVANCED_SERVICE_UNAVAILABLE');
   var result;
   try {
     result = Sheets.Spreadsheets.batchUpdate({ requests: requests }, fileId);
   } catch (error) { sheetRawFailure_(sheetRawServiceReason_(error)); }
   if (!result || result.spreadsheetId !== fileId || !Array.isArray(result.replies) || result.replies.length !== requests.length) sheetRawFailure_('INCOMPLETE_ACKNOWLEDGEMENT');
+  if (guard) guard();
   return { spreadsheetId: fileId, requests: requests.length };
 }
 
