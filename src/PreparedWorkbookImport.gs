@@ -4,7 +4,12 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
   for (var attempt = 0; attempt < 2; attempt++) {
     var before = attempt ? preparedDraftFile_(context, draft) : file;
     var options = preparedWorkbookSourceOptions_(context, draft);
-    options.guard = function () { preparedDraftFile_(context, draft); };
+    // This is a read transaction over one fixed, app-owned staging workbook.
+    // Full Drive ancestry is checked before and after it, before any model can
+    // escape into a preview or plan. During bounded reads, revoke a changed
+    // access key, root or lease immediately without repeating the same remote
+    // original/folder ancestry once for every sheet and API boundary.
+    options.guard = function () { preparedWorkbookReadGuard_(context, draft); };
     var model = preparedDataReadWorkbook_(SpreadsheetApp.openById(file.id), file.id, draft.section, options);
     // Historical checks, exclusions and mailing marks stay attached to their
     // canonical contacts before the immutable output plan is persisted.
@@ -13,6 +18,12 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
     if (!beforeVersion || !afterVersion || beforeVersion === afterVersion) return { model: model, version: afterVersion };
   }
   fail_('PREVIEW_CHANGED', 'Черновик продолжает изменяться во время чтения. Пересчитайте предпросмотр.');
+}
+
+function preparedWorkbookReadGuard_(context, draft) {
+  var current = authorize_();
+  if (current.rootId !== context.rootId || current.rootId !== draft.rootId) fail_('SOURCE_CHANGED', 'Корневая папка изменилась.');
+  preparedAssertLease_(current, draft);
 }
 
 function preparedWorkbookSourceOptions_(context, draft) {
