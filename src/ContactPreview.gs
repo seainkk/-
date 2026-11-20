@@ -140,7 +140,10 @@ function contactPreviewEmailText_(value) {
   var text = String(value || '');
   // Explicit URLs are unambiguous. Do not ban slash/apostrophe/plus characters
   // from legitimate local parts such as sales/department@example.test.
-  text = text.replace(/(?:[a-z][a-z0-9+.-]*:\/\/|\/\/(?=(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[:/?#]|$)|(?:\d{1,3}\.){3}\d{1,3}(?:[:/?#]|$))|www\.(?=(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[:/?#]|$)))[^\s<>"()[\],;]+/gi, ' ');
+  text = text.replace(/(?:[a-z][a-z0-9+.-]*:\/\/|\/\/(?=(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[:/?#]|$)|(?:\d{1,3}\.){3}\d{1,3}(?:[:/?#]|$)))[^\s<>"()[\],;]+/gi, ' ');
+  // "www." is a URL only at a token boundary. It may legitimately occur
+  // inside an email domain, including person@sub.www.example.test.
+  text = text.replace(/(^|[\s,;<>"'()[\]:=])www\.(?=(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[:/?#]|$))[^\s<>"()[\],;]+/gi, '$1 ');
   // Recognize scheme-less social profile paths as URLs, including dotted
   // handles, without treating arbitrary dotted/slashed email local parts so.
   return text.replace(/(?:^|[\s,;<>"()[\]:=])(?:[a-z0-9-]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|tiktok\.com|twitter\.com|x\.com|facebook\.com|vk\.com|ok\.ru|t\.me|telegram\.me|telegram\.dog)\/[^\s<>"()[\],;]+/gi, ' ');

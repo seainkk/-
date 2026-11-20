@@ -284,11 +284,6 @@ function pvAdvance_(context, fileId, intent) {
   if (!settings.key || !settings.enabled) return pvPublic_(scope.context, pvLedger_(scope.context, fileId, false));
   var initial = pvLedger_(scope.context, fileId, false);
   if (!intent.payJobId && !pvAutomaticHint_(initial, settings).canAutoAdvance && !(intent.manualRefresh && initial && initial.jobs.some(function (job) { return !!job.orderId && !pvJobFinished_(job.state); }))) return pvPublic_(scope.context, initial);
-  var connection = pvConnection_(scope.context);
-  if (!connection || connection.keyHash !== digest_(settings.key)) {
-    pvProbe_(scope.context, settings);
-    return pvPublic_(scope.context, pvLedger_(scope.context, fileId, false));
-  }
   var claim = locked_(function () {
     var fresh = gridFile_(fileId, true, context.rootId), state = pvLedger_(fresh.context, fileId, false);
     if (!state) return { state: null };
@@ -325,6 +320,12 @@ function pvAdvance_(context, fileId, intent) {
         job.state = 'waiting_shared'; job.message = 'Контакты уже входят в другую проверку. Результат будет использован без повторной оплаты.'; pvSave_(fresh.context, state); return { state: state };
       }
       job.contacts = missing;
+    }
+    // Cached applications and shared-result reconciliation are local work;
+    // only a selected provider operation may require a connection probe.
+    var connection = pvConnection_(fresh.context);
+    if (!connection || connection.keyHash !== credentialHash) { pvSave_(fresh.context, state); return { state: state, probe: true }; }
+    if (action === 'create') {
       missing.forEach(function (contact) { pvCacheReserve_(cache, cacheMap, contact.key, job.kind, { fileId: state.fileId, jobId: job.jobId, keyHash: credentialHash, at: Date.now() }); });
       pvCacheFlush_(fresh.context, cache);
     }
@@ -337,6 +338,11 @@ function pvAdvance_(context, fileId, intent) {
     pvSave_(fresh.context, state);
     return { state: state, job: JSON.parse(JSON.stringify(job)), token: token, action: action, context: fresh.context, requestedPay: !!intent.payJobId };
   });
+  if (claim.probe) {
+    var probeScope = gridFile_(fileId, true, context.rootId), probeSettings = pvSettings_(probeScope.context);
+    if (probeSettings.enabled && probeSettings.key && digest_(probeSettings.key) === digest_(settings.key)) pvProbe_(probeScope.context, probeSettings);
+    return pvPublic_(probeScope.context, pvLedger_(probeScope.context, fileId, false));
+  }
   if (!claim.job) return pvPublic_(scope.context, claim.state);
   var response, failure = null;
   try {

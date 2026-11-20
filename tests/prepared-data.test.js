@@ -555,3 +555,16 @@ test('explicit per-leaf section wins over names and ambiguous names keep the reg
   assert.equal(section('Новые данные', 'companies'), 'companies'); assert.equal(section('Новые данные', 'lpr'), 'lpr');
   assert.throws(() => f.context.preparedDataSection_('ЛПР', 'companies', { sectionExplicit: 'true' }), /INVALID_REQUEST/);
 });
+
+test('WWW-domain emails survive selected-source extraction and scalar segment re-parsing without accepting profile URLs', () => {
+  const addresses = ['person@www.example.test', 'person@sub.www.example.test', "o'brien+tag@www.example.test", 'sales/department@www.example.test', 'почта@www.пример.рф'];
+  for (const cell of [addresses[0], addresses.join('; ') + '; www.example.test/@not.email; instagram.com/@not.email']) {
+    const f = fixture([['Company_ID', 'Компания', 'Email'], ['A', 'Компания', cell]]), model = f.result(), expected = cell === addresses[0] ? addresses.slice(0, 1) : addresses;
+    assert.equal(model.counts.emails, expected.length);
+    assert.deepEqual(model.records[0].general.emails.slice().sort(), expected.slice().sort());
+    vm.runInContext(readFileSync(new URL('../src/SegmentRecords.gs', import.meta.url), 'utf8'), f.context, { filename: 'SegmentRecords.gs' });
+    const company = f.context.segmentRecordsCompany_(model.records[0]);
+    assert.deepEqual(plain(f.context.segmentRecordsList_(company.emails, 'email')).sort(), expected.slice().sort());
+    for (const email of expected) assert.deepEqual(plain(f.context.segmentRecordsList_([email], 'email')), [email]);
+  }
+});

@@ -245,6 +245,33 @@ test('background validation continues cached result applications even with no un
  const rows=[[...EH,'Валидация'],...Array.from({length:1005},()=>['a@example.test','Company','','','']),['a@example.test','Company','','','Валиден']];const f=fixture({emailRows:rows});f.configure();f.c.getPromouserBalance_();f.queue();assert.equal(f.state().jobs.length,0);assert.equal(f.ledger().pendingApplications,5);assert.equal(f.target().at(1006,f.col('Валидация')).value,'');const calls=f.calls.fetch.length;f.c.processWorkbookValidation_(f.context,A);assert.equal(f.target().at(1006,f.col('Валидация')).value,'Валиден');assert.equal(f.ledger().pendingApplications,0);assert.equal(f.calls.fetch.length,calls);
 });
 
+test('forced workbook processing drains several cached email and phone chunks without a provider connection or any HTTP',()=>{
+ const count=1105,phone=index=>'+7999000'+String(index).padStart(4,'0');
+ const f=fixture({emailRows:[[...EH,'Рассылка'],...Array.from({length:count},(_,i)=>['known'+i+'@example.test','Company','','','Keep campaign']),['new@example.test','New','','','Keep new']],phoneRows:[PH,...Array.from({length:count},(_,i)=>[phone(i+1),'Company','','','','','Телефон']),[phone(9999),'New','','','','','Телефон']],transport:()=>{throw Error('Local cache work must never probe Promouser');}});
+ f.configure({autoPayLimitUsd:5});f.c.locked_(()=>{const cache=f.c.pvCache_(f.context,true),map=f.c.pvCacheRead_(cache);for(let i=0;i<count;i++){f.c.pvCachePut_(f.context,cache,map,f.c.pvKey_('email','known'+i+'@example.test'),'email',{status:i%2?'Невалиден':'Валиден',raw:i%2?'invalid':'valid',checkedAt:'2025-01-01',provider:'Known provider'});f.c.pvCachePut_(f.context,cache,map,f.c.pvKey_('telegram',phone(i+1)),'telegram',{status:'Telegram: активен',raw:'known',checkedAt:'2025-01-01',idTg:String(i+1),days:1,eligible:true});}f.c.pvCacheFlush_(f.context,cache);});
+ f.queue();assert.ok(f.ledger().pendingApplications>1000);assert.equal(f.properties.has('PROMOUSER_CONNECTION'),false);
+ let result=f.state(),steps=0;while(result.canAutoAdvance&&steps<5){result=f.c.processWorkbookValidation_(f.context,A,{forceQueue:true});steps++;assert.equal(f.calls.fetch.length,0,'each cached chunk stays entirely local');}
+ assert.equal(steps,2);assert.equal(f.ledger().pendingApplications,0);assert.equal(result.canAutoAdvance,false);assert.equal(result.state,'pending');assert.equal(result.manualStartRequired,true);assert.deepEqual(plain(result.pendingCounts),{email:1,telegram:1});assert.equal(f.properties.has('PROMOUSER_CONNECTION'),false);
+ assert.equal(f.target().at(count+1,f.col('Валидация')).value,'Валиден');assert.equal(f.target(A,'Телефоны').at(count+1,f.col('Валидация',A,'Телефоны')).value,'Telegram: активен');assert.equal(f.target().at(10,5).value,'Keep campaign');assert.ok(f.ledger().jobs.every(job=>job.state==='queued'&&job.manualStartApproved===false&&!job.orderId));
+});
+
+test('an approved eligible provider job still probes its missing connection outside the lock before submission',()=>{
+ const f=fixture();f.configure();f.queue();f.start();assert.equal(f.properties.has('PROMOUSER_CONNECTION'),false);
+ f.c.processWorkbookValidation_(f.context,A,{forceQueue:true});assert.deepEqual(f.calls.fetch.map(call=>call.url),['https://promouser.com/api/balance']);assert.equal(f.state().jobs[0].state,'queued');
+ f.c.processWorkbookValidation_(f.context,A,{forceQueue:true});assert.equal(f.calls.fetch.filter(call=>call.url.endsWith('/order')).length,1);assert.equal(f.state().jobs[0].state,'awaiting_quote');
+});
+
+test('shared completed cache results reconcile without probing a missing provider connection',()=>{
+ const f=fixture({otherEmailRows:[EH,['a@example.test','B','','']]});f.configure();f.queue(A);f.queue(B);f.start(A);f.start(B);f.advance(A);f.advance(A);f.advance(B);assert.equal(f.state(B).jobs[0].state,'waiting_shared');
+ f.c.locked_(()=>{const cache=f.c.pvCache_(f.context,true),map=f.c.pvCacheRead_(cache);f.c.pvCachePut_(f.context,cache,map,f.c.pvKey_('email','a@example.test'),'email',{status:'Валиден',raw:'valid',checkedAt:'2025'});f.c.pvCacheFlush_(f.context,cache);});f.properties.delete('PROMOUSER_CONNECTION');const before=f.calls.fetch.length;
+ const result=f.c.processWorkbookValidation_(f.context,B,{forceQueue:true});assert.equal(result.jobs[0].state,'complete_shared');assert.equal(f.target(B).at(2,f.col('Валидация',B)).value,'Валиден');assert.equal(f.calls.fetch.length,before);assert.equal(f.properties.has('PROMOUSER_CONNECTION'),false);
+});
+
+test('an active workbook lease prevents connection probes until its approved provider job can be claimed',()=>{
+ const f=fixture();f.configure();f.queue();f.start();const state=f.ledger();state.lease={token:'another-worker',until:f.now()+120000};f.writeLedger(state);
+ f.advance();assert.equal(f.calls.fetch.length,0);assert.equal(f.ledger().lease.token,'another-worker');assert.equal(f.state().jobs[0].state,'queued');f.tick(120001);f.advance();assert.equal(f.calls.fetch.length,1);assert.equal(f.calls.fetch[0].url,'https://promouser.com/api/balance');
+});
+
 test('new email and phone queues require manual preview and start even with the five-dollar limit',()=>{
  const f=fixture({phoneRows:[PH,['+79990000001','A','','','','','Телефон']]});f.configure({autoPayLimitUsd:5});f.queue();
  assert.deepEqual(plain(f.state().pendingCounts),{email:1,telegram:1});assert.equal(f.state().manualStartRequired,true);assert.equal(f.state().canAutoAdvance,false);
