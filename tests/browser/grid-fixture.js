@@ -22,7 +22,18 @@
   function validationDto(){return {configured:state.providerSettings.configured,enabled:state.providerSettings.enabled,state:state.validationState||'complete',canAutoAdvance:state.validationAutoAdvance,nextActionAt:state.validationNextActionAt,counts:{queued:0,processing:0,checked:2,review:0},jobs:state.validationJobs||[],warnings:[]};}
   function execute(method, payload) {
     const next = state.failures[method]?.shift(); if (next) throw new Error('[' + next + '] Проверочная ошибка.');
-    if (method === 'getContactWorkspace') return {enrolled:true,canSync:true,targets:{emailSheetId:1,phoneSheetId:2},sourceSheetIds:state.contactsEnabled?[0]:[],role:'registry'};
+    if (method === 'getContactWorkspace') {
+      const workspace = {enrolled:true,canSync:true,targets:{emailSheetId:1,phoneSheetId:2},sourceSheetIds:state.contactsEnabled?[0]:[],role:'registry'};
+      if (payload.prepareMailingStatus === true && state.mailingStatusPending === true) {
+        const email = find(1), column = ++email.columnCount;
+        email.usedColumns = column;
+        gridServerEdit(email.id, 1, column, 'Статус рассылки');
+        gridServerEdit(email.id, 2, column, 'новый');
+        state.mailingStatusPending = false;
+        workspace.mailingStatusChanged = true;
+      }
+      return workspace;
+    }
     if (method === 'syncWorkbookContacts' || method === 'continueContactSync') {
       if(method==='syncWorkbookContacts'&&state.syncProcessing){state.syncProcessing=false;state.runningContactRequest='existing-contact-request';return {state:'processing',jobId:'running-contacts',requestId:state.runningContactRequest,progress:{label:'Добавляем новые контакты'}};}
       if(method==='continueContactSync'&&state.runningContactRequest&&payload.requestId!==state.runningContactRequest)throw new Error('[REQUEST_REUSED] Нужен UUID активного задания.');
@@ -42,7 +53,15 @@
     if (method === 'getContactAutomationState') return {installed:false};
     if (method === 'enableContactAutomation') return {installed:true};
     if (method === 'disableContactAutomation') return {installed:false};
-    if (method === 'getGridWorkbook') return { id: payload.id, name: 'Кухни — рабочая база', canEdit: state.canEdit, sheets: state.sheets.map(({ cells, ...value }) => ({ ...value })), ...(payload.includeInitialRange===true&&!state.omitInitialRange?{initialRange:range({id:payload.id,sheetId:state.sheets[0].id,row:1,column:1,rowCount:Math.min(80,state.sheets[0].rowCount),columnCount:Math.min(50,state.sheets[0].columnCount)})}:{}) };
+    if (method === 'getGridWorkbook') {
+      const book = { id: payload.id, name: 'Кухни — рабочая база', canEdit: state.canEdit, sheets: state.sheets.map(({ cells, ...value }) => ({ ...value })) };
+      if (state.mailingStatusPending === true) book.needsMailingStatus = true;
+      if (payload.includeInitialRange === true && !state.omitInitialRange) {
+        const first = state.sheets[0];
+        book.initialRange = range({id:payload.id,sheetId:first.id,row:1,column:1,rowCount:Math.min(80,first.rowCount),columnCount:Math.min(50,first.columnCount)});
+      }
+      return book;
+    }
     if (method === 'getGridRange') return range(payload);
     if (method === 'saveGridRange') {
       const previous = state.receipts.get(payload.requestId);

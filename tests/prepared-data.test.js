@@ -13,7 +13,7 @@ function fixture(rows, options = {}) {
   const calls = { reads: [], guards: 0, writes: 0 };
   const width = options.width ?? Math.max(0, ...rows.map(row => row.length));
   const context = vm.createContext({ console });
-  vm.runInContext(['ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs'].map(name => readFileSync(new URL('../src/' + name, import.meta.url), 'utf8')).join('\n'), context);
+  vm.runInContext(['Config.gs', 'ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs'].map(name => readFileSync(new URL('../src/' + name, import.meta.url), 'utf8')).join('\n'), context);
   context.digest_ = value => crypto.createHash('sha256').update(value).digest('base64url');
   context.fail_ = (code, text) => { throw new Error('[' + code + '] ' + text); };
   if (options.limits) context.PREPARED_DATA_LIMITS = { ...context.PREPARED_DATA_LIMITS, ...options.limits };
@@ -328,7 +328,7 @@ test('strong contacts in unfamiliar columns and arbitrary text are recognized wi
   assert.equal(r.canConfirm, true); assert.equal(r.counts.emails, 1); assert.equal(r.counts.phones, 1); assert.equal(r.counts.telegrams, 1);
   assert.equal(r.emailRows[0][0], 'sales@example.com');
   assert.equal(r.phoneRows.find(row => row[0])[0], '+79991234567');
-  assert.deepEqual(r.phoneRows.find(row => row[5] === '@sales_team').slice(5), ['@sales_team', 'Telegram']);
+  assert.deepEqual(r.phoneRows.find(row => row[5] === '@sales_team').slice(5), ['@sales_team', 'Telegram', 'новый']);
   assert.equal(r.records[0].source.column, undefined); assert.equal(r.records[0].provenance.emails['sales@example.com'][0].column, 3);
 });
 

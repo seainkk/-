@@ -533,7 +533,10 @@ function preparedEnsureSheets_(book, draft, plan) {
       if (!sheet) sheet = book.insertSheet(name);
       draft[kind + 'SheetId'] = sheet.getSheetId();
     }
-    preparedWriteBlock_(sheet, 1, [plan[kind].headers], plan[kind].headers.length);
+    var headers = plan[kind].headers;
+    preparedWriteBlock_(sheet, 1, [headers], headers.length);
+    var statusColumn = headers.indexOf(CONTACT_MAILING_STATUS.header);
+    if (statusColumn >= 0 && sheet.getMaxRows() > 1) contactMailingStatusDropdown_(sheet.getRange(2, statusColumn + 1, sheet.getMaxRows() - 1, 1), false);
     sheet.setFrozenRows(1);
   });
   if (book.getSheets().length !== 3) fail_('PREVIEW_CHANGED', 'В результате появились дополнительные листы. Автоматическая подготовка остановлена.');

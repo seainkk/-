@@ -13,6 +13,8 @@
   let dashboard=null,dashboardLoading=false,dashboardAnalysisLoading=false,dashboardAnalysisTimer=null,dashboardRequest=0,dashboardError=null,lastDashboardAttempt=0,lastDashboardLoaded=0,renderedDashboardKey=null;
   let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0,lastMailingsLoaded=0;
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
+  const segmentCategories={partners:'Партнерка',clients:'Клиенты'};
+  let segmentSection='clients';
   const sourceDrafts=new Map(),sourceMessages=new Map(),importRequests=new Map(),segmentRequests=new Map();
   const pendingSyncViews=new Set();let syncTimer=null;
   let contactPreview=null,contactPreviewEpoch=0,segmentImportDestination=null,segmentReturnPending=null;
@@ -286,6 +288,7 @@
   function channelStatus(value){const states={active:{id:'active',label:'В работе',mark:'✓'},inactive:{id:'inactive',label:'Не запущен',mark:'−'}};return Object.prototype.hasOwnProperty.call(states,value)?states[value]:{id:'unknown',label:'Статус не определён',mark:'—'};}
   function segmentStatus(value){const labels={in_work:'В работе',preparation:'Подготовка',no_contacts:'Нет контактов'};return Object.prototype.hasOwnProperty.call(labels,value)?{id:value,label:labels[value]}:{id:'unknown',label:'Статус ещё не определён'};}
   function segmentContentKey(data){return JSON.stringify({state:data?.state||'unavailable',source:data?.source||null,items:data?.items||[]});}
+  function segmentCategory(item){return item?.category==='partners'?'partners':'clients';}
   function normalizeContents(value){return Array.isArray(value)?['companies','lpr'].filter((kind)=>value.includes(kind)):[];}
   function contentsLabel(value){const kinds=normalizeContents(value);return value==null?'Недоступно':kinds.length===2?'Компании и ЛПР':kinds[0]==='companies'?'Компании':kinds[0]==='lpr'?'ЛПР':'Не указано';}
   function contentsCriterion(value){const kinds=normalizeContents(value);return kinds.length===2?'Листы с компаниями и ЛПР распределяются отдельно при добавлении в сегмент.':kinds[0]==='companies'?'1 строка = 1 компания.':kinds[0]==='lpr'?'1 строка = 1 человек (контакты одного человека).':'Укажите наполнение базы.';}
@@ -330,8 +333,8 @@
   function gridIsOpen(){return window.RegistryGrid?.isOpen?.()===true;}
   function workspaceRpc(method,payload,canDispatch){
     const epoch=accessEpoch;
-    if(isReadRpc(method))return readRpc(method,payload,canDispatch);
-    const run=async()=>{while(workspaceMutationBlocked()){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');await new Promise(resolve=>setTimeout(resolve,25));}if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');return rpc(method,payload);};
+    if(isReadRpc(method)&&!(method==='getContactWorkspace'&&payload?.prepareMailingStatus===true))return readRpc(method,payload,canDispatch);
+    const run=async()=>{while(workspaceMutationBlocked()){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');await new Promise(resolve=>setTimeout(resolve,25));}if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');if(canDispatch&&!canDispatch())return null;return rpc(method,payload);};
     const task=workspaceRpcQueue.catch(()=>{}).then(run);workspaceRpcQueue=task.catch(()=>{});return task;
   }
   function openGridWorkbook(id){
@@ -475,10 +478,13 @@
   function renderSegmentsHealth(){const node=$('br-segments-health');node.classList.toggle('br-error',!!dashboardError);node.textContent=dashboardError?'Не удалось обновить сегменты. '+dashboardError:dashboardLoading?'Обновляем сегменты…':dashboard?.analysisPending===true?'Список готов. Сведения о контактах обновляются в фоне.':formIsOpen()?'Автообновление приостановлено на время редактирования.':'Данные обновляются каждую минуту, пока раздел открыт.';}
   function renderSegments(){
     $('br-segments-view').hidden=activeView!=='segments';if(activeView!=='segments')return;renderSegmentsHealth();
-    const ready=dashboard?.state==='ready',items=ready&&Array.isArray(dashboard.items)?dashboard.items:[];$('br-segments-count').textContent=ready?'Сегментов: '+items.length:dashboard?'Список недоступен':'Загружаем сегменты…';
-    const key=segmentContentKey(dashboard);if(key===renderedDashboardKey)return;renderedDashboardKey=key;
+    for(const category of Object.keys(segmentCategories))$('br-segment-category-'+category).setAttribute('aria-pressed',String(category===segmentSection));
+    const ready=dashboard?.state==='ready';
+    const items=ready&&Array.isArray(dashboard.items)?dashboard.items.filter(item=>segmentCategory(item)===segmentSection):[];
+    $('br-segments-count').textContent=ready?'Сегментов: '+items.length:dashboard?'Список недоступен':'Загружаем сегменты…';
+    const key=segmentSection+'|'+segmentContentKey(dashboard);if(key===renderedDashboardKey)return;renderedDashboardKey=key;
     const target=$('br-segments-rows'),focusKey=document.activeElement?.dataset?.segmentFocus,oldY=window.scrollY;target.replaceChildren();$('br-segments-empty').hidden=ready&&items.length>0;
-    const messages={source_missing:['Папка «Аутричи» не найдена','Проверьте привязку папки у администратора.'],source_ambiguous:['Источник сегментов не определён','Нужно уточнить привязку папки «Аутричи».'],source_outside_registry:['Папка «Аутричи» недоступна','Проверьте права доступа и привязку папки.']};const empty=ready?['Пока нет сегментов','Добавьте сегмент — в нём будут отдельные таблицы компаний и ЛПР.']:messages[dashboard?.state]||[dashboardLoading?'Загружаем сегменты…':'Список сегментов недоступен','Нажмите «Обновить», чтобы повторить загрузку.'];$('br-segments-empty-title').textContent=empty[0];$('br-segments-empty-description').textContent=empty[1];
+    const messages={source_missing:['Папка «Аутричи» не найдена','Проверьте привязку папки у администратора.'],source_ambiguous:['Источник сегментов не определён','Нужно уточнить привязку папки «Аутричи».'],source_outside_registry:['Папка «Аутричи» недоступна','Проверьте права доступа и привязку папки.']};const empty=ready?['В этом разделе пока нет сегментов','Нажмите «Добавить сегмент», чтобы создать его в разделе «'+segmentCategories[segmentSection]+'».']:messages[dashboard?.state]||[dashboardLoading?'Загружаем сегменты…':'Список сегментов недоступен','Нажмите «Обновить», чтобы повторить загрузку.'];$('br-segments-empty-title').textContent=empty[0];$('br-segments-empty-description').textContent=empty[1];
     for(const item of items){
       const row=document.createElement('article');row.className='br-segment-row';row.dataset.segment=item.id;
       const head=document.createElement('div');head.className='br-segment-row-head';const name=document.createElement('a');name.href=folderUrl(item.id);name.target='_blank';name.rel='noopener noreferrer';name.className='br-segment-row-name';name.textContent=item.name;name.dataset.segmentFocus=item.id+'/folder';head.append(name);
@@ -494,7 +500,16 @@
     if(!accessReady||viewMutationBlocked()||dashboardLoading||dashboardAnalysisLoading)return;if(options.automatic&&(activeView!=='segments'||document.hidden||formIsOpen()||Date.now()-lastDashboardAttempt<15000))return;
     const epoch=accessEpoch,request=++dashboardRequest,mutation=mutationGeneration,light=!dashboard&&!options.manual&&!options.sync&&!options.fullAnalysis;
     if(options.background)dashboardAnalysisLoading=true;else dashboardLoading=true;lastDashboardAttempt=Date.now();updateControls();renderSegmentsHealth();
-    try{const result=await readRpc('getSegmentsDashboard',light?{includeAnalysis:false}:{},()=>accessReady&&epoch===accessEpoch&&request===dashboardRequest&&(!options.background||activeView==='segments'&&!formIsOpen()&&!viewMutationBlocked()));if(!result||!accessReady||epoch!==accessEpoch||request!==dashboardRequest||mutation!==mutationGeneration)return;dashboard=result;dashboardError=null;lastDashboardLoaded=Date.now();if(activeView==='segments')renderSegments();if(segmentEditor)renderSegmentEditor();}
+    try{
+      const result=await readRpc('getSegmentsDashboard',light?{includeAnalysis:false}:{},()=>accessReady&&epoch===accessEpoch&&request===dashboardRequest&&(!options.background||activeView==='segments'&&!formIsOpen()&&!viewMutationBlocked()));
+      if(!result||!accessReady||epoch!==accessEpoch||request!==dashboardRequest||mutation!==mutationGeneration)return;
+      dashboard=result;dashboardError=null;lastDashboardLoaded=Date.now();
+      if(segmentError?.code==='SEGMENT_CATEGORY_CONFLICT'&&segmentEditor){
+        const item=segmentById(segmentEditor.id);
+        if(item){segmentEditor.category=segmentEditor.baselineCategory=segmentCategory(item);segmentError=null;}
+      }
+      if(activeView==='segments')renderSegments();if(segmentEditor)renderSegmentEditor();
+    }
     catch(error){if(accessReady&&epoch===accessEpoch&&request===dashboardRequest)dashboardError=failure(error).message;}
     finally{if(epoch!==accessEpoch||request!==dashboardRequest)return;dashboardLoading=false;dashboardAnalysisLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();if(dashboard?.analysisPending===true&&activeView==='segments'&&!formIsOpen())scheduleSegmentAnalysis();}
   }
@@ -522,7 +537,19 @@
     $('br-segment-panel').hidden=!segmentEditor;if(!segmentEditor){$('br-segment-normalized-preview').hidden=true;return;}
     $('br-segment-editor-title').textContent=segmentEditor.replenish?'Пополнить базы сегмента':segmentEditor.id?'Изменить сегмент':segmentEditor.fromCatalog?'Добавить базу в сегмент':'Добавить сегмент';
     $('br-segment-target-label').hidden=!segmentEditor.fromCatalog;
-    const target=$('br-segment-target'),selected=segmentEditor.id||'';target.replaceChildren();const fresh=document.createElement('option');fresh.value='';fresh.textContent='Новый сегмент';target.append(fresh);for(const item of dashboard?.items||[]){const option=document.createElement('option');option.value=item.id;option.textContent=item.name;target.append(option);}if(selected&&!segmentById(selected)){const option=document.createElement('option');option.value=selected;option.textContent='Текущий сегмент недоступен';option.disabled=true;target.append(option);}target.value=selected;
+    const target=$('br-segment-target'),selected=segmentEditor.id||'';
+    target.replaceChildren();const fresh=document.createElement('option');fresh.value='';fresh.textContent='Новый сегмент';target.append(fresh);
+    for(const [category,label] of Object.entries(segmentCategories)){
+      const group=document.createElement('optgroup');group.label=label;
+      for(const item of dashboard?.items||[]){
+        if(segmentCategory(item)!==category)continue;
+        const option=document.createElement('option');option.value=item.id;option.textContent=item.name;group.append(option);
+      }
+      if(group.children.length)target.append(group);
+    }
+    if(selected&&!segmentById(selected)){const option=document.createElement('option');option.value=selected;option.textContent='Текущий сегмент недоступен';option.disabled=true;target.append(option);}target.value=selected;
+    $('br-segment-category-label').hidden=!!selected&&segmentEditor.category===segmentEditor.baselineCategory&&(segmentEditor.replenish||segmentEditor.fromCatalog);
+    $('br-segment-category').value=segmentEditor.category;
     renderSegmentSources();renderSegmentError();updateControls();
   }
   function renderSegmentSources(){
@@ -538,7 +565,8 @@
     if(editingBlocked()||importOpen||segmentEditor)return;
     if(options.sourceId){const item=sourceItem(options.sourceId);if(!readySource(item)||sourceDrafts.has(item.id)){notice('Добавлять можно только готовые базы Google Таблиц без несохранённых изменений.','error');return;}}
     const existing=options.segmentId?segmentById(options.segmentId):null;if(options.segmentId&&!existing)return;
-    const epoch=++segmentEditorEpoch;segmentEditor={epoch,id:existing?.id||null,baselineName:existing?.name||'',fromCatalog:options.fromCatalog===true,selected:new Map(),loadingLists:!sourceData||options.fromCatalog===true&&!dashboard,pendingSourceId:options.sourceId||null,readingLists:false,replenish:options.replenish===true,plan:null,job:null};formMode='segment';segmentError=null;$('br-segment-name').value=existing?.name||'';renderSegmentEditor();$('br-segment-name').focus();
+    const epoch=++segmentEditorEpoch,baselineCategory=options.baselineCategory||(existing?segmentCategory(existing):null),category=options.category||baselineCategory||segmentSection;
+    segmentEditor={epoch,id:existing?.id||null,baselineName:existing?.name||'',category,baselineCategory,fromCatalog:options.fromCatalog===true,selected:new Map(),loadingLists:!sourceData||options.fromCatalog===true&&!dashboard,pendingSourceId:options.sourceId||null,readingLists:false,replenish:options.replenish===true,plan:null,job:null};formMode='segment';segmentError=null;$('br-segment-name').value=existing?.name||'';renderSegmentEditor();$('br-segment-name').focus();
     flushPendingView();
   }
   async function loadSegmentEditorLists(){
@@ -607,13 +635,28 @@
         if(!accessReady||segmentEditor!==editor)return;if(result.state!=='complete'){editor.plan=null;editor.job=null;editor.importRequestId=null;throw new Error('[SEGMENT_PREVIEW_CHANGED] Состав данных изменился. Уже записанные строки сохранены. Повторите предпросмотр перед продолжением.');}cacheSegmentResult(result,editor,ids.map(sourceId=>({sourceId})));segmentEditor=null;formMode=null;segmentRequests.clear();renderSegmentEditor();showSegmentResult('Базы сегмента дополнены. Новых компаний: '+Number(result.counts?.companiesAdded||0)+', новых ЛПР: '+Number(result.counts?.peopleAdded||0)+'. Статусы старых контактов сохранены.',false,result.segment);scheduleViewSync();return;
       }
       let segment=segmentById(editor.id);
-      if(!editor.id||name!==editor.baselineName){const payload=editor.id?{id:editor.id,name,loads:[]}:{name,loads:[]},fingerprint=JSON.stringify(payload);let requestId=segmentRequests.get(fingerprint);if(!requestId){requestId=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);segmentRequests.set(fingerprint,requestId);}const result=await rpc(editor.id?'updateSegment':'createSegment',Object.assign(payload,{requestId}));if(!accessReady||segmentEditor!==editor)return;cacheSegmentResult(result,editor,[]);segment=result.segment;editor.id=segment.id;editor.baselineName=name;}
+      const nameChanged=name!==editor.baselineName,categoryChanged=editor.category!==editor.baselineCategory;
+      if(wasNew||nameChanged||categoryChanged){
+        const payload={loads:[]};
+        if(editor.id)payload.id=editor.id;
+        if(wasNew||nameChanged)payload.name=name;
+        if(wasNew||categoryChanged)payload.category=editor.category;
+        if(!wasNew&&categoryChanged)payload.expectedCategory=editor.baselineCategory;
+        const fingerprint=JSON.stringify(payload);let requestId=segmentRequests.get(fingerprint);
+        if(!requestId){requestId=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);segmentRequests.set(fingerprint,requestId);}
+        const result=await rpc(wasNew?'createSegment':'updateSegment',Object.assign(payload,{requestId}));
+        if(!accessReady||segmentEditor!==editor)return;
+        segment=result.segment;
+        if(activeView==='segments'&&(wasNew||categoryChanged))segmentSection=segmentCategory(segment);
+        cacheSegmentResult(result,editor,[]);editor.id=segment.id;editor.baselineName=name;
+        editor.category=editor.baselineCategory=segmentCategory(segment);
+      }
       if(ids.length){editor.plan=await rpc('previewSegmentRecords',{segmentId:editor.id,sourceIds:ids});if(!accessReady||segmentEditor!==editor)return;renderNormalizedSegmentPreview();renderSegmentEditor();}
       else{if(!segment)throw new Error('Сегмент недоступен. Обновите список.');segmentEditor=null;formMode=null;segmentRequests.clear();renderSegmentEditor();showSegmentResult(wasNew?'Сегмент создан.':'Сегмент сохранён.',false,segment);scheduleViewSync();}
     }catch(error){if(segmentEditor===editor){segmentError=failure(error);if(['SEGMENT_PREVIEW_CHANGED','SEGMENT_PREVIEW_EXPIRED','SEGMENT_JOB_MISSING','SEGMENT_JOB_EXPIRED','SEGMENT_PREVIEW_STALE','PLAN_STALE','SOURCE_CHANGED'].includes(segmentError.code)||segmentError.code==='SOURCE_NOT_READY'&&!editor.job){editor.plan=null;editor.job=null;editor.importRequestId=null;}renderSegmentError();}}
     finally{segmentSaving=false;updateControls();if(segmentEditor)renderSegmentSources();flushPendingView();}
   }
-  function uploadForSegment(){if(!segmentEditor||segmentSaving||segmentEditor.plan)return;segmentImportDestination={segmentId:segmentEditor.id||null,name:$('br-segment-name').value.trim(),selected:Array.from(segmentEditor.selected.keys())};segmentEditor=null;segmentError=null;formMode=null;renderSegmentEditor();activeView='sources';importOpen=true;importMode='file';$('br-upload-status').value='ready';$('br-link-status').value='ready';setImportContents('upload',[registrySection]);setImportContents('link',[registrySection]);render();notice('Файл сначала сохранится в реестре. Подтвердите предпросмотр и статус «Готова», затем проверьте загрузку в сегмент.','info');$('br-upload-name').focus();}
+  function uploadForSegment(){if(!segmentEditor||segmentSaving||segmentEditor.plan)return;segmentImportDestination={segmentId:segmentEditor.id||null,name:$('br-segment-name').value.trim(),category:segmentEditor.category,baselineCategory:segmentEditor.baselineCategory,selected:Array.from(segmentEditor.selected.keys())};segmentEditor=null;segmentError=null;formMode=null;renderSegmentEditor();activeView='sources';importOpen=true;importMode='file';$('br-upload-status').value='ready';$('br-link-status').value='ready';setImportContents('upload',[registrySection]);setImportContents('link',[registrySection]);render();notice('Файл сначала сохранится в реестре. Подтвердите предпросмотр и статус «Готова», затем проверьте загрузку в сегмент.','info');$('br-upload-name').focus();}
   function readImportContents(prefix){return ['companies','lpr'].filter((kind)=>$('br-'+prefix+'-'+kind).checked).slice(0,1);}
   function setImportContents(prefix,contents){const chosen=normalizeContents(contents)[0]||registrySection;for(const kind of ['companies','lpr'])$('br-'+prefix+'-'+kind).checked=kind===chosen;}
   function clearPreparedPoll(){if(preparedPollTimer!==null){clearTimeout(preparedPollTimer);preparedPollTimer=null;}}
@@ -733,7 +776,9 @@
     $('br-contact-preview-refresh').disabled=!contactPreview||!!contactPreview.loading||!!contactPreview.queued||editing||importOpen||!!segmentEditor;
     $('br-import-open').disabled=importOpen||editing||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
     $('br-add-segment').disabled=editing||importOpen||!!segmentEditor||dashboard&&dashboard.state!=='ready';
+    for(const category of Object.keys(segmentCategories))$('br-segment-category-'+category).disabled=editing||!!segmentEditor;
     for(const edit of root.querySelectorAll('[data-edit-segment]'))edit.disabled=editing||importOpen||!!segmentEditor;
+    $('br-segment-category').disabled=segmentSaving||segmentRecoveryLocked()||!!segmentEditor?.plan;
     $('br-segment-upload').disabled=waiting||!!segmentEditor?.plan;$('br-segment-close').disabled=segmentSaving;$('br-segment-name').disabled=segmentSaving||segmentRecoveryLocked()||!!segmentEditor?.plan;$('br-segment-target').disabled=waiting||segmentRecoveryLocked()||!!segmentEditor?.plan;$('br-segment-refresh-sources').disabled=waiting||segmentRecoveryLocked();$('br-segment-submit').disabled=waiting||!!segmentEditor?.loadingLists||!!segmentEditor?.plan&&segmentEditor.plan.canConfirm!==true;$('br-segment-submit').textContent=segmentSaving?'Сохраняем…':segmentEditor?.job?'Продолжить тот же запрос':segmentEditor?.plan?'Подтвердить пополнение':segmentEditor?.selected.size?'Показать предпросмотр':segmentRecoveryLocked()?'Повторить запрос':segmentEditor?.id?'Сохранить изменения':'Создать сегмент';$('br-segment-reread').disabled=waiting;
     for(const control of root.querySelectorAll('#br-segment-source-options input,#br-segment-source-options select,#br-segment-source-options button')){if(waiting||segmentRecoveryLocked())control.disabled=true;}
   }
@@ -751,7 +796,7 @@
     if(activeView==='mailings')return refreshMailings(options);
   }
   function flushPendingView(){
-    if(segmentReturnPending&&accessReady&&!requesting()&&!gridIsOpen()&&!segmentEditor&&!preparedImport){const pending=segmentReturnPending;segmentReturnPending=null;activeView='segments';openSegmentEditor({segmentId:pending.segmentId||undefined,replenish:true});if(segmentEditor){if(!pending.segmentId)$('br-segment-name').value=pending.name||'';for(const id of [...pending.selected,pending.sourceId])if(readySource(sourceItem(id)))segmentEditor.selected.set(id,{});renderSegmentEditor();}render();return;}
+    if(segmentReturnPending&&accessReady&&!requesting()&&!gridIsOpen()&&!segmentEditor&&!preparedImport){const pending=segmentReturnPending;segmentReturnPending=null;activeView='segments';openSegmentEditor({segmentId:pending.segmentId||undefined,category:pending.category,baselineCategory:pending.baselineCategory,replenish:true});if(segmentEditor){if(!pending.segmentId)$('br-segment-name').value=pending.name||'';for(const id of [...pending.selected,pending.sourceId])if(readySource(sourceItem(id)))segmentEditor.selected.set(id,{});renderSegmentEditor();}render();return;}
     if(pendingAccessChange){if(networkPending>0||busy)return;pendingAccessChange=false;startSharedAccess();return;}if(requesting())return;if(!accessReady)return;
     if(preparedImport?.continueQueued){advancePreparedBase(true);return;}
     if(preparedImport?.previewQueued&&importOpen&&activeView==='sources'){runPreparedPreview();return;}
@@ -784,9 +829,19 @@
   $('br-view-sources').addEventListener('click',()=>setView('sources'));$('br-view-segments').addEventListener('click',()=>setView('segments'));$('br-view-retarget').addEventListener('click',()=>setView('retarget'));
   $('br-refresh').addEventListener('click',()=>refreshActiveView({manual:true}));
   $('br-mailings-back').addEventListener('click',()=>{setView('segments',{cached:true});setTimeout(()=>{window.scrollTo(0,segmentBackScroll);Array.from(root.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===mailingSegmentId+'/mailings')?.focus({preventScroll:true});},0);});
+  for(const category of Object.keys(segmentCategories))$('br-segment-category-'+category).addEventListener('click',()=>{if(!segmentEditor){segmentSection=category;renderSegments();updateControls();}});
   $('br-add-segment').addEventListener('click',()=>openSegmentEditor());
   $('br-segment-close').addEventListener('click',()=>{if(segmentSaving)return;segmentEditor=null;formMode=null;segmentError=null;segmentEditorEpoch++;renderSegmentEditor();updateControls();flushPendingView();});
-  $('br-segment-target').addEventListener('change',()=>{if(!segmentEditor)return;const item=segmentById($('br-segment-target').value);segmentEditor.id=item?.id||null;segmentEditor.baselineName=item?.name||'';$('br-segment-name').value=item?.name||'';renderSegmentEditor();});
+  $('br-segment-target').addEventListener('change',()=>{
+    if(!segmentEditor)return;
+    if(!segmentEditor.id)segmentEditor.newCategory=segmentEditor.category;
+    const item=segmentById($('br-segment-target').value);
+    segmentEditor.id=item?.id||null;segmentEditor.baselineName=item?.name||'';
+    segmentEditor.baselineCategory=item?segmentCategory(item):null;
+    segmentEditor.category=segmentEditor.baselineCategory||segmentEditor.newCategory||segmentSection;
+    $('br-segment-name').value=item?.name||'';renderSegmentEditor();
+  });
+  $('br-segment-category').addEventListener('change',()=>{if(segmentEditor)segmentEditor.category=$('br-segment-category').value;});
   $('br-segment-refresh-sources').addEventListener('click',()=>refreshSourceBases({forEditor:true,preserveNotice:true}));
   $('br-segment-reread').addEventListener('click',()=>refreshSegments({forEditor:true}));
   $('br-segment-upload').addEventListener('click',uploadForSegment);

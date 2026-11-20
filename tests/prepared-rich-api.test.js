@@ -31,7 +31,7 @@ function fixture(rows,options={}) {
     return{getLinkUrl:()=>method(spec.url||null),getRuns:()=>method(runs.map(run=>({getText:()=>method(run.text),getLinkUrl:()=>method(run.url||null),getStartIndex:()=>method(run.start),getEndIndex:()=>method(run.start+run.text.length)})))};
   }
   const c=vm.createContext({console,Date});
-  vm.runInContext(['ContactPreview.gs','SourceRecords.gs','PreparedData.gs'].map(file=>readFileSync(new URL('../src/'+file,import.meta.url),'utf8')).join('\n'),c);
+  vm.runInContext(['Config.gs','ContactPreview.gs','SourceRecords.gs','PreparedData.gs'].map(file=>readFileSync(new URL('../src/'+file,import.meta.url),'utf8')).join('\n'),c);
   c.digest_=value=>crypto.createHash('sha256').update(value).digest('base64url');
   c.fail_=(code,message)=>{throw Object.assign(new Error(`[${code}] ${message}`),{registryCode:code});};
   if(options.limits)c.PREPARED_DATA_LIMITS={...c.PREPARED_DATA_LIMITS,...options.limits};

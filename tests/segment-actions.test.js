@@ -28,7 +28,7 @@ function fixture(options = {}) {
   const calls = { creates: [], copies: [], opens: [], reads: [], writes: [], flushes: 0, locks: 0, events: [], lists: [], fileGets: [], folderGets: [], fileListings: [], propertyWrites: [] };
   const folders = new Map(), files = new Map(), books = new Map();
   const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, SEGMENTS_FOLDER_ID: OUTREACH, SOURCE_BASES_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: STORAGE, ALLOWED_EMAILS: EMAIL }));
-  let sequence = 1000, failedCreate = false, failedCopy = false, failedName = false, failedTracking = false, failedInsert = false, failedTableWrite = false;
+  let sequence = 1000, failedCreate = false, failedCopy = false, failedName = false, failedTracking = false, failedInsert = false, failedTableWrite = false, failedCategoryWrite = false;
   function folder(id, name, parent) {
     const item = { id, name, parent, trashed: false,
       getId: () => id, getName: () => item.name, setName: name => { item.name = name; return item; },
@@ -120,7 +120,16 @@ function fixture(options = {}) {
   book(LPR, [sheet('Лист1', [], 41, LPR)]);
   const propertiesStore = {
     getProperty: key => properties.get(key) ?? null,
-    setProperty: (key, value) => { calls.propertyWrites.push(key); properties.set(key, value); return propertiesStore; },
+    getProperties: () => Object.fromEntries(properties),
+    setProperty: (key, value) => {
+      calls.propertyWrites.push(key);
+      properties.set(key, value);
+      if (options.failCategoryAfterApply && key.startsWith('SEGMENT_CATEGORY_') && !failedCategoryWrite) {
+        failedCategoryWrite = true;
+        throw new Error('Category write response lost');
+      }
+      return propertiesStore;
+    },
     deleteProperty: key => { properties.delete(key); return propertiesStore; },
   };
   const context = vm.createContext({
@@ -202,6 +211,61 @@ test('empty creation always creates folder plus two native tables directly insid
   for (const file of result.segment.files) assert.equal(f.files.get(file.id).parent, result.segment.id);
   assert.equal(f.calls.creates.length, 3); assert.equal(f.calls.copies.length, 0);
   assert.ok(f.calls.creates.every(metadata => metadata.parents.length === 1 && metadata.appProperties.registrySegmentAction));
+});
+
+test('creation stores an explicit category without changing the Drive parent, and validates category values', () => {
+  const f = fixture();
+  const input = { name: 'Веб-студии', category: 'clients', requestId: 'category-create-001' };
+  assert.throws(() => f.context.createSegment({ ...input, category: 'lpr' }), /INVALID_REQUEST/);
+  const result = f.context.createSegment(input);
+  assert.equal(result.segment.category, 'clients');
+  assert.equal(f.folders.get(result.segment.id).parent, OUTREACH);
+  assert.equal(JSON.parse(f.properties.get('SEGMENT_CATEGORY_' + result.segment.id)).category, 'clients');
+  assert.throws(() => f.context.createSegment({ ...input, category: 'partners' }), /REQUEST_REUSED/);
+  assert.equal(f.calls.creates.length, 3);
+});
+
+test('category-only updates preserve folder and workbook contents and reject stale expected categories', () => {
+  const f = fixture();
+  const input = { id: SEGMENT, category: 'partners', expectedCategory: 'clients', requestId: 'category-change-001' };
+  assert.throws(() => f.context.updateSegment({ ...input, id: 'other_folder_1234567890' }), /OUTSIDE_SEGMENTS/);
+  assert.equal(f.calls.propertyWrites.length, 0);
+  const first = f.context.updateSegment(input);
+  assert.equal(first.segment.category, 'partners');
+  assert.equal(first.segment.name, 'Сегмент');
+  assert.equal(f.folders.get(SEGMENT).parent, OUTREACH);
+  assert.equal(f.calls.creates.length, 0);
+  assert.equal(f.calls.writes.length, 0);
+  assert.equal(f.calls.fileListings.length, 0);
+  const writes = f.calls.propertyWrites.length;
+  assert.throws(() => f.context.updateSegment({ ...input, requestId: 'category-stale-001' }), /SEGMENT_CATEGORY_CONFLICT/);
+  assert.equal(f.calls.propertyWrites.length, writes);
+
+  assert.equal(f.context.updateSegment({ ...input, category: 'clients', expectedCategory: 'partners', requestId: 'category-change-002' }).segment.category, 'clients');
+  assert.equal(f.context.updateSegment(input).segment.category, 'clients', 'a completed retry cannot undo a later update');
+  assert.equal(f.calls.propertyWrites.filter(key => key === 'SEGMENT_CATEGORY_' + SEGMENT).length, 2);
+});
+
+test('a category write with a lost response can be retried with its original expected value', () => {
+  const f = fixture({ failCategoryAfterApply: true });
+  const input = { id: SEGMENT, category: 'partners', expectedCategory: 'clients', requestId: 'category-recovery-001' };
+  assert.throws(() => f.context.updateSegment(input), /SEGMENT_RECOVERY_REQUIRED/);
+  const retried = f.context.updateSegment(input);
+  assert.equal(retried.recovered, true);
+  assert.equal(retried.segment.category, 'partners');
+  assert.equal(f.calls.propertyWrites.filter(key => key === 'SEGMENT_CATEGORY_' + SEGMENT).length, 1);
+});
+
+test('renaming an uncategorized legacy studio preserves its partners category and old request fingerprints', () => {
+  const f = fixture();
+  f.folders.get(SEGMENT).name = 'Веб-студии';
+  const input = { id: SEGMENT, name: 'Новое название', requestId: 'category-legacy-rename-001' };
+  const result = f.context.updateSegment(input);
+  assert.equal(result.segment.category, 'partners');
+  assert.equal(result.segment.name, input.name);
+  const journalKey = 'SEGMENT_ACTION_' + f.context.digest_(SHARED_ACTOR + '|update|' + input.requestId).slice(0, 32);
+  const journal = JSON.parse(f.properties.get(journalKey));
+  assert.equal(journal.fingerprint, f.context.digest_(JSON.stringify({ id: SEGMENT, name: input.name, loads: [] })));
 });
 
 test('empty creation has bounded service calls and reads only the two tracking tabs', () => {

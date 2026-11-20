@@ -373,6 +373,10 @@ test('V2 real reader aggregates all original leaves and keeps exactly two derive
   const result = f.finish(draft, shown), output = f.books.get(result.file.id);
   assert.equal(output.getSheetByName('Email').getLastRow(), 3); assert.equal(output.getSheetByName('Телефоны и Telegram').getLastRow(), 3);
   assert.deepEqual(output.getSheetByName('Телефоны и Telegram').state.data.slice(1).map(row => row[0]).sort(), ['+79991112233', '+79994445566']);
+  for (const name of ['Email', 'Телефоны и Telegram']) {
+    const data = output.getSheetByName(name).state.data, status = data[0].indexOf('Статус рассылки');
+    assert.notEqual(status, -1); assert.deepEqual(data.slice(1).map(line => line[status]), ['новый', 'новый']);
+  }
   assert.equal(output.getSheetByName('Компании').state.data[1][4], 'https://wa.me/79994445566');
   assert.deepEqual(output.getSheets().map(tab => tab.getName()), ['Компании', 'ЛПР', 'Email', 'Телефоны и Telegram']);
 });

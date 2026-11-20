@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const script = readFileSync(new URL('../src/LegacyContactHistory.gs', import.meta.url), 'utf8');
+const script = ['Config.gs', 'LegacyContactHistory.gs'].map(name => readFileSync(new URL('../src/' + name, import.meta.url), 'utf8')).join('\n');
 function env() { const context = vm.createContext({}); vm.runInContext(script, context); return context; }
 function leaf(headers, rows, name = 'Исходная база', id = 0) {
   return { source: { headers, hasHeader: true, headerIndex: 0, name, sheetId: id }, sourceDisplayValues: [headers, ...rows] };
@@ -13,6 +13,16 @@ function model(leaves, emails = [], phones = []) {
     phone: { headers: ['Телефон', 'Компания / ЛПР', 'Откуда', 'Исходные строки', 'Проверить принадлежность', 'Telegram', 'Тип контакта'], rows: phones.map(phone => [phone, 'Компания', 'Телефон', '2', 'Нет', '', 'Мобильный']) }, warnings: [] };
 }
 function field(list, row, header) { return list.rows[row][list.headers.indexOf(header)]; }
+
+test('known source mailing history initializes the working status and preserves the original text', () => {
+  const c = env(), addresses = ['sent@example.test', 'excluded@example.test', 'unknown@example.test'];
+  const data = model([leaf(['Email', 'Статус'], [[addresses[0], 'Запущен'], [addresses[1], 'Фильтр'], [addresses[2], 'Сбор']])], addresses);
+  data.email.headers.push('Статус рассылки');
+  data.email.rows.forEach(row => row.push('новый'));
+  c.legacyContactHistoryEnrich_(data);
+  assert.deepEqual(data.email.rows.map((_, row) => field(data.email, row, 'Статус рассылки')), ['в рассылке', 'фильтр', 'новый']);
+  assert.deepEqual(data.email.rows.map((_, row) => field(data.email, row, 'Статус из источника')), ['Запущен', 'Фильтр', '']);
+});
 
 test('legacy source validation preserves all completed email verdicts and real mailbox providers', () => {
   const c = env(); const data = model([leaf(['Email', 'Валидация', 'Провайдер'], [

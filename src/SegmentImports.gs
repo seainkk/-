@@ -516,13 +516,15 @@ function segmentRecordsSplitCompanyMarkers_(actions) {
 
 /** Compatibility for old open clients: source loads are normalized, never copied as extra leaves. */
 function segmentNormalizedMutation_(kind, request) {
-  var input = segmentInput_(request, kind === 'create' ? ['name', 'requestId', 'loads'] : ['id', 'name', 'requestId', 'loads']), loads = input.loads || [];
+  var input = segmentMutationInput_(kind, request), loads = input.loads || [];
   if (loads.length) segmentRecordsReadySources_(authorize_(), segmentRecordsInputSources_({ loads: loads }));
   var empty = segmentRecordsCopy_(input); empty.loads = [];
   if (kind === 'update' && loads.length && input.name === undefined) {
     var existingContext = authorize_(); empty.name = segmentFolder_(existingContext, segmentSourceFolder_(existingContext), id_(input.id)).getName();
   }
-  var result = segmentMutation_(kind, empty), context = authorize_(), targets = segmentRecordsTargets_(context, result.segment.id, true);
+  var result = segmentMutation_(kind, empty);
+  if (segmentCategoryOnly_(kind, input, loads)) return result;
+  var context = authorize_(), targets = segmentRecordsTargets_(context, result.segment.id, true);
   result.segment = segmentActionResult_(context, targets.folder, targets.tables); result.loadedSheets = [];
   if (loads.length) {
     var preview = previewSegmentRecords_({ segmentId: result.segment.id, loads: loads });

@@ -103,6 +103,45 @@ def main():
         assert opening[0]['payload']['includeInitialRange'] is True
         assert page.locator('#rg-cell-2-1').inner_text() == 'Альфа'
 
+        # A legacy contact sheet paints promptly, then the optional repair
+        # refreshes its metadata and cells without calling any validation.
+        page.goto('about:blank')
+        page.set_content(HTML)
+        page.evaluate("""() => {
+            const email = gridBackend.sheets.splice(1, 1)[0];
+            email.columnCount = 4;
+            gridBackend.sheets.unshift(email);
+            gridBackend.mailingStatusPending = true;
+            gridBackend.holdMethods = ['getContactWorkspace'];
+            void openTestGrid();
+        }""")
+        held('getContactWorkspace')
+        assert page.locator('#rg-cell-2-1').inner_text() == 'Альфа'
+        assert page.locator('#rg-cell-1-5').count() == 0
+        opening = page.evaluate('gridBackend.calls')
+        assert [call['method'] for call in opening] == ['getGridWorkbook', 'getContactWorkspace']
+        assert opening[1]['payload'] == {'id': 'grid_file_1234567890', 'prepareMailingStatus': True}
+        release('getContactWorkspace')
+        page.wait_for_selector('#rg-cell-1-5')
+        idle()
+        assert page.locator('#rg-cell-1-5').inner_text() == 'Статус рассылки'
+        assert page.locator('#rg-cell-2-5').inner_text() == 'новый'
+        methods = page.evaluate('gridBackend.calls.map(call=>call.method)')
+        assert methods[:3] == ['getGridWorkbook', 'getContactWorkspace', 'getGridWorkbook']
+        assert methods[3:] in ([], ['getGridRange'])
+
+        page.evaluate("""() => {
+            RegistryGrid.lock();
+            gridBackend.calls.length = 0;
+            gridBackend.holdMethods = [];
+            gridBackend.canEdit = false;
+            gridBackend.mailingStatusPending = true;
+            void openTestGrid();
+        }""")
+        page.wait_for_selector('#rg-grid-readonly:not([hidden])')
+        idle()
+        assert page.evaluate('gridBackend.calls.map(call=>call.method)') == ['getGridWorkbook']
+
         # Revocation while the bundled read is held cannot restore its nested
         # cells or issue a later fallback read after the grid has been locked.
         page.goto('about:blank')

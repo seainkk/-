@@ -23,7 +23,7 @@ function fixture(options = {}) {
     Utilities: { getUuid: () => 'uuid-' + String(++uuid).padStart(24, '0') },
     SpreadsheetApp: { openById: id => { if (!books.has(id)) throw new Error('missing workbook'); return books.get(id); } },
   });
-  for (const filename of ['Code.gs', 'SegmentActions.gs', 'Promouser.gs', 'ColdyCampaigns.gs']) vm.runInContext(readFileSync(new URL('../src/' + filename, import.meta.url), 'utf8'), context, { filename });
+  for (const filename of ['Config.gs', 'Code.gs', 'SegmentActions.gs', 'Promouser.gs', 'ColdyCampaigns.gs']) vm.runInContext(readFileSync(new URL('../src/' + filename, import.meta.url), 'utf8'), context, { filename });
   context.authorize_ = () => { if (!state.access) context.fail_('LINK_ACCESS_REQUIRED', 'link revoked'); return { rootId: state.rootId, properties: {} }; };
   context.digest_ = digest;
   const validationCache = options.validationCache || {}; context.pvCache_ = () => validationCache; context.pvCacheRead_ = value => value;
@@ -415,7 +415,12 @@ function realNormalizedLprContacts(f) {
   const model = plain(f.context.preparedDataRead_(master, 'synthetic_lpr_master_12345', 'lpr', { guard: () => {} }));
   assert.equal(model.complete, true); assert.equal(model.records[0].people[0].name, person.name);
   assert.equal(model.email.rows[0][1], 'Кухни Альфа — Иванов Иван Иванович (Генеральный директор)');
-  f.lprSheet.data.splice(0, f.lprSheet.data.length, model.email.headers.concat(['Валидация', 'Статус рассылки']), ...model.email.rows.map(row => row.concat(['Валиден', 'Ручной статус'])));
+  const mailingColumn = model.email.headers.indexOf('Статус рассылки');
+  f.lprSheet.data.splice(0, f.lprSheet.data.length, model.email.headers.concat('Валидация'), ...model.email.rows.map(row => {
+    const existing = row.slice();
+    existing[mailingColumn] = 'Ручной статус';
+    return existing.concat('Валиден');
+  }));
   return model;
 }
 
@@ -424,7 +429,8 @@ test('real normalized LPR contact contexts never become Coldy first_name or comp
   const binding = f.bind({ includeCompanies: false, includeLpr: true }), preview = f.preview(binding);
   assert.equal(preview.counts.eligible, 1); assert.equal(preview.sample[0].name, ''); assert.equal(preview.sample[0].company, '');
   assert.equal(f.start(binding, preview).state, 'complete');
-  assert.deepEqual(posts(f)[0].payload.items, [{ email: 'ivan@example.test' }]); assert.equal(f.lprSheet.data[1][5], 'Ручной статус');
+  assert.deepEqual(posts(f)[0].payload.items, [{ email: 'ivan@example.test' }]);
+  assert.equal(f.lprSheet.data[1][f.lprSheet.data[0].indexOf('Статус рассылки')], 'Ручной статус');
 });
 
 test('explicit person and company columns remain available for Coldy personalization', () => {
