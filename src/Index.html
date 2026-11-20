@@ -71,8 +71,11 @@
   </section>
   <main class="br-main" hidden inert>
       <section id="br-sources-view" class="br-sources-view" hidden aria-labelledby="br-sources-title">
-        <div class="br-segments-heading"><div><h1 id="br-sources-title">Реестр баз</h1><p id="br-sources-count" class="br-muted"></p></div><div class="br-source-heading-actions"><button id="br-import-open" type="button" class="br-button br-primary" disabled>＋ Загрузить базу</button><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div></div>
-        <nav class="br-registry-sections" aria-label="Раздел реестра"><button id="br-section-companies" type="button" class="br-button" aria-pressed="true">Компании</button><button id="br-section-lpr" type="button" class="br-button" aria-pressed="false">ЛПР</button></nav>
+        <div class="br-list-heading">
+          <div><h1 id="br-sources-title">Реестр баз</h1><p id="br-sources-count" class="br-muted"></p></div>
+          <nav class="br-registry-sections" aria-label="Раздел реестра"><button id="br-section-companies" type="button" class="br-button" aria-pressed="true">Компании</button><button id="br-section-lpr" type="button" class="br-button" aria-pressed="false">ЛПР</button></nav>
+          <div class="br-source-heading-actions"><button id="br-import-open" type="button" class="br-button br-primary" disabled>＋ Загрузить базу</button><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div>
+        </div>
         <section id="br-prepared-jobs" class="br-prepared-jobs" hidden aria-label="Незавершённая подготовка"><div id="br-prepared-jobs-list"></div></section>
         <section id="br-import-panel" class="br-import-panel" hidden aria-labelledby="br-import-title">
           <div class="br-import-heading"><h2 id="br-import-title">Добавить базу компаний</h2><button id="br-import-cancel" type="button" class="br-button">Закрыть</button></div>
@@ -141,14 +144,16 @@
           <button id="br-source-filters-reset" type="button" class="br-button" disabled>Сбросить</button>
         </div>
         <p id="br-source-filters-note" class="br-source-filters-note" role="status" aria-live="polite" hidden></p>
-        <p class="br-segments-rules">Проверка формата — ручная отметка. Наполнение и статус обработки задаются отдельно. В сегмент можно добавлять только готовые базы Google Таблиц.</p>
         <p id="br-sources-health" class="br-segments-health" role="status" aria-live="polite"></p>
         <div id="br-sources-empty" class="br-segments-empty" role="status" hidden><h2 id="br-sources-empty-title"></h2><p id="br-sources-empty-description"></p></div>
         <div id="br-sources-items" class="br-source-items"></div>
       </section>
     <section id="br-segments-view" class="br-segments-view" hidden aria-labelledby="br-segments-title">
-      <div class="br-segments-heading"><div><h1 id="br-segments-title">Сегменты</h1><p id="br-segments-count" class="br-muted"></p></div><button id="br-add-segment" type="button" class="br-button br-primary">＋ Добавить сегмент</button></div>
-      <nav class="br-registry-sections" aria-label="Разделы сегментов"><button id="br-segment-category-partners" type="button" class="br-button" aria-pressed="false">Партнерка</button><button id="br-segment-category-clients" type="button" class="br-button" aria-pressed="true">Клиенты</button></nav>
+      <div class="br-list-heading">
+        <div><h1 id="br-segments-title">Сегменты</h1><p id="br-segments-count" class="br-muted"></p></div>
+        <nav class="br-registry-sections" aria-label="Разделы сегментов"><button id="br-segment-category-partners" type="button" class="br-button" aria-pressed="false">Партнерка</button><button id="br-segment-category-clients" type="button" class="br-button" aria-pressed="true">Клиенты</button></nav>
+        <button id="br-add-segment" type="button" class="br-button br-primary">＋ Добавить сегмент</button>
+      </div>
       <p id="br-segments-health" class="br-segments-health" role="status" aria-live="polite"></p>
       <div id="br-segments-empty" class="br-segments-empty" role="status" hidden><h2 id="br-segments-empty-title"></h2><p id="br-segments-empty-description"></p></div>
       <div id="br-segments-rows" class="br-segments-rows"></div>
