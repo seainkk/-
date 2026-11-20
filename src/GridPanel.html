@@ -29,6 +29,34 @@
   <aside id="rg-grid-validation" class="rg-grid-validation" aria-labelledby="rg-grid-validation-title" hidden>
     <div class="rg-grid-validation-heading"><h2 id="rg-grid-validation-title">Проверка новых контактов</h2><button id="rg-grid-validation-close" class="rg-grid-button" type="button" aria-label="Скрыть валидацию">✕</button></div>
     <p class="rg-grid-validation-note">Проверяются только контакты без результата. Уже проверенные email и телефоны, включая невалидные, остаются без изменений.</p>
+    <section id="rg-grid-pv-email-section" class="rg-grid-validation-section" aria-labelledby="rg-grid-pv-email-title">
+      <h3 id="rg-grid-pv-email-title">Email · Promouser</h3>
+      <p class="rg-grid-validation-note">Этот вариант используется, когда в настройках выбран Promouser. Сначала покажем новые email; запуск и оплата — после вашего подтверждения.</p>
+      <button id="rg-grid-pv-email-preview" class="rg-grid-button" type="button">Предпросмотр новых email в Promouser</button>
+      <p id="rg-grid-pv-email-message" role="status" aria-live="polite"></p><dl id="rg-grid-pv-email-counts" class="rg-grid-validation-counts"></dl><ul id="rg-grid-pv-email-sample" class="rg-grid-validation-sample"></ul>
+      <p class="rg-grid-validation-note">После запуска заказы до лимита Promouser могут оплачиваться автоматически. Более дорогие заказы требуют подтверждения ниже.</p>
+      <div class="rg-grid-validation-actions"><button id="rg-grid-pv-email-start" class="rg-grid-button" type="button" disabled>Запустить проверку email в Promouser</button><button id="rg-grid-pv-email-retry" class="rg-grid-button" type="button" hidden>Продолжить тот же запрос</button></div>
+    </section>
+    <section id="rg-grid-coldy-section" class="rg-grid-validation-section" aria-labelledby="rg-grid-coldy-title">
+      <h3 id="rg-grid-coldy-title">Email · Coldy</h3>
+      <p class="rg-grid-validation-note">Сначала посмотрим новые адреса. Проверка начнётся только после вашего подтверждения. Ключ подключается в шапке реестра.</p>
+      <button id="rg-grid-coldy-preview" class="rg-grid-button" type="button">Предпросмотр новых email</button>
+      <p id="rg-grid-coldy-message" role="status" aria-live="polite"></p>
+      <dl id="rg-grid-coldy-counts" class="rg-grid-validation-counts"></dl><ul id="rg-grid-coldy-sample" class="rg-grid-validation-sample"></ul>
+      <label class="rg-grid-provider-choice"><input id="rg-grid-coldy-credit-consent" type="checkbox" disabled>Разрешаю списать кредиты Coldy на проверку показанных новых email</label>
+      <p class="rg-grid-validation-note">Расходуются кредиты Coldy; лимит 5 USD в Promouser здесь не действует.</p>
+      <div class="rg-grid-validation-actions"><button id="rg-grid-coldy-start" class="rg-grid-button" type="button" disabled>Запустить проверку email</button><button id="rg-grid-coldy-refresh" class="rg-grid-button" type="button">Обновить статус Coldy</button><button id="rg-grid-coldy-retry" class="rg-grid-button" type="button" hidden>Продолжить тот же запрос</button></div>
+      <div id="rg-grid-coldy-jobs"></div>
+    </section>
+    <section class="rg-grid-validation-section" aria-labelledby="rg-grid-phone-title">
+      <h3 id="rg-grid-phone-title">Телефоны / Telegram · Promouser</h3>
+      <button id="rg-grid-phone-preview" class="rg-grid-button" type="button">Предпросмотр новых телефонов</button>
+      <p id="rg-grid-phone-message" role="status" aria-live="polite"></p>
+      <dl id="rg-grid-phone-counts" class="rg-grid-validation-counts"></dl><ul id="rg-grid-phone-sample" class="rg-grid-validation-sample"></ul>
+      <p class="rg-grid-validation-note">Запуск создаёт проверку показанных новых номеров. Заказы до установленного лимита Promouser оплачиваются автоматически; текущий согласованный лимит — 5 USD за заказ. Более дорогие заказы ждут подтверждения.</p>
+      <div class="rg-grid-validation-actions"><button id="rg-grid-phone-start" class="rg-grid-button" type="button" disabled>Запустить проверку телефонов</button><button id="rg-grid-phone-retry" class="rg-grid-button" type="button" hidden>Продолжить тот же запрос</button></div>
+    </section>
+    <h3>Заказы Promouser</h3>
     <p id="rg-grid-validation-summary" role="status" aria-live="polite"></p>
     <div id="rg-grid-validation-jobs"></div>
     <p id="rg-grid-validation-warnings" class="rg-grid-validation-note"></p>
@@ -36,7 +64,7 @@
       <p id="rg-grid-provider-configured" class="rg-grid-validation-note"></p>
       <form id="rg-grid-provider-form" autocomplete="off">
         <label>API-ключ<input id="rg-grid-provider-key" type="password" autocomplete="new-password" placeholder="Оставьте пустым, чтобы сохранить текущий"></label>
-        <label class="rg-grid-provider-choice"><input id="rg-grid-provider-enabled" type="checkbox">Проверять новые контакты через Promouser</label>
+        <label class="rg-grid-provider-choice"><input id="rg-grid-provider-enabled" type="checkbox">Включить подключение Promouser</label>
         <label>Лимит автоматической оплаты одного заказа, $<input id="rg-grid-provider-limit" type="number" min="0" max="1000" step="0.01" value="0" inputmode="decimal"></label>
         <p class="rg-grid-validation-note">0 — сначала показать стоимость и дождаться вашей оплаты. Положительный лимит разрешает оплачивать каждый новый заказ до этой суммы. Ключ хранится на сервере и не показывается повторно.</p>
         <div class="rg-grid-validation-actions"><button id="rg-grid-provider-save" class="rg-grid-button" type="submit">Сохранить подключение</button><button id="rg-grid-provider-balance" class="rg-grid-button" type="button">Показать баланс</button></div>

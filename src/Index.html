@@ -11,7 +11,21 @@
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Coldy</button><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <dialog id="br-coldy-dialog" class="br-provider-dialog" aria-labelledby="br-coldy-title">
+    <div class="br-import-heading"><h2 id="br-coldy-title">Подключение Coldy</h2><button id="br-coldy-close" type="button" class="br-button" autofocus>Закрыть</button></div>
+    <p class="br-muted">Подключение общее для реестра и сегментов. Ключ хранится на сервере и не показывается повторно.</p>
+    <p id="br-coldy-configured" class="br-muted"></p>
+    <form id="br-coldy-form" autocomplete="off"><fieldset id="br-coldy-fields" class="br-provider-fields" disabled>
+      <label for="br-coldy-key">API-ключ Coldy<input id="br-coldy-key" type="password" autocomplete="new-password" maxlength="512" placeholder="Оставьте пустым, чтобы сохранить текущий"></label>
+      <label for="br-coldy-provider">Сервис проверки новых email<select id="br-coldy-provider"><option value="promouser">Promouser</option><option value="coldy">Coldy</option></select></label>
+      <p class="br-muted">Результаты уже проверенных контактов сохраняются. Telegram по-прежнему проверяется через Promouser.</p>
+      <p class="br-muted">Проверка email запускается вручную после предпросмотра и подтверждения расхода кредитов Coldy. Лимит 5 USD в Promouser к Coldy не относится. Проверка телефонов также запускается вручную в таблице.</p>
+      <div class="br-provider-actions"><button id="br-coldy-save" type="submit" class="br-button br-primary">Сохранить подключение</button><button id="br-coldy-test" type="button" class="br-button">Проверить подключение</button></div>
+    </fieldset></form>
+    <p id="br-coldy-message" role="status" aria-live="polite"></p>
+    <p class="br-muted">Проверка подключения только читает список рассылок. Настройте загрузку контактов в разделе «Сегменты → Рассылки».</p>
+  </dialog>
   <dialog id="br-provider-dialog" class="br-provider-dialog" aria-labelledby="br-provider-title">
     <div class="br-import-heading"><h2 id="br-provider-title">Подключение Promouser</h2><button id="br-provider-close" type="button" class="br-button" autofocus>Закрыть</button></div>
     <p class="br-muted">Настройки действуют для всех таблиц реестра и сегментов.</p>
@@ -19,7 +33,7 @@
     <form id="br-provider-form" autocomplete="off">
       <fieldset id="br-provider-fields" class="br-provider-fields" disabled>
         <label for="br-provider-key">API-ключ<input id="br-provider-key" type="password" autocomplete="new-password" maxlength="512" placeholder="Оставьте пустым, чтобы сохранить текущий"></label>
-        <label class="br-provider-choice"><input id="br-provider-enabled" type="checkbox">Проверять новые контакты через Promouser</label>
+        <label class="br-provider-choice"><input id="br-provider-enabled" type="checkbox">Включить подключение Promouser</label>
         <label for="br-provider-limit">Лимит автоматической оплаты одного заказа, $<input id="br-provider-limit" type="number" min="0" max="1000" step="0.01" required></label>
         <p class="br-muted">При лимите 0 каждый заказ требует ручного подтверждения.</p>
         <div class="br-provider-actions"><button id="br-provider-save" type="submit" class="br-button br-primary">Сохранить подключение</button><button id="br-provider-balance" type="button" class="br-button">Показать баланс</button></div>
@@ -138,6 +152,20 @@
       <button id="br-mailings-back" type="button" class="br-button br-back">← К сегментам</button>
       <h1 id="br-mailings-title">Рассылки</h1>
       <p id="br-mailings-health" class="br-segments-health" role="status" aria-live="polite"></p>
+      <section id="br-coldy-bindings-panel" class="br-mailing-service" aria-labelledby="br-coldy-bindings-title">
+        <div class="br-coldy-heading"><h2 id="br-coldy-bindings-title">Рассылки Coldy</h2><button id="br-coldy-mailings-refresh" type="button" class="br-button">Обновить данные Coldy</button></div>
+        <p id="br-coldy-bindings-message" class="br-muted" role="status" aria-live="polite"></p>
+        <form id="br-coldy-binding-form"><fieldset id="br-coldy-binding-fields" class="br-provider-fields" disabled>
+          <label for="br-coldy-campaign">Привязать существующую рассылку<select id="br-coldy-campaign"><option value="">Выберите рассылку</option></select></label>
+          <div class="br-coldy-choices"><label class="br-provider-choice"><input id="br-coldy-companies" type="checkbox" checked>Email компаний</label><label class="br-provider-choice"><input id="br-coldy-lpr" type="checkbox">Email ЛПР</label></div>
+          <label class="br-provider-choice"><input id="br-coldy-autoupload" type="checkbox">Автоматически добавлять новые валидные email в эту рассылку</label>
+          <label class="br-provider-choice"><input id="br-coldy-active-consent" type="checkbox">Разрешаю добавлять контакты в активную рассылку: Coldy может сразу начать отправку писем</label>
+          <p class="br-muted">Загружаются только проверенные валидные адреса без спорной принадлежности. Удалённые и уже загруженные адреса повторно не добавляются. Загрузка в активную рассылку может вызвать отправку писем. Реестр не включает и не запускает кампании.</p>
+          <button id="br-coldy-binding-save" type="submit" class="br-button">Сохранить привязку</button>
+        </fieldset></form>
+        <div id="br-coldy-bindings-list" class="br-coldy-bindings-list"></div>
+        <section id="br-coldy-upload-preview" class="br-prepared-preview" hidden aria-labelledby="br-coldy-upload-title"><h3 id="br-coldy-upload-title">Загрузка в рассылку</h3><dl id="br-coldy-upload-counts" class="br-contact-preview-metrics"></dl><ul id="br-coldy-upload-sample" class="br-coldy-sample"></ul><p id="br-coldy-upload-warnings" class="br-muted"></p><p id="br-coldy-upload-message" role="status" aria-live="polite"></p><div class="br-provider-actions"><button id="br-coldy-upload-start" type="button" class="br-button br-primary" disabled>Загрузить новые контакты</button><button id="br-coldy-upload-retry" type="button" class="br-button" hidden>Продолжить тот же запрос</button><button id="br-coldy-upload-cancel" type="button" class="br-button">Скрыть</button></div></section>
+      </section>
       <div id="br-mailings-totals"></div><div id="br-mailings-services"></div>
     </section>
     <section id="br-retarget-view" class="br-retarget-view" hidden aria-labelledby="br-retarget-title"><h1 id="br-retarget-title">Ретаргетинг</h1><p>Структура ещё обсуждается.</p></section>

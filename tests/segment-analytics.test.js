@@ -411,6 +411,16 @@ test('mailings validate their folder without scanning unrelated segments or busi
   assert.throws(() => f.mailings('outside_segment_1234567890'), /SEGMENT_NOT_FOUND/);
 });
 
+test('segment analytics includes cached Coldy metrics with an explicit connected-channel total', () => {
+  const f=fixture();let reads=0;
+  f.context.coldySegmentMailings_=(context,id)=>{reads++;assert.equal(context.rootId,ROOT);assert.equal(id,SEGMENT);return {key:'coldy',name:'Coldy',channel:'email',state:'connected',cached:true,generatedAt:'2026-11-19T10:00:00.000Z',campaigns:[{id:'campaign',sent:120,replies:7,leads:2}],totals:{sent:120,replies:7,leads:2}}};
+  const result=f.mailings();assert.equal(reads,1);assert.equal(result.services[0].id,'coldy');assert.deepEqual(result.totals,{sent:120,replies:7,leads:2});assert.equal(result.totalsScope,'connected_channels');assert.equal(result.services[1].state,'not_connected');assert.equal(f.calls.opened.length,0);
+});
+test('unknown Coldy metrics remain unknown in segment totals', () => {
+  const f=fixture();f.context.coldySegmentMailings_=()=>({state:'partial',totals:{sent:120,replies:null,leads:0}});
+  assert.deepEqual(f.mailings().totals,{sent:120,replies:null,leads:0});
+});
+
 test('mailings reject nested, trashed and outside-root folders before reading workbooks', () => {
   const candidate = 'invalid_segment_1234567890';
   for (const entry of [
