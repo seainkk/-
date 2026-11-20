@@ -20,7 +20,9 @@ function stagePreparedUpload_(form) {
     var bytes = blob.getBytes();
     if (!bytes || !bytes.length || bytes.length > REGISTRY_CONFIG.importMaxBytes) fail_('UPLOAD_LIMIT', 'Нужен непустой файл размером до 10 МиБ.');
     common.kind = 'upload';
-    common.sourceFingerprint = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes)).replace(/=+$/, '') + '|' + mime;
+    var hash = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes)).replace(/=+$/, '');
+    common.sourceFingerprint = hash + '|' + mime;
+    common.origin = { id: 'upload:' + hash, name: String(blob.getName()).slice(0, 512) };
     preparedSweepExpired_(context);
     var draft = preparedAllocate_(context, common);
     return preparedWithLease_(draft.draftId, function (current, fresh) {
@@ -52,7 +54,8 @@ function stagePreparedBaseLink_(request) {
   return api_(function () {
     var context = authorize_(), input = importInput_(request, ['url', 'name', 'section', 'status', 'requestId']);
     var common = preparedCommon_(input), link = importSheetLink_(input.url);
-    preparedOriginal_(context, link);
+    var original = preparedOriginal_(context, link);
+    common.origin = { id: link.id, name: String(original.name).slice(0, 512) };
     common.kind = 'link'; common.original = link;
     common.sourceFingerprint = link.id + '|' + link.resourceKey;
     preparedSweepExpired_(context);
@@ -117,16 +120,32 @@ function previewPreparedBase_(request) {
   });
 }
 
+function preparedDestination_(value, draft) {
+  if (value === undefined || value === null) return null;
+  var route = importInput_(value, ['kind', 'segmentId', 'name', 'category']);
+  if (draft.status !== 'ready' || route.kind !== draft.section || ['companies', 'lpr'].indexOf(route.kind) < 0) fail_('INVALID_REQUEST', 'Назначение должно соответствовать типу готовой базы.');
+  if (route.segmentId !== undefined) {
+    if (typeof route.name !== 'string' || !route.name.trim()) fail_('INVALID_NAME', 'Укажите название выбранного сегмента.');
+    return { segmentId: id_(route.segmentId), name: route.name.trim().slice(0, 200), kind: route.kind };
+  }
+  if (['clients', 'partners'].indexOf(route.category) < 0) fail_('INVALID_REQUEST', 'Выберите раздел нового сегмента.');
+  return { name: itemName_(route.name), category: route.category, kind: route.kind };
+}
+
 function confirmPreparedBase_(request) {
   return api_(function () {
-    var input = importInput_(request, ['draftId', 'sheetId', 'previewToken', 'requestId']);
+    var input = importInput_(request, ['draftId', 'sheetId', 'previewToken', 'requestId', 'destination']);
     preparedRequestId_(input.requestId);
     return preparedWithLease_(input.draftId, function (draft, context) {
       if (draft.confirmRequestId && draft.confirmRequestId !== input.requestId) fail_('REQUEST_REUSED', 'Продолжите подтверждение с прежним идентификатором запроса.');
+      var destination = preparedDestination_(input.destination, draft);
+      if (draft.confirmRequestId && JSON.stringify(destination) !== JSON.stringify(draft.destination || null)) fail_('REQUEST_REUSED', 'Этот запрос уже подтверждён с другим назначением.');
       if (draft.state === 'complete') { var complete = preparedCompleteResponse_(context, draft); if (draft.planVersion === 2) preparedWorkbookEnroll_(context, draft); preparedCleanupComplete_(context, draft); authorize_(); return complete; }
       if (preparedSheetId_(input.sheetId) !== draft.sheetId || typeof input.previewToken !== 'string' || input.previewToken !== draft.previewToken || !draft.canConfirm) fail_('PREVIEW_REQUIRED', 'Сначала получите полный предпросмотр выбранного листа.');
       preparedCheckSnapshot_(context, draft);
       if (!draft.confirmRequestId) {
+        if (destination && destination.segmentId) segmentFolder_(context, segmentSourceFolder_(context), destination.segmentId);
+        if (destination) draft.destination = destination;
         draft.confirmRequestId = input.requestId; draft.state = 'processing'; draft.phase = 'create';
         preparedSave_(context, draft);
       }
@@ -193,6 +212,7 @@ function listPreparedJobs_(request) {
       if (draft.rootId !== context.rootId || draft.state !== 'processing' || !Number.isFinite(Date.parse(draft.expiresAt)) || Date.parse(draft.expiresAt) <= Date.now()) return;
       if (typeof draft.confirmRequestId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(draft.confirmRequestId) || !Number.isSafeInteger(draft.sheetId) || draft.sheetId < 0) fail_('PREVIEW_STORAGE', 'У подтверждённой подготовки отсутствуют параметры восстановления.');
       items.push({ draftId: draft.draftId, name: draft.name, section: draft.section, state: 'processing', sheetId: draft.sheetId, requestId: draft.confirmRequestId, expiresAt: draft.expiresAt, progress: { stage: draft.phase, label: 'Подготовка ещё не завершена. Можно продолжить с сохранённого этапа.' } });
+      if (draft.destination) items[items.length - 1].destination = draft.destination;
     });
     return { items: items };
   });
@@ -230,6 +250,7 @@ function preparedAllocate_(context, common) {
       current.properties.deleteProperty(preparedKey_(index.splice(position, 1)[0]));
     }
     var draft = { version: 1, draftId: draftId, rootId: current.rootId, folderId: folder.getId(), fingerprint: fingerprint, kind: common.kind, original: common.original || null, name: common.name, section: common.section, status: common.status, state: 'staged', phase: '', stageFileId: '', stageAttempted: false, outputId: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + PREPARED_IMPORT.ttlMillis).toISOString() };
+    if (common.origin) draft.origin = common.origin;
     // A pruned completed receipt must never create a second result.
     var earlier = preparedFindArtifact_(current, draft, 'output');
     if (earlier) fail_('ALREADY_PREPARED', 'Результат этого запроса уже существует: ' + spreadsheetUrl_(earlier.id));
@@ -368,7 +389,7 @@ function preparedDraftFile_(context, draft) {
 
 function preparedStageResponse_(context, draft) {
   var file = preparedDraftFile_(context, draft), book = SpreadsheetApp.openById(file.id);
-  var options = typeof preparedDataReadWorkbook_ === 'function' ? preparedWorkbookSourceOptions_(context, draft) : {};
+  var options = typeof preparedDataReadWorkbook_ === 'function' ? preparedWorkbookSourceOptions_(context, draft, book) : {};
   var sheets = book.getSheets().filter(function (sheet) { var id = sheet.getSheetId(); return (!options.sourceSheetIds || options.sourceSheetIds.indexOf(id) >= 0) && (options.managedSheetIds || []).indexOf(id) < 0; }).map(function (sheet) { return { id: sheet.getSheetId(), name: sheet.getName(), rows: sheet.getLastRow(), columns: sheet.getLastColumn() }; });
   if (!sheets.length) fail_('INVALID_SOURCE', 'В исходной книге нет листов.');
   var selection = typeof preparedWorkbookSelection_ === 'function' ? preparedWorkbookSelection_(book, options, draft.sourceSheetIds) : sheets.map(function (sheet) { return sheet.id; });
@@ -544,13 +565,14 @@ function preparedEnsureSheets_(book, draft, plan) {
   book.setActiveSheet(preparedSheet_(book, draft.originalSheetId));
 }
 
-function preparedWriteBlock_(sheet, firstRow, rows, width) {
+function preparedWriteBlock_(sheet, firstRow, rows, width, firstColumn) {
   if (!rows.length) return;
+  firstColumn = firstColumn || 1;
   var maximumRows = typeof sheet.getMaxRows === 'function' ? sheet.getMaxRows() : firstRow + rows.length;
   if (firstRow + rows.length - 1 > maximumRows) sheet.insertRowsAfter(maximumRows, firstRow + rows.length - 1 - maximumRows);
   var maximumColumns = typeof sheet.getMaxColumns === 'function' ? sheet.getMaxColumns() : width;
-  if (width > maximumColumns) sheet.insertColumnsAfter(maximumColumns, width - maximumColumns);
-  var range = sheet.getRange(firstRow, 1, rows.length, width), existing = range.getDisplayValues(), formulas = range.getFormulas();
+  if (firstColumn + width - 1 > maximumColumns) sheet.insertColumnsAfter(maximumColumns, firstColumn + width - 1 - maximumColumns);
+  var range = sheet.getRange(firstRow, firstColumn, rows.length, width), existing = range.getDisplayValues(), formulas = range.getFormulas();
   rows.forEach(function (row, i) {
     if (!Array.isArray(row) || row.length !== width) fail_('PREVIEW_STORAGE', 'План содержит некорректные строки.');
     row.forEach(function (value, j) { var old = String(existing[i][j] || ''); if (formulas[i][j] || (old !== '' && old !== String(value === null || value === undefined ? '' : value))) fail_('PREVIEW_CHANGED', 'Результат изменён вручную до завершения подготовки.'); });
@@ -558,7 +580,7 @@ function preparedWriteBlock_(sheet, firstRow, rows, width) {
   // Native Apps Script RichText can turn a leading + into a literal =+.
   // Explicit Sheets API stringValue keeps every character without evaluating it.
   var text = rows.map(function (row) { return row.map(function (value) { return String(value === null || value === undefined ? '' : value); }); });
-  sheetWriteRawStrings_(sheet.getParent().getId(), sheet.getSheetId(), firstRow, 1, text);
+  sheetWriteRawStrings_(sheet.getParent().getId(), sheet.getSheetId(), firstRow, firstColumn, text);
 }
 
 function preparedVerifyResult_(context, book, draft, plan) {
@@ -590,6 +612,8 @@ function preparedPublish_(context, draft, plan, metadata) {
     if (current.rootId !== draft.rootId) fail_('SOURCE_CHANGED', 'Корневая папка изменилась.');
     var file = preparedOutput_(current, draft, true), record = preparation.database.records[file.id];
     if (!record && preparation.database.lastRow >= REGISTRY_CONFIG.maxSourceBaseRows + 1) fail_('STORAGE_LIMIT', 'В реестре нет места для новой базы.');
+    var origins = sourceBaseReadOrigins_(preparation.storage);
+    if (draft.origin && !origins) fail_('STORAGE_SCHEMA', 'Журнал источников недоступен. Проверьте вкладку SourceBaseOrigins.');
     if ((file.parents || []).indexOf(preparation.binding.source.id) === -1) {
       importDestinationWritable_(preparation);
       draft.publishAttempted = true; preparedSave_(current, draft);
@@ -603,19 +627,29 @@ function preparedPublish_(context, draft, plan, metadata) {
     var options;
     if (!draft.metadataCommitted && record && record.revision === 1 && record.baseType === 'general' && record.status === 'collection' && record.formatCheck === 'unchecked') options = { expectedRevision: 1 };
     registerImportedSourceBase_(current, preparation.storage, preparation.database, descriptor, [draft.section], draft.status, options);
+    if (draft.origin) {
+      var selected = plan.sources || (plan.source ? [plan.source] : []);
+      var names = selected.map(function (entry) { return (entry.source || entry).name; }).filter(Boolean);
+      var criteria = names.length ? 'Выбранные листы: ' + names.join(', ') : '';
+      if (criteria.length > 2000) criteria = 'Выбрано листов: ' + names.length;
+      var origin = sourceBaseOrigin_(file.id, draft.origin.id, draft.origin.name, criteria);
+      sourceBaseSaveOrigin_(preparation.storage, origins, file.id, origin);
+    }
     draft.metadataCommitted = true; draft.state = 'complete'; draft.phase = 'done'; preparedSave_(current, draft);
-    return preparedCompleteResponse_(current, draft, preparation);
+    return preparedCompleteResponse_(current, draft, preparation, origins);
   });
 }
 
-function preparedCompleteResponse_(context, draft, preparation) {
+function preparedCompleteResponse_(context, draft, preparation, origins) {
   var file = preparedOutput_(context, draft, true), binding = sourceBasesSource_(authorize_());
   if ((file.parents || []).indexOf(binding.source.id) === -1) fail_('OUTSIDE_REGISTRY', 'Готовая база больше не находится в реестре.');
-  var storage = preparation ? preparation.storage : sourceBasesStorage_(context), database = preparation ? sourceBasesReadDatabase_(storage) : sourceBasesReadDatabase_(storage);
+  var storage = preparation ? preparation.storage : sourceBasesStorage_(context), database = sourceBasesReadDatabase_(storage);
   var record = database.records[file.id], metadata = { id: file.id, name: file.name, fileName: file.name, mimeType: file.mimeType, format: 'Google Таблицы', url: spreadsheetUrl_(file.id) };
   if (!record) fail_('CREATION_UNCERTAIN', 'Файл создан, но его запись в реестре ещё не подтверждена. Продолжите тот же запрос.');
   var relations = database.relations.filter(function (relation) { return relation.fileId === file.id; });
-  return { state: 'complete', draftId: draft.draftId, jobId: draft.draftId, file: { id: file.id, name: file.name, url: metadata.url }, item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(relations, context)) };
+  var result = { state: 'complete', draftId: draft.draftId, jobId: draft.draftId, file: { id: file.id, name: file.name, url: metadata.url }, item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(relations, context), origins === undefined ? sourceBaseReadOrigins_(storage) : origins) };
+  if (draft.destination) result.destination = draft.destination;
+  return result;
 }
 
 function preparedProcessing_(draft, plan) {

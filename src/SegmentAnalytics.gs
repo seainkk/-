@@ -11,7 +11,7 @@ function getSegmentsDashboard_(request) {
     var input = request === undefined ? {} : object_(request);
     if (Object.keys(input).some(function (key) { return key !== 'includeAnalysis'; }) ||
         (input.includeAnalysis !== undefined && typeof input.includeAnalysis !== 'boolean')) fail_('INVALID_REQUEST', 'Некорректный режим загрузки сегментов.');
-    var projection = getSegmentsMetadata_(context);
+    var projection = getSegmentsMetadata_(context, true);
     if (projection.state !== 'ready') return projection;
     if (input.includeAnalysis === false) return segmentDashboardOverview_(context, projection);
     var budget = segmentAnalysisBudget_(), trackingRequest = { loaded: false, snapshot: null };

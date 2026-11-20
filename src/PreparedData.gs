@@ -85,6 +85,17 @@ function preparedDataRead_(sheet, sourceId, section, options) {
     if (typeof sourceRecordsColumns_ === 'function') detected.mapping.recordColumns = sourceRecordsColumns_(options.hasHeader ? labels : [], section);
   }
   var header = detected.header, mapping = detected.mapping;
+  var workChannels = null;
+  if (options.segmentMasterChannels === true) {
+    var normalizedHeaders = header.map(function (label) { return String(label || '').trim().toLowerCase(); });
+    var validMaster = ['id компании', 'источники', 'статус', 'email', 'телефон', 'telegram'].every(function (label) { return normalizedHeaders.indexOf(label) >= 0; });
+    if (!validMaster && options.segmentMasterRequired) fail_('SEGMENT_MASTER_SCHEMA', 'Изменились рабочие колонки сегмента. Восстановите заголовки перед обновлением контактов.');
+    if (validMaster) {
+      var telegram = normalizedHeaders.indexOf('telegram для контактов') >= 0 ? 'telegram для контактов' : 'telegram';
+      var labels = ['email', 'телефон', telegram, 'email лпр', 'телефон лпр', 'telegram лпр'];
+      workChannels = new Set(normalizedHeaders.map(function (label, index) { return labels.indexOf(label) >= 0 ? index : -1; }));
+    }
+  }
   var firstData = detected.hasHeader ? detected.index + 1 : 0, hasHeader = detected.hasHeader, sourceRows = 0, cellContacts = Object.create(null);
   if (detected.index > 0 && hasHeader) warn('Заголовок распознан в строке ' + (detected.index + 1) + '; строки оформления перед ним остаются в исходном листе.');
   if (!hasHeader && lastRow) warn('Заголовки не определены однозначно. Контакты распознаются по содержимому ячеек, первая строка сохранена как данные.');
@@ -113,6 +124,7 @@ function preparedDataRead_(sheet, sourceId, section, options) {
     var personalContext = [observation.name, person.name].filter(Boolean).join(' — ') + (person.role ? ' (' + person.role + ')' : '');
     for (var columnIndex = 0; columnIndex < cells.length; columnIndex++) {
       var label = hasHeader ? String(header[columnIndex] || '') : '', key = (index + 1) + ':' + (columnIndex + 1);
+      if (workChannels && !workChannels.has(columnIndex)) continue;
       var rawValue = values[index] && values[index][columnIndex], text = String(cells[columnIndex] || '');
       var entry = preparedDataCellContacts_(text, rawValue, label, linkIndex[key] || [], mapping, columnIndex);
       if (entry.emails.length || entry.phones.length || entry.telegrams.length) cellContacts[key] = entry;
@@ -134,7 +146,7 @@ function preparedDataRead_(sheet, sourceId, section, options) {
     }
     observed.push(observation);
   }
-  var recordsResult = typeof sourceRecordsBuild_ === 'function' ? sourceRecordsBuild_(displays, { fileId: sourceId, sheetId: sheetId, sheetName: sheetName, section: section, headerIndex: detected.index, hasHeader: hasHeader, header: header, rawRows: values, cellContacts: cellContacts }) : { records: [], warnings: [] };
+  var recordsResult = typeof sourceRecordsBuild_ === 'function' ? sourceRecordsBuild_(displays, { fileId: sourceId, sheetId: sheetId, sheetName: sheetName, section: section, mixedCompanyContext: options.mixedCompanyContext, headerIndex: detected.index, hasHeader: hasHeader, header: header, rawRows: values, cellContacts: cellContacts }) : { records: [], warnings: [] };
   (recordsResult.warnings || []).forEach(warn);
   var records = recordsResult.records || [];
   if (records.length) preparedDataApplyRecordContexts_(observed, records);
@@ -584,7 +596,7 @@ function preparedDataReadWorkbook_(book, fileId, section, options) {
     sourceSheets.push({ id: sheet.getSheetId(), sheetId: sheet.getSheetId(), name: sheet.getName(), rowCount: height, columnCount: width });
     if (!complete && models.length < index) return;
     if (index >= 100 || Date.now() >= deadline || cells + height * width > PREPARED_DATA_LIMITS.maxCells || physicalRows + height > PREPARED_DATA_LIMITS.maxRows) { complete = false; warn('Книга превышает общий лимит полного чтения по листам, строкам, ячейкам или времени. Частичные списки нельзя использовать автоматически.'); return; }
-    var model = preparedDataRead_(sheet, fileId, section, { guard: guard, deadline: deadline, resolveLinkReference: resolveReference, sectionExplicit: options.sectionExplicit });
+    var model = preparedDataRead_(sheet, fileId, section, { guard: guard, deadline: deadline, resolveLinkReference: resolveReference, sectionExplicit: options.sectionExplicit, segmentMasterChannels: options.segmentMasterChannels, segmentMasterRequired: options.segmentMasterRequired });
     models.push(model); cells += model.cellsRead; physicalRows += height;
     observations = observations.concat(model.observations || []); records = records.concat(model.records || []);
     var descriptor = sourceSheets[sourceSheets.length - 1]; descriptor.hasHeader = model.source.hasHeader; descriptor.headerIndex = model.source.headerIndex; descriptor.headers = model.source.headers; descriptor.section = model.section; descriptor.effectiveSection = model.section;
@@ -604,6 +616,88 @@ function preparedDataRowList_(rows) {
   rows.forEach(function (row) { if (first === null) first = previous = row; else if (row === previous + 1) previous = row; else { parts.push(first === previous ? String(first) : first + '–' + previous); first = previous = row; } });
   if (first !== null) parts.push(first === previous ? String(first) : first + '–' + previous);
   return parts.join(', ');
+}
+
+/** Resolve working contact columns from exact source row references, never by display name. */
+function preparedWorkingLists_(model, sourceId) {
+  var byRow = new Map(), links = new Map(), emailCounts = new Map(), sourceIds = new Map(), personIds = new Map();
+  var uploadLeaves = new Map(), siteKeys = new Map(), siteCounts = new Map();
+  if (sourceId && sourceId.indexOf('upload:') === 0) {
+    // GIDs are assigned anew by Drive when the same bytes are converted again.
+    // The original tab order is independent of the user's selected subset.
+    (model.allSourceSheets || model.sourceSheets || []).forEach(function (leaf, index) { uploadLeaves.set(leaf.sheetId, index); });
+  }
+  if (sourceId && !model.workingReports && typeof segmentRecordsDomain_ === 'function') (model.records || []).forEach(function (record) {
+    var company = record.company || {}, domain = segmentRecordsDomain_(company.website), name = segmentRecordsName_(company.name), city = segmentRecordsCity_(company.city);
+    if (!domain || !name || !city || /[\s,;]/.test(String(company.website || '').trim())) return;
+    var key = 'site:' + domain + '|' + name + '|' + city, ref = record.source;
+    siteKeys.set(ref.sheetId + ':' + ref.row, key);
+    var localKey = ref.sheetId + ':' + key; siteCounts.set(localKey, (siteCounts.get(localKey) || 0) + 1);
+  });
+  (model.models || []).forEach(function (leaf) {
+    var source = leaf.source;
+    if (sourceId && source.hasHeader && source.section === 'companies' && (leaf.records || []).length &&
+        !source.headers.some(function (header) { return /^(companyid|idкомпании|идкомпании|companykey)$/.test(contactPreviewHeader_(header)); })) {
+      var ids = Array(source.rowCount).fill('');
+      ids[source.headerIndex] = 'ID компании';
+      sourceIds.set(source.sheetId, ids);
+    }
+    if (sourceId && source.hasHeader && source.section === 'lpr' && (leaf.records || []).some(function (record) { return record.people.length === 1; }) &&
+        !source.headers.some(function (header) { return /^(?:idлпр|идлпр|идентификаторлпр|personid)$/.test(contactPreviewHeader_(header)); })) {
+      var ids = Array(source.rowCount).fill(''); ids[source.headerIndex] = 'ID ЛПР'; personIds.set(source.sheetId, ids);
+    }
+  });
+  (model.records || []).forEach(function (record) {
+    var company = record.company || {}, ref = record.source;
+    if (!ref) return;
+    var id = String(company.id || '').trim(), ids = sourceIds.get(ref.sheetId);
+    var leafIdentity = uploadLeaves.has(ref.sheetId) ? 'tab:' + uploadLeaves.get(ref.sheetId) : ref.sheetId;
+    var rowIdentity = 'source:' + sourceId + ':' + leafIdentity + ':row:' + ref.row;
+    var individual = personIds.get(ref.sheetId), people = record.people || [];
+    if (individual && people.length === 1) individual[ref.row - 1] = people[0].id || 'P-' + digest_(JSON.stringify(rowIdentity)).slice(0, 24);
+    if (!id && ids && (company.name || company.inn || company.ogrn || company.website)) {
+      var inn = typeof segmentRecordsInn_ === 'function' && segmentRecordsInn_(company.inn);
+      var ogrn = typeof segmentRecordsOgrn_ === 'function' && segmentRecordsOgrn_(company.ogrn);
+      var site = siteKeys.get(ref.sheetId + ':' + ref.row);
+      var identity = inn ? 'inn:' + inn : ogrn ? 'ogrn:' + ogrn : site && siteCounts.get(ref.sheetId + ':' + site) === 1 ? site : rowIdentity;
+      id = 'C-' + digest_(JSON.stringify(identity)).slice(0, 24);
+      ids[ref.row - 1] = id;
+    }
+    byRow.set(ref.sheetId + ':' + ref.row, { id: id, website: String(company.website || '') });
+  });
+  (model.contactIndex || []).forEach(function (entry) {
+    var ids = new Set(), sites = new Set(), unresolved = false;
+    (entry.sourceRefs || []).forEach(function (ref) {
+      var company = byRow.get(ref.sheetId + ':' + ref.row);
+      if (company && company.id) ids.add(company.id); else unresolved = true;
+      if (company && company.website) sites.add(company.website);
+    });
+    var id = !unresolved && ids.size === 1 ? Array.from(ids)[0] : '';
+    links.set(entry.type + ':' + entry.value, { id: id, websites: Array.from(sites).join('; '), multiple: ids.size > 1 });
+    if (entry.type === 'email') ids.forEach(function (ownerId) { emailCounts.set(ownerId, (emailCounts.get(ownerId) || 0) + 1); });
+  });
+  function project(kind) {
+    var list = model[kind], headers = WORKING_CONTACT_COLUMNS[kind].slice();
+    list.headers.forEach(function (h) { if (headers.indexOf(h) < 0) headers.push(h); });
+    var input = list.headers, read = headers.map(function (h) { return input.indexOf(h); });
+    var rows = list.rows.map(function (row) {
+      var phone = kind === 'phone' && row[input.indexOf('Телефон')];
+      var key = kind === 'email' ? 'email:' + row[input.indexOf('Email')] : phone ? 'phone:' + phone : 'telegram:' + row[input.indexOf('Telegram')];
+      var info = links.get(key);
+      return headers.map(function (header, i) {
+        if (read[i] !== -1 && row[read[i]] !== '' && row[read[i]] !== undefined) return row[read[i]];
+        if (info) {
+          if (header === 'ID компании') return info.id;
+          if (header === 'Сайты') return info.websites;
+          if (header === 'Почт на компанию' && info.id) return String(emailCounts.get(info.id));
+          if (header === 'Проверить принадлежность' && info.multiple) return 'Да';
+        }
+        return '';
+      });
+    });
+    return { headers: headers, rows: rows };
+  }
+  return { email: project('email'), phone: project('phone'), sourceIds: sourceIds, personIds: personIds };
 }
 function preparedDataFit_(value, warn) {
   if (value.length <= PREPARED_DATA_LIMITS.maxCellCharacters) return value;

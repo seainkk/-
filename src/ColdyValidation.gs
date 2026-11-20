@@ -113,12 +113,14 @@ function cvRows_(context, state, ensure) {
   if (emailColumn === undefined) fail_('COLDY_EMAIL_COLUMN', 'На управляемой вкладке нет столбца Email.');
   var statusColumn = map[pvHeader_('Валидация')], values = count ? sheet.getRange(2, 1, count, width).getDisplayValues() : [];
   var notes = count && statusColumn !== undefined ? sheet.getRange(2, statusColumn + 1, count, 1).getNotes() : [];
+  var excluded = new Set();
   return values.map(function (line, index) {
     var rawEmail = String(line[emailColumn] || '').trim(); if (!rawEmail) return null;
     var value = pvEmail_(rawEmail), key = value ? pvKey_('email', value) : '', note = String(notes[index] && notes[index][0] || ''), bound = pvBinding_(note);
+    if (value && pvExcludedRow_(line, map)) excluded.add(key);
     var status = statusColumn === undefined ? '' : String(line[statusColumn] || '').trim(), legacy = !bound && !status ? pvLegacyResult_('email', line, map) : null;
     return { fileId: state.fileId, sheetId: target, row: index + 2, value: value, rawEmail: rawEmail, key: key, kind: 'email', map: map, values: line, note: note, bound: bound, changed: !!bound && bound !== key, completed: !!legacy || !!status && !pvPendingStatus_(status), status: legacy ? legacy.status : status, legacyResult: legacy, invalid: !value };
-  }).filter(function (row) { return !!row; });
+  }).filter(function (row) { return row && !excluded.has(row.key); });
 }
 
 /** All callers hold the same script lock as Promouser when reading/reserving the shared cache. */

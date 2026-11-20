@@ -221,6 +221,13 @@ function fixture(options = {}) {
     if (options.metadataFailures > 0) { options.metadataFailures--; throw context.registryError_('STORAGE_WRITE', 'Service metadata write failed'); }
     for (const record of changed) records.set(record.fileId, plain(record));
   };
+  const origins = { index: Object.create(null) };
+  context.sourceBaseReadOrigins_ = () => origins;
+  context.sourceBaseSaveOrigin_ = (_storage, journal, id, origin) => {
+    assert.ok(calls.lockDepth > 0);
+    if (journal.index[id]) assert.deepEqual(plain(journal.index[id]), plain(origin));
+    journal.index[id] = origin;
+  };
   installSharedApi(context, { accessKey: () => options.accessKey === undefined ? TEST_ACCESS_KEY : options.accessKey });
   const upload = (changes = {}) => plain(context.uploadSourceBase({ name: 'Новая база', baseType: 'general', status: 'collection', requestId: 'upload_request_1234567890', file: blob(), ...changes }));
   const link = (changes = {}) => plain(context.importSourceBaseLink({ url: `https://docs.google.com/spreadsheets/d/${ORIGINAL}/edit`, name: 'Импортированная база', baseType: 'general', status: 'collection', mode: 'copy', requestId: 'link_request_1234567890', ...changes }));

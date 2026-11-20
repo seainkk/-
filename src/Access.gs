@@ -22,6 +22,7 @@ function callApp(request) {
       // Explicit optional handlers keep isolated legacy fixtures usable; the
       // release check requires every feature module in the deployed project.
       var contactMethods = {
+        recoverSourceBaseOrigins: typeof recoverSourceBaseOrigins_ === 'function' ? recoverSourceBaseOrigins_ : null,
         getContactWorkspace: typeof getContactWorkspace_ === 'function' ? getContactWorkspace_ : null,
         syncWorkbookContacts: typeof syncWorkbookContacts_ === 'function' ? syncWorkbookContacts_ : null,
         continueContactSync: typeof continueContactSync_ === 'function' ? continueContactSync_ : null,

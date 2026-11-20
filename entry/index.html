@@ -32,16 +32,47 @@
     const GOOGLE_APP_URL='https://script.google.com/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec';
     const $=(id)=>document.getElementById(id);
     let accessKey=null,currentFrame=null,loadingTimer=null,ready=false;
+    let appWindow=null,appOrigin='',canBack=false,backArmed=false,releasingBack=false;
 
     function keyFromHash(value){const match=typeof value==='string'?value.match(/^#access_key=([A-Za-z0-9_-]{43})$/):null;return match?match[1]:null;}
     function appUrl(key){if(typeof key!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return GOOGLE_APP_URL+'#access_key='+key;}
     function entryUrl(key){if(typeof key!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');const url=new URL(window.location.href);url.search='';url.hash='access_key='+key;if(url.pathname.endsWith('/index.html'))url.pathname=url.pathname.slice(0,-10);return url.href;}
-    function googleOrigin(origin){try{const url=new URL(origin);return url.protocol==='https:'&&(url.hostname==='script.google.com'||url.hostname==='script.googleusercontent.com'||/^[a-z0-9-]+-script\.googleusercontent\.com$/.test(url.hostname));}catch(error){return false;}}
+    function googleOrigin(origin){try{const url=new URL(origin);return url.origin===origin&&!url.port&&url.protocol==='https:'&&(url.hostname==='script.google.com'||url.hostname==='script.googleusercontent.com'||/^[a-z0-9-]+-script\.googleusercontent\.com$/.test(url.hostname));}catch(error){return false;}}
     function frameSource(source){if(!currentFrame||!source)return false;try{let node=source;for(let depth=0;node&&depth<8;depth++){if(node===currentFrame.contentWindow)return true;const parent=node.parent;if(!parent||parent===node)return false;node=parent;}}catch(error){return false;}return false;}
-    function clearFrame(){if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}const old=currentFrame;currentFrame=null;if(old)old.remove();ready=false;$('entry-frame-host').hidden=true;$('entry-copy').hidden=true;$('entry-copy').disabled=true;$('entry-copy-status').textContent='';}
+    function isBackEntry(){return window.history.state?.basesRegistryBack===true;}
+    function syncBackEntry(){
+      if(!window.history||releasingBack)return;
+      if(canBack&&ready){
+        if(isBackEntry()){backArmed=true;return;}
+        if(navigator.userActivation?.hasBeenActive===false)return;
+        try{
+          // Omitting the URL keeps the address intact. The state contains no credential.
+          window.history.pushState({basesRegistryBack:true},'');backArmed=true;
+        }catch(error){backArmed=false;}
+      }else if(backArmed&&isBackEntry()){
+        backArmed=false;releasingBack=true;
+        try{window.history.back();}catch(error){releasingBack=false;}
+      }
+    }
+    function popEntry(){
+      if(!window.history)return;
+      const wasArmed=backArmed;backArmed=false;
+      if(accessKey!==keyFromHash(window.location.hash)){releasingBack=false;return;}
+      if(releasingBack){releasingBack=false;syncBackEntry();return;}
+      if(isBackEntry()){backArmed=ready&&canBack;return;} // Forward to a previous same-page entry.
+      if(!wasArmed||!ready||!canBack||!frameSource(appWindow))return;
+      // The child reports its new state even if a dirty form kept the same view.
+      canBack=false;
+      try{appWindow.postMessage({type:'bases-registry-back'},appOrigin);}catch(error){/* A detached frame cannot accept a back action. */}
+    }
+    function clearFrame(releaseBack=false){
+      canBack=false;appWindow=null;appOrigin='';
+      if(releaseBack)syncBackEntry();else{backArmed=false;releasingBack=false;}
+      if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}const old=currentFrame;currentFrame=null;if(old)old.remove();ready=false;$('entry-frame-host').hidden=true;$('entry-copy').hidden=true;$('entry-copy').disabled=true;$('entry-copy-status').textContent='';
+    }
     function showState(state,title,message,retry){document.body.dataset.state=state;$('entry-card').hidden=false;$('entry-title').textContent=title;$('entry-message').textContent=message;$('entry-spinner').hidden=state!=='loading';$('entry-retry').hidden=!retry;}
     function openEntry(){
-      clearFrame();accessKey=keyFromHash(window.location.hash);
+      const key=keyFromHash(window.location.hash);clearFrame(!!key&&key===accessKey);accessKey=key;
       if(!accessKey){showState('locked','Для входа нужна закрытая ссылка','Откройте полную ссылку, которую вам передал владелец сервиса.',false);return;}
       if(!('credentialless' in HTMLIFrameElement.prototype)){showState('unsupported','Откройте сервис в актуальном Chrome или Edge','Для открытия без переключения Google-аккаунтов нужен браузер, поддерживающий изолированное подключение сервиса. Скопируйте эту же ссылку в актуальный Chrome или Edge.',false);return;}
       showState('loading','Открываем реестр…','Подключаем сервис. Google-вход для реестра не требуется.',false);
@@ -62,13 +93,19 @@
     }
     window.addEventListener('message',(event)=>{
       if(!googleOrigin(event.origin)||!frameSource(event.source)||!event.data||typeof event.data!=='object')return;
+      if(ready&&(event.source!==appWindow||event.origin!==appOrigin))return;
       if(event.data.type==='bases-registry-ready'){
+        appWindow=event.source;appOrigin=event.origin;
         if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-frame-host').hidden=false;$('entry-copy').hidden=false;$('entry-copy').disabled=false;
+      }else if(ready&&event.data.type==='bases-registry-navigation'&&typeof event.data.canBack==='boolean'){
+        canBack=event.data.canBack;syncBackEntry();
       }else if(event.data.type==='bases-registry-locked'){
-        clearFrame();showState('locked','Нужна действующая закрытая ссылка','Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.',false);
+        clearFrame(true);showState('locked','Нужна действующая закрытая ссылка','Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.',false);
       }
     });
-    $('entry-copy').addEventListener('click',copyEntry);$('entry-retry').addEventListener('click',openEntry);window.addEventListener('hashchange',openEntry);window.addEventListener('pagehide',clearFrame);
+    $('entry-copy').addEventListener('click',copyEntry);$('entry-retry').addEventListener('click',openEntry);window.addEventListener('hashchange',openEntry);window.addEventListener('popstate',popEntry);
+    window.addEventListener('pointerup',syncBackEntry);window.addEventListener('keyup',syncBackEntry);
+    window.addEventListener('pagehide',()=>clearFrame());window.addEventListener('pageshow',event=>{if(event.persisted)openEntry();});
     openEntry();
   })();
   </script>

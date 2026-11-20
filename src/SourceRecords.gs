@@ -1,10 +1,60 @@
 /** Pure source-row normalization. Contact extraction and every write belong to the caller. */
+var SOURCE_DIRECTORY_FIELDS = [
+  ['directoryNames', 'Названия', ['Название компании', 'Компания', 'Организация']], ['directoryCategories', 'Категории', ['Категория', 'Категория компании', 'Отрасль', 'Вид деятельности']],
+  ['directoryRegions', 'Регионы, области', ['Регион', 'Регионы', 'Область', 'Регион компании']], ['directoryCities', 'Населенные пункты', ['Населенный пункт', 'Город', 'Города']],
+  ['directoryAddresses', 'Полные адреса', ['Адрес', 'Адреса', 'Полный адрес', 'Адрес компании', 'Юридический адрес', 'Фактический адрес']],
+  ['directoryMobile', 'Мобильные телефоны', ['Мобильный телефон', 'Мобильный телефон компании']], ['directoryLandlines', 'Городские телефоны', ['Городской телефон', 'Стационарный телефон', 'Телефон офиса']],
+  ['directoryEmails', 'Email-адреса', ['Email', 'E-mail', 'Email компании', 'Электронная почта', 'Почта компании']],
+  ['directoryTelegram', 'Telegram', ['Телеграм', 'Telegram компании']], ['directoryWhatsApp', 'WhatsApp', ['WhatsApp компании', 'Вотсап']],
+  ['directoryVk', 'Вконтакте', ['VK', 'ВК']], ['directoryOk', 'Одноклассники', ['OK.ru']], ['directorySites', 'Сайты', ['Сайт', 'Сайт компании', 'Website']],
+  ['directoryMax', 'Max', ['Max компании']], ['directoryBranches', 'Филиалов', ['Филиалы', 'Количество филиалов', 'Число филиалов']],
+  ['directoryPostal', 'Индексы', ['Индекс', 'Почтовый индекс']], ['directoryParsedAt', 'Дата парсинга', ['Дата сбора', 'Дата выгрузки']]
+];
+
+function sourceRecordsDirectoryColumns_(header, columns) {
+  var keys = header.map(sourceRecordsKey_), result = {}, specific = false;
+  var canonical = { name: 'directoryNames', city: 'directoryCities', website: 'directorySites' };
+  SOURCE_DIRECTORY_FIELDS.forEach(function (field) {
+    var labels = [field[1]].concat(field[2]).map(sourceRecordsKey_), found = [];
+    keys.forEach(function (key, index) {
+      var column = columns[index] || {};
+      if (!column.person && (labels.indexOf(key) >= 0 || canonical[column.company] === field[0])) found.push(index);
+    });
+    if (!found.length) return;
+    result[field[0]] = found;
+    if (['directoryNames','directoryCities','directorySites','directoryEmails','directoryTelegram'].indexOf(field[0]) === -1) specific = true;
+  });
+  return specific ? result : null;
+}
+
+function sourceRecordsDirectoryRow_(cells, mapping, rowContacts, columns, record) {
+  var directory = {}, channels = { directoryEmails: 'emails', directoryMobile: 'phones', directoryLandlines: 'phones', directoryTelegram: 'telegrams' };
+  Object.keys(mapping).forEach(function (key) {
+    var values = [], channel = channels[key];
+    mapping[key].forEach(function (index) {
+      var value = String(cells[index] == null ? '' : cells[index]), descriptor = columns[index] || {};
+      if (!value || values.indexOf(value) >= 0) return;
+      if (channel && !descriptor.general) {
+        var contacts = (rowContacts[index] || {})[channel] || [];
+        if (contacts.some(function (contact) { return record.general[channel].indexOf(contact) === -1; })) return;
+      }
+      values.push(value);
+    });
+    directory[key] = values.join('\n');
+  });
+  return directory;
+}
+
 function sourceRecordsBuild_(displayRows, options) {
   options = options || {};
   if (!Array.isArray(displayRows)) throw new Error('Source rows must be an array.');
   var hasHeader = options.hasHeader !== false, headerIndex = Number.isInteger(options.headerIndex) && options.headerIndex >= 0 ? options.headerIndex : 0;
   var header = Array.isArray(options.header) ? options.header : hasHeader ? displayRows[headerIndex] || [] : [];
+  var personIdColumns = [];
+  header.forEach(function (label, index) { if (/^(?:idлпр|идлпр|идентификаторлпр|personid)$/.test(sourceRecordsKey_(label))) personIdColumns.push(index); });
   var columns = sourceRecordsColumns_(header, options.section), contacts = options.cellContacts || Object.create(null), warnings = [], records = [];
+  var companyContext = options.mixedCompanyContext && columns.some(function (column) { return ['name', 'inn', 'ogrn', 'id'].indexOf(column.company) !== -1; });
+  var directoryColumns = sourceRecordsDirectoryColumns_(header, columns);
   var warn = function (message) { if (warnings.indexOf(message) === -1) warnings.push(message); };
   for (var rowIndex = hasHeader ? headerIndex + 1 : 0; rowIndex < displayRows.length; rowIndex++) {
     var cells = Array.isArray(displayRows[rowIndex]) ? displayRows[rowIndex] : [], rowNumber = rowIndex + 1;
@@ -64,7 +114,7 @@ function sourceRecordsBuild_(displayRows, options) {
         else if (descriptor.group.indexOf('role:') === 0 && activeKeys.length === 1 && groups[activeKeys[0]].key.indexOf('role:') !== 0 && !groups[activeKeys[0]].roles.some(function (role) { var mapped = sourceRecordsRole_(sourceRecordsKey_(role)); return mapped.key && descriptor.group !== 'role:' + mapped.key; })) target = groups[activeKeys[0]];
         else target = getGroup(descriptor.group);
       }
-      else if (descriptor.person || options.section === 'lpr') {
+      else if (descriptor.person || options.section === 'lpr' && !companyContext) {
         if (options.section === 'lpr' && descriptor.number && groups['number:' + descriptor.number]) target = groups['number:' + descriptor.number];
         else if (activeKeys.length === 1) target = groups[activeKeys[0]];
         else if (!activeKeys.length) target = getGroup('default');
@@ -100,9 +150,14 @@ function sourceRecordsBuild_(displayRows, options) {
         record.people.push(person);
       });
     });
+    if (personIdColumns.length === 1 && record.people.length === 1) {
+      var personId = String(cells[personIdColumns[0]] || '').trim();
+      if (/^P-[A-Za-z0-9_-]{20,43}$/.test(personId)) record.people[0].id = personId;
+    }
     if (!record.people.length && !sourceRecordsHasContacts_(record.general) && !Object.keys(record.company).some(function (key) { return typeof record.company[key] === 'string' && record.company[key] !== ''; })) {
       record.ambiguous = true; warn('В некоторых непустых строках не распознаны реквизиты компании или ЛПР. Исходные строки сохранены для ручной проверки.');
     }
+    if (directoryColumns) record.directory = sourceRecordsDirectoryRow_(cells, directoryColumns, rowContacts, columns, record);
     records.push(record);
   }
   return { records: records, warnings: warnings };

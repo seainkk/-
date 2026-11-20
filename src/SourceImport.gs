@@ -30,6 +30,7 @@ function uploadSourceBase_(form) {
     return locked_(function () {
       var preparation = importPrepare_();
       common.kind = 'upload'; common.mode = 'upload'; common.extension = extension; common.mimeType = mimeType;
+      common.origin = { id: 'upload:' + hash, name: filename.slice(0, 512) };
       common.fingerprintParts = [hash, bytes.length, extension, mimeType];
       return importExecute_(preparation, common, function (receipt, key, fingerprint, beginMutation) {
         blob.setContentType(mimeType);
@@ -220,6 +221,7 @@ function importExecute_(preparation, common, action) {
   var existed = !!receipt;
   if (!receipt) {
     receipt = { version: 1, fingerprint: fingerprint, mode: common.mode, destination: destination, status: 'pending', attempted: false, fileId: '', preActionRevision: 0, metadataCommitted: false, createdAt: new Date().toISOString() };
+    if (common.origin) receipt.origin = common.origin;
     importAllocateReceipt_(context, key, receipt);
   }
   var recovered = existed;
@@ -328,9 +330,14 @@ function importFinalize_(preparation, common, key, receipt, recovered) {
   if (!receipt.metadataCommitted && receipt.preActionRevision > 0) options = { expectedRevision: receipt.preActionRevision };
   else if (!receipt.metadataCommitted && receipt.preActionRevision === 0 && current && current.revision === 1 && current.baseType === 'general' && current.status === 'collection' && current.formatCheck === 'unchecked') options = { expectedRevision: 1 };
   var record = registerImportedSourceBase_(context, storage, database, metadata, common.contents, common.status, options);
+  var origins = sourceBaseReadOrigins_(storage);
+  var source = common.mode === 'copy' ? receipt.original : receipt.origin;
+  if (!receipt.metadataCommitted && source && source.id !== file.id) {
+    sourceBaseSaveOrigin_(storage, origins, file.id, sourceBaseOrigin_(file.id, source.id, source.name, ''));
+  }
   receipt.status = 'done'; receipt.metadataCommitted = true;
   importSaveReceipt_(context, key, receipt, false);
-  return { item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(database.relations, context)), file: { id: metadata.id, name: metadata.name, url: metadata.url, mimeType: metadata.mimeType }, mode: common.mode, recovered: !!recovered };
+  return { item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(database.relations, context), origins), file: { id: metadata.id, name: metadata.name, url: metadata.url, mimeType: metadata.mimeType }, mode: common.mode, recovered: !!recovered };
 }
 
 function importReadReceipt_(context, key) {

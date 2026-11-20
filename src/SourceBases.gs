@@ -8,6 +8,8 @@ var SOURCE_BASES_SCHEMA = Object.freeze({
   basesHeaders: ['fileId', 'fileName', 'mimeType', 'url', 'format', 'status', 'formatCheck', 'revision', 'present', 'updatedAt', 'updatedBy', 'baseType', 'contents'],
   relationsTab: 'SourceBaseSegments',
   relationsHeaders: ['fileId', 'segmentId', 'createdAt', 'createdBy'],
+  originsTab: 'SourceBaseOrigins',
+  originsHeaders: ['selectionFileId', 'sourceId', 'sourceName', 'criteria'],
   statuses: ['collection', 'ready', 'rework'],
   checks: ['unchecked', 'valid', 'invalid'],
   baseTypes: ['general', 'lpr', 'mixed'],
@@ -32,7 +34,8 @@ function getSourceBases_() {
         var database = sourceBasesReadDatabase_(storage);
         var records = sourceBasesSync_(current, storage, database, discovered);
         var associations = sourceBasesAssociations_(database.relations, current);
-        var items = discovered.map(function (file) { return sourceBaseItem_(file, records[file.id], associations); });
+        var origins = sourceBaseReadOrigins_(storage);
+        var items = discovered.map(function (file) { return sourceBaseItem_(file, records[file.id], associations, origins); });
         return sourceBasesResponse_(binding, storage.public, items, true, true);
       } catch (error) {
         if (error.registryCode && ['AUTH_REQUIRED', 'ACCESS_DENIED', 'SETUP_REQUIRED', 'OUTSIDE_REGISTRY', 'BUSY'].indexOf(error.registryCode) !== -1) throw error;
@@ -54,9 +57,17 @@ function getSourceBases_() {
 function updateSourceBase_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request);
-    var allowedKeys = ['id', 'status', 'formatCheck', 'baseType', 'contents', 'expectedRevision'];
+    var bindOrigin = Object.prototype.hasOwnProperty.call(input, 'origin');
+    var allowedKeys = bindOrigin ? ['id', 'expectedRevision', 'requestId', 'origin'] : ['id', 'status', 'formatCheck', 'baseType', 'contents', 'expectedRevision'];
     if (Object.keys(input).some(function (key) { return allowedKeys.indexOf(key) === -1; })) fail_('INVALID_REQUEST', 'Можно изменить только наполнение базы, статус сбора и ручную проверку формата.');
     var fileId = id_(input.id);
+    var origin;
+    if (bindOrigin) {
+      if (input.requestId !== fileId) fail_('INVALID_REQUEST', 'Повторите привязку с идентификатором этой выборки.');
+      var spec = object_(input.origin);
+      if (Object.keys(spec).some(function (key) { return ['url', 'name', 'criteria'].indexOf(key) === -1; })) fail_('INVALID_REQUEST', 'Проверьте поля исходной базы.');
+      origin = sourceBaseOrigin_(fileId, importSheetLink_(spec.url).id, spec.name, spec.criteria === undefined ? '' : spec.criteria);
+    }
     if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) fail_('INVALID_REQUEST', 'Сначала обновите сохранённое состояние базы.');
     var hasStatus = Object.prototype.hasOwnProperty.call(input, 'status');
     var hasCheck = Object.prototype.hasOwnProperty.call(input, 'formatCheck');
@@ -65,7 +76,7 @@ function updateSourceBase_(request) {
     if (hasContents && !Array.isArray(input.contents)) fail_('INVALID_CONTENTS', 'Наполнение базы должно содержать компании и/или ЛПР.');
     var contents = hasContents ? sourceBaseContents_(input.contents) : (hasType ? sourceBaseContents_(input.baseType) : null);
     if (hasType && hasContents && sourceBaseLegacyType_(contents) !== input.baseType) fail_('INVALID_CONTENTS', 'Наполнение базы не соответствует указанному типу.');
-    if (!hasStatus && !hasCheck && !hasType && !hasContents) fail_('INVALID_REQUEST', 'Не выбрано изменение базы.');
+    if (!bindOrigin && !hasStatus && !hasCheck && !hasType && !hasContents) fail_('INVALID_REQUEST', 'Не выбрано изменение базы.');
     if (hasStatus && SOURCE_BASES_SCHEMA.statuses.indexOf(input.status) === -1) fail_('INVALID_STATUS', 'Неизвестный статус сбора.');
     if (hasCheck && SOURCE_BASES_SCHEMA.checks.indexOf(input.formatCheck) === -1) fail_('INVALID_FORMAT_CHECK', 'Неизвестный результат ручной проверки формата.');
     if (hasType && SOURCE_BASES_SCHEMA.baseTypes.indexOf(input.baseType) === -1) fail_('INVALID_BASE_TYPE', 'Неизвестный тип базы.');
@@ -78,6 +89,14 @@ function updateSourceBase_(request) {
       var database = sourceBasesReadDatabase_(storage);
       var stored = database.records[fileId];
       if (!stored || !stored.present) fail_('CONFLICT', 'Состав исходных баз изменился. Обновите список перед сохранением.');
+      var origins = sourceBaseReadOrigins_(storage);
+      if (bindOrigin) {
+        if (file.mimeType !== REGISTRY_CONFIG.spreadsheetMime) fail_('INVALID_FILE_TYPE', 'Выборка должна быть таблицей Google в реестре.');
+        if ([current.rootId, storage.public.id, current.properties.getProperty('CONTACT_CENTER_ID') || REGISTRY_CONFIG.defaultContactCenterId].indexOf(origin.id) !== -1) fail_('PROTECTED_FILE', 'Служебный файл нельзя привязать как исходник.');
+        if (stored.revision !== input.expectedRevision && !(origins && origins.index[fileId])) fail_('CONFLICT', 'Выборка изменилась. Обновите список перед привязкой.');
+        sourceBaseSaveOrigin_(storage, origins, fileId, origin);
+        return { item: sourceBaseItem_(file, stored, sourceBasesAssociations_(database.relations, current), origins) };
+      }
       if (stored.revision !== input.expectedRevision) fail_('CONFLICT', 'Эту базу уже изменили. Обновите список перед повторным сохранением.');
       var record = sourceBaseCopyRecord_(stored);
       sourceBaseApplyMetadata_(record, file);
@@ -92,7 +111,7 @@ function updateSourceBase_(request) {
         sourceBaseBump_(record, current.email);
         sourceBaseWriteRecords_(storage.basesSheet, [record]);
       }
-      return { item: sourceBaseItem_(file, record, sourceBasesAssociations_(database.relations, current)) };
+      return { item: sourceBaseItem_(file, record, sourceBasesAssociations_(database.relations, current), origins) };
     });
   });
 }
@@ -463,8 +482,123 @@ function sourceBasesAssociations_(relations, context) {
   return { relations: relations, index: index };
 }
 
-function sourceBaseItem_(file, record, associations) {
+// The service book stores references only. Never fetch external files to render lineage.
+function sourceBaseOrigin_(selectionId, id, name, criteria) {
+  var upload = typeof id === 'string' && /^upload:[A-Za-z0-9_-]{43}$/.test(id);
+  if (!upload) id_(id);
+  if (selectionId === id) fail_('INVALID_REQUEST', 'Выборка и исходная база должны быть разными файлами.');
+  if (typeof name !== 'string' || !name.trim() || name.length > 2000 || typeof criteria !== 'string' || criteria.length > 2000) fail_('INVALID_REQUEST', 'Укажите название исходника. Название и критерии допускают до 2000 знаков.');
+  return { id: id, name: name.trim(), criteria: criteria.trim(), url: upload ? null : spreadsheetUrl_(id) };
+}
+
+function sourceBaseReadOrigins_(storage) {
+  try {
+    var sheet = storage.book.getSheetByName(SOURCE_BASES_SCHEMA.originsTab);
+    var result = { sheet: sheet, index: Object.create(null), lastRow: 0 };
+    if (!sheet || !sheet.getLastRow()) return result;
+    var data = sourceBasesReadRows_(sheet, SOURCE_BASES_SCHEMA.originsHeaders);
+    result.lastRow = data.lastRow;
+    data.rows.forEach(function (row) {
+      if (row.every(function (cell) { return cell === ''; })) return;
+      var selectionId = id_(row[0]);
+      if (result.index[selectionId]) fail_('STORAGE_DUPLICATE', 'В журнале повторилась рабочая выборка.');
+      result.index[selectionId] = sourceBaseOrigin_(selectionId, row[1], row[2], row[3]);
+    });
+    return result;
+  } catch (error) {
+    // Isolate a damaged optional journal from the existing source catalog.
+    return null;
+  }
+}
+
+function recoverSourceBaseOrigins_(request) {
+  return api_(function () {
+    authorize_();
+    var input = object_(request), seen = Object.create(null);
+    if (Object.keys(input).length !== 1 || !Array.isArray(input.items) || !input.items.length || input.items.length > 8) fail_('INVALID_REQUEST', 'Выберите от одной до восьми рабочих баз.');
+    var items = input.items.map(function (entry) {
+      var item = object_(entry), id = id_(item.id);
+      if (Object.keys(item).length !== 3 || item.requestId !== id || seen[id] || !Number.isSafeInteger(item.expectedRevision) || item.expectedRevision < 1) fail_('INVALID_REQUEST', 'Проверьте идентификаторы и версии рабочих баз.');
+      seen[id] = true;
+      return item;
+    });
+    return locked_(function () {
+      var current = authorize_(), binding = sourceBasesSource_(current), storage = sourceBasesStorage_(current);
+      if (binding.state !== 'ready') fail_('SOURCE_UNAVAILABLE', 'Папка исходных баз недоступна.');
+      var database = sourceBasesReadDatabase_(storage), origins = sourceBaseReadOrigins_(storage);
+      if (!origins) fail_('STORAGE_SCHEMA', 'Журнал источников недоступен. Проверьте вкладку SourceBaseOrigins.');
+      var result = { linked: 0, known: 0, unresolved: 0, changed: 0 };
+      items.forEach(function (item) {
+        var record = database.records[item.id];
+        if (!record || !record.present || record.revision !== item.expectedRevision) { result.changed++; return; }
+        var file;
+        try { file = sourceBasesFile_(current, binding.folder, item.id); }
+        catch (error) { if (error.registryCode === 'NOT_FOUND' || error.registryCode === 'OUTSIDE_REGISTRY') { result.changed++; return; } throw error; }
+        if (file.getMimeType() !== REGISTRY_CONFIG.spreadsheetMime) { result.unresolved++; return; }
+        if (origins.index[item.id]) { result.known++; return; }
+        var info = Drive.Files.get(item.id, { fields: 'id,trashed,appProperties', supportsAllDrives: true });
+        if (info.id !== item.id || info.trashed) { result.changed++; return; }
+        var origin = sourceBaseReceiptOrigin_(current, binding.source.id, item.id, info.appProperties || {}, database.records);
+        if (!origin || [current.rootId, storage.public.id, current.properties.getProperty('CONTACT_CENTER_ID') || REGISTRY_CONFIG.defaultContactCenterId].indexOf(origin.id) !== -1) { result.unresolved++; return; }
+        sourceBasesFile_(current, binding.folder, item.id);
+        sourceBaseSaveOrigin_(storage, origins, item.id, origin);
+        result.linked++;
+      });
+      return result;
+    });
+  });
+}
+
+// Read the single journal addressed by the verified output's private Drive tags.
+// Previous uploads and evicted receipts carry no verifiable original spreadsheet ID.
+function sourceBaseReceiptOrigin_(current, destination, selectionId, tags, records) {
+  var receipt = null, original = null, name = '';
+  if (tags.registryPreparedRole === 'output' && tags.registryPreparedRoot === current.rootId && /^[A-Za-z0-9_-]{24,64}$/.test(tags.registryPreparedDraft || '') && typeof tags.registryPreparedFingerprint === 'string' && tags.registryPreparedFingerprint) {
+    try { receipt = preparedRead_(current, tags.registryPreparedDraft, true); }
+    catch (error) { if (error.registryCode === 'OUTSIDE_REGISTRY' || error.registryCode === 'PREVIEW_STORAGE') return null; throw error; }
+    if (receipt && receipt.state === 'complete' && receipt.metadataCommitted === true && receipt.kind === 'link' && receipt.outputId === selectionId && receipt.fingerprint === tags.registryPreparedFingerprint) {
+      original = receipt.original;
+      if (receipt.origin && original && receipt.origin.id === original.id) name = receipt.origin.name;
+    }
+  } else if (/^IMPORT_[A-Za-z0-9_-]{32}$/.test(tags.registryImportKey || '') && typeof tags.registryImportFingerprint === 'string' && tags.registryImportFingerprint) {
+    try { receipt = importReadReceipt_(current, tags.registryImportKey); }
+    catch (error) { if (error.registryCode === 'CREATION_UNCERTAIN') return null; throw error; }
+    if (receipt && receipt.status === 'done' && receipt.metadataCommitted === true && receipt.mode === 'copy' && receipt.destination === destination && receipt.fileId === selectionId && receipt.fingerprint === tags.registryImportFingerprint) original = receipt.original;
+  }
+  if (!original || typeof original.id !== 'string' || !/^[A-Za-z0-9_-]{10,200}$/.test(original.id) || original.id === selectionId) return null;
+  name = name || original.name || (records[original.id] && records[original.id].fileName) || 'Исходная Google Таблица';
+  return sourceBaseOrigin_(selectionId, original.id, name, '');
+}
+
+// Under the app lock, one immutable row per working file is the receipt for all retries.
+function sourceBaseSaveOrigin_(storage, origins, selectionId, origin) {
+  if (!origins) fail_('STORAGE_SCHEMA', 'Журнал связей недоступен. Проверьте вкладку SourceBaseOrigins в служебной книге.');
+  var saved = origins.index[selectionId];
+  if (saved) {
+    if (saved.id !== origin.id || saved.name !== origin.name || saved.criteria !== origin.criteria) fail_('ORIGIN_CONFLICT', 'У выборки уже сохранена другая привязка. Обновите реестр.');
+    return;
+  }
+  var visited = Object.create(null), parent = origin.id;
+  while (parent) {
+    if (parent === selectionId || visited[parent]) fail_('ORIGIN_CONFLICT', 'Эта привязка образует замкнутую цепочку выборок.');
+    visited[parent] = true; parent = origins.index[parent] && origins.index[parent].id;
+  }
+  if (origins.lastRow >= REGISTRY_CONFIG.maxSourceBaseRows + 1) fail_('STORAGE_LIMIT', 'В журнале нет места для новой связи.');
+  var sheet = origins.sheet || storage.book.insertSheet(SOURCE_BASES_SCHEMA.originsTab);
+  var rows = [[id_(selectionId), origin.id, origin.name, origin.criteria]], start = origins.lastRow + 1;
+  if (!origins.lastRow) rows.unshift(SOURCE_BASES_SCHEMA.originsHeaders);
+  var end = start + rows.length - 1, capacity = sheet.getMaxRows();
+  if (end > capacity) sheet.insertRowsAfter(capacity, end - capacity);
+  SpreadsheetApp.flush();
+  // Write the complete row as literal strings in one API call, including names starting with "=".
+  sheetWriteRawStrings_(storage.public.id, sheet.getSheetId(), start, 1, rows);
+  origins.sheet = sheet; origins.lastRow = end; origins.index[selectionId] = origin;
+}
+
+function sourceBaseItem_(file, record, associations, origins) {
   var item = { id: file.id, name: file.name, fileName: file.fileName, mimeType: file.mimeType, url: file.url, format: file.format, status: record ? record.status : null, formatCheck: record ? record.formatCheck : null, baseType: record ? record.baseType : null, contents: record ? sourceBaseContents_(record.contents || record.baseType) : null, canAddToSegment: !!(record && record.present && record.status === 'ready' && file.mimeType === REGISTRY_CONFIG.spreadsheetMime), revision: record ? record.revision : null, present: true, segments: associations ? [] : null, associationsAvailable: !!associations };
+  item.origin = origins && origins.index[file.id] || null;
+  item.originAvailable = !!origins;
   if (record) { item.updatedAt = record.updatedAt; item.updatedBy = record.updatedBy; }
   if (associations) associations.relations.forEach(function (relation) {
     if (relation.fileId !== file.id) return;

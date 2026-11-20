@@ -82,8 +82,12 @@ function segmentRecordsJoinSources_(before, after) {
   return result.join('\n');
 }
 function segmentRecordsHasContacts_(record) { return ['emails', 'phones', 'telegrams'].some(function (key) { return segmentRecordsText_(record[key]) !== ''; }); }
-function segmentRecordsSchema_(kind) { return kind === 'companies' ? SEGMENT_RECORDS_SCHEMA.company : SEGMENT_RECORDS_SCHEMA.person; }
-function segmentRecordsValues_(record, kind) { return segmentRecordsSchema_(kind).map(function (field) { return segmentRecordsText_(record[field[0]]); }); }
+function segmentRecordsSchema_(kind, directory) {
+  if (kind !== 'companies') return SEGMENT_RECORDS_SCHEMA.person;
+  return directory ? SEGMENT_RECORDS_SCHEMA.company.concat(SOURCE_DIRECTORY_FIELDS) : SEGMENT_RECORDS_SCHEMA.company;
+}
+function segmentRecordsFieldValue_(key, value) { return key.indexOf('directory') === 0 ? String(value == null ? '' : value) : segmentRecordsText_(value); }
+function segmentRecordsValues_(record, kind, directory) { return segmentRecordsSchema_(kind, directory).map(function (field) { return segmentRecordsFieldValue_(field[0], record[field[0]]); }); }
 
 function segmentRecordsCompany_(record) {
   var raw = record.company || {}, general = record.general || {};
@@ -93,7 +97,7 @@ function segmentRecordsCompany_(record) {
     emails: segmentRecordsList_(general.emails || raw.emails, 'email').join('; '),
     phones: segmentRecordsList_(general.phones || raw.phones, 'phone').join('; '),
     telegrams: segmentRecordsList_(general.telegrams || raw.telegrams, 'telegram').join('; '),
-    source: segmentRecordsSource_(record.source)
+    source: segmentRecordsSource_(record.source), directory: record.directory
   };
 }
 
@@ -112,7 +116,7 @@ function segmentRecordsCompanyKeys_(record) {
 function segmentRecordsPlanner_(input) {
   input = input || {};
   var sourceRecords = Array.isArray(input.records) ? input.records : [], companies = [], people = [], review = [], markers = [], companyIndex = Object.create(null), companyNames = Object.create(null), personIndex = Object.create(null), companyChanges = [], personChanges = [];
-  var nextCompanyRow = 2, nextPersonRow = 2;
+  var nextCompanyRow = 2, nextPersonRow = 2, targetKind = input.targetKind, linkedCompanies = Object.create(null);
   function addIndex(index, key, record) { if (!index[key]) index[key] = []; if (index[key].indexOf(record) === -1) index[key].push(record); }
   function indexCompany(record) {
     segmentRecordsCompanyKeys_(record).forEach(function (key) { addIndex(companyIndex, key, record); });
@@ -136,8 +140,8 @@ function segmentRecordsPlanner_(input) {
     return (records || []).map(function (raw) {
       var record = segmentRecordsCopy_(raw); record.row = Number(raw.row || raw.rowIndex);
       if (!Number.isSafeInteger(record.row) || record.row < 2) fail_('SEGMENT_MASTER_SCHEMA', 'В единой таблице есть некорректный номер строки.');
-      segmentRecordsSchema_(kind).forEach(function (field) { record[field[0]] = segmentRecordsText_(record[field[0]]); });
-      record.before = segmentRecordsValues_(record, kind); record.existing = true;
+      segmentRecordsSchema_(kind, input.directory).forEach(function (field) { record[field[0]] = segmentRecordsFieldValue_(field[0], record[field[0]]); });
+      record.before = segmentRecordsValues_(record, kind, input.directory); record.existing = true;
       if (kind === 'companies') { nextCompanyRow = Math.max(nextCompanyRow, record.row + 1); indexCompany(record); }
       else { nextPersonRow = Math.max(nextPersonRow, record.row + 1); indexPerson(record); }
       return record;
@@ -147,6 +151,17 @@ function segmentRecordsPlanner_(input) {
   var seenSourceMarkers = Object.create(null), acceptedCompanies = 0, acceptedPeople = 0;
   function issue(kind, reason, source, value) { review.push({ kind: kind, reason: reason, source: segmentRecordsSource_(source), name: segmentRecordsText_(value) }); }
   function mergeCompany(record, incoming) {
+    var directory = Object.assign({ directoryNames: incoming.name, directoryCities: incoming.city, directorySites: incoming.website, directoryEmails: incoming.emails, directoryTelegram: incoming.telegrams }, incoming.directory || {});
+    if (input.directory) SOURCE_DIRECTORY_FIELDS.forEach(function (field) {
+      var key = field[0], value = segmentRecordsFieldValue_(key, directory[key]);
+      if (!value || (record._formulaFields && record._formulaFields[key]) || record[key] === value) return;
+      if (!record[key]) record[key] = value;
+      else if (key !== 'directoryBranches' && key !== 'directoryParsedAt') {
+        var seen = new Set(record[key].split(/\r?\n/));
+        var additions = value.split(/\r?\n/).filter(function (line) { if (!line || seen.has(line)) return false; seen.add(line); return true; });
+        if (additions.length) record[key] += '\n' + additions.join('\n');
+      }
+    });
     ['name', 'inn', 'ogrn', 'website', 'city'].forEach(function (key) { if (!record[key] && incoming[key]) record[key] = incoming[key]; });
     if (!segmentRecordsInn_(record.inn) && segmentRecordsInn_(incoming.inn)) record.inn = segmentRecordsInn_(incoming.inn);
     if (!segmentRecordsOgrn_(record.ogrn) && segmentRecordsOgrn_(incoming.ogrn)) record.ogrn = segmentRecordsOgrn_(incoming.ogrn);
@@ -157,6 +172,7 @@ function segmentRecordsPlanner_(input) {
   }
   function resolveCompany(incoming) {
     var keys = segmentRecordsCompanyKeys_(incoming), matches = [], hardConflict = false;
+    var explicitId = /^C-[A-Za-z0-9_-]{20,43}$/.test(incoming.id || '') ? incoming.id : '';
     if (!keys.length) return null;
     var strongKeys = keys.filter(function (key) { return /^(?:inn|ogrn|id):/.test(key); });
     function findCandidates(selected, strong) {
@@ -166,7 +182,15 @@ function segmentRecordsPlanner_(input) {
       if (found.length) {
         var candidate = found[0];
         var incompatible = (segmentRecordsInn_(incoming.inn) && segmentRecordsInn_(candidate.inn) && segmentRecordsInn_(incoming.inn) !== segmentRecordsInn_(candidate.inn)) || (segmentRecordsOgrn_(incoming.ogrn) && segmentRecordsOgrn_(candidate.ogrn) && segmentRecordsOgrn_(incoming.ogrn) !== segmentRecordsOgrn_(candidate.ogrn));
-        if (incompatible) {
+        var differentNames = explicitId && explicitId === candidate.id && incoming.name && candidate.name &&
+          segmentRecordsName_(incoming.name) !== segmentRecordsName_(candidate.name);
+        var sameRegistration = (segmentRecordsInn_(incoming.inn) && segmentRecordsInn_(incoming.inn) === segmentRecordsInn_(candidate.inn)) ||
+          (segmentRecordsOgrn_(incoming.ogrn) && segmentRecordsOgrn_(incoming.ogrn) === segmentRecordsOgrn_(candidate.ogrn));
+        if (!incompatible && explicitId && candidate.id && explicitId !== candidate.id && selected[i].indexOf('site:') === 0 && segmentRecordsCity_(incoming.city)) {
+          issue('company', 'Совпадают сайт, название и город, но указаны разные ID компаний. Проверьте записи перед объединением.', incoming.source, incoming.name);
+          return null;
+        }
+        if (incompatible || differentNames && !sameRegistration || explicitId && candidate.id && explicitId !== candidate.id) {
           if (strong) { issue('company', 'Сильные идентификаторы компании противоречат друг другу. Контакты не объединялись.', incoming.source, incoming.name); return null; }
           hardConflict = true; continue;
         }
@@ -176,14 +200,20 @@ function segmentRecordsPlanner_(input) {
       return true;
     }
     if (findCandidates(strongKeys, true) === null) return null;
-    if (!matches.length && findCandidates(keys.filter(function (key) { return !/^(?:inn|ogrn|id):/.test(key); }), false) === null) return null;
+    if (!matches.length && findCandidates(keys.filter(function (key) { return targetKind === 'lpr' ? /^(?:site|name-city):/.test(key) : !/^(?:inn|ogrn|id):/.test(key); }), false) === null) return null;
     if (matches.length > 1) { issue('company', 'ИНН, сайт или название указывают на разные компании. Нужна ручная проверка.', incoming.source, incoming.name); return null; }
+    if (targetKind === 'lpr') {
+      var existing = matches[0];
+      if (!existing || !existing.id || hardConflict || (companyIndex['id:' + existing.id] || []).length !== 1) return null;
+      linkedCompanies[existing.id] = existing.row;
+      return existing;
+    }
     if (matches.length === 1) return mergeCompany(matches[0], incoming);
     var nameMatches = companyNames[segmentRecordsName_(incoming.name)] || [];
     var strong = keys.some(function (key) { return /^(?:inn|ogrn|id|site|name-city):/.test(key); });
     if (nameMatches.length && !strong && !hardConflict) { issue('company', 'Совпадает название, но недостаточно данных для безопасного объединения. Исходная строка сохранена.', incoming.source, incoming.name); return null; }
     var identity = keys.filter(function (key) { return /^(?:inn|ogrn|id|site|name-city):/.test(key); })[0] || keys[0];
-    var record = { id: segmentRecordsId_('C', identity), name: '', inn: '', ogrn: '', website: '', city: '', emails: '', phones: '', telegrams: '', personName: '', personRole: '', personEmails: '', personPhones: '', personTelegrams: '', transferred: '', sources: '', status: '', row: nextCompanyRow++, existing: false, before: [] };
+    var record = { id: explicitId || segmentRecordsId_('C', identity), name: '', inn: '', ogrn: '', website: '', city: '', emails: '', phones: '', telegrams: '', personName: '', personRole: '', personEmails: '', personPhones: '', personTelegrams: '', transferred: '', sources: '', status: '', row: nextCompanyRow++, existing: false, before: [] };
     companies.push(record); acceptedCompanies++;
     if (identity.indexOf('contacts:') === 0) issue('company', 'Контакты сохранены без определения компании. Заполните компанию или ИНН позднее.', incoming.source, segmentRecordsList_(incoming.emails, 'email')[0] || segmentRecordsList_(incoming.phones, 'phone')[0] || segmentRecordsList_(incoming.telegrams, 'telegram')[0]);
     return mergeCompany(record, incoming);
@@ -199,7 +229,20 @@ function segmentRecordsPlanner_(input) {
     var target = found[0];
     if (target && explicitId && target.id !== explicitId) { issue('person', 'ФИО совпадают, но ID ЛПР различаются. Контакты не объединялись.', source, record.name); return null; }
     if (target && explicitId && target.name && record.name && segmentRecordsName_(target.name) !== segmentRecordsName_(record.name)) { issue('person', 'Один ID ЛПР указан для разных ФИО. Нужна ручная проверка.', source, record.name); return null; }
+    if (target && targetKind === 'lpr' && target.companyId && !record.companyId && !explicitId) { issue('person', 'Название компании и ФИО совпадают, но связь с компанией не подтверждена. Нужна ручная проверка.', source, record.name); return null; }
+    if (target && explicitId && ((target.companyId && record.companyId && target.companyId !== record.companyId) ||
+        (!target.companyId || !record.companyId) && target.companyName && record.companyName && segmentRecordsName_(target.companyName) !== segmentRecordsName_(record.companyName))) {
+      issue('person', 'Один ID ЛПР указан для разных компаний. Проверьте принадлежность перед объединением.', source, record.name); return null;
+    }
     if (target && target.companyId && record.companyId && target.companyId !== record.companyId) target = null;
+    if (target && !explicitId && record.name) {
+      var overlapping = false, comparable = false;
+      ['email', 'phone', 'telegram'].forEach(function (channel) {
+        var field = channel + 's', known = segmentRecordsList_(target[field], channel), incoming = segmentRecordsList_(record[field], channel);
+        if (known.length && incoming.length) { comparable = true; if (known.some(function (value) { return incoming.indexOf(value) >= 0; })) overlapping = true; }
+      });
+      if (comparable && !overlapping) { issue('person', 'ФИО совпадают, но контакты не совпали. Проверьте, один ли это человек.', source, record.name); return null; }
+    }
     if (!target) {
       var identity = key || ['source', segmentRecordsSourceKey_(source), record.name, record.role].join('|');
       if (!key && (personIndex['unresolved-name:' + segmentRecordsName_(record.name)] || []).length) issue('person', 'ЛПР без компании сохранён отдельно: совпадение ФИО не доказывает принадлежность одному человеку.', source, record.name);
@@ -214,11 +257,15 @@ function segmentRecordsPlanner_(input) {
     indexPerson(target); return target;
   }
   sourceRecords.forEach(function (sourceRecord) {
-    var incoming = segmentRecordsCompany_(sourceRecord), company = resolveCompany(incoming), source = segmentRecordsSource_(sourceRecord.source), transferred = [];
+    var incoming = segmentRecordsCompany_(sourceRecord), source = segmentRecordsSource_(sourceRecord.source), transferred = [];
+    if (targetKind === 'lpr' && !(sourceRecord.people || []).length) return;
+    var company = resolveCompany(incoming);
     if (!company && !segmentRecordsHasContacts_(incoming) && !(Array.isArray(sourceRecord.people) && sourceRecord.people.length) && !segmentRecordsCompanyKeys_(incoming).length) issue('row', 'Строка не распознана как компания, ЛПР или контакт. Подробности сохранены в исходной базе.', source, incoming.name);
+    if (targetKind === 'companies') return;
     (Array.isArray(sourceRecord.people) ? sourceRecord.people : []).forEach(function (raw) {
       var person = resolvePerson(raw || {}, company, incoming.name, raw && raw.source || source);
       if (!person) return;
+      if (targetKind === 'lpr') return;
       transferred.push(person.id);
       if (company && !company.personName && !company.personRole && !company.personEmails && !company.personPhones && !company.personTelegrams) {
         company.personName = person.name; company.personRole = person.role; company.personEmails = person.emails; company.personPhones = person.phones; company.personTelegrams = person.telegrams;
@@ -238,15 +285,15 @@ function segmentRecordsPlanner_(input) {
   });
   function actions(records, kind) {
     return records.map(function (record) {
-      var after = segmentRecordsValues_(record, kind);
+      var after = segmentRecordsValues_(record, kind, input.directory);
       if (record.existing && JSON.stringify(record.before) === JSON.stringify(after)) return null;
       return { row: record.row, id: record.id, before: record.before, after: after, added: !record.existing };
     }).filter(Boolean);
   }
   companyChanges = actions(companies, 'companies'); personChanges = actions(people, 'lpr');
   return {
-    version: SEGMENT_RECORDS_SCHEMA.version, companies: companyChanges, people: personChanges, markers: markers, review: review,
-    counts: { companiesAdded: acceptedCompanies, companiesUpdated: companyChanges.filter(function (action) { return !action.added; }).length, peopleAdded: acceptedPeople, peopleUpdated: personChanges.filter(function (action) { return !action.added; }).length, peopleWithoutContacts: people.filter(function (record) { return !segmentRecordsHasContacts_(record); }).length, review: review.length },
+    version: SEGMENT_RECORDS_SCHEMA.version, companies: companyChanges, people: personChanges, markers: markers, review: review, linkedCompanies: linkedCompanies,
+    counts: { companiesAdded: acceptedCompanies, companiesUpdated: companyChanges.filter(function (action) { return !action.added; }).length, peopleAdded: acceptedPeople, peopleUpdated: personChanges.filter(function (action) { return !action.added; }).length, peopleWithoutContacts: targetKind === 'companies' ? 0 : people.filter(function (record) { return !segmentRecordsHasContacts_(record); }).length, review: review.length },
     sample: { companies: companyChanges.slice(0, 5).map(function (action) { return action.after; }), people: personChanges.slice(0, 5).map(function (action) { return action.after; }) }
   };
 }

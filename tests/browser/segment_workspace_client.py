@@ -1,13 +1,63 @@
 """Normalized segment and computer-file replenishment. Local fakes only."""
 import sys
+import json
 sys.dont_write_bytecode = True
 from playwright.sync_api import expect, sync_playwright
-from performance_client import HTML
+from performance_client import FIXTURE, HTML
+
+
+def check_reload_recovery(browser):
+    page = browser.new_page()
+    saved = {}
+    # The fixture server survives a full document reload. Only the server holds
+    # the confirmed request, as it would after loss of the browser's state.
+    def serve(route):
+        if saved:
+            setup = """
+              const savedJob = %s;
+              backend.segments[0].pendingImport = savedJob;
+              api.continueSegmentRecords = p => {
+                if(p.jobId !== savedJob.jobId || p.requestId !== savedJob.requestId || p.segmentId !== backend.segments[0].id) throw Error('wrong receipt');
+                delete backend.segments[0].pendingImport;
+                return {state:'complete',segment:clone(backend.segments[0]),counts:{},requestId:p.requestId};
+              };
+            """ % json.dumps(saved)
+        else:
+            setup = """
+              api.importSegmentRecords = p => {
+                backend.confirmed = {jobId:'server-job-for-restored-segment',requestId:p.requestId};
+                backend.holdMethods=['continueSegmentRecords'];
+                return {state:'processing',...backend.confirmed};
+              };
+            """
+        route.fulfill(content_type='text/html', body=HTML.replace(FIXTURE, FIXTURE + setup, 1))
+
+    page.route('https://registry.example.test/**', serve)
+    page.goto('https://registry.example.test/')
+    card = page.locator('[data-segment="existing-segment"]')
+    page.locator('#br-view-segments').click()
+    card.get_by_role('button', name='Пополнить базы').click()
+    page.locator('[data-choose-source="source-mixed"]').check()
+    page.locator('#br-segment-submit').click()
+    expect(page.locator('#br-segment-normalized-preview')).to_be_visible()
+    page.locator('#br-segment-submit').click()
+    page.wait_for_function('!!backend.confirmed')
+    saved.update(page.evaluate('backend.confirmed'))
+    page.reload()
+    page.locator('#br-view-segments').click()
+    resume = card.get_by_role('button', name='Продолжить пополнение')
+    expect(resume).to_be_visible()
+    resume.click()
+    expect(resume).to_have_count(0)
+    assert page.evaluate("backend.calls.filter(c=>c.name==='continueSegmentRecords').map(c=>c.p)") == [{**saved, 'segmentId': 'existing-segment'}]
+    assert page.evaluate("backend.calls.filter(c=>['importSegmentRecords','previewSegmentRecords','uploadSourceBase','createSegment'].includes(c.name)).length") == 0
+    page.close()
 
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+        launch = {'channel': 'chrome'} if sys.platform == 'win32' else {'executable_path': '/usr/bin/chromium'}
+        browser = p.chromium.launch(**launch, headless=True, args=['--no-sandbox'])
         page = browser.new_page(viewport={'width': 1440, 'height': 1100})
         errors=[]
         page.on('pageerror',lambda error:errors.append(str(error)))
@@ -154,6 +204,7 @@ def main():
         assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
         assert not errors,errors
         print('PASS: segment categories, metadata-only moves, ready-only preview, explicit replenishment confirmation and computer-file import.')
+        check_reload_recovery(browser)
         browser.close()
 
 

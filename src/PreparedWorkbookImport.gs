@@ -3,7 +3,7 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
   var file = initialFile || preparedDraftFile_(context, draft);
   for (var attempt = 0; attempt < 2; attempt++) {
     var before = attempt ? preparedDraftFile_(context, draft) : file;
-    var options = preparedWorkbookSourceOptions_(context, draft), book = SpreadsheetApp.openById(file.id);
+    var book = SpreadsheetApp.openById(file.id), options = preparedWorkbookSourceOptions_(context, draft, book);
     var allSourceSheets = preparedWorkbookSourceSheets_(book, options);
     options.sourceSheetIds = preparedWorkbookSelection_(book, options, draft.sourceSheetIds);
     // A whole historical workbook can need more time than a single changed
@@ -30,6 +30,12 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
       model.fingerprint = digest_(JSON.stringify([3, model.fingerprint, history.fingerprint]));
       (history.warnings || []).forEach(function (warning) { if (model.warnings.indexOf(warning) < 0) model.warnings.push(warning); });
     } else if (typeof legacyContactHistoryEnrich_ === 'function') model = legacyContactHistoryEnrich_(model);
+    if (draft.workingSelection && model.complete) {
+      var native = workingSelectionTargets_(book.getSheets());
+      if (!native || JSON.stringify(native.targets) !== JSON.stringify(draft.workingSelection.targets)) fail_('PREVIEW_CHANGED', 'Изменились рабочие листы готовой выборки.');
+      model.workingReports = preparedWorkingReports_(book, native, options);
+      model.fingerprint = digest_(JSON.stringify([model.fingerprint, model.workingReports]));
+    }
     var after = preparedDraftFile_(context, draft), beforeVersion = preparedVersion_(before), afterVersion = preparedVersion_(after);
     if (!beforeVersion || !afterVersion || beforeVersion === afterVersion) return { model: model, version: afterVersion };
   }
@@ -42,7 +48,33 @@ function preparedWorkbookReadGuard_(context, draft) {
   preparedAssertLease_(current, draft);
 }
 
-function preparedWorkbookSourceOptions_(context, draft) {
+/** A curated selection already has contact reports. Keep their manually chosen
+ * membership, column order, evidence fields and per-owner duplicate rows. */
+function preparedWorkingReports_(book, native, options) {
+  var reports = {}, cells = 0;
+  ['email', 'phone'].forEach(function (kind) {
+    options.guard();
+    var sheet = preparedSheet_(book, native.targets[kind + 'SheetId']), width = sheet.getLastColumn(), height = sheet.getLastRow();
+    cells += width * height;
+    if (cells > PREPARED_DATA_LIMITS.maxCells || height > PREPARED_DATA_LIMITS.maxRows) fail_('PREPARED_LIMIT', 'Отчёты готовой выборки превышают лимит полного чтения.');
+    var headers = sheet.getRange(1, 1, 1, width).getDisplayValues()[0], rows = [], size = Math.max(1, Math.floor(50000 / width));
+    var validation = headers.indexOf('Валидация'), contact = headers.indexOf(kind === 'email' ? 'Email' : 'Мобильный телефон');
+    for (var start = 2; start <= height; start += size) {
+      options.guard(); if (Date.now() >= options.deadline) fail_('PREPARED_LIMIT', 'Не удалось полностью прочитать готовые отчёты за отведённое время.');
+      var count = Math.min(size, height - start + 1), lines = sheet.getRange(start, 1, count, width).getDisplayValues();
+      var notes = validation >= 0 ? sheet.getRange(start, validation + 1, count, 1).getNotes() : null;
+      lines.forEach(function (line, index) {
+        var bound = notes && pvBinding_(notes[index][0]);
+        if (bound && bound !== pvKey_(kind === 'email' ? 'email' : 'telegram', kind === 'email' ? pvEmail_(line[contact]) : pvPhone_(line[contact]))) fail_('PREVIEW_CHANGED', 'Сохранённая валидация привязана к другому контакту. Проверьте готовый отчёт.');
+        rows.push(line);
+      });
+    }
+    reports[kind] = { name: sheet.getName(), headers: headers, rows: rows };
+  });
+  return reports;
+}
+
+function preparedWorkbookSourceOptions_(context, draft, book) {
   var options = {};
   // Re-importing a prepared book must not treat managed contact lists as new
   // originals. IDs, rather than user-visible names, identify these lists.
@@ -50,6 +82,11 @@ function preparedWorkbookSourceOptions_(context, draft) {
     var original = preparedOriginal_(context, draft.original), tags = original.appProperties || {};
     if (tags.registryPreparedVersion === '1' && /^\d+$/.test(tags.registryPreparedOriginalSheetId || '')) options.sourceSheetIds = [Number(tags.registryPreparedOriginalSheetId)];
     else options.managedSheetIds = [tags.registryContactEmailSheetId, tags.registryContactPhoneSheetId].filter(function (id) { return /^\d+$/.test(id || ''); }).map(Number);
+  }
+  // Recovery uses the sheet set that belonged to the confirmed immutable plan.
+  if (book && !draft.confirmRequestId && !options.sourceSheetIds && !(options.managedSheetIds || []).length) {
+    var selection = workingSelectionTargets_(book.getSheets());
+    if (selection) options.managedSheetIds = [selection.targets.emailSheetId, selection.targets.phoneSheetId];
   }
   return options;
 }
@@ -72,10 +109,11 @@ function preparedWorkbookSelection_(book, options, requested) {
 }
 
 function preparedWorkbookPreview_(context, draft, sheetId, sourceSheetIds) {
-  var file = preparedDraftFile_(context, draft), book = SpreadsheetApp.openById(file.id), options = preparedWorkbookSourceOptions_(context, draft);
+  var file = preparedDraftFile_(context, draft), book = SpreadsheetApp.openById(file.id), options = preparedWorkbookSourceOptions_(context, draft, book);
   var selectedIds = preparedWorkbookSelection_(book, options, sourceSheetIds === undefined ? draft.sourceSheetIds : sourceSheetIds);
   if (selectedIds.indexOf(sheetId) < 0) fail_('INVALID_SOURCE', 'Лист предпросмотра должен входить в выбранные исходные листы.');
-  if (sourceSheetIds !== undefined) draft.sourceSheetIds = selectedIds;
+  if (sourceSheetIds !== undefined || options.managedSheetIds && options.managedSheetIds.length) draft.sourceSheetIds = selectedIds;
+  draft.workingSelection = workingSelectionTargets_(book.getSheets());
   // Only newly staged previews use the extended selected-source/history
   // envelope. Already confirmed V2 receipts keep their earlier fingerprints.
   draft.historyReadVersion = 1; draft.previewToken = ''; draft.canConfirm = false; draft.planId = ''; draft.planHash = ''; draft.planRole = '';
@@ -87,15 +125,37 @@ function preparedWorkbookPreview_(context, draft, sheetId, sourceSheetIds) {
     if (partial) selected = { source: { sheetId: sheetId, name: partial.name, headers: [], sample: [], rowCount: partial.rowCount } };
   }
   if (!selected) fail_('INVALID_SOURCE', 'Выбранный исходный лист больше недоступен.');
+  var working = preparedWorkingLists_(model, draft.original ? draft.original.id : draft.origin && draft.origin.id || file.id);
+  if (model.workingReports) {
+    var masterIds = working.sourceIds.get(sheetId), known = new Map();
+    (model.records || []).forEach(function (record) { known.set(record.source.row, { id: record.company.id || masterIds && masterIds[record.source.row - 1] || '', name: String(record.company.name || '').trim() }); });
+    ['email', 'phone'].forEach(function (kind) {
+      var report = model.workingReports[kind];
+      if (report.headers.indexOf('ID компании') < 0) {
+        var refs = report.headers.indexOf('Строки в Лист1'), nameColumn = report.headers.indexOf('Компания'); report.headers.push('ID компании');
+        report.rows.forEach(function (line) {
+          var candidates = String(line[refs] || '').split(/\s*[,;]\s*/).map(function (row) { return known.get(Number(row)); });
+          var owner = String(line[nameColumn] || '').trim(), matches = owner ? candidates.filter(function (record) { return record && record.name === owner; }) : [];
+          var ids = new Set((matches.length ? matches : candidates).map(function (record) { return record && record.id || ''; }));
+          line.push(ids.size === 1 ? Array.from(ids)[0] : '');
+        });
+      }
+      working[kind] = report;
+      var contact = report.headers.indexOf(kind === 'email' ? 'Email' : 'Мобильный телефон');
+      var unique = new Set(report.rows.map(function (row) { return contactSyncKey_(kind, row[contact]); }).filter(Boolean));
+      if (kind === 'email') model.counts.emails = unique.size;
+      else { model.counts.phones = unique.size; model.counts.mobiles = unique.size; model.counts.telegrams = 0; model.counts.sharedTelegrams = 0; }
+    });
+  }
   var names = Object.create(null), sources = (model.models || []).map(function (leaf) {
     var title = model.models.length === 1 ? 'Исходная база' : leaf.source.name;
     title = preparedWorkbookUniqueName_(title, names);
-    return { source: leaf.source, name: title, formulas: (leaf.formulaSnapshots || []).map(preparedEncodeFormula_), sourceValueSignature: digest_(JSON.stringify(leaf.sourceValues || [])), copySignature: preparedCopySignature_(leaf.sourceValues || [], leaf.formulaSnapshots || []) };
+    return { source: leaf.source, name: title, companyIds: working.sourceIds.get(leaf.source.sheetId), personIds: working.personIds.get(leaf.source.sheetId), formulas: (leaf.formulaSnapshots || []).map(preparedEncodeFormula_), sourceValueSignature: digest_(JSON.stringify(leaf.sourceValues || [])), copySignature: preparedCopySignature_(leaf.sourceValues || [], leaf.formulaSnapshots || []) };
   });
-  var emailName = preparedWorkbookUniqueName_('Email', names), phoneName = preparedWorkbookUniqueName_('Телефоны и Telegram', names);
-  var token = digest_(JSON.stringify([2, draft.draftId, sheetId, draft.name, draft.section, draft.status, model.fingerprint]));
+  var emailName = preparedWorkbookUniqueName_('Email', names), phoneName = preparedWorkbookUniqueName_(model.workingReports ? 'Мобильные телефоны' : 'Телефоны и Telegram', names);
+  var token = digest_(JSON.stringify([4, draft.draftId, sheetId, draft.name, draft.section, draft.status, model.fingerprint]));
   var canConfirm = model.complete === true && model.canConfirm === true;
-  var email = { name: emailName, headers: model.email.headers, rows: model.email.rows }, phone = { name: phoneName, headers: model.phone.headers, rows: model.phone.rows };
+  var email = { name: emailName, headers: working.email.headers, rows: working.email.rows }, phone = { name: phoneName, headers: working.phone.headers, rows: working.phone.rows };
   var response = { draftId: draft.draftId, sheetId: sheetId, sourceSheetIds: selectedIds, allSourceSheets: model.allSourceSheets || [], previewToken: token, canConfirm: canConfirm, counts: model.counts, sourceSheets: model.sourceSheets || [], sourceSheetCount: (model.sourceSheets || []).length, warnings: model.warnings || [], sheets: [
     { name: (sources.filter(function (source) { return source.source.sheetId === sheetId; })[0] || {}).name || selected.source.name, headers: selected.source.headers || [], sample: selected.source.sample || [], rowCount: selected.source.rowCount },
     { name: emailName, headers: email.headers, sample: email.rows.slice(0, 8), rowCount: email.rows.length + 1 },
@@ -200,7 +260,16 @@ function preparedWorkbookAdvance_(context, draft, plan) {
     var end = Math.min(sourcePlan.formulas.length, (draft.freezeCursor || 0) + PREPARED_IMPORT.freezeCells);
     preparedFreezeFormulaBlock_(context, book, draft, original, sourcePlan.formulas, draft.freezeCursor || 0, end);
     SpreadsheetApp.flush(); draft.freezeCursor = end;
-    if (end >= sourcePlan.formulas.length) { draft.freezeSourceIndex = sourceIndex + 1; draft.freezeCursor = 0; }
+    if (end >= sourcePlan.formulas.length) {
+      var ids = sourcePlan.companyIds || sourcePlan.personIds;
+      if (ids) {
+        var cursor = draft.companyIdCursor || 0, next = Math.min(cursor + PREPARED_IMPORT.writeRows, ids.length);
+        preparedOutput_(context, draft, false);
+        preparedWriteBlock_(original, cursor + 1, ids.slice(cursor, next).map(function (id) { return [id]; }), 1, sourcePlan.source.columnCount + 1);
+        draft.companyIdCursor = next;
+      }
+      if (!ids || draft.companyIdCursor >= ids.length) { draft.freezeSourceIndex = sourceIndex + 1; draft.freezeCursor = 0; draft.companyIdCursor = 0; }
+    }
     if (draft.freezeSourceIndex >= plan.sources.length) { preparedWorkbookEnsureSheets_(book, draft, plan); draft.phase = 'emails'; draft.writeCursor = 0; }
     preparedSave_(context, draft); return preparedProcessing_(draft, plan);
   }
@@ -281,7 +350,12 @@ function preparedWorkbookVerifyResult_(context, book, draft, plan) {
   plan.sources.forEach(function (source, index) {
     preparedOutput_(context, draft, false);
     var original = preparedSheet_(book, draft.copiedSheetIds[index]), rows = source.source.rowCount, columns = source.source.columnCount;
-    if (original.getName() !== source.name || original.getLastRow() !== rows || original.getLastColumn() !== columns) fail_('PREVIEW_CHANGED', 'Исходный лист результата отличается от снимка.');
+    var ids = source.companyIds || source.personIds;
+    if (original.getName() !== source.name || original.getLastRow() !== rows || original.getLastColumn() !== columns + (ids ? 1 : 0)) fail_('PREVIEW_CHANGED', 'Исходный лист результата отличается от снимка.');
+    if (ids) {
+      var idRange = original.getRange(1, columns + 1, rows, 1), actualIds = idRange.getDisplayValues();
+      if (idRange.getFormulas().some(function (row) { return row[0]; }) || ids.some(function (id, i) { return actualIds[i][0] !== id; })) fail_('PREVIEW_CHANGED', 'ID изменились до завершения подготовки.');
+    }
     var range = rows && columns ? original.getRange(1, 1, rows, columns) : null;
     if (digest_(JSON.stringify(range ? range.getValues() : [])) !== source.sourceValueSignature || (range && range.getFormulas().some(function (row) { return row.some(Boolean); }))) fail_('PREVIEW_CHANGED', 'Исходный лист результата отличается от подтверждённого снимка.');
   });

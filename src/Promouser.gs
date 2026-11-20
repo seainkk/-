@@ -484,7 +484,7 @@ function pvTargets_(context, state, ensure) {
   function byId(value) { return sheets.filter(function (sheet) { return String(sheet.getSheetId()) === String(value); })[0]; }
   var email = byId(targets.emailSheetId), phone = byId(targets.phoneSheetId);
   if (!email || !phone || email.getSheetId() === phone.getSheetId()) fail_('PV_TARGETS_REQUIRED', 'Сначала распределите контакты на вкладки Email и Телефоны.');
-  var rows = [], layout = [];
+  var rows = [], layout = [], excluded = new Set();
   [{ sheet: email, kind: 'email', wanted: PROMOUSER.emailHeaders }, { sheet: phone, kind: 'telegram', wanted: PROMOUSER.phoneHeaders }].forEach(function (entry) {
     var sheet = entry.sheet, usedRows = sheet.getLastRow(), width = sheet.getLastColumn();
     if (usedRows > PROMOUSER.maxRows || width > PROMOUSER.maxColumns) fail_('PV_LIMIT', 'Таблица контактов превышает лимит одной проверки.');
@@ -497,7 +497,7 @@ function pvTargets_(context, state, ensure) {
       sheetWriteRawStrings_(state.fileId, sheet.getSheetId(), 1, before + 1, [missing]);
       map = pvHeaderMap_(headers); width = headers.length;
     }
-    var emailColumn = pvFindHeader_(map, ['email', 'e-mail', 'почта']), phoneColumn = pvFindHeader_(map, ['телефон', 'phone', 'mobile']), telegramColumn = pvFindHeader_(map, ['telegram', 'телеграм']);
+    var emailColumn = pvFindHeader_(map, ['email', 'e-mail', 'почта']), phoneColumn = pvFindHeader_(map, ['телефон', 'мобильный телефон', 'phone', 'mobile']), telegramColumn = pvFindHeader_(map, ['telegram', 'телеграм']);
     var statusColumn = map[pvHeader_('Валидация')], count = Math.max(0, usedRows - 1);
     var values = count ? sheet.getRange(2, 1, count, width).getDisplayValues() : [];
     var notes = count && statusColumn !== undefined && typeof sheet.getRange(2, statusColumn + 1, count, 1).getNotes === 'function' ? sheet.getRange(2, statusColumn + 1, count, 1).getNotes() : Array.from({ length: count }, function () { return ['']; });
@@ -513,13 +513,25 @@ function pvTargets_(context, state, ensure) {
       if (!value && !rawValue) return;
       var invalid = !value; if (invalid) value = rawValue;
       var key = pvKey_(kind, value), note = String(notes[index] && notes[index][0] || ''), bound = pvBinding_(note), status = String(line[statusColumn] || '').trim();
+      if (pvExcludedRow_(line, map)) excluded.add(key);
       var changed = !!bound && bound !== key, completed = !!status && !pvPendingStatus_(status);
       var legacy = !bound && !status ? pvLegacyResult_(kind, line, map) : null;
       if (legacy) { completed = true; status = legacy.status; }
       rows.push({ fileId: state.fileId, sheetId: sheet.getSheetId(), row: index + 2, value: value, key: key, kind: kind, country: country, invalid: invalid, map: map, status: status, note: note, bound: bound, changed: changed, completed: completed, legacyResult: legacy, values: line });
     });
   });
-  return { rows: rows, layout: layout };
+  return { rows: rows.filter(function (row) { return !excluded.has(row.key); }), layout: layout };
+}
+
+function pvExcludedRow_(values, map, forCampaign) {
+  var column = pvFindHeader_(map, ['Статус рассылки', 'Статус']);
+  if (column === undefined) return false;
+  return pvExcludedStatus_(values[column], forCampaign);
+}
+function pvExcludedStatus_(value, forCampaign) {
+  var status = String(value || '').trim().toLowerCase();
+  if (forCampaign && ['рассылка', 'в рассылке', 'запущен'].indexOf(status) >= 0) return true;
+  return ['фильтр', 'не совпал', 'невалид', 'нецелевой', 'срок > 30', 'в плане запис книжка', 'дубль'].indexOf(status) >= 0;
 }
 
 function pvApply_(context, state, updates) {
@@ -608,10 +620,11 @@ function pvLegacyResult_(kind, values, map) {
     return { status: pvEmailStatus_(raw), raw: raw, checkedAt: date, provider: provider, orderId: '', imported: true };
   }
   if (!raw && (map[pvHeader_('ID_TG')] !== undefined || map[pvHeader_('Active_days_ago')] !== undefined)) raw = pick(['result', 'статус проверки']);
-  if (!/^[1-9]\d*$/.test(idTg) && days === null && !raw && !date) return null;
+  var explicitNo = /^(?:0|нет|не найден|not found|no telegram)$/i.test(idTg);
+  if (!/^[1-9]\d*$/.test(idTg) && !explicitNo && days === null && !raw && !date) return null;
   if (!/^[1-9]\d*$/.test(idTg)) idTg = '';
-  var eligible = idTg && days !== null ? days <= 30 : null;
-  return { status: idTg ? days === null ? 'Telegram: активность скрыта' : eligible ? 'Telegram: активен' : 'Telegram: более 30 дней офлайн' : 'Telegram не подтверждён', raw: raw, checkedAt: date, provider: '', orderId: '', idTg: idTg, nickname: nickname, days: days, eligible: eligible, imported: true };
+  var eligible = explicitNo ? false : idTg && days !== null ? days <= 30 : null;
+  return { status: explicitNo ? 'Telegram не найден' : idTg ? days === null ? 'Telegram: активность скрыта' : eligible ? 'Telegram: активен' : 'Telegram: более 30 дней офлайн' : 'Telegram не подтверждён', raw: raw, checkedAt: date, provider: '', orderId: '', idTg: idTg, nickname: nickname, days: days, eligible: eligible, imported: true };
 }
 
 function pvSettings_(context) {
