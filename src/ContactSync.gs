@@ -767,6 +767,7 @@ function contactSyncWorkingFields_(evidence) {
   var fields = {}, statuses = [], originals = [];
   evidence.forEach(function (entry) {
     var raw = entry.fields['Статус'] || '', mapped = workingSelectionStatus_(raw);
+    if (mapped === CONTACT_MAILING_STATUS.initial && entry.fields['Статус из источника']) mapped = contactMailingStatusFromHistory_(entry.fields['Статус из источника']);
     if (statuses.indexOf(mapped) < 0) statuses.push(mapped);
     if (raw && originals.indexOf(raw) < 0) originals.push(raw);
   });

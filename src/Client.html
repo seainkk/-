@@ -800,8 +800,10 @@
     const epoch=accessEpoch,current=()=>accessReady&&epoch===accessEpoch;
     segmentSaving=true;updateControls();
     try{
-      const result=await continueSegmentUntilComplete({state:'processing',jobId:saved.jobId},item.id,saved.requestId,current,
-        stage=>notice(stage.progress?.label||'Продолжаем подтверждённое пополнение…','info'));
+      notice('Продолжаем подтверждённое пополнение…','info');
+      const initial=await rpc('continueSegmentRecords',{segmentId:item.id,jobId:saved.jobId,requestId:saved.requestId});
+      const result=await continueSegmentUntilComplete(initial,item.id,saved.requestId,current,
+        stage=>notice(stage.progress?.label||'Пополнение выполняется…','info'));
       if(!result)return;
       if(result.state!=='complete')throw new Error('[SEGMENT_PREVIEW_CHANGED] Проверьте данные и выполните новый предпросмотр.');
       const segment=segmentById(item.id);if(segment)delete segment.pendingImport;cacheSegmentResult(result,{id:item.id},[]);

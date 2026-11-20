@@ -22,6 +22,9 @@ test('known source mailing history initializes the working status and preserves 
   c.legacyContactHistoryEnrich_(data);
   assert.deepEqual(data.email.rows.map((_, row) => field(data.email, row, 'Статус рассылки')), ['в рассылке', 'фильтр', 'новый']);
   assert.deepEqual(data.email.rows.map((_, row) => field(data.email, row, 'Статус из источника')), ['Запущен', 'Фильтр', '']);
+  assert.equal(c.contactMailingStatusFromHistory_('Рассылка; Нецелевой'), 'фильтр');
+  assert.equal(c.contactMailingStatusFromHistory_('Рассылка'), 'в рассылке');
+  assert.equal(c.contactMailingStatusFromHistory_('В плане запис книжка'), 'фильтр');
 });
 
 test('legacy source validation preserves all completed email verdicts and real mailbox providers', () => {
