@@ -97,8 +97,11 @@
           </form>
           <section id="br-prepared-preview" class="br-prepared-preview" hidden aria-labelledby="br-prepared-title">
             <h3 id="br-prepared-title">Что получится</h3>
-            <label for="br-prepared-sheet">Лист для предпросмотра (сохранятся все исходные листы)<select id="br-prepared-sheet"></select></label>
-            <p id="br-prepared-description" class="br-muted">Все исходные листы сохранятся. Email и телефоны / Telegram, в том числе из ссылок на соцсети, будут собраны отдельно без дублей. При подключённом Promouser проверяются только новые контакты.</p>
+            <fieldset id="br-prepared-source-fields" class="br-prepared-source-fields"><legend>Какие исходные листы включить в рабочую базу</legend><p class="br-muted">Снимите отметки с архивных выгрузок, сводок и листов, которые сейчас не нужны.</p><div id="br-prepared-sources" class="br-prepared-sources"></div></fieldset>
+            <p id="br-prepared-source-summary" class="br-muted" role="status" aria-live="polite"></p>
+            <label for="br-prepared-sheet">Выбранный исходный лист для образца<select id="br-prepared-sheet"></select></label>
+            <p id="br-prepared-description" class="br-muted">В рабочую базу попадут выбранные исходные листы и 2 контактные вкладки. История проверок из старых листов сохраняется; исходный файл не изменяется.</p>
+            <button id="br-prepared-recalculate" type="button" class="br-button">Рассчитать предпросмотр</button>
             <p id="br-prepared-health" role="status" aria-live="polite" class="br-muted"></p>
             <dl id="br-prepared-counts" class="br-contact-preview-metrics"></dl>
             <p id="br-prepared-identity-note" class="br-muted"></p>

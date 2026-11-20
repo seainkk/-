@@ -118,6 +118,9 @@ def main():
         held('stagePreparedBaseLink')
         assert len(page.evaluate("backend.calls.filter(item=>item.name==='previewSourceBaseContacts')")) == 0
         release('stagePreparedBaseLink')
+        page.wait_for_selector('#br-prepared-preview:not([hidden])')
+        idle()
+        page.locator('#br-prepared-recalculate').click()
         page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3")
         idle()
         page.evaluate("backend.holdMethods=['getSourceBases','previewSourceBaseContacts']")

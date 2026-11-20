@@ -45,6 +45,8 @@ def main():
         page.locator('#br-upload-file').set_input_files({'name':'new-companies.csv','mimeType':'text/csv','buffer':b'Company,Email\nTest,new@example.test'})
         page.locator('#br-upload-submit').click()
         page.wait_for_selector('#br-prepared-preview:not([hidden])')
+        page.wait_for_function('backend.active===0')
+        page.locator('#br-prepared-recalculate').click()
         page.wait_for_function("!document.getElementById('br-prepared-confirm').disabled")
         assert 'Статус: Готова' in page.locator('#br-prepared-identity-note').inner_text()
         assert page.evaluate('backend.normalizedImports')==1

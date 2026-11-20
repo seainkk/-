@@ -180,6 +180,9 @@ def main():
         page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit')
         page.evaluate("backend.holdMethods=['getSourceBases']")
         page.locator('#br-link-submit').click()
+        page.wait_for_selector('#br-prepared-preview:not([hidden])')
+        idle()
+        page.locator('#br-prepared-recalculate').click()
         page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3")
         idle()
         assert page.evaluate('backend.importCount') == 0

@@ -29,11 +29,11 @@ function fixture(options = {}) {
   resource(ROOT, 'Реестр баз', FOLDER, []); resource(SOURCE, 'Исходные базы', FOLDER, [ROOT]);
   resource(OUTSIDE, 'Внешняя папка', FOLDER, []); resource(SERVICE, 'Служебный реестр', MIME, [ROOT]);
   resource(ORIGINAL, 'Источник', MIME, [options.outside ? OUTSIDE : SOURCE]);
-  function sheet(id, name, rows, book, formulas = {}) {
+  function sheet(id, name, rows, book, formulas = {}, notes = {}) {
     const data = rows.map(row => row.slice()); let maxRows = Math.max(1000, data.length), maxColumns = Math.max(26, ...data.map(row => row.length));
-    const formulaMap = { ...formulas };
+    const formulaMap = { ...formulas }, noteMap = { ...notes };
     const api = {
-      state: { data, formulaMap }, getSheetId: () => id, getName: () => name, getParent: () => book,
+      state: { data, formulaMap, noteMap }, getSheetId: () => id, getName: () => name, getParent: () => book,
       getLastRow: () => { for (let i = data.length - 1; i >= 0; i--) if (data[i]?.some(value => value !== '' && value !== null && value !== undefined)) return i + 1; return 0; },
       getLastColumn: () => Math.max(0, ...data.map(row => { for (let i = row.length - 1; i >= 0; i--) if (row[i] !== '' && row[i] !== null && row[i] !== undefined) return i + 1; return 0; })),
       getMaxRows: () => maxRows, getMaxColumns: () => maxColumns,
@@ -42,7 +42,7 @@ function fixture(options = {}) {
       setFrozenRows() { return api; },
       copyTo(destination) {
         calls.copies++;
-        const copied = sheet(++sheetSerial, 'Копия ' + name, data, destination, formulaMap); destination.tabs.push(copied);
+        const copied = sheet(++sheetSerial, 'Копия ' + name, data, destination, formulaMap, noteMap); destination.tabs.push(copied);
         if (options.loseSheetCopy) { options.loseSheetCopy = false; throw Error('Lost copy reply'); }
         return copied;
       },
@@ -53,7 +53,7 @@ function fixture(options = {}) {
           for (let r = 0; r < height; r++) { while (data.length < row + r) data.push([]); for (let c = 0; c < width; c++) { const value = rows[r][c], text = rich ? value.getText() : value; data[row - 1 + r][column - 1 + c] = rich && options.nativeRichTextPrefix && /^\+/.test(text) ? '=' + text : text; delete formulaMap[(row + r) + ':' + (column + c)]; } }
           if (options.loseWrite) { options.loseWrite = false; throw Error('Lost write reply'); }
         };
-        const range = { getValues: values, getDisplayValues: () => values().map(line => line.map(value => value === null || value === undefined ? '' : String(value))), getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null)), getFormulas: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => formulaMap[(row + r) + ':' + (column + c)] || '')), getFormula: () => formulaMap[row + ':' + column] || '', getValue: () => values()[0][0], setNumberFormat: () => range, setValues(rows) { write(rows, false); return range; }, setValue(value) { write([[value]], false); return range; }, setRichTextValues(rows) { write(rows, true); return range; }, setRichTextValue(value) { write([[value]], true); return range; } };
+        const range = { getValues: values, getDisplayValues: () => values().map(line => line.map(value => value === null || value === undefined ? '' : String(value))), getNotes: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => noteMap[(row + r) + ':' + (column + c)] || '')), getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null)), getFormulas: () => Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => formulaMap[(row + r) + ':' + (column + c)] || '')), getFormula: () => formulaMap[row + ':' + column] || '', getValue: () => values()[0][0], setNumberFormat: () => range, setValues(rows) { write(rows, false); return range; }, setValue(value) { write([[value]], false); return range; }, setRichTextValues(rows) { write(rows, true); return range; }, setRichTextValue(value) { write([[value]], true); return range; } };
         return range;
       }
     };
@@ -89,7 +89,7 @@ function fixture(options = {}) {
     copy(metadata, originalId) {
       const original = resources.get(originalId), id = 'prepared_file_' + (++serial) + '_1234567890';
       const item = resource(id, metadata.name, original.mimeType, metadata.parents, { appProperties: plain(metadata.appProperties) });
-      const output = book(id); output.tabs = books.get(originalId).tabs.map(tab => sheet(tab.getSheetId(), tab.getName(), tab.state.data, output, tab.state.formulaMap));
+      const output = book(id); output.tabs = books.get(originalId).tabs.map(tab => sheet(tab.getSheetId(), tab.getName(), tab.state.data, output, tab.state.formulaMap, tab.state.noteMap));
       calls.actions.push({ kind: 'copy', id, originalId });
       if (options.loseStageCopy) { options.loseStageCopy = false; throw Error('Lost stage copy reply'); }
       return plain(item);
@@ -690,4 +690,128 @@ test('V2 re-import of a prepared book excludes managed tabs by GID without exclu
   const next = f.stage({ url: first.file.url, requestId: 'v2_reimport_1234567890' }), shown = f.preview(next, output.tabs[0].getSheetId());
   assert.equal(shown.sourceSheetCount, 2); assert.equal(shown.sourceSheets[0].name, 'Email');
   const result = f.finish(next, shown); assert.equal(f.books.get(result.file.id).tabs.length, 4);
+});
+
+function selectedPreview(f, draft, ids, sheetId = ids[0]) {
+  return f.invoke('previewPreparedBase_', { draftId: draft.draftId, sheetId, sourceSheetIds: ids });
+}
+function historyWorkbookReader(f) {
+  workbookReader(f);
+  vm.runInContext(readFileSync(new URL('../src/LegacyContactHistory.gs', import.meta.url), 'utf8'), f.context, { filename: 'LegacyContactHistory.gs' });
+  return f;
+}
+
+test('explicit GID zero selection copies just that original plus two contact tabs and leaves the full original intact', () => {
+  const f = workbookReader(fixture()), original = f.books.get(ORIGINAL), snapshot = plain(original.tabs.map(tab => tab.state.data));
+  const draft = f.stage(), shown = selectedPreview(f, draft, [0]);
+  assert.deepEqual(shown.sourceSheetIds, [0]); assert.equal(shown.sourceSheetCount, 1); assert.equal(shown.allSourceSheets.length, 2);
+  assert.equal(shown.counts.emails, 1); assert.deepEqual(shown.sourceSheets.map(sheet => sheet.sheetId), [0]);
+  const result = f.finish(draft, shown), output = f.books.get(result.file.id);
+  assert.deepEqual(output.tabs.map(tab => tab.getName()), ['Исходная база', 'Email', 'Телефоны и Telegram']);
+  assert.equal(output.getSheetByName('Email').getLastRow(), 2);
+  assert.deepEqual(original.tabs.map(tab => tab.state.data), snapshot); assert.equal(original.tabs.length, 2);
+});
+
+test('selection is persisted for stage replay and cannot be replaced by an unrelated displayed leaf', () => {
+  const f = workbookReader(fixture()), draft = f.stage(); selectedPreview(f, draft, [0]);
+  const replay = f.stage(); assert.deepEqual(replay.sourceSheetIds, [0]); assert.equal(replay.sheets.length, 2); assert.equal(replay.selectedSheetId, 0);
+  assert.throws(() => f.preview(draft, 9), /INVALID_SOURCE/);
+  assert.deepEqual(f.drafts()[0].sourceSheetIds, [0]);
+});
+
+test('invalid duplicate negative string empty huge foreign and unselected display IDs fail before output writes', () => {
+  for (const ids of [[], [0, 0], [-1], ['0'], Array.from({ length: 101 }, (_, i) => i)]) {
+    const f = workbookReader(fixture()), draft = f.stage(); assert.throws(() => selectedPreview(f, draft, ids, 0), /INVALID_REQUEST/);
+    assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
+  }
+  for (const [ids, display] of [[[99], 99], [[0], 9]]) {
+    const f = workbookReader(fixture()), draft = f.stage(); assert.throws(() => selectedPreview(f, draft, ids, display), /INVALID_SOURCE/);
+    assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
+  }
+});
+
+test('changing selection invalidates the earlier token while checkbox order is canonical', () => {
+  const f = workbookReader(fixture()), draft = f.stage();
+  const old = selectedPreview(f, draft, [0]), next = selectedPreview(f, draft, [9]);
+  assert.notEqual(old.previewToken, next.previewToken); assert.throws(() => f.confirm(draft, old), /PREVIEW_REQUIRED/);
+  const a = selectedPreview(f, draft, [9, 0], 0), b = selectedPreview(f, draft, [0, 9], 0);
+  assert.deepEqual(a.sourceSheetIds, [0, 9]); assert.equal(a.previewToken, b.previewToken);
+});
+
+test('managed generated contact IDs stay forbidden even if explicitly selected on re-import', () => {
+  const f = workbookReader(fixture()), first = f.finish(f.stage()), output = f.books.get(first.file.id);
+  const draft = f.stage({ url: first.file.url, requestId: 'selection_reimport_1234567890' });
+  const metadata = f.resources.get(first.file.id), managed = Number(metadata.appProperties.registryContactEmailSheetId);
+  assert.ok(!draft.sheets.some(sheet => sheet.id === managed));
+  assert.throws(() => selectedPreview(f, draft, [managed]), /INVALID_SOURCE/);
+  assert.equal(f.drafts().find(item => item.draftId === draft.draftId).canConfirm, undefined);
+  assert.equal(output.tabs.length, 4);
+});
+
+test('selected originals alone undergo heavy parsing while unselected report history is retained', () => {
+  const f = historyWorkbookReader(fixture()), original = f.books.get(ORIGINAL);
+  original.tabs[1].state.data.splice(0, 2,
+    ['Email', 'Валидация', 'Провайдер', 'Статус'],
+    ['a@example.test', 'valid', 'Yandex', 'Фильтр'],
+    ['archive-only@example.test', 'invalid', 'Other', '']);
+  const draft = f.stage(), heavy = f.context.preparedDataRead_, normalized = [];
+  f.context.preparedDataRead_ = (sheet, ...args) => { normalized.push(sheet.getSheetId()); assert.equal(sheet.getSheetId(), 0); return heavy(sheet, ...args); };
+  const shown = selectedPreview(f, draft, [0]);
+  assert.deepEqual(normalized, [0]); assert.equal(shown.counts.emails, 1); assert.equal(shown.canConfirm, true);
+  const emailPreview = shown.sheets[1], row = emailPreview.sample[0];
+  assert.equal(row[emailPreview.headers.indexOf('Валидация')], 'Проверить историю контакта');
+  assert.equal(row[emailPreview.headers.indexOf('Провайдер')], 'Yandex'); assert.match(row[emailPreview.headers.indexOf('Результат проверки')], /valid/);
+  const result = f.finish(draft, shown), output = f.books.get(result.file.id);
+  assert.equal(output.tabs.length, 3); assert.equal(output.getSheetByName('Email').getLastRow(), 2);
+  assert.ok(!output.getSheetByName('Email').state.data.some(row => row.includes('archive-only@example.test')));
+});
+
+test('unselected check-history changes affect preview tokens and prevent stale confirmation after a metadata bump', () => {
+  const f = historyWorkbookReader(fixture()), other = f.books.get(ORIGINAL).tabs[1];
+  other.state.data.splice(0, 2, ['Email', 'Валидация', 'Провайдер'], ['a@example.test', 'valid', 'Yandex']);
+  const draft = f.stage(), shown = selectedPreview(f, draft, [0]), receipt = f.drafts()[0];
+  const archive = f.books.get(receipt.stageFileId).tabs.find(tab => tab.getSheetId() === 9);
+  archive.state.data[1][1] = 'invalid'; f.resources.get(receipt.stageFileId).version = '2';
+  assert.throws(() => f.confirm(draft, shown), /PREVIEW_CHANGED/);
+  assert.equal(f.calls.actions.some(action => action.role === 'output'), false);
+  const updated = selectedPreview(f, draft, [0]); assert.notEqual(updated.previewToken, shown.previewToken);
+  assert.equal(updated.sheets[1].sample[0][updated.sheets[1].headers.indexOf('Валидация')], 'Невалиден');
+});
+
+test('a changed email with an old owned check binding in an unselected report remains new', () => {
+  const f = historyWorkbookReader(fixture()), other = f.books.get(ORIGINAL).tabs[1];
+  other.state.data.splice(0, 2, ['Email', 'Валидация', 'Статус'], ['a@example.test', 'valid', 'Рассылка']);
+  other.state.noteMap['2:2'] = 'registry-promouser-contact:v1:' + crypto.createHash('sha256').update('promouser-contact-v1|email|old@example.test').digest('base64url');
+  const draft = f.stage(), shown = selectedPreview(f, draft, [0]), email = shown.sheets[1];
+  const status = email.headers.indexOf('Валидация');
+  assert.ok(status < 0 || !email.sample[0][status], 'old status is never inherited by a different canonical email');
+  assert.equal(shown.counts.emails, 1);
+});
+
+test('re-importing a selected three-tab result retains completion and exclusion history from its managed report', () => {
+  const f = historyWorkbookReader(fixture()), archive = f.books.get(ORIGINAL).tabs[1];
+  archive.state.data.splice(0, 2, ['Email', 'Валидация', 'Провайдер', 'Статус'], ['a@example.test', 'valid', 'Yandex', 'Фильтр']);
+  const firstDraft = f.stage(), first = f.finish(firstDraft, selectedPreview(f, firstDraft, [0]));
+  const draft = f.stage({ url: first.file.url, requestId: 'history_roundtrip_1234567890' });
+  assert.equal(draft.sheets.length, 1); assert.equal(f.books.get(first.file.id).tabs.length, 3);
+  const shown = selectedPreview(f, draft, [draft.sheets[0].id]), email = shown.sheets[1];
+  assert.equal(shown.counts.emails, 1);
+  assert.equal(email.sample[0][email.headers.indexOf('Валидация')], 'Проверить историю контакта');
+  assert.match(email.sample[0][email.headers.indexOf('Результат проверки')], /Фильтр/);
+});
+
+test('an email completion in a mixed source row never becomes a completed phone check', () => {
+  const f = historyWorkbookReader(fixture()), main = f.books.get(ORIGINAL).tabs[0];
+  main.state.data[0].push('Валидация'); main.state.data.slice(1).forEach(row => row.push('valid'));
+  const draft = f.stage(), shown = selectedPreview(f, draft, [0]), email = shown.sheets[1], phone = shown.sheets[2];
+  assert.equal(email.sample[0][email.headers.indexOf('Валидация')], 'Валиден');
+  const status = phone.headers.indexOf('Валидация');
+  assert.ok(status < 0 || !phone.sample[0][status], 'email verdict cannot suppress the still-new phone validation');
+});
+
+test('partial selected models expose all metadata but cannot be confirmed', () => {
+  const f = workbookReader(fixture()), draft = f.stage(), read = f.context.preparedDataRead_;
+  f.context.preparedDataRead_ = (...args) => { const model = read(...args); model.complete = false; model.canConfirm = false; return model; };
+  const shown = selectedPreview(f, draft, [0]); assert.equal(shown.canConfirm, false); assert.equal(shown.allSourceSheets.length, 2); assert.deepEqual(shown.sourceSheetIds, [0]);
+  assert.throws(() => f.confirm(draft, shown), /PREVIEW_REQUIRED/);
 });
