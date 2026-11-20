@@ -401,3 +401,51 @@ test('company label changed during the final campaign read cannot upload stale o
   const binding = f.bind(), preview = f.preview(binding); armed = true;
   assert.throws(() => f.start(binding, preview), /COLDY_SOURCE_CHANGED/); assert.equal(posts(f).length, 0);
 });
+
+function realNormalizedLprContacts(f) {
+  for (const filename of ['ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs', 'SegmentRecords.gs']) vm.runInContext(readFileSync(new URL('../src/' + filename, import.meta.url), 'utf8'), f.context, { filename });
+  const person = { id: 'lpr_example_record_id', companyId: 'company_example_record_id', companyName: 'Кухни Альфа', name: 'Иванов Иван Иванович', role: 'Генеральный директор', emails: 'ivan@example.test', phones: '+79990000001', telegrams: '', sources: 'Учебный источник', status: '' };
+  const schema = f.context.SEGMENT_RECORDS_SCHEMA.person;
+  const rows = [schema.map(field => field[1]), schema.map(field => person[field[0]] || '')];
+  const master = { getSheetId: () => 1, getName: () => 'ЛПР', getLastRow: () => rows.length, getLastColumn: () => rows[0].length,
+    getRange: (row, column, height, width) => {
+      const matrix = accessor => Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => accessor(row + y - 1, column + x - 1)));
+      return { getValues: () => matrix((y, x) => rows[y]?.[x] ?? ''), getDisplayValues: () => matrix((y, x) => String(rows[y]?.[x] ?? '')), getFormulas: () => matrix(() => ''), getRichTextValues: () => matrix(() => null) };
+    } };
+  const model = plain(f.context.preparedDataRead_(master, 'synthetic_lpr_master_12345', 'lpr', { guard: () => {} }));
+  assert.equal(model.complete, true); assert.equal(model.records[0].people[0].name, person.name);
+  assert.equal(model.email.rows[0][1], 'Кухни Альфа — Иванов Иван Иванович (Генеральный директор)');
+  f.lprSheet.data.splice(0, f.lprSheet.data.length, model.email.headers.concat(['Валидация', 'Статус рассылки']), ...model.email.rows.map(row => row.concat(['Валиден', 'Ручной статус'])));
+  return model;
+}
+
+test('real normalized LPR contact contexts never become Coldy first_name or company without explicit fields', () => {
+  const f = fixture({ companies: [], lpr: [] }); realNormalizedLprContacts(f);
+  const binding = f.bind({ includeCompanies: false, includeLpr: true }), preview = f.preview(binding);
+  assert.equal(preview.counts.eligible, 1); assert.equal(preview.sample[0].name, ''); assert.equal(preview.sample[0].company, '');
+  assert.equal(f.start(binding, preview).state, 'complete');
+  assert.deepEqual(posts(f)[0].payload.items, [{ email: 'ivan@example.test' }]); assert.equal(f.lprSheet.data[1][5], 'Ручной статус');
+});
+
+test('explicit person and company columns remain available for Coldy personalization', () => {
+  const f = fixture({ companies: [], lpr: [] }); realNormalizedLprContacts(f);
+  f.lprSheet.data[0].push('ФИО', 'Компания'); f.lprSheet.data[1].push('Иванов Иван Иванович', 'Кухни Альфа');
+  const binding = f.bind({ includeCompanies: false, includeLpr: true }), preview = f.preview(binding);
+  assert.equal(preview.sample[0].name, 'Иванов Иван Иванович'); assert.equal(preview.sample[0].company, 'Кухни Альфа');
+  assert.equal(f.start(binding, preview).state, 'complete');
+  assert.deepEqual(posts(f)[0].payload.items, [{ email: 'ivan@example.test', company: 'Кухни Альфа', first_name: 'Иванов Иван Иванович' }]);
+});
+
+test('LPR ownership context remains fingerprinted independently of empty personalization fields', () => {
+  for (const phase of ['preview', 'dispatch']) {
+    let reads = 0, armed = false;
+    const f = fixture({ companies: [], lpr: [], api: ({ path, method }) => {
+      if (armed && phase === 'dispatch' && method === 'GET' && path.startsWith('/campaigns/') && ++reads === 2) f.lprSheet.data[1][1] = 'Другая компания — другой человек';
+    } });
+    realNormalizedLprContacts(f);
+    const binding = f.bind({ includeCompanies: false, includeLpr: true }), preview = f.preview(binding);
+    if (phase === 'preview') f.lprSheet.data[1][1] = 'Другая компания — другой человек';
+    armed = true;
+    assert.throws(() => f.start(binding, preview), /COLDY_SOURCE_CHANGED/); assert.equal(posts(f).length, 0);
+  }
+});
