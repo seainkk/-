@@ -48,11 +48,11 @@ function workingSelectionStatus_(value) {
 function contactMailingStatusFromHistory_(history) {
   var statuses = (Array.isArray(history) ? history : String(history || '').split(';')).map(function (value) {
     var status = String(value || '').trim().toLowerCase();
-    if (status === 'в рассылке' || status === 'запущен') return 'в рассылке';
-    if (status === 'фильтр') return 'фильтр';
+    if (/^(?:рассылка|в рассылке|запущен[аоы]?|отправлен[аоы]?|sent|in campaign|replied|ответил[аи]?)$/.test(status)) return 'в рассылке';
+    if (['фильтр', 'не совпал', 'невалид', 'нецелевой', 'срок > 30', 'в плане запис книжка', 'дубль'].indexOf(status) >= 0) return 'фильтр';
     return '';
   }).filter(Boolean);
-  return statuses.length && statuses.every(function (value) { return value === statuses[0]; }) ? statuses[0] : CONTACT_MAILING_STATUS.initial;
+  return statuses.indexOf('фильтр') >= 0 ? 'фильтр' : statuses.indexOf('в рассылке') >= 0 ? 'в рассылке' : CONTACT_MAILING_STATUS.initial;
 }
 
 function contactMailingStatusDropdown_(range, preserve) {
