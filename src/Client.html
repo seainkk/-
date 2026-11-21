@@ -32,7 +32,7 @@
   function sharedUrl(key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return 'https://seainkk.github.io/-/#access_key='+key;}
   function notifyEntry(state){try{if(window.top!==window)window.top.postMessage({type:state==='ready'?'bases-registry-ready':'bases-registry-locked'},'https://seainkk.github.io');}catch(ignored){}}
   function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
-  function isReadRpc(method){return ['getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);}
+  function isReadRpc(method){return ['getProjectAnalytics','getProjectInfrastructure','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);}
   async function readRpc(method,payload,canDispatch){
     const epoch=accessEpoch;
     while(networkPending>=2){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');if(canDispatch&&!canDispatch())return null;await new Promise(resolve=>setTimeout(resolve,25));}
@@ -68,7 +68,7 @@
     const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-provider-open').hidden=!accessReady;$('br-coldy-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message){
-    accessEpoch++;dashboardRequest++;if(dashboardAnalysisTimer!==null){clearTimeout(dashboardAnalysisTimer);dashboardAnalysisTimer=null;}dashboardAnalysisLoading=false;dashboardLoading=false;mailingsLoading=false;sourceLoading=false;accessReady=false;accessKey='';closeProviderSettings();closeColdySettings();coldyMailings=null;preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
+    accessEpoch++;dashboardRequest++;if(dashboardAnalysisTimer!==null){clearTimeout(dashboardAnalysisTimer);dashboardAnalysisTimer=null;}dashboardAnalysisLoading=false;dashboardLoading=false;mailingsLoading=false;sourceLoading=false;accessReady=false;accessKey='';window.RegistryProject?.lock?.();closeProviderSettings();closeColdySettings();coldyMailings=null;preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
     viewTrail.length=0;pendingImportExit=null;suspendedSegment=null;uploadSegmentOptions=null;uploadEntryView='sources';$('br-import-destination').replaceChildren();$('br-import-segment-name').value='';recoveringOrigins=false;$('br-origin-recovery-status').textContent='';closeSourceOrigin();$('br-lineage-rows').replaceChildren();$('br-source-lineage').open=false;$('br-source-lineage').hidden=true;
     contactPreview=null;contactPreviewEpoch++;segmentImportDestination=null;segmentReturnPending=null;renderContactPreview();
     pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;
@@ -195,19 +195,19 @@
     $('br-coldy-provider').value=data.emailValidationProvider==='coldy'?'coldy':'promouser';
   }
   async function openColdySettings(){
-    if(!accessReady||coldySession||providerSession||gridIsOpen())return;const current={pending:'load',settings:null};coldySession=current;$('br-coldy-message').textContent='Загружаем настройки…';$('br-coldy-configured').textContent='';$('br-coldy-key').value='';$('br-coldy-dialog').showModal();renderColdySettings(current);
+    if(!accessReady||coldySession||providerSession||gridIsOpen()||window.RegistryProject?.hasPending?.())return;const current={pending:'load',settings:null};coldySession=current;$('br-coldy-message').textContent='Загружаем настройки…';$('br-coldy-configured').textContent='';$('br-coldy-key').value='';$('br-coldy-dialog').showModal();renderColdySettings(current);
     try{const data=await workspaceRpc('getColdySettings',{});if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='';}}catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   async function saveColdySettings(event){
     event.preventDefault();const current=coldySession;if(!current?.settings||current.pending)return;
     const payload={emailValidationProvider:$('br-coldy-provider').value,autoValidateEmails:false};
     const key=$('br-coldy-key').value.trim();if(key)payload.apiKey=key;$('br-coldy-key').value='';current.pending='save';$('br-coldy-message').textContent='Сохраняем подключение…';renderColdySettings(current);
-    try{const data=await workspaceRpc('configureColdy',payload);if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='Настройки сохранены. Ранее проверенные контакты сохраняют результаты.';if(coldyMailings)coldyMailings.loaded=false;}}
+    try{const data=await workspaceRpc('configureColdy',payload);if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='Настройки сохранены. Ранее проверенные контакты сохраняют результаты.';if(coldyMailings)coldyMailings.loaded=false;window.RegistryProject?.invalidate?.({credentialsChanged:data.credentialChanged===true||(data.credentialChanged===undefined&&!!key)});if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;}}
     catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{delete payload.apiKey;if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   async function testColdyConnection(){
     const current=coldySession;if(!current?.settings?.configured||current.pending)return;current.pending='test';$('br-coldy-message').textContent='Читаем список рассылок…';renderColdySettings(current);
-    try{const data=await workspaceRpc('testColdyConnection',{});if(coldySession===current){current.settings.connected=data.connected===true;$('br-coldy-configured').textContent='Coldy подключён.';$('br-coldy-message').textContent='Подключение подтверждено. Рассылок: '+Number(data.campaignCount||0)+'. Платные проверки не запускались.';}}
+    try{const data=await workspaceRpc('testColdyConnection',{});if(coldySession===current){current.settings.connected=data.connected===true;window.RegistryProject?.invalidate?.();if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;$('br-coldy-configured').textContent='Coldy подключён.';$('br-coldy-message').textContent='Подключение подтверждено. Рассылок: '+Number(data.campaignCount||0)+'. Платные проверки не запускались.';}}
     catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   function coldyMailingsAlive(current){return !!current&&coldyMailings===current&&accessReady&&current.epoch===accessEpoch;}
@@ -244,12 +244,12 @@
     if(!values.campaignId||!values.includeCompanies&&!values.includeLpr){current.error='Выберите рассылку и хотя бы один источник email.';renderColdyBindings(current);return;}
     const fingerprint=JSON.stringify(values);if(!current.bindingRequest||current.bindingRequest.fingerprint!==fingerprint)current.bindingRequest={fingerprint,payload:{...values,requestId:requestId()}};
     current.busy=true;current.busyMessage='Сохраняем привязку…';current.error=null;renderColdyBindings(current);
-    try{await workspaceRpc('saveColdyBinding',current.bindingRequest.payload);if(!coldyMailingsAlive(current))return;current.bindingRequest=null;current.editing=false;current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;$('br-coldy-active-consent').checked=false;notice('Привязка Coldy сохранена.');}
+    try{await workspaceRpc('saveColdyBinding',current.bindingRequest.payload);if(!coldyMailingsAlive(current))return;window.RegistryProject?.invalidate?.();current.bindingRequest=null;current.editing=false;current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;$('br-coldy-active-consent').checked=false;notice('Привязка Coldy сохранена.');}
     catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
   }
   async function removeColdyBinding(bindingId){
     const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;const request=current.removeRequests.get(bindingId)||requestId();current.removeRequests.set(bindingId,request);current.busy=true;current.busyMessage='Убираем привязку…';renderColdyBindings(current);
-    try{await workspaceRpc('removeColdyBinding',{segmentId:current.segmentId,bindingId,requestId:request});if(!coldyMailingsAlive(current))return;current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;current.removeRequests.delete(bindingId);current.preview=null;current.job=null;current.step=null;current.failed=false;current.error=null;}
+    try{await workspaceRpc('removeColdyBinding',{segmentId:current.segmentId,bindingId,requestId:request});if(!coldyMailingsAlive(current))return;window.RegistryProject?.invalidate?.();current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;current.removeRequests.delete(bindingId);current.preview=null;current.job=null;current.step=null;current.failed=false;current.error=null;}
     catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
   }
   function renderColdyUpload(current=coldyMailings){
@@ -285,7 +285,7 @@
   }
   async function refreshColdyMailings(){
     const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;current.busy=true;current.busyMessage='Обновляем показатели Coldy…';current.error=null;renderColdyBindings(current);
-    try{const refreshed=await workspaceRpc('refreshColdyMailings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;mailings=await workspaceRpc('getSegmentMailings',{segmentId:current.segmentId});if(coldyMailingsAlive(current)){renderMailings();notice(refreshed.hasMore?'Обновлены следующие '+Number(refreshed.refreshedCampaigns||0)+' рассылок. Нажмите обновление ещё раз, чтобы получить остальные.':'Показатели Coldy обновлены. Проверьте время данных и предупреждения.');}}
+    try{const refreshed=await workspaceRpc('refreshColdyMailings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;window.RegistryProject?.invalidate?.();current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;mailings=await workspaceRpc('getSegmentMailings',{segmentId:current.segmentId});if(coldyMailingsAlive(current)){renderMailings();notice(refreshed.hasMore?'Обновлены следующие '+Number(refreshed.refreshedCampaigns||0)+' рассылок. Нажмите обновление ещё раз, чтобы получить остальные.':'Показатели Coldy обновлены. Проверьте время данных и предупреждения.');}}
     catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
   }
   function nativeUrl(id,sheetId){return 'https://docs.google.com/spreadsheets/d/'+encodeURIComponent(id)+'/edit'+(sheetId===undefined?'':'#gid='+encodeURIComponent(sheetId));}
@@ -337,7 +337,7 @@
   function requesting(){return networkPending-readPending>0||busy||sourceLoading||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading;}
   // Reading a list must not prevent opening a cached form or typing into it.
   function editingBlocked(){return !accessReady||busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||gridIsOpen();}
-  function formIsOpen(){return importOpen||!!segmentEditor||!!originSession||sourceDrafts.size>0||gridIsOpen()||!!providerSession||!!coldySession||!!coldyMailings?.busy||!!coldyMailings?.editing||!!coldyMailings?.preview;}
+  function formIsOpen(){return importOpen||!!segmentEditor||!!originSession||sourceDrafts.size>0||gridIsOpen()||!!providerSession||!!coldySession||!!coldyMailings?.busy||!!coldyMailings?.editing||!!coldyMailings?.preview||!!window.RegistryProject?.isEditing?.();}
   function gridIsOpen(){return window.RegistryGrid?.isOpen?.()===true;}
   function workspaceRpc(method,payload,canDispatch){
     const epoch=accessEpoch;
@@ -1050,11 +1050,11 @@
   }
   function render(){
     $('br-sources-view').hidden=activeView!=='sources';$('br-segments-view').hidden=activeView!=='segments';$('br-mailings-view').hidden=activeView!=='mailings';$('br-retarget-view').hidden=activeView!=='retarget';
-    for(const view of ['sources','segments','retarget'])$('br-view-'+view).setAttribute('aria-pressed',String(activeView===view||view==='segments'&&activeView==='mailings'));
-    root.dataset.view=activeView;renderSources();renderSegments();renderMailings();renderContactPreview();renderRegistrySections();renderAccess();updateControls();
+    for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).setAttribute('aria-pressed',String(activeView===view||view==='segments'&&activeView==='mailings'));
+    root.dataset.view=activeView;window.RegistryProject?.show?.(activeView,{ready:accessReady,epoch:accessEpoch});renderSources();renderSegments();renderMailings();renderContactPreview();renderRegistrySections();renderAccess();updateControls();
   }
   function updateControls(){
-    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()||!!providerSession;for(const view of ['sources','segments','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
+    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
     for(const add of root.querySelectorAll('[data-add-source]')){const item=sourceItem(add.dataset.addSource);add.disabled=!readySource(item)||sourceDrafts.has(item.id)||editing||importOpen||!!segmentEditor;}
     for(const analyze of root.querySelectorAll('[data-preview-source]'))analyze.disabled=editing||importOpen||!!segmentEditor;
@@ -1077,6 +1077,7 @@
     if(!accessReady)return;
     if(viewMutationBlocked()||requesting()&&!['segments','mailings'].includes(activeView)){if(options.opening)pendingView=activeView;return;}
     if(options.automatic&&(document.hidden||formIsOpen()))return;
+    if(['analytics','infrastructure'].includes(activeView))return window.RegistryProject?.refresh?.(options);
     const loadedAt=activeView==='sources'?sourceData&&lastSourceLoaded:activeView==='segments'?dashboard&&lastDashboardLoaded:mailings?.segment?.id===mailingSegmentId&&lastMailingsLoaded;
     if(options.opening&&!pendingSyncViews.has(activeView)&&loadedAt&&Date.now()-loadedAt<30000)return;
     pendingSyncViews.delete(activeView);
@@ -1209,7 +1210,7 @@
   $('br-provider-balance').addEventListener('click',showProviderBalance);
   $('br-provider-automation').addEventListener('click',toggleProviderAutomation);
   $('br-source-search').addEventListener('input',updateSourceFilters);$('br-source-contents-filter').addEventListener('change',updateSourceFilters);$('br-source-unassigned-filter').addEventListener('change',updateSourceFilters);$('br-source-filters-reset').addEventListener('click',resetSourceFilters);
-  $('br-view-sources').addEventListener('click',()=>setView('sources'));$('br-view-segments').addEventListener('click',()=>setView('segments'));$('br-view-retarget').addEventListener('click',()=>setView('retarget'));
+  $('br-view-sources').addEventListener('click',()=>setView('sources'));$('br-view-segments').addEventListener('click',()=>setView('segments'));$('br-view-retarget').addEventListener('click',()=>setView('retarget'));$('br-view-analytics')?.addEventListener('click',()=>setView('analytics'));$('br-view-infrastructure')?.addEventListener('click',()=>setView('infrastructure'));
   $('br-refresh').addEventListener('click',()=>refreshActiveView({manual:true}));
   $('br-mailings-back').addEventListener('click',()=>{if(viewTrail.at(-1)?.view==='segments')viewTrail.pop();setView('segments',{back:true,cached:true});setTimeout(()=>{window.scrollTo(0,segmentBackScroll);Array.from(root.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===mailingSegmentId+'/mailings')?.focus({preventScroll:true});},0);});
   for(const category of Object.keys(segmentCategories))$('br-segment-category-'+category).addEventListener('click',()=>{if(!segmentEditor){segmentSection=category;renderSegments();updateControls();}});
@@ -1251,8 +1252,9 @@
   $('br-contact-preview-close').addEventListener('click',()=>{contactPreview=null;contactPreviewEpoch++;renderContactPreview();updateControls();flushPendingView();});
   $('br-contact-preview-refresh').addEventListener('click',()=>{if(contactPreview)queueContactPreview(Object.assign({mimeType:'application/vnd.google-apps.spreadsheet'},contactPreview.source));});
   $('br-contact-preview-prev').addEventListener('click',()=>{if(contactPreview){contactPreview.page--;renderContactConflicts();}});$('br-contact-preview-next').addEventListener('click',()=>{if(contactPreview){contactPreview.page++;renderContactConflicts();}});
-  window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving||preparedImport?.confirmationRequested||window.RegistryGrid?.hasPending?.()){event.preventDefault();event.returnValue='';}});
+  window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving||preparedImport?.confirmationRequested||window.RegistryGrid?.hasPending?.()||window.RegistryProject?.hasPending?.()){event.preventDefault();event.returnValue='';}});
   try{if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;lockAccess(null);accessMessage='Ссылка изменилась. Проверяем доступ…';renderAccess();pendingAccessChange=true;flushPendingView();});}catch(ignored){}
+  window.RegistryProject?.configure?.({transport:workspaceRpc,openConnection:openColdySettings,onStateChange:()=>updateControls(),onMutation:()=>{mailings=null;lastMailingsLoaded=0;if(coldyMailings)coldyMailings.loaded=false;}});
   render();startSharedAccess();
 })();
 </script>

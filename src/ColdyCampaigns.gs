@@ -20,12 +20,16 @@ function getColdyBindings_(request) {
 
 function saveColdyBinding_(request) {
   return api_(function () {
-    var input = segmentInput_(request, ['segmentId', 'campaignId', 'includeCompanies', 'includeLpr', 'autoUpload', 'allowActive', 'requestId']), context = authorize_();
+    var input = segmentInput_(request, ['segmentId', 'campaignId', 'includeCompanies', 'includeLpr', 'autoUpload', 'allowActive', 'preserveExisting', 'requestId']), context = authorize_();
     var segmentId = id_(input.segmentId), campaignId = coldyCampaignId_(input.campaignId), requestId = segmentRequestId_(input.requestId);
     ['includeCompanies', 'includeLpr', 'autoUpload', 'allowActive'].forEach(function (field) { if (typeof input[field] !== 'boolean') fail_('INVALID_REQUEST', 'Укажите источники и параметры загрузки Coldy.'); });
+    if (input.preserveExisting !== undefined && typeof input.preserveExisting !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный режим добавления привязки Coldy.');
     if (!input.includeCompanies && !input.includeLpr) fail_('COLDY_SOURCE_REQUIRED', 'Выберите компании или ЛПР.');
     coldyCampaignScope_(context, segmentId);
-    var requestHash = digest_(JSON.stringify([segmentId, campaignId, input.includeCompanies, input.includeLpr, input.autoUpload, input.allowActive]));
+    var fingerprint = [segmentId, campaignId, input.includeCompanies, input.includeLpr, input.autoUpload, input.allowActive];
+    // Keep the classic absent/false fingerprint unchanged for pending request IDs.
+    if (input.preserveExisting === true) fingerprint.push('preserveExisting:v1');
+    var requestHash = digest_(JSON.stringify(fingerprint));
     var oldReceipt = locked_(function () { return coldyCampaignReceipt_(coldyCampaignRegistry_(context), requestId, requestHash); });
     if (oldReceipt) return { binding: oldReceipt.binding };
     var credentialHash = coldyCredentialHash_(context), campaign = coldyCampaignRead_(context, campaignId);
@@ -37,6 +41,12 @@ function saveColdyBinding_(request) {
       if (receipt) return { binding: receipt.binding };
       var existing = registry.bindings.filter(function (binding) { return binding.campaignId === campaignId; })[0];
       if (existing && existing.segmentId !== segmentId) fail_('COLDY_CAMPAIGN_BOUND', 'Эта рассылка уже связана с другим сегментом. Для точной аналитики используйте отдельную рассылку.');
+      if (existing && input.preserveExisting === true) {
+        var preserved = coldyCampaignPublicBinding_(existing);
+        coldyCampaignRemember_(registry, requestId, requestHash, { binding: preserved });
+        coldyCampaignSaveRegistry_(context, registry);
+        return { binding: preserved };
+      }
       var binding = { id: existing ? existing.id : digest_('binding|' + Utilities.getUuid()), segmentId: segmentId, campaignId: campaignId, campaignName: campaign.name, campaignStatus: campaign.status,
         includeCompanies: input.includeCompanies, includeLpr: input.includeLpr, autoUpload: input.autoUpload, allowActive: input.allowActive, revision: existing ? existing.revision + 1 : 1, updatedAt: new Date().toISOString() };
       if (existing) registry.bindings = registry.bindings.filter(function (item) { return item.id !== existing.id; });
