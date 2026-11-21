@@ -30,10 +30,12 @@
       <p><strong>Нужно разрешение владельца Google</strong></p>
       <ol>
         <li>Войдите в аккаунт владельца и откройте <a href="https://script.google.com/home/projects/1FyQVeeqd4X13NqQ7PtRMVg7U8p60yk-tWvgK-9vmPdpQgK-mQE3sL8aH/edit" target="_blank" rel="noopener noreferrer">редактор Apps Script проекта</a>.</li>
-        <li>Выберите функцию <code>setupContactAutomation_</code>, нажмите «Выполнить» и подтвердите запрошенный Google доступ.</li>
+        <li>После публикации обновите страницу редактора, откройте файл <strong>ContactAutomation.gs</strong> и выберите функцию <code>authorizeGoogleAccess</code> (без подчёркивания в конце).</li>
+        <li>Нажмите «Выполнить» и подтвердите запрошенный Google доступ.</li>
         <li>Вернитесь сюда и нажмите «Проверить подключение».</li>
       </ol>
       <p>Это нужно сделать один раз в центральном проекте, а не в каждой таблице. Ключ Coldy уже сохранён, вводить его повторно не нужно.</p>
+      <p>Функция подтверждает доступ Google. Если фоновая обработка ещё не включена, после этого включите её кнопкой «Включить обработку изменений в Google Таблицах» в окне «Подключение Promouser».</p>
     </div>
     <p class="br-muted">Проверка подключения только читает список рассылок. Настройте загрузку контактов в разделе «Сегменты → Рассылки».</p>
   </dialog>
@@ -55,7 +57,11 @@
       <button id="br-provider-automation" type="button" class="br-button" disabled>Включить обработку изменений в Google Таблицах</button>
       <p id="br-provider-automation-message" class="br-muted" role="status" aria-live="polite"></p>
     </div>
-    <p id="br-provider-owner" class="br-muted" hidden>Владельцу нужно один раз запустить <code>setupContactAutomation_</code> в <a href="https://script.google.com/home/projects/1FyQVeeqd4X13NqQ7PtRMVg7U8p60yk-tWvgK-9vmPdpQgK-mQE3sL8aH/edit" target="_blank" rel="noopener noreferrer">редакторе Apps Script</a> и подтвердить доступ. Функция также включает фоновую обработку.</p>
+    <div id="br-provider-owner" class="br-muted" hidden>
+      <p>Владельцу нужно один раз открыть <a href="https://script.google.com/home/projects/1FyQVeeqd4X13NqQ7PtRMVg7U8p60yk-tWvgK-9vmPdpQgK-mQE3sL8aH/edit" target="_blank" rel="noopener noreferrer">редактор Apps Script проекта</a> под своим аккаунтом.</p>
+      <p>После публикации обновите страницу редактора, откройте файл <strong>ContactAutomation.gs</strong>, выберите функцию <code>authorizeGoogleAccess</code> (без подчёркивания в конце), нажмите «Выполнить» и подтвердите доступ Google. Это делается один раз в центральном проекте, а не в каждой таблице.</p>
+      <p>Вернитесь в сервис и повторите проверку баланса. Если фоновая обработка ещё не включена, включите её отдельной кнопкой «Включить обработку изменений в Google Таблицах».</p>
+    </div>
   </dialog>
   <div id="br-notice" class="br-notice" role="status" aria-live="polite" hidden></div>
   <div id="br-loading" class="br-loading" aria-live="polite" hidden>Загружаем приложение…</div>

@@ -4,13 +4,13 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const ROOT='registry_root_1234567890', HASH='H'.repeat(43);
 function fixture(options={}) {
- const map=new Map([['ROOT_FOLDER_ID',ROOT],['HASH',HASH]]), calls={created:0,deleted:0,sync:[],continued:[],people:[],validation:[],lock:[]};
+ const map=new Map([['ROOT_FOLDER_ID',ROOT],['HASH',HASH]]), calls={created:0,deleted:0,sync:[],continued:[],people:[],validation:[],lock:[],authorization:[],logs:[]};
  const properties={getProperty:k=>map.get(k)??null,setProperty:(k,v)=>map.set(k,v),deleteProperty:k=>map.delete(k)};
  const triggers=[];let uid=0;
- const context=vm.createContext({console:{warn(){}},JSON,Object,Array,Number,String,Date,Math,Error,REGISTRY_CONFIG:{defaultRootFolderId:ROOT},SHARED_REQUEST_SCOPE_:{keyHash:HASH},
+ const context=vm.createContext({console:{warn(){},info(message){calls.logs.push(message)}},JSON,Object,Array,Number,String,Date,Math,Error,REGISTRY_CONFIG:{defaultRootFolderId:ROOT},SHARED_REQUEST_SCOPE_:{keyHash:HASH},
   PropertiesService:{getScriptProperties:()=>properties},Utilities:{getUuid:()=>`request-${++uid}`},
   LockService:{getScriptLock:()=>({tryLock(ms){calls.lock.push(ms);return !options.busy},releaseLock(){}})},
-  ScriptApp:{getProjectTriggers(){if(options.noConsent)throw Error('private owner token must never leak');return triggers;},newTrigger(name){return{timeBased(){return this},everyMinutes(n){assert.equal(n,5);return this},create(){calls.created++;const triggerId=`trigger-${++uid}`;const t={getUniqueId:()=>triggerId,getHandlerFunction:()=>name};triggers.push(t);return t}}},deleteTrigger(t){calls.deleted++;if(options.deleteFails)throw Error('private');triggers.splice(triggers.indexOf(t),1)}}});
+  ScriptApp:{AuthMode:{FULL:'FULL'},requireAllScopes(mode){calls.authorization.push(mode);if(options.partialConsent)throw Error('Authorization is required')},getProjectTriggers(){if(options.noConsent)throw Error('private owner token must never leak');return triggers;},newTrigger(name){return{timeBased(){return this},everyMinutes(n){assert.equal(n,5);return this},create(){calls.created++;const triggerId=`trigger-${++uid}`;const t={getUniqueId:()=>triggerId,getHandlerFunction:()=>name};triggers.push(t);return t}}},deleteTrigger(t){calls.deleted++;if(options.deleteFails)throw Error('private');triggers.splice(triggers.indexOf(t),1)}}});
  context.api_=fn=>fn();context.object_=v=>{if(!v||typeof v!=='object'||Array.isArray(v))throw Error('INVALID_REQUEST');return v};context.fail_=(c,m)=>{const e=new Error(`[${c}] ${m}`);e.registryCode=c;throw e};
  context.sharedConfiguredHash_=()=>map.get('HASH');
  context.authorize_=()=>{if(context.SHARED_REQUEST_SCOPE_?.keyHash!==map.get('HASH'))context.fail_('LINK_ACCESS_REQUIRED','No access');return{rootId:map.get('ROOT_FOLDER_ID'),properties}};
@@ -39,6 +39,35 @@ test('disabling marker prevents background work even if Google trigger deletion 
 test('busy lock skips this tick without acquiring workbook or provider data',()=>{const f=fixture({items:[{id:'book'}]});f.enable();f.options.busy=true;assert.equal(f.tick().skipped,'busy');assert.equal(f.calls.sync.length,0);assert.equal(f.calls.validation.length,0)});
 test('mid-run key revocation stops subsequent books and clears the owner scope and lease',()=>{const f=fixture({items:[{id:'one'},{id:'two'}],revoke:true});f.enable();const previous=f.context.SHARED_REQUEST_SCOPE_;assert.throws(()=>f.tick(),/LINK_ACCESS_REQUIRED/);assert.equal(f.calls.sync.length,1);assert.equal(f.context.SHARED_REQUEST_SCOPE_,previous);assert.equal(f.map.has('CONTACT_AUTOMATION_LEASE'),false)});
 test('editor setup is private and empty requests are required for automation APIs',()=>{const f=fixture();assert.throws(()=>f.context.enableContactAutomation_({other:true}),/INVALID_REQUEST/);f.context.SHARED_REQUEST_SCOPE_=null;assert.equal(f.context.setupContactAutomation_().installed,true);assert.equal(f.context.SHARED_REQUEST_SCOPE_,null)});
+
+test('visible authorization launcher has no application effects even without shared access',()=>{
+ const f=fixture(),before=[...f.map];
+ for(const scope of [null,{keyHash:'invalid'}]){
+  f.context.SHARED_REQUEST_SCOPE_=scope;
+  assert.equal(f.context.authorizeGoogleAccess(),undefined);
+  assert.equal(f.context.SHARED_REQUEST_SCOPE_,scope);
+ }
+ assert.deepEqual(f.calls.authorization,['FULL','FULL']);assert.deepEqual([...f.map],before);
+ assert.equal(f.calls.created,0);assert.equal(f.calls.deleted,0);assert.equal(f.triggers.length,0);
+ assert.equal(f.calls.sync.length,0);assert.equal(f.calls.validation.length,0);
+ assert.equal(f.calls.logs.length,2);assert.ok(f.calls.logs.every(message=>!message.includes(HASH)&&!message.includes(ROOT)));
+});
+
+test('partial Google consent stops the launcher before reporting success or changing state',()=>{
+ const f=fixture({partialConsent:true}),before=[...f.map];f.context.SHARED_REQUEST_SCOPE_=null;
+ assert.throws(()=>f.context.authorizeGoogleAccess(),/Authorization is required/);
+ assert.deepEqual(f.calls.authorization,['FULL']);assert.equal(f.calls.logs.length,0);
+ assert.deepEqual([...f.map],before);assert.equal(f.context.SHARED_REQUEST_SCOPE_,null);
+ assert.equal(f.calls.created,0);assert.equal(f.calls.sync.length,0);assert.equal(f.calls.validation.length,0);
+});
+
+test('setup instructions point to the visible authorization function without installing the timer',()=>{
+ const f=fixture(),state=f.context.getContactAutomationState_({});
+ assert.equal(state.setupFunction,'authorizeGoogleAccess');assert.equal(state.setupFunction.endsWith('_'),false);
+ assert.equal(typeof f.context[state.setupFunction],'function');assert.equal(state.installed,false);
+ f.context[state.setupFunction]();assert.equal(f.context.getContactAutomationState_({}).installed,false);
+ assert.equal(f.calls.created,0);
+});
 
 test('pending LPR transfer resumes its original job before any contact list writes',()=>{const f=fixture({items:[{id:'companies',role:'segment-companies'}],peopleProcessing:true});f.enable();f.tick();assert.equal(f.calls.people[1].requestId,'people-request');assert.equal(f.calls.people[1].jobId,'people-job');assert.equal(f.calls.sync.length,1)});
 test('unfinished LPR transfer keeps the workbook queued and does not validate contacts',()=>{const f=fixture({items:[{id:'companies',role:'segment-companies'}],peopleProcessing:true,peopleForever:true});f.enable();assert.equal(f.tick().pending,1);assert.equal(f.calls.sync.length,0);assert.equal(f.calls.validation.length,0)});
