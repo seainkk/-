@@ -184,7 +184,9 @@
     if(!automation)return;
     runProviderAction('automation',automation.installed?'disableContactAutomation':'enableContactAutomation',{},showAutomationState,'br-provider-automation-message');
   }
-  function closeColdySettings(){coldySession=null;$('br-coldy-form').reset();$('br-coldy-key').value='';if($('br-coldy-dialog').open)$('br-coldy-dialog').close();}
+  function showColdyOwnerHelp(code=''){$('br-coldy-owner').hidden=code!=='COLDY_OWNER_AUTH_REQUIRED';}
+  function showColdyFailure(error){const parsed=failure(error);showColdyOwnerHelp(parsed.code);$('br-coldy-message').textContent=parsed.message;}
+  function closeColdySettings(){coldySession=null;showColdyOwnerHelp();$('br-coldy-form').reset();$('br-coldy-key').value='';if($('br-coldy-dialog').open)$('br-coldy-dialog').close();}
   function renderColdySettings(current=coldySession){
     if(!current||coldySession!==current)return;const pending=!!current.pending;
     $('br-coldy-fields').disabled=pending||!current.settings;$('br-coldy-close').disabled=false;$('br-coldy-test').disabled=pending||current.settings?.configured!==true;
@@ -195,20 +197,20 @@
     $('br-coldy-provider').value=data.emailValidationProvider==='coldy'?'coldy':'promouser';
   }
   async function openColdySettings(){
-    if(!accessReady||coldySession||providerSession||gridIsOpen()||window.RegistryProject?.hasPending?.())return;const current={pending:'load',settings:null};coldySession=current;$('br-coldy-message').textContent='Загружаем настройки…';$('br-coldy-configured').textContent='';$('br-coldy-key').value='';$('br-coldy-dialog').showModal();renderColdySettings(current);
-    try{const data=await workspaceRpc('getColdySettings',{});if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='';}}catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
+    if(!accessReady||coldySession||providerSession||gridIsOpen()||window.RegistryProject?.hasPending?.())return;const current={pending:'load',settings:null};coldySession=current;showColdyOwnerHelp();$('br-coldy-message').textContent='Загружаем настройки…';$('br-coldy-configured').textContent='';$('br-coldy-key').value='';$('br-coldy-dialog').showModal();renderColdySettings(current);
+    try{const data=await workspaceRpc('getColdySettings',{});if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='';}}catch(error){if(coldySession===current)showColdyFailure(error);}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   async function saveColdySettings(event){
     event.preventDefault();const current=coldySession;if(!current?.settings||current.pending)return;
     const payload={emailValidationProvider:$('br-coldy-provider').value,autoValidateEmails:false};
-    const key=$('br-coldy-key').value.trim();if(key)payload.apiKey=key;$('br-coldy-key').value='';current.pending='save';$('br-coldy-message').textContent='Сохраняем подключение…';renderColdySettings(current);
+    const key=$('br-coldy-key').value.trim();if(key)payload.apiKey=key;$('br-coldy-key').value='';current.pending='save';showColdyOwnerHelp();$('br-coldy-message').textContent='Сохраняем подключение…';renderColdySettings(current);
     try{const data=await workspaceRpc('configureColdy',payload);if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='Настройки сохранены. Ранее проверенные контакты сохраняют результаты.';if(coldyMailings)coldyMailings.loaded=false;window.RegistryProject?.invalidate?.({credentialsChanged:data.credentialChanged===true||(data.credentialChanged===undefined&&!!key)});if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;}}
-    catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{delete payload.apiKey;if(coldySession===current){current.pending=null;renderColdySettings(current);}}
+    catch(error){if(coldySession===current)showColdyFailure(error);}finally{delete payload.apiKey;if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   async function testColdyConnection(){
-    const current=coldySession;if(!current?.settings?.configured||current.pending)return;current.pending='test';$('br-coldy-message').textContent='Читаем список рассылок…';renderColdySettings(current);
-    try{const data=await workspaceRpc('testColdyConnection',{});if(coldySession===current){current.settings.connected=data.connected===true;window.RegistryProject?.invalidate?.();if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;$('br-coldy-configured').textContent='Coldy подключён.';$('br-coldy-message').textContent='Подключение подтверждено. Рассылок: '+Number(data.campaignCount||0)+'. Платные проверки не запускались.';}}
-    catch(error){if(coldySession===current)$('br-coldy-message').textContent=failure(error).message;}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
+    const current=coldySession;if(!current?.settings?.configured||current.pending)return;current.pending='test';showColdyOwnerHelp();$('br-coldy-message').textContent='Читаем список рассылок…';renderColdySettings(current);
+    try{const data=await workspaceRpc('testColdyConnection',{});if(coldySession===current){showColdyOwnerHelp();current.settings.connected=data.connected===true;window.RegistryProject?.invalidate?.();if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;$('br-coldy-configured').textContent='Coldy подключён.';$('br-coldy-message').textContent='Подключение подтверждено. Рассылок: '+Number(data.campaignCount||0)+'. Платные проверки не запускались.';}}
+    catch(error){if(coldySession===current)showColdyFailure(error);}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   function coldyMailingsAlive(current){return !!current&&coldyMailings===current&&accessReady&&current.epoch===accessEpoch;}
   function requestId(){return globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);}

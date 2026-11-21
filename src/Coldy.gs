@@ -130,13 +130,11 @@ function coldyApi_(context, method, path, payload, options) {
   // Check scope and credential again immediately before the external action.
   current = coldyCurrent_(context, true);
   if (coldyCredentialHash_(current) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Повторите действие.');
-  var response;
-  try { response = UrlFetchApp.fetch(COLDY.base + address, request); }
-  catch (error) {
-    if (/required permissions|authorization is required|do not have permission|not authorized/i.test(String(error && error.message || ''))) fail_('COLDY_OWNER_AUTH_REQUIRED', 'Владельцу Apps Script нужно один раз разрешить внешние запросы Coldy.');
-    fail_('COLDY_NETWORK', 'Coldy не подтвердил ответ. Состояние операции сохранено; не создавайте повторную загрузку.');
-  }
-  var status = response.getResponseCode(), body = response.getContentText(), parsed;
+  var response, status, body, parsed;
+  try {
+    response = UrlFetchApp.fetch(COLDY.base + address, request);
+    status = response.getResponseCode(); body = response.getContentText();
+  } catch (error) { coldyTransportFailure_(error, method); }
   if (status < 200 || status >= 300) {
     if (status === 401) {
       var fresh = coldyCurrent_(context, false);
@@ -145,15 +143,30 @@ function coldyApi_(context, method, path, payload, options) {
     }
     if (status === 403) coldyHttpFailure_('COLDY_FORBIDDEN', 'Coldy отклонил доступ к действию. Проверьте права организации.', status, response);
     if (status === 404) coldyHttpFailure_('COLDY_NOT_FOUND', 'Объект Coldy не найден в подключённой организации.', status, response);
-    if (status === 409) coldyHttpFailure_('COLDY_CONFLICT', 'Coldy пока не подтвердил действие: проверьте состояние прежней операции.', status, response);
+    if (status === 409) coldyHttpFailure_('COLDY_CONFLICT', method === 'GET' ? 'Coldy пока не подтвердил чтение данных. Повторите обновление позже.' : 'Coldy пока не подтвердил действие: проверьте состояние прежней операции.', status, response);
     if (status === 429) coldyHttpFailure_('COLDY_RATE_LIMIT', 'Coldy просит снизить частоту запросов. Повторите обновление позже.', status, response);
-    if (status >= 500) coldyHttpFailure_('COLDY_UNAVAILABLE', 'Coldy временно не подтвердил действие. Сначала проверьте состояние операции.', status, response);
+    if (status >= 500) coldyHttpFailure_('COLDY_UNAVAILABLE', method === 'GET' ? 'Coldy временно недоступен. Повторите проверку подключения или обновление позже.' : 'Coldy временно не подтвердил действие. Сначала проверьте состояние операции.', status, response);
     coldyHttpFailure_('COLDY_PROVIDER', 'Coldy отклонил запрос. Проверьте параметры операции.', status, response);
   }
   if (typeof body !== 'string' || body.length > COLDY.maxResponseCharacters) fail_('COLDY_RESPONSE', 'Coldy вернул слишком большой ответ.');
   try { parsed = JSON.parse(body); } catch (error) { fail_('COLDY_RESPONSE', 'Coldy вернул неподдерживаемый ответ.'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail_('COLDY_RESPONSE', 'Coldy вернул неподдерживаемый ответ.');
   return parsed;
+}
+
+/** Fixed diagnostics only: exceptions can contain credentials and contact data. */
+function coldyTransportFailure_(error, method) {
+  var message = String(error && error.message || '').slice(0, 4000);
+  if (/required permissions|authorization is required|do not have permission|not authorized|insufficient permissions?|script\.external_request|(?:нет|недостаточно) (?:прав|разрешени)|(?:необходимо|необходима|требуется).*авторизац|требуется разрешение/i.test(message)) {
+    fail_('COLDY_OWNER_AUTH_REQUIRED', 'Google требует разового разрешения владельца Apps Script на внешние запросы. Откройте проект, выполните setupContactAutomation_ и подтвердите доступ, затем повторите проверку подключения. Повторно вводить ключ Coldy не нужно.');
+  }
+  var reason = '';
+  if (/service invoked too many times|quota exceeded|limit exceeded|квот|слишком много (?:раз|запросов)|превышен.*лимит/i.test(message)) reason = 'Достигнут лимит внешних запросов Google. ';
+  else if (/timed?\s*out|timeout|время ожидания.*ист[её]к|превышено.*время/i.test(message)) reason = 'Истекло время ожидания ответа. ';
+  else if (/dns|name resolution|host not found|не удалось.*имя (?:узла|хоста)/i.test(message)) reason = 'Не удалось определить адрес API Coldy. ';
+  else if (/ssl|tls|certificate|сертификат/i.test(message)) reason = 'Не удалось установить защищённое соединение с API Coldy. ';
+  var action = method === 'GET' ? 'Этот запрос только читает данные; проверку подключения или обновление можно повторить.' : 'Результат операции может быть неизвестен. Продолжите прежнюю операцию; не создавайте повторную загрузку или проверку.';
+  fail_('COLDY_NETWORK', 'Не удалось получить ответ Coldy. ' + reason + action);
 }
 
 function coldyHttpFailure_(code, message, status, response) {

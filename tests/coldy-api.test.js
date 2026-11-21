@@ -176,6 +176,81 @@ test('network uncertainty never automatically retries a non-idempotent create or
   assert.equal(f.calls.fetch.length,1);
 });
 
+test('failed connection read can be repeated without claiming a saved upload or changing settings',()=>{
+  const f=fixture({transport:()=>{throw new Error('connection reset '+KEY+' private@example.test');}});f.configure();
+  assert.throws(()=>f.c.testColdyConnection_({}),error=>{
+    assert.equal(error.registryCode,'COLDY_NETWORK');
+    assert.match(error.message,/только читает данные.*можно повторить/);
+    assert.doesNotMatch(error.message,/Состояние операции сохранено|не создавайте повторную|private@example\.test/);
+    assert.equal(error.message.includes(KEY),false);return true;
+  });
+  assert.equal(f.calls.fetch.length,1);assert.equal(f.calls.fetch[0].request.method,'get');
+  assert.equal(f.calls.creates.length,0);assert.equal(f.calls.updates.length,0);
+  assert.equal(f.properties.get('COLDY_API_KEY'),KEY);assert.equal(f.c.getColdySettings_({}).connected,false);
+});
+
+test('failed read preserves the previously confirmed campaign snapshot and connection timestamp',()=>{
+  let unavailable=false;
+  const f=fixture({transport:({response})=>{if(unavailable)throw new Error('Timeout '+KEY);return response({items:[{id:CAMPAIGN,name:'Existing',status:'Draft'}]});}});
+  f.configure();f.c.testColdyConnection_({});
+  const cached=plain(f.c.coldyCachedCampaigns_(f.context)),settings=plain(f.c.getColdySettings_({})),writes=f.calls.creates.length+f.calls.updates.length;
+  unavailable=true;f.tick(1000);
+  assert.throws(()=>f.c.testColdyConnection_({}),/COLDY_NETWORK/);
+  assert.deepEqual(plain(f.c.coldyCachedCampaigns_(f.context)),cached);
+  assert.deepEqual(plain(f.c.getColdySettings_({})),settings);
+  assert.equal(f.calls.creates.length+f.calls.updates.length,writes);assert.equal(f.calls.fetch.length,2);
+});
+
+test('English and localized Google consent errors give owner setup instructions without exposing secrets',()=>{
+  for(const message of [
+    'Authorization is required to perform that action',
+    'You do not have permission to call UrlFetchApp.fetch. Required permissions: https://www.googleapis.com/auth/script.external_request',
+    'У вас нет разрешения на вызов функции UrlFetchApp.fetch. Необходимые разрешения: https://www.googleapis.com/auth/script.external_request',
+    'Недостаточно прав для вызова UrlFetchApp.fetch',
+    'Требуется авторизация для выполнения действия',
+    'Autorisierung erforderlich: https://www.googleapis.com/auth/script.external_request'
+  ]){
+    const f=fixture({transport:()=>{throw new Error(message+' '+KEY+' private@example.test');}});f.configure();
+    assert.throws(()=>f.c.testColdyConnection_({}),error=>error.registryCode==='COLDY_OWNER_AUTH_REQUIRED'&&/setupContactAutomation_/.test(error.message)&&!error.message.includes(KEY)&&!error.message.includes('private@example.test'));
+    assert.equal(f.calls.fetch.length,1);assert.equal(f.calls.creates.length,0);assert.equal(f.c.getColdySettings_({}).connected,false);
+  }
+});
+
+test('network diagnostics use fixed safe messages and do not retry reads or unknown writes',()=>{
+  for(const [message,expected] of [
+    ['DNS error','определить адрес API'],['SSL certificate error','защищённое соединение'],
+    ['Request timed out','время ожидания'],['Превышено время ожидания','время ожидания'],
+    ['Service invoked too many times for one day: urlfetch','лимит внешних запросов Google'],
+    ['Превышена квота UrlFetch','лимит внешних запросов Google']
+  ])for(const method of ['GET','POST']){
+    const f=fixture({transport:()=>{throw new Error(message+' '+KEY+' private@example.test');}});f.configure();
+    assert.throws(()=>f.c.coldyApi_(f.context,method,method==='GET'?'/campaigns':'/email-verifications',method==='GET'?undefined:{emails:['a@example.test']},method==='GET'?undefined:{idempotencyKey:'persisted-request-123'}),error=>{
+      assert.equal(error.registryCode,'COLDY_NETWORK');assert.ok(error.message.includes(expected));
+      assert.equal(error.message.includes(KEY),false);assert.equal(error.message.includes('private@example.test'),false);
+      if(method==='POST'){assert.match(error.message,/не создавайте повторную загрузку или проверку/);assert.doesNotMatch(error.message,/можно повторить/);}
+      return true;
+    });
+    assert.equal(f.calls.fetch.length,1);
+    if(method==='POST')assert.equal(f.calls.fetch[0].request.headers['Idempotency-Key'],'persisted-request-123');
+  }
+});
+
+test('losing the response body after dispatch preserves uncertainty for writes and repeatable reads',()=>{
+  for(const stage of ['getResponseCode','getContentText'])for(const method of ['GET','POST']){
+    const f=fixture({transport:({response})=>({...response({ok:true}),[stage]:()=>{throw new Error('response lost '+KEY);}})});f.configure();
+    assert.throws(()=>f.c.coldyApi_(f.context,method,method==='GET'?'/campaigns':'/leads/bulk',method==='GET'?undefined:{campaign:CAMPAIGN,items:[{email:'a@example.test'}]}),error=>error.registryCode==='COLDY_NETWORK'&&!error.message.includes(KEY)&&(method==='GET'?/можно повторить/:/Продолжите прежнюю операцию/).test(error.message));
+    assert.equal(f.calls.fetch.length,1);assert.equal(f.calls.creates.length,0);
+  }
+});
+
+test('unavailable or conflicting GET responses do not describe an uncertain upload',()=>{
+  for(const status of [409,500,503]){
+    const f=fixture({transport:({response})=>response({error:KEY},status)});f.configure();
+    assert.throws(()=>f.c.testColdyConnection_({}),error=>['COLDY_CONFLICT','COLDY_UNAVAILABLE'].includes(error.registryCode)&&/Повторите/.test(error.message)&&!/состояние операции/.test(error.message)&&!error.message.includes(KEY));
+    assert.equal(f.calls.fetch.length,1);assert.equal(f.calls.creates.length,0);
+  }
+});
+
 test('provider failures expose sanitized status and bounded Retry-After, never raw errors',()=>{
   for(const [status,code] of [[400,'COLDY_PROVIDER'],[401,'COLDY_AUTH'],[403,'COLDY_FORBIDDEN'],[404,'COLDY_NOT_FOUND'],[409,'COLDY_CONFLICT'],[429,'COLDY_RATE_LIMIT'],[502,'COLDY_UNAVAILABLE'],[302,'COLDY_PROVIDER']]){
     const f=fixture({transport:({response})=>response('private '+KEY+' a@example.test',status,{'Retry-After':'60'})});f.configure();
