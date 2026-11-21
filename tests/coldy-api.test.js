@@ -211,7 +211,7 @@ test('English and localized Google consent errors give owner setup instructions 
     'Autorisierung erforderlich: https://www.googleapis.com/auth/script.external_request'
   ]){
     const f=fixture({transport:()=>{throw new Error(message+' '+KEY+' private@example.test');}});f.configure();
-    assert.throws(()=>f.c.testColdyConnection_({}),error=>error.registryCode==='COLDY_OWNER_AUTH_REQUIRED'&&/setupContactAutomation_/.test(error.message)&&!error.message.includes(KEY)&&!error.message.includes('private@example.test'));
+    assert.throws(()=>f.c.testColdyConnection_({}),error=>error.registryCode==='COLDY_OWNER_AUTH_REQUIRED'&&/authorizeGoogleAccess/.test(error.message)&&!error.message.includes(KEY)&&!error.message.includes('private@example.test'));
     assert.equal(f.calls.fetch.length,1);assert.equal(f.calls.creates.length,0);assert.equal(f.c.getColdySettings_({}).connected,false);
   }
 });

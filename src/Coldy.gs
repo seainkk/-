@@ -158,7 +158,7 @@ function coldyApi_(context, method, path, payload, options) {
 function coldyTransportFailure_(error, method) {
   var message = String(error && error.message || '').slice(0, 4000);
   if (/required permissions|authorization is required|do not have permission|not authorized|insufficient permissions?|script\.external_request|(?:нет|недостаточно) (?:прав|разрешени)|(?:необходимо|необходима|требуется).*авторизац|требуется разрешение/i.test(message)) {
-    fail_('COLDY_OWNER_AUTH_REQUIRED', 'Google требует разового разрешения владельца Apps Script на внешние запросы. Откройте проект, выполните setupContactAutomation_ и подтвердите доступ, затем повторите проверку подключения. Повторно вводить ключ Coldy не нужно.');
+    fail_('COLDY_OWNER_AUTH_REQUIRED', 'Google требует разового разрешения владельца Apps Script на внешние запросы. Откройте проект, выберите файл ContactAutomation.gs, выполните authorizeGoogleAccess и подтвердите доступ, затем повторите проверку подключения. Повторно вводить ключ Coldy не нужно.');
   }
   var reason = '';
   if (/service invoked too many times|quota exceeded|limit exceeded|квот|слишком много (?:раз|запросов)|превышен.*лимит/i.test(message)) reason = 'Достигнут лимит внешних запросов Google. ';

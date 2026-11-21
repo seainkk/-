@@ -7,6 +7,14 @@ var CONTACT_AUTOMATION = Object.freeze({
   remaining: 'CONTACT_AUTOMATION_REMAINING', lease: 'CONTACT_AUTOMATION_LEASE'
 });
 
+/** Visible in the editor. Public invocation discloses no data and changes no app state. */
+function authorizeGoogleAccess() {
+  // Handles partial consent too; the fixed success log runs only after all
+  // scopes already declared in the project manifest have been granted.
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+  console.info('Разрешения Google подтверждены. Вернитесь в сервис и повторите проверку подключения.');
+}
+
 function contactAutomationInput_(request) {
   var input = request === undefined ? {} : object_(request);
   if (Object.keys(input).length) fail_('INVALID_REQUEST', 'Неизвестные параметры фонового обновления.');
@@ -28,7 +36,7 @@ function contactAutomationPublicState_(properties) {
     lastError: properties.getProperty(CONTACT_AUTOMATION.lastError) || null,
     needsOwnerSetup: !installed,
     setupUrl: 'https://script.google.com/home/projects/1FyQVeeqd4X13NqQ7PtRMVg7U8p60yk-tWvgK-9vmPdpQgK-mQE3sL8aH/edit',
-    setupFunction: 'setupContactAutomation_'
+    setupFunction: 'authorizeGoogleAccess'
   };
 }
 
@@ -52,7 +60,7 @@ function enableContactAutomation_(request) {
     } catch (error) {
       var state = contactAutomationPublicState_(context.properties);
       state.needsOwnerSetup = true;
-      state.message = 'Владелец проекта должен один раз запустить setupContactAutomation_ в редакторе Apps Script и разрешить фоновое обновление. Кнопка проверки контактов уже доступна.';
+      state.message = 'Владелец проекта должен один раз выполнить authorizeGoogleAccess в файле ContactAutomation.gs редактора Apps Script и подтвердить разрешения Google. Затем снова включите обработку изменений в сервисе.';
       return state;
     }
   });

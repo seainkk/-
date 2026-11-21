@@ -176,10 +176,11 @@ test('a corrupt verifier fails closed and an absent override uses only the packa
   assert.equal(f.call('getAppBootstrap').registry.id, ROOT);
 });
 
-test('only the shell and the two verified transports are exposed to google.script.run', () => {
+test('public surface is limited to the shell, verified transports and the authorization-only launcher', () => {
   const names = readdirSync(new URL('../src/', import.meta.url)).filter(name => name.endsWith('.gs'));
   const publicFunctions = names.flatMap(name => [...readFileSync(new URL('../src/' + name, import.meta.url), 'utf8').matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map(match => match[1])).filter(name => !name.endsWith('_')).sort();
-  assert.deepEqual(publicFunctions, ['callApp', 'doGet', 'uploadSourceBase']);
+  assert.deepEqual(publicFunctions, ['authorizeGoogleAccess', 'callApp', 'doGet', 'uploadSourceBase']);
+  assert.throws(() => fixture().call('authorizeGoogleAccess'), /INVALID_REQUEST/);
 });
 
 test('all contact, validation and automation RPCs require the current shared credential', () => {

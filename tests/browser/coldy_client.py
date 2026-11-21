@@ -174,9 +174,12 @@ def main():
             'href', 'https://script.google.com/home/projects/'
             '1FyQVeeqd4X13NqQ7PtRMVg7U8p60yk-tWvgK-9vmPdpQgK-mQE3sL8aH/edit')
         expect(owner_help.locator('a')).to_have_attribute('rel', 'noopener noreferrer')
-        expect(owner_help.locator('code')).to_have_text('setupContactAutomation_')
+        expect(owner_help.locator('code')).to_have_text('authorizeGoogleAccess')
         for instruction in ['Выполнить', 'один раз', 'центральном проекте',
-                            'не в каждой таблице', 'вводить его повторно не нужно']:
+                            'не в каждой таблице', 'вводить его повторно не нужно',
+                            'обновите страницу редактора', 'ContactAutomation.gs',
+                            'без подчёркивания', 'Если фоновая обработка ещё не включена',
+                            'Включить обработку изменений в Google Таблицах']:
             expect(owner_help).to_contain_text(instruction)
         assert not registry_calls('enableContactAutomation'), 'Consent stays a Google owner action'
 
