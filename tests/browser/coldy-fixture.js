@@ -52,6 +52,7 @@
       return publicSettings();
     },
     testColdyConnection() {
+      if (state.connectionError) throw new Error(state.connectionError);
       return { connected: true, campaignCount: state.campaigns.length, checkedAt: '2026-11-19T10:00:00Z' };
     },
     listColdyCampaigns() {

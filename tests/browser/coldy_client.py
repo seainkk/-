@@ -150,6 +150,86 @@ def main():
         expect(page.locator('#br-coldy-open')).to_be_hidden()
         expect(key).to_have_value('')
 
+        # Missing owner OAuth consent is actionable in the central project.
+        # The help survives rendering, uses no saved credential, and disappears
+        # at the next attempt rather than suggesting the old error still holds.
+        registry_reset()
+        open_settings()
+        key = page.locator('#br-coldy-key')
+        owner_help = page.locator('#br-coldy-owner')
+        test_connection = page.locator('#br-coldy-test')
+        owner_error = '[COLDY_OWNER_AUTH_REQUIRED] Владельцу нужно разрешить внешние запросы Google.'
+
+        def owner_auth_error():
+            page.evaluate('(message)=>{coldyBackend.connectionError=message;}', owner_error)
+            test_connection.click()
+            registry_idle()
+            expect(owner_help).to_be_visible()
+            expect(key).to_have_value('')
+            assert 'stored-coldy-fixture-key' not in page.locator('body').inner_text()
+
+        expect(owner_help).to_be_hidden()
+        owner_auth_error()
+        expect(owner_help.locator('a')).to_have_attribute(
+            'href', 'https://script.google.com/home/projects/'
+            '1FyQVeeqd4X13NqQ7PtRMVg7U8p60yk-tWvgK-9vmPdpQgK-mQE3sL8aH/edit')
+        expect(owner_help.locator('a')).to_have_attribute('rel', 'noopener noreferrer')
+        expect(owner_help.locator('code')).to_have_text('setupContactAutomation_')
+        for instruction in ['Выполнить', 'один раз', 'центральном проекте',
+                            'не в каждой таблице', 'вводить его повторно не нужно']:
+            expect(owner_help).to_contain_text(instruction)
+        assert not registry_calls('enableContactAutomation'), 'Consent stays a Google owner action'
+
+        page.evaluate("coldyBackend.connectionError='';backend.holdMethods=['testColdyConnection']")
+        test_connection.click()
+        page.wait_for_function("backend.pending.some(call=>call.method==='testColdyConnection')")
+        expect(owner_help).to_be_hidden()
+        expect(test_connection).to_be_disabled()
+        page.evaluate("backend.holdMethods=[];releaseRpc('testColdyConnection')")
+        registry_idle()
+        expect(owner_help).to_be_hidden()
+        expect(page.locator('#br-coldy-message')).to_contain_text('Подключение подтверждено')
+
+        page.evaluate("coldyBackend.connectionError='[COLDY_NETWORK] Соединение временно недоступно.'")
+        test_connection.click()
+        registry_idle()
+        expect(owner_help).to_be_hidden()
+        expect(page.locator('#br-coldy-message')).to_contain_text('временно недоступно')
+
+        owner_auth_error()
+        page.evaluate("backend.holdMethods=['configureColdy']")
+        page.locator('#br-coldy-save').click()
+        page.wait_for_function("backend.pending.some(call=>call.method==='configureColdy')")
+        expect(owner_help).to_be_hidden()
+        expect(key).to_have_value('')
+        page.evaluate("backend.holdMethods=[];releaseRpc('configureColdy')")
+        registry_idle()
+        assert 'apiKey' not in registry_calls('configureColdy')[-1]['p']
+        expect(owner_help).to_be_hidden()
+
+        owner_auth_error()
+        page.locator('#br-coldy-close').click()
+        expect(owner_help).to_be_hidden()
+        open_settings()
+        expect(owner_help).to_be_hidden()
+        # A late owner error from a closed dialog cannot reintroduce the help.
+        page.evaluate("backend.holdMethods=['testColdyConnection']")
+        test_connection.click()
+        page.wait_for_function("backend.pending.some(call=>call.method==='testColdyConnection')")
+        page.locator('#br-coldy-close').click()
+        page.evaluate("backend.holdMethods=[];releaseRpc('testColdyConnection')")
+        registry_idle()
+        expect(owner_help).to_be_hidden()
+        expect(page.locator('#br-coldy-dialog')).to_be_hidden()
+
+        open_settings()
+        owner_auth_error()
+        page.evaluate('backend.revoked=true')
+        test_connection.click()
+        expect(page.locator('#br-coldy-dialog')).to_be_hidden()
+        expect(owner_help).to_be_hidden()
+        expect(key).to_have_value('')
+
         # Binding an existing campaign saves local policy; only a later preview
         # confirmation can upload contacts. Campaign names and samples are text.
         registry_reset()

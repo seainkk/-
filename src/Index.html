@@ -26,6 +26,15 @@
       <div class="br-provider-actions"><button id="br-coldy-save" type="submit" class="br-button br-primary">Сохранить подключение</button><button id="br-coldy-test" type="button" class="br-button">Проверить подключение</button></div>
     </fieldset></form>
     <p id="br-coldy-message" role="status" aria-live="polite"></p>
+    <div id="br-coldy-owner" class="br-muted" hidden>
+      <p><strong>Нужно разрешение владельца Google</strong></p>
+      <ol>
+        <li>Войдите в аккаунт владельца и откройте <a href="https://script.google.com/home/projects/1FyQVeeqd4X13NqQ7PtRMVg7U8p60yk-tWvgK-9vmPdpQgK-mQE3sL8aH/edit" target="_blank" rel="noopener noreferrer">редактор Apps Script проекта</a>.</li>
+        <li>Выберите функцию <code>setupContactAutomation_</code>, нажмите «Выполнить» и подтвердите запрошенный Google доступ.</li>
+        <li>Вернитесь сюда и нажмите «Проверить подключение».</li>
+      </ol>
+      <p>Это нужно сделать один раз в центральном проекте, а не в каждой таблице. Ключ Coldy уже сохранён, вводить его повторно не нужно.</p>
+    </div>
     <p class="br-muted">Проверка подключения только читает список рассылок. Настройте загрузку контактов в разделе «Сегменты → Рассылки».</p>
   </dialog>
   <dialog id="br-provider-dialog" class="br-provider-dialog" aria-labelledby="br-provider-title">
