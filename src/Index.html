@@ -8,14 +8,15 @@
   <title>Реестр баз</title>
   <?!= include_('Styles'); ?>
   <?!= include_('GridStyles'); ?>
+  <?!= include_('ProjectStyles'); ?>
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Coldy</button><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-analytics" type="button" class="br-button" aria-pressed="false">Аналитика</button><button id="br-view-infrastructure" type="button" class="br-button" aria-pressed="false">Инфраструктура</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Coldy</button><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
   <div class="br-back-row" id="br-back-row" hidden><button id="br-action-back" class="br-button" type="button">← Назад</button></div>
   <dialog id="br-coldy-dialog" class="br-provider-dialog" aria-labelledby="br-coldy-title">
     <div class="br-import-heading"><h2 id="br-coldy-title">Подключение Coldy</h2><button id="br-coldy-close" type="button" class="br-button" autofocus>Закрыть</button></div>
-    <p class="br-muted">Подключение общее для реестра и сегментов. Ключ хранится на сервере и не показывается повторно.</p>
+    <p class="br-muted">Подключение общее для реестра, сегментов, аналитики и инфраструктуры проекта. Ключ хранится на сервере и не показывается повторно.</p>
     <p id="br-coldy-configured" class="br-muted"></p>
     <form id="br-coldy-form" autocomplete="off"><fieldset id="br-coldy-fields" class="br-provider-fields" disabled>
       <label for="br-coldy-key">API-ключ Coldy<input id="br-coldy-key" type="password" autocomplete="new-password" maxlength="512" placeholder="Оставьте пустым, чтобы сохранить текущий"></label>
@@ -204,10 +205,12 @@
       </section>
       <div id="br-mailings-totals"></div><div id="br-mailings-services"></div>
     </section>
+    <?!= include_('ProjectPanel'); ?>
     <section id="br-retarget-view" class="br-retarget-view" hidden aria-labelledby="br-retarget-title"><h1 id="br-retarget-title">Ретаргетинг</h1><p>Структура ещё обсуждается.</p></section>
   </main>
 </div>
 <?!= include_('GridClient'); ?>
+<?!= include_('ProjectClient'); ?>
 <?!= include_('Client'); ?>
 </body>
 </html>

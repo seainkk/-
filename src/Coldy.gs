@@ -31,7 +31,9 @@ function configureColdy_(request) {
       properties.setProperty(COLDY.providerProperty, provider);
       properties.setProperty(COLDY.autoProperty, 'false');
       if (rotated) properties.deleteProperty(COLDY.connectionProperty);
-      return coldySettingsPublic_(coldySettings_(context));
+      var result = coldySettingsPublic_(coldySettings_(context));
+      result.credentialChanged = rotated;
+      return result;
     });
   });
 }
@@ -170,7 +172,11 @@ function coldyPath_(method, path) {
     if (route !== '/leads/bulk' && route !== '/email-verifications' || bits.length > 1) fail_('INVALID_REQUEST', 'Неподдерживаемое действие Coldy.');
     return route;
   }
-  if (route === '/campaigns' || new RegExp('^/campaigns/' + uuid + '$').test(route) || new RegExp('^/email-verifications/' + identifier + '(?:/results)?$').test(route)) allowed = [];
+  if (route === '/accounts' || /^\/accounts\/[1-9]\d*$/.test(route)) {
+    if (route !== '/accounts' && !Number.isSafeInteger(Number(route.slice('/accounts/'.length)))) fail_('INVALID_REQUEST', 'Некорректный идентификатор ящика Coldy.');
+    allowed = [];
+  }
+  else if (route === '/campaigns' || new RegExp('^/campaigns/' + uuid + '$').test(route) || new RegExp('^/email-verifications/' + identifier + '(?:/results)?$').test(route)) allowed = [];
   else if (new RegExp('^/leads/campaign/' + uuid + '$').test(route)) allowed = ['after_id', 'offset', 'limit', 'search'];
   else if (new RegExp('^/analytics/campaigns/' + uuid + '/(?:summary|events|by-account|by-sequence)$').test(route)) allowed = ['period', 'start_date', 'end_date', 'type', 'event_types'].concat(/\/by-account$/.test(route) ? ['search', 'limit', 'offset', 'sort_by', 'sort_order'] : []);
   if (!allowed) fail_('INVALID_REQUEST', 'Неподдерживаемое действие Coldy.');

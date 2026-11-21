@@ -1,0 +1,29 @@
+<section id="pj-analytics-view" class="pj-view" hidden aria-labelledby="pj-analytics-title">
+  <div class="pj-heading"><div><p class="pj-eyebrow">Проект · Coldy</p><h1 id="pj-analytics-title">Аналитика</h1><p class="br-muted">Рассылки и результаты по сегментам.</p></div><div class="pj-toolbar"><button id="pj-analytics-connect" class="br-button" type="button" aria-haspopup="dialog">Подключить Coldy</button><button id="pj-analytics-refresh" class="br-button" type="button">↻ Обновить данные</button></div></div>
+  <p id="pj-analytics-health" class="pj-health" role="status" aria-live="polite"></p>
+  <div id="pj-analytics-connection" class="pj-connection" hidden></div>
+  <div class="pj-filter"><label for="pj-segment">Сегмент</label><select id="pj-segment"><option value="">Выберите сегмент</option></select><span id="pj-analytics-updated" class="br-muted"></span></div>
+  <div id="pj-analytics-empty" class="pj-empty" hidden></div>
+  <div id="pj-analytics-content" hidden>
+    <dl id="pj-analytics-totals" class="pj-metrics" aria-label="Итоги рассылок сегмента"></dl>
+    <div class="pj-card">
+      <div class="pj-card-heading"><div><h2>Рассылки сегмента</h2><p class="br-muted">Отметьте рассылки Coldy, которые относятся к этому сегменту.</p></div><div class="pj-toolbar"><span id="pj-selection-count" class="br-muted"></span><button id="pj-selection-save" class="br-button br-primary" type="button" disabled>Сохранить выбор</button><button id="pj-selection-retry" class="br-button" type="button" hidden>Продолжить тот же запрос</button></div></div>
+      <p id="pj-selection-health" class="pj-health" role="status" aria-live="polite"></p>
+      <div class="pj-table-wrap"><table class="pj-table pj-campaign-table"><thead><tr><th scope="col"><span class="pj-sr-only">Выбор</span></th><th scope="col">Рассылка</th><th scope="col">Состояние в Coldy</th><th scope="col">Отправлено</th><th scope="col">Ответы</th><th scope="col">Лиды</th></tr></thead><tbody id="pj-campaign-rows"></tbody></table></div>
+      <p id="pj-analytics-note" class="pj-footnote br-muted">Выбор связывает существующие рассылки с аналитикой сегмента. Снятие выбора удаляет связь и её автозагрузку контактов. Отправка писем настраивается в Coldy.</p>
+    </div>
+  </div>
+</section>
+<section id="pj-infrastructure-view" class="pj-view" hidden aria-labelledby="pj-infrastructure-title">
+  <div class="pj-heading"><div><p class="pj-eyebrow">Проект · Coldy</p><h1 id="pj-infrastructure-title">Инфраструктура</h1><p class="br-muted">Почтовые ящики, используемые для отправки писем.</p></div><div class="pj-toolbar"><button id="pj-infrastructure-connect" class="br-button" type="button" aria-haspopup="dialog">Подключить Coldy</button><button id="pj-infrastructure-refresh" class="br-button" type="button">↻ Синхронизировать</button></div></div>
+  <p id="pj-infrastructure-health" class="pj-health" role="status" aria-live="polite"></p>
+  <div class="pj-toolbar"><button id="pj-infrastructure-continue" class="br-button" type="button" hidden>Продолжить синхронизацию</button></div>
+  <div id="pj-infrastructure-connection" class="pj-connection" hidden></div>
+  <dl id="pj-infrastructure-totals" class="pj-metrics" aria-label="Почтовая инфраструктура проекта"></dl>
+  <div id="pj-infrastructure-empty" class="pj-empty" hidden></div>
+  <div id="pj-infrastructure-content" class="pj-card" hidden>
+    <div class="pj-card-heading"><div><h2>Почтовые ящики</h2><p id="pj-infrastructure-period" class="br-muted">Список и доступные показатели загружаются из Coldy.</p></div><span id="pj-infrastructure-updated" class="br-muted"></span></div>
+    <div class="pj-table-wrap"><table class="pj-table pj-infrastructure-table"><thead><tr><th scope="col">Почта</th><th scope="col">Состояние</th><th scope="col">Отправлено</th><th scope="col">За сегодня</th><th scope="col">Лимит в день</th><th scope="col">Ошибки</th></tr></thead><tbody id="pj-account-rows"></tbody></table></div>
+    <p id="pj-infrastructure-note" class="pj-footnote br-muted">Синхронизация получает список ящиков и доступные показатели Coldy.</p>
+  </div>
+</section>

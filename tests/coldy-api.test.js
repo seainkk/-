@@ -7,6 +7,26 @@ import crypto from 'node:crypto';
 const ROOT='coldy_registry_root_123456', KEY='coldy_fixture_secret_NEVER_IN_RESPONSE', CAMPAIGN='237056d1-20b1-41ab-aa0e-17965cecbe14';
 const plain=value=>JSON.parse(JSON.stringify(value));
 
+test('sender inventory permits only exact read-only accounts routes without parameters',()=>{
+  const f=fixture();
+  for(const path of ['/accounts','/accounts/1','/accounts/9723','/accounts/9007199254740991'])assert.equal(f.c.coldyPath_('GET',path),path);
+  for(const path of ['/accounts/0','/accounts/01','/accounts/-1','/accounts/1.5','/accounts/9007199254740992','/accounts/1/tokens','/accounts/1/','/accounts/1/password','/accounts/1?status=Connected','/accounts?limit=100','/accounts/1?fields=password','/accounts/%31','/accounts/../campaigns'])assert.throws(()=>f.c.coldyPath_('GET',path),/INVALID_REQUEST/);
+  for(const method of ['POST','PATCH','DELETE'])for(const path of ['/accounts','/accounts/1'])assert.throws(()=>f.c.coldyPath_(method,path),/INVALID_REQUEST/);
+  assert.equal(f.calls.fetch.length,0);
+});
+
+test('connection saves report credential rotation without treating same-key settings as a new account',()=>{
+  const f=fixture();
+  assert.equal(f.configure().credentialChanged,true);
+  assert.equal(f.configure().credentialChanged,false);
+  assert.equal(f.c.configureColdy_({emailValidationProvider:'coldy'}).credentialChanged,false);
+  assert.equal(f.c.configureColdy_({clearKey:true}).credentialChanged,true);
+  assert.equal(f.c.configureColdy_({clearKey:true}).credentialChanged,false);
+  assert.equal(f.calls.fetch.length,0);
+});
+
+
+
 function fixture(options={}) {
   let now=1795089600000, seq=0, locked=false, rootId=ROOT, authorized=true;
   const files=new Map([[ROOT,{id:ROOT,mimeType:'application/vnd.google-apps.folder',parents:['owner_drive_123456'],appProperties:{}}]]), properties=new Map(), calls={fetch:[],creates:[],updates:[],locks:0};

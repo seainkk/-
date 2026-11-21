@@ -462,3 +462,70 @@ test('LPR ownership context remains fingerprinted independently of empty persona
     assert.throws(() => f.start(binding, preview), /COLDY_SOURCE_CHANGED/); assert.equal(posts(f).length, 0);
   }
 });
+
+test('preserveExisting keeps a teammate binding created during the final campaign GET wholly unchanged', () => {
+  let armed = false, createdByTeammate;
+  const f = fixture({ api: ({ method, path }) => {
+    if (armed && method === 'GET' && path === '/campaigns/' + CAMPAIGN) {
+      armed = false;
+      createdByTeammate = f.bind({ includeCompanies: false, includeLpr: true, autoUpload: true, allowActive: true, requestId: 'teammate-binding-created' });
+      for (const [key, value] of f.storage) if (key.includes('|campaignbindings|')) value.bindings[0].futureSetting = { keep: true };
+    }
+  } });
+  armed = true;
+  const result = f.bind({ includeCompanies: true, includeLpr: true, autoUpload: false, allowActive: false, preserveExisting: true, requestId: 'analytics-add-campaign' });
+  assert.deepEqual(result, createdByTeammate);
+  const persisted = [...f.storage.entries()].find(([key]) => key.includes('|campaignbindings|'))[1];
+  assert.deepEqual(persisted.bindings[0].futureSetting, { keep: true }); assert.equal(persisted.bindings[0].revision, 1); assert.equal(persisted.bindings.length, 1);
+  assert.equal(posts(f).length, 0);
+});
+
+test('classic absent/false binding writes retain their exact old fingerprint and update behavior', () => {
+  const f = fixture(), first = f.bind({ autoUpload: true, allowActive: true });
+  const requestId = 'classic-false-request';
+  const updated = f.bind({ preserveExisting: false, requestId, includeCompanies: true, includeLpr: true, autoUpload: false, allowActive: false });
+  assert.equal(updated.id, first.id); assert.equal(updated.revision, first.revision + 1); assert.equal(updated.autoUpload, false); assert.equal(updated.allowActive, false);
+  const before = f.calls.saves.length;
+  assert.deepEqual(f.bind({ requestId, includeCompanies: true, includeLpr: true, autoUpload: false, allowActive: false }), updated); assert.equal(f.calls.saves.length, before);
+  const registry = [...f.storage.entries()].find(([key]) => key.includes('|campaignbindings|'))[1], receipt = registry.receipts.find(receipt => receipt.requestId === requestId);
+  assert.equal(receipt.hash, digest(JSON.stringify([SEGMENT, CAMPAIGN, true, true, false, false])));
+});
+
+test('preserveExisting creates a genuinely new safe binding but never takes a foreign segment campaign', () => {
+  const f = fixture();
+  const created = f.bind({ preserveExisting: true, includeCompanies: true, includeLpr: true, autoUpload: false, allowActive: false });
+  assert.equal(created.includeCompanies, true); assert.equal(created.includeLpr, true); assert.equal(created.autoUpload, false); assert.equal(created.allowActive, false); assert.equal(created.revision, 1);
+  const before = f.calls.saves.length;
+  assert.throws(() => f.bind({ preserveExisting: true, segmentId: SECOND, requestId: 'foreign-preserve-request' }), /COLDY_CAMPAIGN_BOUND/); assert.equal(f.calls.saves.length, before);
+});
+
+test('preserveExisting receipts recover a lost save acknowledgement without further HTTP or flag changes', () => {
+  let loseAck = false;
+  const f = fixture({ afterSave: ({ kind, value }) => {
+    if (loseAck && kind === 'campaignbindings' && value.receipts.some(receipt => receipt.requestId === 'preserved-lost-ack')) { loseAck = false; throw new Error('lost receipt acknowledgement'); }
+  } });
+  const original = f.bind({ includeCompanies: false, includeLpr: true, autoUpload: true, allowActive: true });
+  const payload = { preserveExisting: true, includeCompanies: true, includeLpr: true, autoUpload: false, allowActive: false, requestId: 'preserved-lost-ack' };
+  loseAck = true; assert.throws(() => f.bind(payload)); const before = f.calls.api.length, saves = f.calls.saves.length;
+  assert.deepEqual(f.bind(payload), original); assert.equal(f.calls.api.length, before); assert.equal(f.calls.saves.length, saves);
+  assert.deepEqual(plain(f.context.getColdyBindings_({ segmentId: SEGMENT }).bindings[0]), original);
+});
+
+test('the same request ID cannot cross between preserveExisting and classic update modes', () => {
+  for (const firstMode of [true, false]) {
+    const f = fixture(), requestId = 'mode-switch-request'; f.bind({ requestId, preserveExisting: firstMode });
+    assert.throws(() => f.bind({ requestId, preserveExisting: !firstMode }), /REQUEST_REUSED/);
+    if (firstMode) assert.throws(() => f.bind({ requestId }), /REQUEST_REUSED/);
+  }
+});
+
+test('preserveExisting is strictly boolean and does not bypass key or registry changes during HTTP', () => {
+  for (const value of [null, 'true', 1, {}, []]) { const f = fixture(); assert.throws(() => f.bind({ preserveExisting: value }), /INVALID_REQUEST/); assert.equal(f.calls.api.length, 0); }
+  for (const mode of [true, false]) for (const change of ['key', 'root']) {
+    let armed = false;
+    const f = fixture({ api: ({ method, path, state }) => { if (armed && method === 'GET' && path.startsWith('/campaigns/')) { if (change === 'key') state.credentialHash = 'credential-B'; else state.rootId = 'another_registry_123456789'; } } });
+    f.bind({ autoUpload: true }); const before = f.calls.saves.length; armed = true;
+    assert.throws(() => f.bind({ preserveExisting: mode, requestId: 'changing-scope-request' }), change === 'key' ? /COLDY_CREDENTIAL_CHANGED/ : /COLDY_SCOPE_CHANGED/);
+    assert.equal(f.calls.saves.length, before); assert.equal(posts(f).length, 0);
+  }
+});
