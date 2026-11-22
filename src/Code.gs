@@ -8,7 +8,12 @@
  */
 function doGet() {
   // Only a static shell is public. The fragment credential is checked by every RPC.
-  try { return HtmlService.createTemplateFromFile('Index').evaluate().setTitle(REGISTRY_CONFIG.title).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL); }
+  try {
+    var page;
+    try { page = HtmlService.createHtmlOutputFromFile('RegistryShell'); }
+    catch (noBundle) { page = HtmlService.createTemplateFromFile('Index').evaluate(); } // Direct clasp push from src.
+    return page.setTitle(REGISTRY_CONFIG.title).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  }
   catch (error) { return HtmlService.createHtmlOutput('<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Центр мультиканального аутрича</title><body style="font:16px/1.6 system-ui;margin:40px;max-width:650px"><h1>Центр мультиканального аутрича</h1><p>Не удалось открыть интерфейс. Обратитесь к владельцу сервиса.</p></body></html>'); }
 }
 

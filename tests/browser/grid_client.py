@@ -4,26 +4,28 @@ Run: python tests/browser/grid_client.py
 Requires Python Playwright and Chromium. Does not access Google or user data.
 """
 from pathlib import Path
+import sys
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
 HTML = (
     '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1">'
-    + (ROOT / 'src/Styles.html').read_text()
-    + (ROOT / 'src/GridStyles.html').read_text()
+    + (ROOT / 'src/Styles.html').read_text(encoding='utf-8')
+    + (ROOT / 'src/GridStyles.html').read_text(encoding='utf-8')
     + '</head><body><main id="bases-registry-app">'
     '<div hidden><h1 id="registry-style-title">Реестр баз</h1>'
     '<input id="registry-style-input" aria-label="Проверка стилей реестра"></div>'
-    + (ROOT / 'src/GridPanel.html').read_text()
-    + '</main><script>' + Path(__file__).with_name('grid-fixture.js').read_text()
-    + '</script>' + (ROOT / 'src/GridClient.html').read_text() + '</body></html>'
+    + (ROOT / 'src/GridPanel.html').read_text(encoding='utf-8')
+    + '</main><script>' + Path(__file__).with_name('grid-fixture.js').read_text(encoding='utf-8')
+    + '</script>' + (ROOT / 'src/GridClient.html').read_text(encoding='utf-8') + '</body></html>'
 )
 
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+        launch = {'channel':'chrome'} if sys.platform == 'win32' else {'executable_path':'/usr/bin/chromium'}
+        browser = p.chromium.launch(**launch, headless=True, args=['--no-sandbox'])
         page = browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))

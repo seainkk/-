@@ -42,6 +42,8 @@ function refreshProjectInfrastructure_(request) {
     projectInfraMonitoringCurrent_(context, settings.credentialHash, monitoringSignature);
     if (input.cursor !== undefined) {
       if (!before || !projectInfraMonitoringMatches_(before, monitoringSignature)) fail_('COLDY_INFRA_CURSOR_STALE', 'Выбор почт изменился. Начните новую синхронизацию.');
+      var allowedIds = new Set(monitoring.accountIds);
+      if (before.detailIds.some(function (id) { return !allowedIds.has(id); })) fail_('COLDY_STORAGE', 'Продолжение содержит почту вне выбранного мониторинга.');
       if (before.processedCursors.indexOf(input.cursor) !== -1) return projectInfraPublic_(context, before);
       if (!before.nextCursor || input.cursor !== before.nextCursor) fail_('COLDY_INFRA_CURSOR_STALE', 'Синхронизация почт уже изменилась. Обновите список.');
     }
@@ -91,10 +93,21 @@ function refreshProjectInfrastructure_(request) {
         }
       } else state = JSON.parse(JSON.stringify(before));
       state.lastError = null; state.retryAt = 0; state.warnings = [];
-      if (state.selectedOnly && state.capacityWork) projectCapacityAdvance_(context, settings, state);
+      if (state.selectedOnly && state.capacityWork) {
+        projectCapacityAdvance_(context, settings, state);
+        if (state.finalCapacityCheck && state.capacity && !state.lastError) state.inventoryAt = state.capacity.updatedAt;
+      }
       else {
         if ((!state.poolOnly || state.selectedOnly) && input.inventoryOnly !== true) projectInfraDetails_(context, settings, state);
         if (state.capacityWork && !state.lastError) projectCapacityAdvance_(context, settings, state);
+      }
+      // A long or throttled run may outlive the original membership snapshot. Recheck it once,
+      // keeping the completed sender diagnostics and their individual observation timestamps.
+      if (state.selectedOnly && state.poolOnly && state.capacity && !state.capacityWork && !state.lastError &&
+          state.cursorIndex === state.detailIds.length && !state.finalCapacityCheck &&
+          Math.min(Date.parse(state.inventoryAt),Date.parse(state.capacity.updatedAt)) < Date.now() - PROJECT_INFRASTRUCTURE.cacheMillis) {
+        state.finalCapacityCheck = true;
+        state.capacityWork = {mapped:false,cursor:0};
       }
     } catch (error) {
       if (projectInfraScopeError_(error)) throw error;
@@ -125,32 +138,39 @@ function refreshProjectInfrastructure_(request) {
 }
 
 function projectInfraDetails_(context, settings, state) {
-  var firstIndex = state.cursorIndex, deadline = Date.now() + PROJECT_INFRASTRUCTURE.detailBudgetMillis;
+  var parallel = typeof UrlFetchApp.fetchAll === 'function', groupSize = parallel ? 5 : 1, firstIndex = state.cursorIndex;
+  var deadline = Date.now() + (parallel ? 45000 : PROJECT_INFRASTRUCTURE.detailBudgetMillis);
   var indexes = Object.create(null);
   state.accounts.forEach(function (item, index) { indexes[item.id] = index; });
   var stop = Math.min(state.detailIds.length, state.cursorIndex + PROJECT_INFRASTRUCTURE.batch);
-  for (; state.cursorIndex < stop; state.cursorIndex++) {
-    // A slow first request may exceed the budget, but must still advance the
-    // cursor. Check only between calls; an in-flight UrlFetch cannot be stopped.
-    if (state.cursorIndex > firstIndex && Date.now() >= deadline) break;
-    var index = indexes[state.detailIds[state.cursorIndex]], item = state.accounts[index];
+  function guard() { projectInfraMonitoringCurrent_(context, settings.credentialHash, state.monitoringSignature); }
+  while (state.cursorIndex < stop && (state.cursorIndex === firstIndex || Date.now() < deadline)) {
+    var ids = state.detailIds.slice(state.cursorIndex,Math.min(stop,state.cursorIndex + groupSize)), responses;
     try {
-      projectInfraMonitoringCurrent_(context, settings.credentialHash, state.monitoringSignature);
-      if (state.cursorIndex > firstIndex && Date.now() >= deadline) break;
-      var detail = coldyApi_(context, 'GET', '/accounts/' + item.id);
-      projectInfraMonitoringCurrent_(context, settings.credentialHash, state.monitoringSignature);
-      state.accounts[index] = projectInfraDetail_(item, detail, settings.key, state.selectedOnly);
-      state.verifiedProvider = true;
+      responses = coldyGetBatch_(context,ids.map(function (id) { return '/accounts/' + id; }),guard);
     } catch (error) {
-      if (projectInfraScopeError_(error) || error.registryCode === 'COLDY_AUTH' || error.registryCode === 'COLDY_OWNER_AUTH_REQUIRED') throw error;
-      item.stale = true;
-      item.syncError = projectInfraError_(error);
-      if (['COLDY_RATE_LIMIT', 'COLDY_NETWORK', 'COLDY_UNAVAILABLE'].indexOf(error.registryCode) !== -1) {
-        state.lastError = projectInfraError_(error);
-        state.retryAt = Date.now() + Math.max(15000, Math.min(86400000, error.retryAfterMs || 0));
-        state.warnings.push(state.lastError.message);
-        break;
+      if (['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE'].indexOf(error.registryCode) < 0) throw error;
+      responses = [{error:error}];
+    }
+    // Retain the longest provider cooldown even if several concurrent reads were throttled.
+    var retry = responses.reduce(function (ms, r) { return Math.max(ms,r.error && r.error.retryAfterMs || 0); },0);
+    for (var n = 0; n < responses.length; n++) {
+      var index = indexes[ids[n]], item = state.accounts[index], result = responses[n];
+      try {
+        if (result.error) throw result.error;
+        state.accounts[index] = projectInfraDetail_(item,result.value,settings.key,state.selectedOnly);
+        state.verifiedProvider = true;
+      } catch (error) {
+        item.stale = true;
+        item.syncError = projectInfraError_(error);
+        if (['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE'].indexOf(error.registryCode) >= 0) {
+          state.lastError = item.syncError;
+          state.retryAt = Date.now() + Math.max(15000,Math.min(86400000,retry));
+          state.warnings.push(state.lastError.message);
+          return;
+        }
       }
+      state.cursorIndex++;
     }
   }
   if (state.detailIds.some(function (id) { return !!state.accounts[indexes[id]].syncError; })) state.warnings.push('Часть сведений о выбранных ящиках не обновлена. Сохранённые значения отмечены как устаревшие.');

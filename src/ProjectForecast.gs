@@ -9,23 +9,32 @@ function getProjectSendingForecast_(request) {
     if (!settings.configured) return empty('not_configured', 'Подключите Coldy в настройках проекта.');
     var monitoring = projectMonitoringRead_(context, settings);
     var signature = projectMonitoringSignature_(context, monitoring);
-    projectInfraMonitoringCurrent_(context, settings.credentialHash, signature);
-    if (!monitoring.accountIds.length) return empty('no_selection', 'Для расчёта выберите почты проекта в разделе «Инфраструктура».');
+    if (!monitoring.accountIds.length) {
+      projectInfraMonitoringCurrent_(context, settings.credentialHash, signature);
+      return empty('no_selection', 'Для расчёта выберите почты проекта в разделе «Инфраструктура».');
+    }
 
     var owner = projectMonitoringOwner_(settings.credentialHash);
     var saved = coldyLoad_(context, 'sendingforecast', owner);
     var inventory = projectInfraRead_(context, settings);
-    var infra = projectInfraPublic_(context, inventory, signature);
     var working = saved && saved.selection === signature && saved.work && Date.now() - (saved.touchedAt || saved.startedAt) < 1800000;
-    var recentlyChecked = Date.now() - Date.parse(infra.updatedAt) < 60000;
-    if (!infra.retryAfterMs && (infra.nextCursor && infra.poolOnly || !recentlyChecked && !working ||
-        (!infra.poolOnly || !infra.capacity.updatedAt) && !(infra.error && recentlyChecked) ||
-        infra.capacity.stale && !recentlyChecked)) {
-      infra = refreshProjectInfrastructure_(infra.nextCursor && infra.poolOnly ? {cursor:infra.nextCursor} : {includeCapacity:true,live:true});
-    }
+    var matching = projectInfraMonitoringMatches_(inventory,signature) && inventory.poolOnly;
+    var cursor = matching && inventory.nextCursor, capacity = matching && inventory.capacity;
+    var lastChecked = inventory && Date.parse(inventory.updatedAt), recentlyChecked = Date.now() - lastChecked < 60000;
+    var expired = !capacity || capacity.stale || Date.now() - Date.parse(capacity.updatedAt) >= PROJECT_INFRASTRUCTURE.cacheMillis;
+    var retrying = inventory && (inventory.retryAt > Date.now() || inventory.lastError && recentlyChecked);
+    var advance = !retrying && (cursor || !matching || !capacity || !recentlyChecked && (!working || expired));
+    // Refresh already verifies ownership and builds the public projection; avoid performing the same
+    // Drive reads before every cursor continuation.
+    var infra = advance ? refreshProjectInfrastructure_(cursor ? {cursor:cursor} : {includeCapacity:true,live:true}) :
+      projectInfraPublic_(context,inventory,signature);
+    if (infra.monitoring.revision !== monitoring.revision ||
+        JSON.stringify(infra.monitoring.accountIds) !== JSON.stringify(monitoring.accountIds))
+      fail_('COLDY_MONITORING_CHANGED','Изменился выбор почт. Обновите прогноз.');
     if (!infra.poolOnly || infra.nextCursor || !infra.capacity.updatedAt || infra.capacity.stale || infra.retryAfterMs) {
       var waiting = empty(infra.error || infra.retryAfterMs ? 'partial' : 'loading',
-        infra.error && infra.error.message || 'Обновляем назначения рассылок, графики и лимиты выбранных почт.');
+        infra.error && infra.error.message || 'Обновляем назначения, расписания и лимиты. Проверено почт: ' +
+          infra.detailProgress.completed + ' из ' + infra.detailProgress.total + '.');
       waiting.retryAfterMs = infra.retryAfterMs || (infra.error ? 60000 : 0);
       waiting.pending = !waiting.retryAfterMs;
       if (saved && saved.generatedAt && Date.now() - Date.parse(saved.generatedAt) < 1800000 &&
@@ -53,16 +62,13 @@ function getProjectSendingForecast_(request) {
     state.inputs = inputs;
     state.retryAt = 0; state.message = '';
     var credential = settings.credentialHash, project = registryProjectId_();
-    function guard(id, beforeRequest) {
-      var fresh = coldyCurrent_(context, false);
-      if (registryProjectId_() !== project || coldyCredentialHash_(fresh) !== credential)
-        fail_('COLDY_CREDENTIAL_CHANGED', 'Подключение проекта изменилось. Обновите прогноз.');
-      if (beforeRequest) {
-        projectInfraMonitoringCurrent_(fresh, credential, signature);
-        var ownerNow = projectCapacityOwners_(fresh, [id])[id];
-        if (!ownerNow || ownerNow.bindingState !== 'linked' || ownerNow.segmentId !== segments.get(id) || ownerNow.segmentProjectId !== project)
-          fail_('COLDY_MONITORING_CHANGED', 'Изменилась привязка рассылки. Обновите прогноз.');
-      }
+    function guard(id) {
+      if (registryProjectId_() !== project || !segments.has(id))
+        fail_('COLDY_MONITORING_CHANGED', 'Изменился проект рассылки. Обновите прогноз.');
+      var fresh = projectInfraMonitoringCurrent_(context, credential, signature);
+      var ownerNow = projectCapacityOwners_(fresh, [id])[id];
+      if (!ownerNow || ownerNow.bindingState !== 'linked' || ownerNow.segmentId !== segments.get(id) || ownerNow.segmentProjectId !== project)
+        fail_('COLDY_MONITORING_CHANGED', 'Изменилась привязка рассылки. Обновите прогноз.');
     }
     try {
       projectForecastCollect_(context, ids, state, guard);
@@ -121,27 +127,43 @@ function projectForecastScope_(selection, infra) {
 }
 
 function projectForecastCollect_(context, ids, state, guard) {
-  var deadline = Date.now() + 18000;
-  for (var pages = 0; pages < 8 && state.progress.campaignsDone < ids.length; pages++) {
-    var id = ids[state.progress.campaignsDone], work = state.work[id];
-    if (!work) {
-      guard(id,true);
-      var detail = coldyApi_(context,'GET','/campaigns/' + coldyCampaignId_(id));
-      guard(id,false);
-      if (!detail || !coldyUuid_(detail.id) || detail.id.toLowerCase() !== id || detail.status !== 'Active')
-        fail_('COLDY_FORECAST_CHANGED','Состояние рассылки изменилось. Пересчитываем прогноз по актуальным данным.');
-      work = {sequence:projectForecastSequence_(detail)};
-      state.work[id] = work;
+  var deadline = Date.now() + 18000, pages = 0;
+  while (pages < 8 && state.progress.campaignsDone < ids.length) {
+    var id = coldyCampaignId_(ids[state.progress.campaignsDone]), work = state.work[id];
+    var start = work && work.nextOffset || 0, offsets = [start];
+    // Only the first page establishes a total. Subsequent offsets must belong to it.
+    for (var offset = start + 200; work && offset < work.total && offsets.length < Math.min(5,8-pages); offset += 200) offsets.push(offset);
+    var paths = offsets.map(function (offset) { return '/leads/campaign/' + id + '?limit=200&offset=' + offset; });
+    if (!work) paths.unshift('/campaigns/' + id);
+    var results = coldyGetBatch_(context, paths, function () { guard(id); });
+    if (!Array.isArray(results) || results.length !== paths.length) fail_('COLDY_RESPONSE','Coldy не подтвердил все запрошенные страницы.');
+    var index = 0, cooldown = results.reduce(function (delay,r) { return Math.max(delay,Number(r && r.error && r.error.retryAfterMs) || 0); },0);
+    try {
+      if (!work) {
+        var detailResult = results[index++];
+        if (detailResult && detailResult.error) throw detailResult.error;
+        var detail = detailResult && detailResult.value;
+        if (!detail || !coldyUuid_(detail.id) || detail.id.toLowerCase() !== id || detail.status !== 'Active')
+          fail_('COLDY_FORECAST_CHANGED','Состояние рассылки изменилось. Пересчитываем прогноз по актуальным данным.');
+        work = {sequence:projectForecastSequence_(detail)};
+        state.work[id] = work;
+      }
+      // Commit the contiguous prefix only. A retry starts at the first unconfirmed offset.
+      offsets.forEach(function (offset) {
+        var result = results[index++];
+        if (result && result.error) throw result.error;
+        var page = projectForecastDemandPage_(id, offset, work.total, work.sequence, result && result.value);
+        var next = projectForecastAppendDemand_(work.campaignId ? work : null, page);
+        next.sequence = work.sequence;
+        state.work[id] = work = next;
+        state.progress.contactsRead += page.leadIds.length;
+        if (next.complete) state.progress.campaignsDone++;
+      });
+    } catch (error) {
+      if (error.registryCode && cooldown) error.retryAfterMs = Math.max(error.retryAfterMs || 0,cooldown);
+      throw error;
     }
-    var before = true;
-    var page = projectForecastDemandPage_(context, id, work.nextOffset || 0, function () {
-      guard(id,before); before = false;
-    }, work.total, work.sequence);
-    var next = projectForecastAppendDemand_(work.campaignId ? work : null, page);
-    next.sequence = work.sequence;
-    state.work[id] = next;
-    state.progress.contactsRead += page.leadIds.length;
-    if (next.complete) state.progress.campaignsDone++;
+    pages += offsets.length;
     if (Date.now() >= deadline) break;
   }
 }

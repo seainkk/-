@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -34,8 +34,8 @@ async function claspPackage(cwd) {
   return { root: path.join(cwd, 'node_modules/@google/clasp'), bin };
 }
 
-async function defaultInvoker(args, { cwd, env }) {
-  const clasp = await claspPackage(cwd);
+async function defaultInvoker(args, { cwd, packageDir = cwd, env }) {
+  const clasp = await claspPackage(packageDir);
   const executable = path.join(clasp.root, clasp.bin);
   const { CLASPRC_JSON: ignored, ...childEnv } = env;
   try {
@@ -48,6 +48,32 @@ async function defaultInvoker(args, { cwd, env }) {
     // Never forward raw CLI errors: OAuth responses and debug output can contain credentials.
     throw commandError(command, `${error.stdout || ''}\n${error.stderr || ''}`);
   }
+}
+
+// Index contains literal includes only. Never evaluate server code or accept a path from a scriptlet.
+export async function buildRegistryShell(sourceDirectory) {
+  const template = await readFile(path.join(sourceDirectory, 'Index.html'), 'utf8');
+  const allowed = new Set(['Styles','GridStyles','ProjectStyles','GridPanel','ProjectPanel','GridClient','ProjectClient','Client']);
+  const directive = /<\?[\s\S]*?(?:\?>|$)/g;
+  const names = new Map();
+  for (const [text] of template.matchAll(directive)) {
+    const match = /^<\?!=\s*include_\(\s*(['"])([A-Za-z]+)\1\s*\)\s*;?\s*\?>$/.exec(text);
+    if (!match || !allowed.has(match[2])) throw new Error('Страница реестра содержит неизвестную шаблонную инструкцию. Публикация остановлена.');
+    names.set(text, match[2]);
+  }
+  const parts = new Map(await Promise.all([...new Set(names.values())].map(async name =>
+    [name, await readFile(path.join(sourceDirectory, name + '.html'), 'utf8')]
+  )));
+  return template.replace(directive, text => parts.get(names.get(text)));
+}
+
+async function stageRegistryPush(cwd, staging) {
+  const source = path.join(staging, 'src');
+  await cp(path.join(cwd, 'src'), source, { recursive: true });
+  await copyFile(path.join(cwd, '.clasp.json'), path.join(staging, '.clasp.json'));
+  try { await copyFile(path.join(cwd, '.claspignore'), path.join(staging, '.claspignore')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  await writeFile(path.join(source, 'RegistryShell.html'), await buildRegistryShell(source), { flag:'wx' });
 }
 
 async function defaultDeploymentReader({ cwd, authPath, scriptId, deploymentId }) {
@@ -106,19 +132,21 @@ export async function deploy({ cwd = process.cwd(), env = process.env, invoke = 
     if (!credentials || typeof credentials !== 'object' || Array.isArray(credentials)) throw new Error('CLASPRC_JSON должен содержать JSON-объект авторизации clasp.');
   }
 
-  let authDirectory;
+  let temporaryDirectory;
   let authPath;
   try {
     const prefix = [];
+    temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'bases-registry-clasp-'));
+    const staging = path.join(temporaryDirectory, 'project');
+    await stageRegistryPush(cwd, staging);
     if (rawCredentials) {
-      authDirectory = await mkdtemp(path.join(tmpdir(), 'bases-registry-clasp-'));
-      authPath = path.join(authDirectory, '.clasprc.json');
+      authPath = path.join(temporaryDirectory, '.clasprc.json');
       await writeFile(authPath, rawCredentials, { mode: 0o600, flag: 'wx' });
       prefix.push('--auth', authPath);
     }
     prefix.push('--json');
     const execute = async command => {
-      try { return await invoke([...prefix, ...command], { cwd, env }); }
+      try { return await invoke([...prefix, ...command], { cwd: command[0] === 'push' ? staging : cwd, packageDir: cwd, env }); }
       catch (error) {
         // The injected transport used in tests follows the same no-secret logging rule.
         if (invoke !== defaultInvoker) throw commandError(command[0]);
@@ -142,7 +170,7 @@ export async function deploy({ cwd = process.cwd(), env = process.env, invoke = 
     log('Google подтвердил выполнение от владельца и открытие без Google-авторизации. Доступ к операциям проверяет серверный ключ ссылки.');
     return { deploymentId, versionNumber: version, url, access: 'ANYONE_ANONYMOUS', executeAs: 'USER_DEPLOYING' };
   } finally {
-    if (authDirectory) await rm(authDirectory, { recursive: true, force: true });
+    if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   }
 }
 

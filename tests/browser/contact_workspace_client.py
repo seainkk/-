@@ -7,7 +7,8 @@ from grid_client import HTML
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+        launch = {'channel':'chrome'} if sys.platform == 'win32' else {'executable_path':'/usr/bin/chromium'}
+        browser = p.chromium.launch(**launch, headless=True, args=['--no-sandbox'])
         page = browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -210,6 +211,10 @@ def main():
         page.locator('#rg-grid-validation-open').click()
         idle()
         assert page.evaluate('continuationTimers.filter(t=>t.active).length')==1
+        page.evaluate("Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'))")
+        assert page.evaluate('continuationTimers.filter(t=>t.active).length')==0
+        assert page.evaluate("gridBackend.calls.filter(c=>c.method==='refreshWorkbookValidation').length")==0
+        page.evaluate("Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'))")
         page.evaluate('deliverContinuation()')
         idle()
         assert page.evaluate("gridBackend.calls.filter(c=>c.method==='refreshWorkbookValidation').length")==1
