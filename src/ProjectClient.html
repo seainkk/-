@@ -210,6 +210,9 @@
   }
   async function readForecast(explicit=false){
     if(!forecastVisible()||forecastBusy)return;
+    if(forecastPreviewAttempt&&new Date(forecastPreviewAttempt+10800000).toISOString().slice(0,10)!==currentForecastDay()){
+      forecastPreviewAttempt=0;void preloadForecast();
+    }
     if(Date.now()<forecastRetryAt){
       if(forecastData?.pending&&forecastTimer===null)scheduleForecast(forecastRetryAt-Date.now());
       return;
