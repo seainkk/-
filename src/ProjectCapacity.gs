@@ -14,6 +14,7 @@ function projectCapacityValidate_(saved) {
     if (!item || !coldyUuid_(item.id) || ids.has(item.id) || item.status !== 'Active' || typeof item.name !== 'string' ||
         item.waitSchedule !== null && typeof item.waitSchedule !== 'boolean') invalid();
     if (item.allSendersSelected !== undefined && typeof item.allSendersSelected !== 'boolean') invalid();
+    if (item.scheduleUpdatedAt != null && !Number.isFinite(Date.parse(item.scheduleUpdatedAt))) invalid();
     ids.add(item.id);
     var s = item.schedule;
     if (s !== null && (!s || !projectCapacitySchedule_(s, item.id) ||
@@ -49,7 +50,7 @@ function projectCapacitySelected_(context, capacity) {
   }) };
 }
 
-function projectCapacityMappings_(response, selected, key) {
+function projectCapacityMappings_(response, selected, key, receivedAt) {
   if (!response || !Array.isArray(response.items) || response.items.length > PROJECT_INFRASTRUCTURE.maxAccounts ||
       response.next_cursor || response.nextCursor || response.nextPageToken || response.has_more || response.hasMore ||
       response.total != null && response.total !== response.items.length) {
@@ -87,7 +88,7 @@ function projectCapacityMappings_(response, selected, key) {
       if (campaign) campaign.allSendersSelected = false;
     });
   });
-  return { assignments: accounts, campaigns: Array.from(campaigns.values()), updatedAt: new Date().toISOString(), stale: false };
+  return { assignments: accounts, campaigns: Array.from(campaigns.values()), updatedAt: receivedAt || new Date().toISOString(), stale: false };
 }
 
 function projectCapacitySchedule_(value, campaignId) {
@@ -107,18 +108,38 @@ function projectCapacitySchedule_(value, campaignId) {
 }
 
 function projectCapacityAdvance_(context, settings, state) {
-  var work = state.capacityWork;
+  var work = state.capacityWork, receivedAt;
   function read(path) {
     projectInfraMonitoringCurrent_(context, settings.credentialHash, state.monitoringSignature);
     var response = coldyApi_(context, 'GET', path);
+    receivedAt = new Date().toISOString();
     projectInfraMonitoringCurrent_(context, settings.credentialHash, state.monitoringSignature);
     return response;
   }
   try {
     if (!work.mapped) {
-      var mapping = projectCapacityMappings_(read('/account-campaign-mappings'), state.detailIds, settings.key);
+      var response = read('/account-campaign-mappings');
+      var mapping = projectCapacityMappings_(response, state.detailIds, settings.key, receivedAt);
       state.verifiedProvider = true;
-      state.capacity = projectCapacitySelected_(context, mapping).capacity;
+      var selected = projectCapacitySelected_(context, mapping).capacity;
+      if (state.finalCapacityCheck && state.selectedOnly && state.cursorIndex === state.detailIds.length) {
+        // This is the last provider read of a long pass. Keep only schedules that were actually
+        // observed for a campaign still present; newly active campaigns have no verified schedule.
+        var previous = new Map(state.capacity.campaigns.map(function (c) { return [c.id,c]; }));
+        selected.campaigns.forEach(function (c) {
+          var old = previous.get(c.id);
+          if (!old) return;
+          c.schedule = old.schedule;
+          c.waitSchedule = old.waitSchedule;
+          c.scheduleUpdatedAt = old.scheduleUpdatedAt || null;
+        });
+        state.capacity = selected;
+        state.inventoryAt = selected.updatedAt;
+        state.finalMembershipConfirmed = true;
+        delete state.capacityWork;
+        return;
+      }
+      state.capacity = selected;
       work.mapped = true;
       // Publish assignments before waiting for any individual campaign schedule.
       if (state.poolOnly && state.capacity.campaigns.length) return;
@@ -138,10 +159,12 @@ function projectCapacityAdvance_(context, settings, state) {
         campaign.name = projectInfraText_(detail.name, settings.key, 1000) || campaign.name;
         campaign.waitSchedule = typeof detail.wait_schedule === 'boolean' ? detail.wait_schedule : null;
         campaign.schedule = projectCapacitySchedule_(detail.schedule, campaign.id);
+        campaign.scheduleUpdatedAt = receivedAt;
       } catch (error) {
         if (error.registryCode !== 'COLDY_NOT_FOUND' && error.registryCode !== 'COLDY_FORBIDDEN') throw error;
         // The complete membership is still evidence of an assignment; the window is unknown.
         campaign.schedule = null;
+        campaign.scheduleUpdatedAt = null;
       }
     }
     if (work.cursor === campaigns.length) delete state.capacityWork;
@@ -188,12 +211,19 @@ function projectCapacityPublic_(context, settings, saved, result) {
   cap = scoped && scoped.capacity;
   var campaigns = cap ? cap.campaigns : [], byId = new Map(), idle = new Map(), zones = new Map();
   var list = campaigns.map(function (item) {
-    byId.set(item.id, item);
     var owner = owners[item.id] || { bindingState: 'unlinked', segmentId: null, segmentName: null };
-    return { id: item.id, name: projectInfraText_(item.name, settings.key, 1000), status: item.status, allSendersSelected: item.allSendersSelected === true,
-      waitSchedule: item.waitSchedule, schedule: item.schedule, endAt: null,
+    var observed = Date.parse(item.scheduleUpdatedAt);
+    // In older snapshots schedules were fetched after that snapshot's membership map. Its date
+    // is a lower bound for freshness, never an invented timestamp for the individual schedule.
+    if (item.scheduleUpdatedAt === undefined && item.schedule && !saved.finalMembershipConfirmed) observed = Date.parse(cap.updatedAt);
+    var scheduleStale = !Number.isFinite(observed) || observed < now - PROJECT_INFRASTRUCTURE.cacheMillis;
+    var current = { id: item.id, name: projectInfraText_(item.name, settings.key, 1000), status: item.status, allSendersSelected: item.allSendersSelected === true,
+      waitSchedule: scheduleStale ? null : item.waitSchedule, schedule: scheduleStale ? null : item.schedule,
+      scheduleUpdatedAt:item.scheduleUpdatedAt || null, scheduleStale:scheduleStale, endAt: null,
       bindingState: owner.bindingState, segmentId: owner.segmentId, segmentName: owner.segmentName,
       segmentProjectId: owner.segmentProjectId || null, segmentProjectName: owner.segmentProjectName || null };
+    byId.set(item.id,current);
+    return current;
   });
   var partial = list.some(function (item) { return !item.schedule || item.bindingState === 'unknown'; });
   result.capacity = { state: !cap ? 'unknown' : stale || partial || work ? 'partial' : 'ready', stale: !!stale,
@@ -214,6 +244,10 @@ function projectCapacityPublic_(context, settings, saved, result) {
     var mapped = (work ? work.mapped : !!cap) ? 1 : 0;
     result.syncProgress = { completed: (saved.poolOnly && !saved.selectedOnly ? 0 : result.detailProgress.completed) + mapped + (work ? work.cursor : campaigns.length),
       total: (saved.poolOnly && !saved.selectedOnly ? 0 : result.detailProgress.total) + 1 + (mapped ? campaigns.length : 0) };
+    if (work && work.confirmOnly || saved.finalMembershipConfirmed) {
+      var checked = result.detailProgress.completed + 1 + (saved.schedulesBeforeConfirmation || 0);
+      result.syncProgress = {completed: checked + (saved.finalMembershipConfirmed ? 1 : 0), total:checked + 1};
+    }
   }
 }
 

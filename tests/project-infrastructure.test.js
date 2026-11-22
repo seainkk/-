@@ -255,10 +255,77 @@ test('after a long mailbox pass the same generation rechecks membership once wit
   f.tick(300001);
   let steps=0;
   while(r.nextCursor && steps++<6) r=f.refresh({cursor:r.nextCursor});
-  assert.equal(r.nextCursor,null);assert.equal(r.capacity.stale,false);assert.equal(r.capacity.state,'ready');
+  assert.equal(r.nextCursor,null);assert.equal(r.capacity.stale,false);assert.equal(r.capacity.state,'partial');
+  assert.equal(r.capacity.campaigns[0].schedule,null);
+  assert.equal(r.capacity.campaigns[0].scheduleStale,true);
+  assert.ok(Date.parse(r.capacity.campaigns[0].scheduleUpdatedAt)<Date.parse(r.capacity.updatedAt));
+  assert.ok(f.state().capacity.campaigns[0].schedule,'preserve an older observed schedule in private storage');
   assert.equal(f.state().generation,generation);assert.equal(f.state().finalCapacityCheck,true);
   assert.equal(f.calls.http.filter(p=>p==='/account-campaign-mappings').length,2);
+  assert.equal(f.calls.http.filter(p=>p==='/campaigns/'+ACTIVE_ONE).length,1);
   assert.deepEqual(f.calls.http.filter(p=>/^\/accounts\//.test(p)),['/accounts/1','/accounts/2','/accounts/3']);
+});
+
+test('a schedule that always takes more than five minutes ends in one confirmed map after the sender observations',()=>{
+  const f=capacityFixture([[1,[ACTIVE_ONE]],[2,[]],[3,[]]]);
+  const original=f.c.coldyApi_;let deliveredAt,verifiedAt;
+  f.c.coldyApi_=(context,method,path)=>{
+    const response=original(context,method,path);
+    if(path==='/campaigns/'+ACTIVE_ONE) { f.tick(320000);deliveredAt=f.c.Date.now(); }
+    if(path==='/account-campaign-mappings') verifiedAt=f.c.Date.now();
+    return response;
+  };
+  const r=readCapacity(f);
+  assert.equal(r.nextCursor,null);assert.equal(r.capacity.state,'ready');
+  assert.equal(r.capacity.stale,false);assert.equal(Date.parse(r.capacity.updatedAt),verifiedAt);
+  assert.equal(Date.parse(r.capacity.campaigns[0].scheduleUpdatedAt),deliveredAt);
+  assert.deepEqual(f.calls.http,['/account-campaign-mappings','/campaigns/'+ACTIVE_ONE,'/accounts/1','/accounts/2','/accounts/3','/account-campaign-mappings']);
+  assert.deepEqual(f.refresh({includeCapacity:true,live:true}).capacity,r.capacity,'another open view reuses the just-confirmed map');
+  assert.equal(f.calls.http.length,6);
+});
+
+test('a changed final map immediately removes inactive campaigns, marks new windows unknown and preserves sender timestamps',()=>{
+  let maps=0;
+  const f=capacityFixture(({response})=>response({items:[
+    {account_id:1,campaigns:++maps===1?[{id:ACTIVE_ONE,name:'Previous',status:'Active'}]:[{id:ACTIVE_TWO,name:'New',status:'Active'}]},
+    {account_id:2,campaigns:[]},{account_id:3,campaigns:[]}
+  ]}));
+  f.c.projectCapacityOwners_=(context,ids)=>Object.fromEntries(ids.map(id=>[id,{segmentId:'segment_directory_1',segmentProjectId:'numshield',bindingState:'linked'}]));
+  let r=f.refresh({includeCapacity:true});r=f.refresh({cursor:r.nextCursor});
+  f.tick(300001);r=f.refresh({cursor:r.nextCursor});
+  const senderAt=r.accounts[0].updatedAt, pending=r.nextCursor, completed=r.syncProgress.completed;
+  assert.ok(pending);
+  f.tick(6000);r=f.refresh({cursor:pending});
+  assert.equal(r.nextCursor,null);assert.equal(maps,2);assert.equal(r.capacity.stale,false);
+  assert.equal(r.syncProgress.completed,completed+1);assert.equal(r.syncProgress.completed,r.syncProgress.total);
+  assert.deepEqual(r.accounts[0].capacity.campaignIds,[ACTIVE_TWO]);
+  assert.deepEqual(r.capacity.campaigns.map(c=>c.id),[ACTIVE_TWO]);assert.equal(r.capacity.campaigns[0].schedule,null);
+  assert.equal(r.capacity.campaigns[0].scheduleUpdatedAt,null);assert.equal(r.accounts[0].updatedAt,senderAt);
+  assert.equal(r.accounts[0].capacity.idleFrom,null);assert.equal(r.capacity.state,'partial');
+  const requests=f.calls.http.length;
+  assert.deepEqual(f.refresh({cursor:pending}),r);assert.equal(f.calls.http.length,requests);
+});
+
+test('a throttled final membership check keeps its cursor and never restamps the old assignment time',()=>{
+  let maps=0;
+  const f=capacityFixture(({response})=>++maps===2?response({},429,{'Retry-After':'20'}):
+    response({items:[{account_id:1,campaigns:[{id:ACTIVE_ONE,name:'A',status:'Active'}]}]}));
+  let r=f.refresh({includeCapacity:true});const verified=r.capacity.updatedAt;
+  r=f.refresh({cursor:r.nextCursor});f.tick(310000);r=f.refresh({cursor:r.nextCursor});
+  const cursor=r.nextCursor;
+  r=f.refresh({cursor});assert.equal(r.retryAfterMs,20000);assert.equal(r.capacity.updatedAt,verified);
+  assert.equal(r.nextCursor,cursor);assert.equal(r.capacity.stale,true);
+  f.tick(20001);r=f.refresh({cursor});assert.equal(r.nextCursor,null);assert.equal(r.capacity.stale,false);
+  assert.equal(maps,3);assert.equal(f.calls.http.filter(p=>p==='/campaigns/'+ACTIVE_ONE).length,1);
+});
+
+test('legacy schedule freshness is bounded by its original map and has no invented per-campaign timestamp',()=>{
+  const f=capacityFixture([[1,[ACTIVE_ONE]]]);
+  readCapacity(f);delete f.state().capacity.campaigns[0].scheduleUpdatedAt;
+  let c=f.get().capacity.campaigns[0];
+  assert.ok(c.schedule);assert.equal(c.scheduleUpdatedAt,null);
+  f.tick(300001);c=f.get().capacity.campaigns[0];
+  assert.equal(c.schedule,null);assert.equal(c.scheduleStale,true);
 });
 
 function forecastFixture(total = 15) {
@@ -305,6 +372,64 @@ test('project forecast reads only selected cohorts, resumes without double count
   assert.doesNotMatch(JSON.stringify(report),/private recipient|sensitive@example|seenIds|cohorts/);
   assert.doesNotMatch(JSON.stringify(f.calls.saves.filter(x=>x.kind==='sendingforecast')),/private recipient|sensitive@example/);
   f.select([]); assert.equal(f.forecast().state,'no_selection'); assert.equal(f.calls.http.length,count);
+});
+
+test('expiry during an active forecast cannot starve recipients; final publication waits for fresh infrastructure',()=>{
+  const f=forecastFixture(5201);readCapacity(f);
+  assert.equal(f.forecast().progress.contactsRead,1600);
+  const mappings=()=>f.calls.http.filter(path=>path==='/account-campaign-mappings').length;
+  const before=mappings();
+  f.tick(301000); // Previously this restarted mailbox collection with 0% progress.
+  for(const expected of [3200,4800,5201]){
+    const active=f.forecast();assert.equal(active.progress.contactsRead,expected);
+    assert.equal(active.pending,true);assert.equal(active.generatedAt,null);assert.equal(active.forecast,null);
+    assert.equal(mappings(),before);
+    f.tick(1000);
+  }
+  const waiting=f.forecast();assert.ok(mappings()>before);
+  assert.equal(waiting.progress.contactsRead,5201);assert.equal(waiting.progress.campaignsDone,1);
+  assert.equal(waiting.forecast,null);assert.equal(waiting.pending,true);
+  const finished=f.complete();assert.equal(finished.state,'ready');assert.equal(finished.progress.contactsRead,5201);
+  assert.deepEqual(f.offsets,Array.from({length:27},(_,i)=>i*200));
+});
+
+test('a mailbox quota changed during final computation reuses verified recipients but never publishes the old limits',()=>{
+  const f=forecastFixture(201);readCapacity(f);
+  f.beforePage=()=>{ f.state().accounts[0].dailyLimit=17; };
+  const pending=f.forecast();assert.equal(pending.progress.contactsRead,201);
+  assert.equal(pending.pending,true);assert.equal(pending.generatedAt,null);assert.equal(pending.forecast,null);
+  f.beforePage=null;
+  const report=f.forecast();assert.equal(report.state,'ready');assert.deepEqual(f.offsets,[0,200]);
+  assert.equal(report.forecast.periods[0].expected,17);assert.equal(report.forecast.periods[0].capacity,17);
+});
+
+test('during a sender refresh only a dated result with the same live scope, quota and current observations remains visible',()=>{
+  for(const change of ['none','limit','expired','error','membership']){
+    const f=forecastFixture(30);readCapacity(f);
+    const finished=f.complete();assert.equal(finished.state,'ready');
+    f.tick(change==='expired'?301000:61000);
+    f.refresh({includeCapacity:true});
+    if(change==='limit')f.state().accounts[0].dailyLimit=5;
+    if(change==='error')f.state().accounts[0].syncError={code:'COLDY_RESPONSE',message:'Ошибка чтения'};
+    if(change==='membership')f.c.projectCapacityOwners_=()=>({});
+    const waiting=f.forecast();
+    assert.equal(waiting.pending,true);
+    if(change==='none'){
+      assert.deepEqual(waiting.forecast,finished.forecast);assert.equal(waiting.generatedAt,finished.generatedAt);
+      assert.match(waiting.message,/последний подтверждённый расчёт/);
+    }else{assert.equal(waiting.forecast,null);assert.equal(waiting.generatedAt,null);}
+  }
+});
+
+test('an explicitly invalid map or an unbound campaign stops the scan even when there is a reusable demand checkpoint',()=>{
+  const f=forecastFixture(3201);readCapacity(f);
+  assert.equal(f.forecast().progress.contactsRead,1600);
+  const before=f.offsets.length; f.state().capacity.stale=true;
+  const paused=f.forecast(); assert.equal(paused.pending,true);assert.equal(paused.forecast,null);
+  assert.equal(paused.progress.contactsRead,1600);assert.equal(f.offsets.length,before);
+  f.c.projectCapacityOwners_=()=>({}); f.tick(301000);
+  const next=f.forecast();assert.equal(next.progress?.contactsRead||0,0);
+  assert.equal(f.offsets.length,before);assert.equal(next.generatedAt,null);
 });
 
 function enableForecastFetchAll(f, changeResponse) {
@@ -365,6 +490,18 @@ test('forecast abandons results after a concurrent mailbox removal and reports p
   assert.throws(()=>f.forecast(),/COLDY_MONITORING_CHANGED/);
   assert.equal(f.forecast().state,'no_selection');
   assert.ok(!f.calls.saves.filter(x=>x.kind==='sendingforecast').some(x=>x.value.generatedAt));
+});
+
+test('provider cooldown outlives an expired demand checkpoint and also defers background infrastructure reads',()=>{
+  const f=forecastFixture(12);readCapacity(f);
+  f.beforePage=()=>{const error=f.coded('COLDY_RATE_LIMIT','busy');error.retryAfterMs=3600000;throw error;};
+  assert.equal(f.forecast().retryAfterMs,3600000);
+  const requests=f.calls.http.length,offsets=f.offsets.length;
+  f.tick(31*60000);
+  const waiting=f.forecast();
+  assert.equal(waiting.retryAfterMs,29*60000);assert.equal(waiting.progress,undefined);
+  assert.equal(waiting.generatedAt,null);assert.equal(waiting.forecast,null);
+  assert.equal(f.calls.http.length,requests);assert.equal(f.offsets.length,offsets);
 });
 
 test('forecast marks unassigned recipients from a campaign shared with unselected mailboxes',()=>{

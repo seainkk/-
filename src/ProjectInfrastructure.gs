@@ -93,10 +93,7 @@ function refreshProjectInfrastructure_(request) {
         }
       } else state = JSON.parse(JSON.stringify(before));
       state.lastError = null; state.retryAt = 0; state.warnings = [];
-      if (state.selectedOnly && state.capacityWork) {
-        projectCapacityAdvance_(context, settings, state);
-        if (state.finalCapacityCheck && state.capacity && !state.lastError) state.inventoryAt = state.capacity.updatedAt;
-      }
+      if (state.selectedOnly && state.capacityWork) projectCapacityAdvance_(context, settings, state);
       else {
         if ((!state.poolOnly || state.selectedOnly) && input.inventoryOnly !== true) projectInfraDetails_(context, settings, state);
         if (state.capacityWork && !state.lastError) projectCapacityAdvance_(context, settings, state);
@@ -104,10 +101,11 @@ function refreshProjectInfrastructure_(request) {
       // A long or throttled run may outlive the original membership snapshot. Recheck it once,
       // keeping the completed sender diagnostics and their individual observation timestamps.
       if (state.selectedOnly && state.poolOnly && state.capacity && !state.capacityWork && !state.lastError &&
-          state.cursorIndex === state.detailIds.length && !state.finalCapacityCheck &&
+          state.cursorIndex === state.detailIds.length && !state.finalMembershipConfirmed &&
           Math.min(Date.parse(state.inventoryAt),Date.parse(state.capacity.updatedAt)) < Date.now() - PROJECT_INFRASTRUCTURE.cacheMillis) {
         state.finalCapacityCheck = true;
-        state.capacityWork = {mapped:false,cursor:0};
+        state.schedulesBeforeConfirmation = state.capacity.campaigns.length;
+        state.capacityWork = {mapped:false,cursor:0,confirmOnly:true};
       }
     } catch (error) {
       if (projectInfraScopeError_(error)) throw error;
@@ -356,6 +354,7 @@ function projectInfraTotals_(accounts, known) {
 function projectInfraCursor_(state) {
   var parts = ['infrastructure-cursor', state.rootId, state.credentialHash, state.generation, state.monitoringSignature, state.cursorIndex];
   if (state.capacityWork) parts.push(state.capacityWork.mapped, state.capacityWork.cursor);
+  if (state.capacityWork && state.capacityWork.confirmOnly) parts.push('confirm-membership');
   return digest_(JSON.stringify(parts));
 }
 function projectInfraId_(value) {

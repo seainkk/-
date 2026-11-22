@@ -45,7 +45,7 @@ test('campaign catalog reads and connection counts use the current project even 
 
 function fixture(options={}) {
   let now=1795089600000, seq=0, locked=false, rootId=ROOT, authorized=true;
-  const files=new Map([[ROOT,{id:ROOT,mimeType:'application/vnd.google-apps.folder',parents:['owner_drive_123456'],appProperties:{}}]]), properties=new Map(), calls={fetch:[],creates:[],updates:[],locks:0};
+  const files=new Map([[ROOT,{id:ROOT,mimeType:'application/vnd.google-apps.folder',parents:['owner_drive_123456'],appProperties:{}}]]), properties=new Map(), calls={fetch:[],creates:[],updates:[],driveReads:[],locks:0};
   const props={getProperty:key=>properties.get(key)??null,setProperty:(key,value)=>properties.set(key,String(value)),deleteProperty:key=>properties.delete(key)};
   const context={rootId:ROOT,properties:props};
   class Clock extends Date { constructor(...args){super(...(args.length?args:[now]));} static now(){return now;} }
@@ -59,10 +59,11 @@ function fixture(options={}) {
     authorize_:()=>{if(!authorized)throw coded('LINK_ACCESS_REQUIRED','Access revoked');return{rootId,properties:props};},
     locked_:fn=>{assert.equal(locked,false,'No nested operation locks');locked=true;calls.locks++;try{return fn();}finally{locked=false;}},
     Utilities:{newBlob:(text,mime,name)=>({text,mime,name})},
-    DriveApp:{getFileById:id=>({getBlob:()=>({getDataAsString:()=>files.get(id).body})})},
+    DriveApp:{getFileById:id=>({getBlob:()=>({getDataAsString:()=>{calls.driveReads.push(['blob',id]);return files.get(id).body;}})})},
     Drive:{Files:{
-      get:id=>{if(!files.has(id))throw new Error('Missing '+KEY);return plain(files.get(id));},
+      get:id=>{calls.driveReads.push(['get',id]);if(!files.has(id))throw new Error('Missing '+KEY);return plain(files.get(id));},
       list:({q})=>{
+        calls.driveReads.push(['list']);
         const parent=q.match(/'([^']+)' in parents/)?.[1],tags=[...q.matchAll(/key='([^']+)' and value='([^']+)'/g)].map(m=>[m[1],m[2]]);
         return{files:[...files.values()].filter(f=>!f.trashed&&(!parent||f.parents?.includes(parent))&&tags.every(([k,v])=>f.appProperties?.[k]===v)).map(plain),...(options.listPageToken?{nextPageToken:'more'}:{})};
       },
@@ -284,6 +285,67 @@ test('private JSON state is bound to exact registry, kind, owner and role withou
   assert.deepEqual(plain(f.load('validation','workbook_123456')),{jobs:[],status:'queued'});assert.equal(f.load('validation','another_book_123456'),null);assert.equal(f.load('uploads','workbook_123456'),null);
   const journal=[...f.files.values()].find(file=>file.mimeType==='application/json');assert.equal(journal.appProperties.registryColdyRoot,ROOT);assert.equal(journal.appProperties.registryColdyKind,'validation');assert.equal(journal.appProperties.registryColdyOwnerHash,f.c.digest_('workbook_123456'));
   const envelope=JSON.parse(journal.body);envelope.owner='different';journal.body=JSON.stringify(envelope);assert.throws(()=>f.load('validation','workbook_123456'),/COLDY_STORAGE/);
+});
+
+test('indexed journal reads verify root, exact folder and file directly before a single blob read',()=>{
+  const f=fixture();f.save('validation','workbook_123456',{jobs:[]});
+  const folder=f.properties.get('COLDY_STATE_FOLDER_ID');
+  const file=[...f.files.values()].find(item=>item.mimeType==='application/json').id;
+  f.calls.driveReads.length=0;
+  assert.deepEqual(plain(f.load('validation','workbook_123456')),{jobs:[]});
+  assert.deepEqual(f.calls.driveReads,[['get',ROOT],['get',folder],['get',file],['blob',file]]);
+});
+
+test('an invalid or inaccessible configured Coldy ID never triggers discovery or a blob read',()=>{
+  for(const change of ['invalid file ID','missing folder','foreign folder','foreign owner','wrong folder ID','wrong file ID','trashed root']){
+    const f=fixture();f.save('validation','workbook_123456',{jobs:[]});
+    const pointer=[...f.properties.keys()].find(name=>name.startsWith('COLDY_JSON_'));
+    const folder=f.files.get(f.properties.get('COLDY_STATE_FOLDER_ID')), file=f.files.get(f.properties.get(pointer));
+    if(change==='invalid file ID')f.properties.set(pointer,'');
+    if(change==='missing folder')f.properties.set('COLDY_STATE_FOLDER_ID','missing_folder_123456');
+    if(change==='foreign folder')folder.parents=['another_registry_root'];
+    if(change==='foreign owner')file.appProperties.registryColdyOwnerHash=f.c.digest_('another_book');
+    if(change==='wrong folder ID')folder.id='different_folder_123456';
+    if(change==='wrong file ID')file.id='different_file_123456';
+    if(change==='trashed root')f.files.get(ROOT).trashed=true;
+    f.calls.driveReads.length=0;
+    assert.throws(()=>f.load('validation','workbook_123456'),/INVALID_ID|COLDY_STORAGE|OUTSIDE_REGISTRY/,change);
+    assert.ok(f.calls.driveReads.every(([method])=>method==='get'),change);
+  }
+});
+
+test('Coldy discovery is used only for absent pointers and still verifies the envelope and current scope',()=>{
+  for(const absent of ['folder','file','both']){
+    const f=fixture();f.save('validation','workbook_123456',{jobs:[]});
+    const pointer=[...f.properties.keys()].find(name=>name.startsWith('COLDY_JSON_'));
+    if(absent!=='file')f.properties.delete('COLDY_STATE_FOLDER_ID');
+    if(absent!=='folder')f.properties.delete(pointer);
+    f.calls.driveReads.length=0;
+    assert.deepEqual(plain(f.load('validation','workbook_123456')),{jobs:[]});
+    assert.equal(f.calls.driveReads.filter(([method])=>method==='list').length,absent==='both'?2:1);
+    const journal=[...f.files.values()].find(file=>file.mimeType==='application/json');
+    journal.body=JSON.stringify({...JSON.parse(journal.body),kind:'bindings'});
+    assert.throws(()=>f.load('validation','workbook_123456'),/COLDY_STORAGE/);
+  }
+  const orphan=fixture();orphan.save('validation','workbook_123456',{jobs:[]});
+  orphan.files.delete(orphan.properties.get('COLDY_STATE_FOLDER_ID'));orphan.properties.delete('COLDY_STATE_FOLDER_ID');
+  orphan.calls.driveReads.length=0;
+  assert.throws(()=>orphan.load('validation','workbook_123456'),/COLDY_STORAGE/);
+  assert.equal(orphan.calls.driveReads.some(([method])=>method==='blob'),false);
+  for(const transition of ['revoke','switch']){
+    const f=fixture();f.save('validation','workbook_123456',{jobs:[]});
+    const original=f.context.properties.getProperty;
+    f.context.properties.getProperty=key=>{
+      const value=original(key);
+      if(key.startsWith('COLDY_JSON_')){
+        if(transition==='revoke')f.revoke();else f.switchRoot('another_root_123456');
+      }
+      return value;
+    };
+    f.calls.driveReads.length=0;
+    assert.throws(()=>f.load('validation','workbook_123456'),/SOURCE_CHANGED|LINK_ACCESS_REQUIRED/);
+    assert.deepEqual(f.calls.driveReads,[]);
+  }
 });
 
 test('lost folder and JSON creation acknowledgements recover the same exact tags without duplicates',()=>{

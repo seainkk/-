@@ -11,6 +11,9 @@ api.getProjectSendingForecast=(payload,project)=>{
   if(window.forecastState==='waiting'){
     return {state:'loading',pending:true,retryAfterMs:0,progress:{campaignsDone:1,campaignsTotal:2,contactsRead:27}};
   }
+  if(window.forecastState==='confirming'){
+    return {state:'loading',pending:true,retryAfterMs:0,message:'Сверяем назначения почт.',progress:{campaignsDone:2,campaignsTotal:2,contactsRead:84}};
+  }
   if(window.forecastState==='limited'){
     return {state:'loading',pending:true,retryAfterMs:120000,progress:{campaignsDone:0,campaignsTotal:2,contactsRead:10}};
   }
@@ -77,6 +80,8 @@ def main():
         page.evaluate("forecastState='waiting'")
         view.get_by_role('button',name='Пересчитать').click()
         expect(view.locator('#pj-forecast-health')).to_contain_text('контактов проверено 27')
+        page.evaluate("forecastState='confirming'")
+        expect(view.locator('#pj-forecast-health')).to_contain_text('Сверяем назначения почт. Рассылок обработано 2 из 2, контактов проверено 84.')
         page.evaluate("forecastState='ready'")
         expect(totals).to_have_text(['35','14','21','63'])
         page.evaluate("forecastState='waiting'")

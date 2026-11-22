@@ -318,12 +318,17 @@ function coldyPropertyJson_(properties, key) { try { return JSON.parse(propertie
 
 /** Callers hold their operation lock/lease. These helpers deliberately do not nest locked_. */
 function coldyLoad_(context, kind, owner) {
-  var scope = coldyStoreScope_(context, kind, owner), folder = coldyFolder_(scope.context, false);
-  if (!folder) return null;
-  var file = coldyStoreFile_(scope, folder, false);
-  if (!file) return null;
-  var envelope = coldyReadEnvelope_(scope, file);
-  return envelope.data;
+  // The final state check reads fresh root, folder and file metadata immediately before the blob.
+  var scope = coldyStoreScope_(context, kind, owner, false), properties = scope.context.properties;
+  var folderId = properties.getProperty(COLDY.folderProperty), fileId = properties.getProperty(scope.indexKey);
+  if (fileId != null) id_(fileId);
+  var folder = folderId != null ? {id:id_(folderId)} : coldyFolder_(scope.context, false);
+  if (!folder) {
+    if (fileId != null) fail_('COLDY_STORAGE', 'Не удалось найти служебную папку сохранённого журнала Coldy.');
+    return null;
+  }
+  var file = fileId != null ? coldyStateCheck_(scope, folder, fileId) : coldyStoreFind_(scope, folder);
+  return file ? coldyReadEnvelope_(scope, file).data : null;
 }
 
 function coldySave_(context, kind, owner, value) {
@@ -356,8 +361,8 @@ function coldySave_(context, kind, owner, value) {
   return value;
 }
 
-function coldyStoreScope_(context, kind, owner) {
-  var current = coldyCurrent_(context, true);
+function coldyStoreScope_(context, kind, owner, checkRoot) {
+  var current = coldyCurrent_(context, checkRoot !== false);
   if (typeof kind !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/.test(kind) || typeof owner !== 'string' || !owner || owner.length > 200 || /[\u0000-\u001f\u007f]/.test(owner)) fail_('INVALID_REQUEST', 'Некорректный журнал Coldy.');
   return { context: current, kind: kind, owner: owner, ownerHash: digest_(owner), indexKey: 'COLDY_JSON_' + digest_(JSON.stringify([current.rootId, kind, owner])) };
 }
@@ -414,7 +419,11 @@ function coldyFolderCheck_(context, fileId) {
   return file;
 }
 function coldyMetadata_(fileId) {
-  try { return Drive.Files.get(id_(fileId), { fields: COLDY.fields, supportsAllDrives: true }); }
+  try {
+    var id = id_(fileId), file = Drive.Files.get(id, { fields: COLDY.fields, supportsAllDrives: true });
+    if (!file || file.id !== id) fail_('OUTSIDE_REGISTRY', 'Google не подтвердил запрошенный ID данных Coldy.');
+    return file;
+  }
   catch (error) { if (error.registryCode) throw error; fail_('COLDY_STORAGE', 'Служебные данные Coldy недоступны.'); }
 }
 function coldyCurrent_(context, checkRoot) {
