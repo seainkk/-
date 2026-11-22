@@ -116,14 +116,18 @@ function coldyIncomingStep_(context,job,guard,deadline){
   if(!scan) state.scan=scan={phase:'read',offset:0,total:null,rows:[]};
   var staged=scan.phase==='write';
   if(scan.phase==='read'){
+    var startOffset=scan.offset, hadDetails=!!scan.campaignStatus, wasLimited=!!scan.singlePage;
     try {
-      var first=scan.total===null;
+      var first=scan.total===null && !wasLimited;
       coldyIncomingRead_(context,b,scan,guard);
       if(first && scan.offset<scan.total && Date.now()<deadline-5000) coldyIncomingRead_(context,b,scan,guard);
     }
     catch(error){
-      if(error.registryCode==='COLDY_RECIPIENT_LIST_CHANGED'){
-        delete state.scan;save();
+      if(error.registryCode==='COLDY_RECIPIENT_LIST_CHANGED' || error.registryCode==='COLDY_RESPONSE'){
+        if(hadCheckpoint){delete state.scan;save();}
+      } else if(coldyIncomingTransientRead_(error)){
+        if(error.registryCode==='COLDY_RATE_LIMIT') scan.singlePage=true;
+        if(startOffset!==scan.offset || hadDetails!==!!scan.campaignStatus || wasLimited!==!!scan.singlePage) save();
       }
       throw error;
     }
@@ -216,32 +220,59 @@ function coldyIncomingStep_(context,job,guard,deadline){
   }
 }
 
+function coldyIncomingTransientRead_(error){
+  return ['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_CONFLICT'].includes(error.registryCode);
+}
+
 /** One bounded batch per campaign. Validate the full membership before publishing duplicate-email totals. */
 function coldyIncomingRead_(context,b,scan,guard){
-  var id=coldyCampaignId_(b.campaignId), offsets=[scan.offset];
-  for(var next=scan.offset+200;scan.total!==null && next<scan.total && offsets.length<4;next+=200) offsets.push(next);
+  var id=coldyCampaignId_(b.campaignId), needDetails=scan.total===null && !scan.campaignStatus;
+  var offsets=scan.singlePage && needDetails ? [] : [scan.offset];
+  for(var next=scan.offset+200;!scan.singlePage && scan.total!==null && next<scan.total && offsets.length<4;next+=200) offsets.push(next);
   var paths=offsets.map(function(o){return '/leads/campaign/'+id+'?limit=200&offset='+o;});
-  var initial=scan.total===null;
-  if(initial) paths.unshift('/campaigns/'+id);
+  if(needDetails) paths.unshift('/campaigns/'+id);
   var responses=coldyGetBatch_(context,paths,guard);
-  var failure=responses.find(function(r){return r.error&&r.error.registryCode==='COLDY_RATE_LIMIT';})||responses.find(function(r){return r.error;});
-  if(failure) throw failure.error;
-  if(initial){
-    var detail=coldyCampaignDetail_(id,responses.shift().value);
-    scan.campaignStatus=detail.status;scan.campaignName=detail.name;
+  if(!Array.isArray(responses)||responses.length!==paths.length) fail_('COLDY_RESPONSE','Coldy не подтвердил все запрошенные страницы.');
+  var errors=responses.filter(function(r){return r.error;}).map(function(r){return r.error;});
+  var rateLimit=errors.filter(function(e){return e.registryCode==='COLDY_RATE_LIMIT';})
+    .sort(function(a,b){return (b.retryAfterMs||0)-(a.retryAfterMs||0);})[0];
+  try{
+    var permanent=errors.find(function(e){return !coldyIncomingTransientRead_(e);});
+    if(permanent) throw permanent;
+    coldyIncomingApplyPages_(id,scan,offsets,responses,needDetails);
+  }catch(error){
+    if(rateLimit){
+      error.coldyReadLimited=true;
+      error.retryAfterMs=Math.max(error.retryAfterMs||0,rateLimit.retryAfterMs||0);
+    }
+    throw error;
+  }
+  if(errors.length) throw rateLimit||errors[0];
+  if(offsets.length) delete scan.singlePage;
+}
+
+function coldyIncomingApplyPages_(id,scan,offsets,responses,needDetails){
+  var contiguous=true;
+  if(needDetails){
+    var response=responses.shift();
+    if(response.error) contiguous=false;
+    else{
+      var detail=coldyCampaignDetail_(id,response.value);
+      scan.campaignStatus=detail.status;scan.campaignName=detail.name;
+    }
   }
   var seen=new Set(scan.rows.map(function(lead){return lead.id;}));
   offsets.forEach(function(offset,index){
+    if(responses[index].error){contiguous=false;return;}
     var page=coldyRecipientNormalizePage_(id,offset,responses[index].value);
     if(scan.total!==null&&page.total!==scan.total) fail_('COLDY_RECIPIENT_LIST_CHANGED','Изменился состав получателей.');
-    scan.total=page.total;
     page.items.forEach(function(row){
       if(seen.has(row.id)) fail_('COLDY_RECIPIENT_LIST_CHANGED','Coldy повторил адресата между страницами.');
       seen.add(row.id);
       // Names, message text and personalization are unnecessary in an incoming status update.
-      scan.rows.push({id:row.id,email:row.email,status:row.status,sentCount:row.sentCount,replied:row.replied,bounced:row.bounced,doNotSend:row.doNotSend});
+      if(contiguous) scan.rows.push({id:row.id,email:row.email,status:row.status,sentCount:row.sentCount,replied:row.replied,bounced:row.bounced,doNotSend:row.doNotSend});
     });
-    scan.offset+=page.items.length;
+    if(contiguous){scan.total=page.total;scan.offset+=page.items.length;}
   });
 }
 
@@ -322,7 +353,10 @@ function coldyRecipientTick_(event){
         if(error.registryCode==='LINK_ACCESS_REQUIRED'||error.registryCode==='LINK_SETUP_REQUIRED') throw error;
         var retry=Number(error.retryAfterMs)||0;
         mark.state='error';mark.issue=coldyIncomingIssue_(error);mark.retryAt=Date.now()+Math.max(60000,retry,error.registryCode==='COLDY_NOT_FOUND'?900000:0);
-        if(error.registryCode==='COLDY_RATE_LIMIT'){props.setProperty(pauseKey,String(mark.retryAt));heartbeat('rate_limit',mark.retryAt);}
+        if(error.registryCode==='COLDY_RATE_LIMIT'||error.coldyReadLimited){
+          var pauseUntil=Date.now()+Math.max(60000,retry);
+          props.setProperty(pauseKey,String(pauseUntil));heartbeat('rate_limit',pauseUntil);
+        }
       }
       timerGuard();props.setProperty('COLDY_INCOMING_'+job.owner,JSON.stringify(mark));
       if(Number(props.getProperty(pauseKey))>Date.now()) break;
