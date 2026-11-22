@@ -24,6 +24,7 @@ function callApp(request) {
       var contactMethods = {
         claimRegistrySegment: typeof claimRegistrySegment_ === 'function' ? claimRegistrySegment_ : null,
         getProjectAnalytics: typeof getProjectAnalytics_ === 'function' ? getProjectAnalytics_ : null,
+        getProjectSendingForecast: typeof getProjectSendingForecast_ === 'function' ? getProjectSendingForecast_ : null,
         getProjectAnalyticsCampaigns: typeof getProjectAnalyticsCampaigns_ === 'function' ? getProjectAnalyticsCampaigns_ : null,
         getProjectInfrastructure: typeof getProjectInfrastructure_ === 'function' ? getProjectInfrastructure_ : null,
         getProjectInfrastructureSelection: typeof getProjectInfrastructureSelection_ === 'function' ? getProjectInfrastructureSelection_ : null,

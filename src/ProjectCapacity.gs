@@ -13,6 +13,7 @@ function projectCapacityValidate_(saved) {
   campaigns.forEach(function (item) {
     if (!item || !coldyUuid_(item.id) || ids.has(item.id) || item.status !== 'Active' || typeof item.name !== 'string' ||
         item.waitSchedule !== null && typeof item.waitSchedule !== 'boolean') invalid();
+    if (item.allSendersSelected !== undefined && typeof item.allSendersSelected !== 'boolean') invalid();
     ids.add(item.id);
     var s = item.schedule;
     if (s !== null && (!s || !projectCapacitySchedule_(s, item.id) ||
@@ -74,6 +75,16 @@ function projectCapacityMappings_(response, selected, key) {
       if (!name || ++links > 100000) fail_('COLDY_INFRA_INCOMPLETE', 'Карта активных рассылок неполна или слишком велика.');
       accounts[id].push(campaignId);
       if (!campaigns.has(campaignId)) campaigns.set(campaignId, { id: campaignId, name: name, status: 'Active', waitSchedule: null, schedule: null });
+    });
+  });
+  // Only retain whether the selected pool covers every sender of each visible campaign.
+  // No addresses, names or assignments of unselected accounts enter the snapshot.
+  campaigns.forEach(function (campaign) { campaign.allSendersSelected = true; });
+  response.items.forEach(function (item) {
+    if (accounts[item.account_id]) return;
+    item.campaigns.forEach(function (link) {
+      var campaign = link && typeof link.id === 'string' && campaigns.get(link.id.toLowerCase());
+      if (campaign) campaign.allSendersSelected = false;
     });
   });
   return { assignments: accounts, campaigns: Array.from(campaigns.values()), updatedAt: new Date().toISOString(), stale: false };
@@ -179,7 +190,7 @@ function projectCapacityPublic_(context, settings, saved, result) {
   var list = campaigns.map(function (item) {
     byId.set(item.id, item);
     var owner = owners[item.id] || { bindingState: 'unlinked', segmentId: null, segmentName: null };
-    return { id: item.id, name: projectInfraText_(item.name, settings.key, 1000), status: item.status,
+    return { id: item.id, name: projectInfraText_(item.name, settings.key, 1000), status: item.status, allSendersSelected: item.allSendersSelected === true,
       waitSchedule: item.waitSchedule, schedule: item.schedule, endAt: null,
       bindingState: owner.bindingState, segmentId: owner.segmentId, segmentName: owner.segmentName,
       segmentProjectId: owner.segmentProjectId || null, segmentProjectName: owner.segmentProjectName || null };

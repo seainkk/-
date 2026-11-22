@@ -163,6 +163,75 @@ function readCapacity(f) {
   return result;
 }
 
+function forecastFixture(total = 15) {
+  const f = capacityFixture([[1,[ACTIVE_ONE]],[4,[UNSELECTED]]],{
+    [ACTIVE_ONE]:{sequences:[{id:7,delay:0}],sending_priority:'sequence_emails',
+      is_stop_sending_on_reply:true,is_stop_sending_on_company_reply:false}
+  },{monitoringIds:['1']});
+  for (const file of ['ProjectAnalytics.gs','ProjectForecastDemand.gs','ProjectForecastCalc.gs','ProjectForecast.gs']) {
+    vm.runInContext(readFileSync(new URL('../src/' + file, import.meta.url),'utf8'), f.c, {filename:file});
+  }
+  f.c.registryProjectId_=()=>'numshield';
+  f.c.coldyCampaignId_=id=>{assert.equal(id,ACTIVE_ONE);return id;};
+  const api=f.c.coldyApi_; f.offsets=[];
+  f.c.coldyApi_=(context,method,path)=>{
+    if (!path.startsWith('/leads/')) return api(context,method,path);
+    assert.equal(method,'GET'); assert.ok(path.startsWith('/leads/campaign/'+ACTIVE_ONE+'?'));
+    const offset = Number(new URL('https://example.test'+path).searchParams.get('offset'));
+    f.offsets.push(offset);
+    if (f.beforePage) f.beforePage();
+    return {offset,total,limit:200,items:Array.from({length:Math.min(200,total-offset)},(_,index)=>({
+      id:offset+index+1,campaign_id:ACTIVE_ONE,chosen_sender:null,status:'Not contacted',stop_sending:false,
+      amount_sequences_sent:0,first_name:'private recipient identity',email:'sensitive@example.test'
+    }))};
+  };
+  f.forecast=()=>plain(f.c.getProjectSendingForecast_({}));
+  f.complete=()=>{
+    let result=f.forecast();
+    for(let i=0;result.pending && i<30;i++) result=f.forecast();
+    return result;
+  };
+  return f;
+}
+
+test('project forecast reads only selected cohorts, resumes without double counting and shares a fresh report',()=>{
+  const f=forecastFixture(1801), report=f.complete();
+  assert.equal(report.state,'ready');
+  assert.deepEqual(f.offsets,[0,200,400,600,800,1000,1200,1400,1600,1800]);
+  assert.equal(report.progress.contactsRead,1801);
+  assert.deepEqual(report.forecast.periods.map(p=>p.expected),[100,200,200]);
+  assert.ok(!f.calls.http.includes('/accounts') && !f.calls.http.includes('/campaigns'));
+  const count=f.calls.http.length, before=f.offsets.length;
+  assert.deepEqual(f.forecast(),report);
+  assert.equal(f.offsets.length,before);assert.equal(f.calls.http.length,count);
+  assert.doesNotMatch(JSON.stringify(report),/private recipient|sensitive@example|seenIds|cohorts/);
+  assert.doesNotMatch(JSON.stringify(f.calls.saves.filter(x=>x.kind==='sendingforecast')),/private recipient|sensitive@example/);
+  f.select([]); assert.equal(f.forecast().state,'no_selection'); assert.equal(f.calls.http.length,count);
+});
+
+test('forecast abandons results after a concurrent mailbox removal and reports provider cooldown without requesting more pages',()=>{
+  const f=forecastFixture(12);
+  readCapacity(f);
+  f.beforePage=()=>{const e=f.coded('COLDY_RATE_LIMIT','busy');e.retryAfterMs=120000;throw e;};
+  const paused=f.forecast(); assert.equal(paused.retryAfterMs,120000); assert.equal(paused.generatedAt,null);
+  assert.equal(paused.forecast.periods[0].capacity,100); assert.equal(paused.forecast.periods[0].expected,null);
+  f.forecast(); assert.equal(f.offsets.length,1);
+  f.tick(120001);
+  f.beforePage=()=>{f.select([]);};
+  assert.throws(()=>f.forecast(),/COLDY_MONITORING_CHANGED/);
+  assert.equal(f.forecast().state,'no_selection');
+  assert.ok(!f.calls.saves.filter(x=>x.kind==='sendingforecast').some(x=>x.value.generatedAt));
+});
+
+test('forecast marks unassigned recipients from a campaign shared with unselected mailboxes',()=>{
+  const f=capacityFixture([[1,[ACTIVE_ONE]],[4,[ACTIVE_ONE,UNSELECTED]]],{}, {monitoringIds:['1']});
+  const infra=readCapacity(f);
+  assert.equal(infra.capacity.campaigns.length,1);
+  assert.equal(infra.capacity.campaigns[0].allSendersSelected,false);
+  assert.deepEqual(infra.accounts.map(a=>a.id),['1']);
+  assert.doesNotMatch(JSON.stringify(infra),/unselected-only-name/);
+});
+
 test('pool refresh reads only 20 chosen mailbox IDs and the chosen campaign in a 1159-account organization', () => {
   const ids=Array.from({length:20},(_,i)=>String(i+1));
   const f=capacityFixture(ids.map(id=>[Number(id),[ACTIVE_ONE,ACTIVE_TWO,UNSELECTED]]),{},
