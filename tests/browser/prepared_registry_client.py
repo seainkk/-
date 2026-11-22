@@ -3,9 +3,9 @@ from pathlib import Path
 import sys
 from playwright.sync_api import expect, sync_playwright
 ROOT=Path(__file__).resolve().parents[2]
-FIXTURE=Path(__file__).with_name('performance-fixture.js').read_text()
+FIXTURE=Path(__file__).with_name('performance-fixture.js').read_text(encoding='utf-8')
 GRID_STUB="""window.RegistryGrid={opened:[],open(o){this.opened.push(o.id);this.transport=o.transport;this.closed=o.onClose;this.openedNow=true;},isOpen(){return !!this.openedNow;},hasPending(){return false;},lock(){this.openedNow=false;this.locked=true;}};"""
-HTML=(ROOT/'src/Index.html').read_text().replace("<?!= include_('Styles'); ?>",(ROOT/'src/Styles.html').read_text()).replace("<?!= include_('Client'); ?>",'<script>'+FIXTURE+GRID_STUB+'</script>'+(ROOT/'src/Client.html').read_text())
+HTML=(ROOT/'src/Index.html').read_text(encoding='utf-8').replace("<?!= include_('Styles'); ?>",(ROOT/'src/Styles.html').read_text(encoding='utf-8')).replace("<?!= include_('Client'); ?>",'<script>'+FIXTURE+GRID_STUB+'</script>'+(ROOT/'src/Client.html').read_text(encoding='utf-8'))
 
 def check_source_card(page):
     card = page.locator('[data-source-id="source-companies"]')
@@ -45,32 +45,55 @@ def check_source_card(page):
     expect(badge).to_be_visible()
 
 def check_lineage(page):
-    original = 'https://docs.google.com/spreadsheets/d/original_sheet_fixture/edit'
     card = page.locator('[data-source-id="source-companies"]')
-    panel = page.locator('#br-source-lineage')
-    panel.locator('summary').click()
-    rows = page.locator('#br-lineage-rows tr')
-    expect(rows).to_have_count(5)
-    target = rows.filter(has_text='Готовая база компаний')
-    expect(target.locator('td').first).to_have_text('Не указан')
-    expect(target.get_by_role('link',name='Существующий сегмент')).to_be_visible()
-    # This overview includes both registry sections and all selections of one original.
-    expect(rows.filter(has_text='Готовая база ЛПР')).to_have_count(1)
+    original = 'https://docs.google.com/spreadsheets/d/source-lpr/edit'
+    expect(page.locator('summary').filter(has_text='Исходные базы и выборки')).to_have_count(0)
+    expect(page.get_by_role('table',name='Исходные базы, выборки и сегменты')).to_have_count(0)
+
+    # External Sheets stay clickable, while an uploaded file has no invented Drive URL.
+    external = page.locator('[data-source-id="source-draft"] .br-source-relations')
+    expect(external.get_by_role('link',name='Внешний оригинал')).to_have_attribute(
+        'href','https://docs.google.com/spreadsheets/d/external_fixture/edit')
+    upload = page.locator('[data-source-id="source-csv"] .br-source-relations')
+    expect(upload.get_by_text('Выгрузка.csv',exact=False)).to_be_visible()
+    expect(upload.get_by_role('link')).to_have_count(0)
+
+    # A manually assigned parent is immediately visible alongside the existing status and segment.
     card.locator('.br-source-settings > summary').click()
     attach = card.get_by_role('button',name='Привязать исходную базу')
     attach.click()
     expect(page.locator('#br-origin-dialog')).to_be_visible()
     page.locator('#br-origin-url').fill(original+'?gid=42')
-    page.locator('#br-origin-name').fill('Один исходник')
+    page.locator('#br-origin-name').fill('Готовая база ЛПР')
     page.locator('#br-origin-criteria').fill('Два региона')
     page.locator('#br-origin-save').click()
     expect(page.locator('#br-origin-dialog')).to_be_hidden()
-    expect(target.get_by_role('link',name='Один исходник')).to_have_attribute('href',original)
-    expect(target.locator('td').nth(2)).to_have_text('Два региона')
-    expect(target.get_by_role('link',name='Существующий сегмент')).to_be_visible()
-    expect(rows.filter(has_text='Один исходник')).to_have_count(2)
-    expect(rows.filter(has_text='Готовая база ЛПР')).to_contain_text('Без сегмента')
     expect(attach).to_have_count(0)
+    expect(card.locator('.br-source-role')).to_have_text('Выборка')
+    expect(card.locator('.br-source-status')).to_have_text('Готова')
+    expect(card.get_by_text('Два региона',exact=False)).to_be_visible()
+    expect(card.get_by_role('link',name='Существующий сегмент')).to_be_visible()
+
+    # The parent is in a different section and excluded by the current search.
+    search = page.locator('#br-source-search')
+    search.fill('Готовая база компаний')
+    parent = page.locator('[data-source-id="source-lpr"]')
+    expect(parent).to_have_count(0)
+    initial_reads = page.evaluate('backend.sourceGets')
+    card.locator('[data-related-source="source-lpr"]').click()
+    expect(parent.locator('h2')).to_have_text('Готовая база ЛПР')
+    expect(page.locator('#br-section-lpr')).to_have_attribute('aria-pressed','true')
+    expect(parent.locator('.br-source-role')).to_have_text('Исходная база')
+    expect(parent.locator('[data-related-source="source-mixed"]')).to_be_visible()
+    page.locator('#br-action-back').click()
+    expect(search).to_have_value('Готовая база компаний')
+    expect(page.locator('#br-section-companies')).to_have_attribute('aria-pressed','true')
+    expect(parent).to_have_count(0)
+    card.locator('[data-related-source="source-lpr"]').click()
+    parent.locator('[data-related-source="source-companies"]').click()
+    expect(card.locator('h2')).to_be_visible()
+    expect(page.locator('#br-section-companies')).to_have_attribute('aria-pressed','true')
+    assert page.evaluate('backend.sourceGets') == initial_reads
 
 def main():
  with sync_playwright() as p:
@@ -91,7 +114,14 @@ def main():
   def stage_link(name='Кухни',section='companies'):
    if section=='lpr':page.locator('#br-section-lpr').click()
    open_catalog();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
-  reset(boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});backend.sources[2].origin={id:'original_sheet_fixture',name:'Один исходник',criteria:'',url:'https://docs.google.com/spreadsheets/d/original_sheet_fixture/edit'};")
+  reset(boot="""
+   backend.sources.forEach(source=>source.originAvailable=true);
+   backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});
+   const origin=backend.sources[2];
+   backend.sources[1].origin={id:origin.id,name:origin.name,criteria:'Один регион',url:origin.url};
+   backend.sources[3].origin={id:'external_fixture',name:'Внешний оригинал',criteria:'',url:'https://docs.google.com/spreadsheets/d/external_fixture/edit'};
+   backend.sources[4].origin={id:'upload:'+'a'.repeat(43),name:'Выгрузка.csv',criteria:'',url:null};
+  """)
   check_lineage(page)
   reset(boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});")
   check_source_card(page)

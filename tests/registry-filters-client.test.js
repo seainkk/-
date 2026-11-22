@@ -8,7 +8,9 @@ function source(name) {
   const start = client.indexOf('function ' + name + '(');
   assert.ok(start >= 0, 'Actual client helper exists: ' + name);
   let depth = 0, quote = null, escaped = false;
-  for (let i = client.indexOf('{', start); i < client.length; i++) {
+  const signature = client.slice(start).match(/^function [^(]+\([^)]*\)\s*\{/);
+  assert.ok(signature, 'Actual client helper has a function body: ' + name);
+  for (let i = start + signature[0].length - 1; i < client.length; i++) {
     const c = client[i];
     if (quote) { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === quote) quote = null; continue; }
     if (c === '"' || c === "'" || c === String.fromCharCode(96)) { quote = c; continue; }
@@ -89,7 +91,7 @@ test('reset clears only the filters and reveals retained edits', () => {
   const elements = Object.fromEntries(['br-source-search', 'br-source-contents-filter', 'br-source-project-filter', 'br-source-unassigned-filter'].map(id => [id, { value: 'previous', checked: true, focus() { this.focused = true; } }]));
   const filters = { query: 'список', contents: 'lpr', project:'neosender', onlyUnassigned: true }, drafts = new Map([['draft', { expectedRevision: 2 }]]);
   const resetContext = vm.createContext({ sourceFilters: filters, sourceDrafts: drafts, $: id => elements[id], renderSources() {}, updateControls() {} });
-  vm.runInContext(source('resetSourceFilters') + ';resetSourceFilters();', resetContext);
+  vm.runInContext([source('setSourceFilters'), source('resetSourceFilters'), 'resetSourceFilters();'].join('\n'), resetContext);
   assert.deepEqual(filters, { query: '', contents: '', project:'', onlyUnassigned: false });
   assert.equal(elements['br-source-search'].value, '');
   assert.equal(elements['br-source-unassigned-filter'].checked, false);

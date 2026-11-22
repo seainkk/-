@@ -19,7 +19,6 @@
   let accessKey='',accessReady=false,accessMessage=null,pendingAccessChange=false;
   let originSession=null;
   let recoveringOrigins=false;
-  let renderedLineageKey=null;
   const viewTrail=[];
   let pendingImportExit=null,backAvailable=false;
   let suspendedSegment=null;
@@ -115,7 +114,7 @@
     $('br-coldy-upload-title').textContent='Загрузка в рассылку';$('br-mailings-title').textContent='Рассылки';
     $('br-unassigned').hidden=true;$('br-unassigned-rows').replaceChildren();$('br-upload-project').value='';
     accessEpoch++;dashboardRequest++;if(dashboardAnalysisTimer!==null){clearTimeout(dashboardAnalysisTimer);dashboardAnalysisTimer=null;}dashboardAnalysisLoading=false;dashboardLoading=false;mailingsLoading=false;sourceLoading=false;accessReady=false;accessKey='';window.RegistryProject?.lock?.();closeProviderSettings();closeColdySettings();coldyMailings=null;preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
-    viewTrail.length=0;pendingImportExit=null;suspendedSegment=null;uploadSegmentOptions=null;uploadEntryView='sources';$('br-import-destination').replaceChildren();$('br-import-segment-name').value='';recoveringOrigins=false;$('br-origin-recovery-status').textContent='';closeSourceOrigin();$('br-lineage-rows').replaceChildren();$('br-source-lineage').open=false;$('br-source-lineage').hidden=true;
+    viewTrail.length=0;pendingImportExit=null;suspendedSegment=null;uploadSegmentOptions=null;uploadEntryView='sources';$('br-import-destination').replaceChildren();$('br-import-segment-name').value='';recoveringOrigins=false;$('br-origin-recovery-status').textContent='';closeSourceOrigin();$('br-origin-recovery').hidden=true;
     contactPreview=null;contactPreviewEpoch++;segmentImportDestination=null;segmentReturnPending=null;renderContactPreview();
     pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;lastSourceAttempt=0;lastDashboardAttempt=0;lastMailingsAttempt=0;
     if(message)notifyEntry(unavailable?'unavailable':'locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
@@ -127,8 +126,7 @@
     try{window.localStorage.setItem(projectPreference,chosen);}catch(ignored){}
     if(activeView==='mailings')activeView='segments';
     registrySection='companies';segmentSection='clients';segmentBackScroll=0;
-    Object.assign(sourceFilters,{query:'',contents:'',project:'',onlyUnassigned:false});
-    $('br-source-search').value='';$('br-source-contents-filter').value='';$('br-source-project-filter').value='';$('br-source-unassigned-filter').checked=false;
+    setSourceFilters();
     startSharedAccess(true);
   }
   function projectSwitchBlocked(){return busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||recoveringOrigins||window.RegistryProject?.hasPending?.()||formIsOpen();}
@@ -526,7 +524,14 @@
     return {items:items.filter((item)=>matches.has(item.id)||drafts.has(item.id)),matchedCount:matched.length,totalCount:items.filter((item)=>item.present!==false).length,pinnedIds:pinned.map((item)=>item.id),unknownAssociations:filters?.onlyUnassigned===true?items.filter((item)=>sourceMatchesFilters(data,item,withoutAssociations)&&!sourceAssociationsKnown(data,item)).length:0};
   }
   function updateSourceFilters(){sourceFilters.project=$('br-source-project-filter').value;sourceFilters.query=$('br-source-search').value;sourceFilters.contents=$('br-source-contents-filter').value;sourceFilters.onlyUnassigned=$('br-source-unassigned-filter').checked;renderSources();updateControls();}
-  function resetSourceFilters(){sourceFilters.project='';$('br-source-project-filter').value='';sourceFilters.query='';sourceFilters.contents='';sourceFilters.onlyUnassigned=false;$('br-source-search').value='';$('br-source-contents-filter').value='';$('br-source-unassigned-filter').checked=false;renderSources();updateControls();$('br-source-search').focus();}
+  function setSourceFilters(filters={query:'',contents:'',project:'',onlyUnassigned:false}){
+    Object.assign(sourceFilters,filters);
+    $('br-source-search').value=filters.query;
+    $('br-source-contents-filter').value=filters.contents;
+    $('br-source-project-filter').value=filters.project;
+    $('br-source-unassigned-filter').checked=filters.onlyUnassigned;
+  }
+  function resetSourceFilters(){setSourceFilters();renderSources();updateControls();$('br-source-search').focus();}
   function sourcePatch(item,draft,reviewed){const patch={id:item.id,expectedRevision:reviewed?item.revision:draft.expectedRevision};for(const field of ['contents','status','formatCheck'])if(Object.prototype.hasOwnProperty.call(draft.values,field))patch[field]=draft.values[field];return patch;}
   function importFileError(file){if(!file)return 'Выберите файл базы.';if(!/\.(csv|tsv|xls|xlsx|ods)$/i.test(file.name))return 'Поддерживаются файлы CSV, TSV, XLS, XLSX и ODS.';if(!Number.isFinite(file.size)||file.size<=0)return 'Выберите непустой файл.';if(file.size>10*1024*1024)return 'Размер файла не должен превышать 10 МиБ.';return null;}
   function importLinkId(value){try{const url=new URL(value.trim()),match=url.pathname.match(/^\/spreadsheets\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{10,200})(?:\/|$)/);return url.protocol==='https:'&&url.hostname==='docs.google.com'&&!url.username&&!url.password&&!url.port&&match?match[1]:null;}catch(error){return null;}}
@@ -558,31 +563,45 @@
   function setRegistrySection(section){if(!['companies','lpr'].includes(section)||importOpen||gridIsOpen())return;registrySection=section;sourceFilters.contents='';$('br-source-contents-filter').value='';renderedSourceKey=null;renderSources();updateControls();}
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
   function sourceFocused(){return !!document.activeElement?.closest?.('.br-source-fields');}
-  function lineageLink(label,url){
-    const link=document.createElement('a');link.textContent=label;link.href=url;link.target='_blank';link.rel='noopener noreferrer';return link;
+  function openRelatedSource(id,opener){
+    const item=sourceItem(id);
+    if(!accessReady||!item||item.present===false)return;
+    const openSettings=Array.from($('br-sources-items').querySelectorAll('.br-source-settings[open] > summary'),summary=>summary.dataset.sourceFocus);
+    rememberView({view:'sources',scroll:window.scrollY,registrySection,filters:{...sourceFilters},focus:opener.dataset.sourceFocus,openSettings});
+    if(!sourceInSection(item,registrySection))registrySection=normalizeContents(item.contents)[0];
+    if(!sourceMatchesFilters(sourceData,item,sourceFilters))setSourceFilters();
+    renderSources();updateControls();
+    const row=$('br-sources-items').querySelector('[data-source-id="'+CSS.escape(id)+'"]');
+    row?.focus({preventScroll:true});row?.scrollIntoView({block:'center'});
   }
-  function renderSourceLineage(){
-    const panel=$('br-source-lineage'),body=$('br-lineage-rows');
-    const items=(sourceData?.items||[]).filter(item=>item.present!==false);
-    panel.hidden=!items.length;
-    if(!panel.open||panel.hidden){renderedLineageKey=null;if(body.children.length)body.replaceChildren();return;}
-    const key=JSON.stringify([sourceData.associationsAvailable,items.map(item=>[item.id,item.name,item.url,item.origin,item.originAvailable,item.segments,item.associationsAvailable])]);
-    if(key===renderedLineageKey)return;renderedLineageKey=key;
-    items.sort((a,b)=>(a.origin?.name||'').localeCompare(b.origin?.name||'','ru')||a.name.localeCompare(b.name,'ru'));
-    const rows=document.createDocumentFragment();
-    for(const item of items){
-      const row=document.createElement('tr'),origin=item.origin,source=row.insertCell();
-      if(origin?.id&&origin.url&&importLinkId(origin.url)===origin.id)source.append(lineageLink(origin.name,nativeUrl(origin.id)));
-      else source.textContent=origin?.name||(item.originAvailable===false?'Связь недоступна':'Не указан');
-      row.insertCell().append(lineageLink(item.name,sourceFileUrl(item)));
-      row.insertCell().textContent=origin?.criteria||'—';
-      const segments=row.insertCell();
-      for(const segment of item.segments||[]){if(segments.childNodes.length)segments.append(' · ');segments.append(lineageLink(segment.name,folderUrl(segment.id)));}
-      if(!sourceAssociationsKnown(sourceData,item))segments.append(segments.childNodes.length?' · Есть недоступные связи':'Сведения недоступны');
-      else if(!segments.childNodes.length)segments.textContent='Без сегмента';
-      rows.append(row);
+  function relatedSourceButton(owner,item){
+    const link=document.createElement('button');link.type='button';link.className='br-related-source';
+    link.textContent=item.name;link.dataset.relatedSource=item.id;link.dataset.sourceFocus=owner.id+'/related/'+item.id;
+    link.addEventListener('click',()=>openRelatedSource(item.id,link));
+    return link;
+  }
+  function renderSourceRelations(row,meta,item,catalog,children){
+    const origin=item.origin,role=document.createElement('span');
+    role.className='br-source-role';
+    role.textContent=origin?'Выборка':children.length?'Исходная база':item.originAvailable===false?'Происхождение недоступно':'Источник не указан';
+    meta.prepend(role);
+    if(!origin&&!children.length)return;
+    const relations=document.createElement('div');relations.className='br-source-relations';
+    if(origin){
+      const parent=document.createElement('p');parent.append('Источник: ');
+      if(catalog.has(origin.id))parent.append(relatedSourceButton(item,catalog.get(origin.id)));
+      else if(origin.url&&importLinkId(origin.url)===origin.id){
+        const link=document.createElement('a');link.href=nativeUrl(origin.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent=origin.name;parent.append(link);
+      }else parent.append(origin.name);
+      relations.append(parent);
+      if(origin.criteria){const criteria=document.createElement('p');criteria.textContent='Критерии: '+origin.criteria;relations.append(criteria);}
     }
-    body.replaceChildren(rows);
+    if(children.length){
+      const selections=document.createElement('p');selections.append('Выборки ('+children.length+'): ');
+      children.forEach((child,index)=>{if(index)selections.append(' · ');selections.append(relatedSourceButton(item,child));});
+      relations.append(selections);
+    }
+    row.append(relations);
   }
   async function recoverSourceOrigins(){
     if(recoveringOrigins||requesting()||!accessReady||!sourceData?.canEdit)return;
@@ -709,14 +728,24 @@
     $('br-sources-view').hidden=activeView!=='sources';if(activeView!=='sources')return;
     const previewOnly=!!catalogPreview&&!sourceData;
     $('br-source-project-filter').disabled=previewOnly;$('br-source-unassigned-filter').disabled=previewOnly;
-    if(previewOnly){renderRegistrySections();renderSourcesHealth();renderSourceLineage();renderCatalogPreview();return;}
+    if(previewOnly){$('br-origin-recovery').hidden=true;renderRegistrySections();renderSourcesHealth();renderCatalogPreview();return;}
     const data=sourceData,sectionData=data?Object.assign({},data,{items:(data.items||[]).filter(item=>sourceInSection(item,registrySection))}):data,selection=sourceFilterSelection(sectionData,sourceFilters,[...sourceDrafts.keys(),...projectDrafts.keys()]),items=selection.items,filtered=sourceFiltersActive(sourceFilters);renderRegistrySections();
     $('br-sources-count').textContent=data?.source?'Показано: '+selection.matchedCount+' из '+selection.totalCount+(selection.pinnedIds.length?' · Дополнительно с несохранёнными изменениями: '+selection.pinnedIds.length:''):data?'Список недоступен':'Загружаем список…';
     $('br-source-filters-reset').disabled=!filtered;const filterNote=$('br-source-filters-note');filterNote.hidden=!selection.unknownAssociations;filterNote.textContent=selection.unknownAssociations?'Связи с сегментами недоступны для '+selection.unknownAssociations+' баз. Они не включены в фильтр «Без сегмента».':'';
     const folder=$('br-sources-folder');folder.hidden=!data?.source?.id;if(data?.source?.id)folder.href=folderUrl(data.source.id);
     renderSourcesHealth();
-    renderSourceLineage();
-    const key=JSON.stringify({state:data?.state,source:data?.source,storage:data?.storage,canEdit:data?.canEdit,associationsAvailable:data?.associationsAvailable,filters:sourceFilters,registrySection,items,projects:Array.from(projectDrafts),drafts:Array.from(sourceDrafts),messages:Array.from(sourceMessages),saving:sourceSaving,initial:!data?(sourceLoading?'loading':sourceRefreshError?'error':'empty'):''});if(key===renderedSourceKey)return;renderedSourceKey=key;
+    const allItems=(data?.items||[]).filter(item=>item.present!==false);
+    $('br-origin-recovery').hidden=!data?.canEdit||!allItems.length;
+    // A card in another section can be the parent or a selection of a visible card.
+    const relatedItems=allItems.map(item=>[item.id,item.name,item.origin?.id]);
+    const key=JSON.stringify({state:data?.state,source:data?.source,storage:data?.storage,canEdit:data?.canEdit,associationsAvailable:data?.associationsAvailable,filters:sourceFilters,registrySection,items,relatedItems,projects:Array.from(projectDrafts),drafts:Array.from(sourceDrafts),messages:Array.from(sourceMessages),saving:sourceSaving,initial:!data?(sourceLoading?'loading':sourceRefreshError?'error':'empty'):''});if(key===renderedSourceKey)return;renderedSourceKey=key;
+    const catalog=new Map(),selectionsByOrigin=new Map();
+    for(const item of allItems){
+      catalog.set(item.id,item);
+      if(!item.origin)continue;
+      if(!selectionsByOrigin.has(item.origin.id))selectionsByOrigin.set(item.origin.id,[]);
+      selectionsByOrigin.get(item.origin.id).push(item);
+    }
     const target=$('br-sources-items'),focusKey=document.activeElement?.dataset?.sourceFocus,oldX=window.scrollX,oldY=window.scrollY;
     const openSettings=new Map(Array.from(target.querySelectorAll('.br-source-settings'),settings=>[settings.parentElement.dataset.sourceId,settings.open]));
     target.replaceChildren();
@@ -724,7 +753,7 @@
     const states={source_missing:['Папка «Исходные базы» не найдена','Проверьте привязку папки у администратора. Реестр и сегменты остаются доступны.'],source_ambiguous:['Найдено несколько папок «Исходные базы»','Администратору нужно уточнить привязку папки.'],source_outside_registry:['Папка «Исходные базы» недоступна в реестре','Проверьте права доступа и привязку папки.']};
     const emptyText=states[data?.state]||(filtered&&data?.source&&selection.totalCount>0?['По фильтрам ничего не найдено','Измените поиск или фильтры реестра. Кнопка «Сбросить» покажет все базы.']:[data?'В папке пока нет файлов':sourceLoading?'Загружаем исходные базы…':'Список ещё не загружен',data?'Добавьте исходные файлы в папку «Исходные базы» и обновите список.':'Нажмите «Обновить», чтобы повторить загрузку.']);$('br-sources-empty-title').textContent=emptyText[0];$('br-sources-empty-description').textContent=emptyText[1];
     for(const item of items){
-      const row=document.createElement('article');row.className='br-source-item';row.dataset.sourceId=item.id;
+      const row=document.createElement('article');row.className='br-source-item';row.dataset.sourceId=item.id;row.tabIndex=-1;row.dataset.sourceFocus=item.id+'/card';
       const head=document.createElement('div');head.className='br-source-head';
       const identity=document.createElement('div');identity.className='br-source-identity';
       const heading=document.createElement('h2');heading.textContent=item.name;
@@ -740,6 +769,7 @@
       meta.append(link,type);
       if(item.projectIds?.length){const projects=document.createElement('span');projects.textContent=item.projectIds.map(id=>projectNames[id]).filter(Boolean).join(' · ');meta.append(projects);}
       identity.append(meta);
+      renderSourceRelations(row,meta,item,catalog,selectionsByOrigin.get(item.id)||[]);
       if(canPreviewContacts(item)){
         const actions=document.createElement('div');actions.className='br-source-preview-actions';
         const work=button('br-primary','Работать с таблицей');work.dataset.gridSource=item.id;work.dataset.sourceFocus=item.id+'/grid';work.disabled=editingBlocked()||importOpen||!!segmentEditor;work.addEventListener('click',()=>openGridWorkbook(item.id));
@@ -1390,6 +1420,7 @@
     root.dataset.view=activeView;window.RegistryProject?.show?.(activeView,{ready:accessReady,epoch:accessEpoch});renderSources();renderSegments();renderMailings();renderContactPreview();renderRegistrySections();renderAccess();updateControls();
   }
   function updateControls(){
+    $('br-origin-recover').disabled=!sourceData?.canEdit||recoveringOrigins||requesting()||!accessReady;
     const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-settings-open').disabled=!accessReady||gridIsOpen()||!!window.RegistryProject?.hasPending?.();$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
     for(const add of root.querySelectorAll('[data-add-source]')){const item=sourceItem(add.dataset.addSource);add.disabled=!readySource(item)||sourceDrafts.has(item.id)||editing||importOpen||!!segmentEditor;}
@@ -1473,18 +1504,28 @@
     segmentEditor=saved.editor;segmentError=saved.error;formMode='segment';activeView=saved.view;
     $('br-segment-name').value=saved.name;render();renderSegmentEditor();$('br-segment-close').focus();
   }
+  function rememberView(entry){viewTrail.push(entry);if(viewTrail.length>32)viewTrail.shift();}
   function setView(view,options={}){
-    if(view!==activeView&&!options.back){viewTrail.push({view:activeView,scroll:window.scrollY,mailingSegmentId});if(viewTrail.length>32)viewTrail.shift();}
+    if(view!==activeView&&!options.back)rememberView({view:activeView,scroll:window.scrollY,mailingSegmentId});
     activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});if(view==='segments'&&dashboard?.analysisPending===true&&!formIsOpen())scheduleSegmentAnalysis();if(view==='sources'&&preparedJobsQueued)flushPendingView();
   }
   function previousView(){
     const previous=viewTrail.pop();if(!previous)return false;
+    if(previous.filters){
+      registrySection=previous.registrySection;setSourceFilters(previous.filters);renderSources();updateControls();
+      const cards=$('br-sources-items');
+      for(const settings of cards.querySelectorAll('.br-source-settings')){
+        if(previous.openSettings.includes(settings.querySelector('summary').dataset.sourceFocus))settings.open=true;
+      }
+      const opener=cards.querySelector('[data-source-focus="'+CSS.escape(previous.focus)+'"]');
+      opener?.focus({preventScroll:true});window.scrollTo(0,previous.scroll);return true;
+    }
     if(previous.view==='mailings')mailingSegmentId=previous.mailingSegmentId;
     setView(previous.view,{back:true});window.scrollTo(0,previous.scroll);return true;
   }
-  function visibleDetails(){
+  function visibleDetails(previousSettings){
     const scope=gridIsOpen()?$('rg-grid-panel'):root;
-    const open=Array.from(scope?.querySelectorAll('details[open]')||[]).filter(node=>node.getClientRects().length);
+    const open=Array.from(scope?.querySelectorAll('details[open]')||[]).filter(node=>node.getClientRects().length&&!previousSettings?.includes(node.querySelector('summary')?.dataset.sourceFocus));
     return open.findLast(node=>node.contains(document.activeElement))||open.at(-1);
   }
   function canGoBack(){
@@ -1509,7 +1550,7 @@
     }
     if(activeView==='sources'&&contactPreview){$('br-contact-preview-close').click();return;}
     if(activeView==='mailings'&&coldyMailings?.preview&&!coldyMailings.busy&&!coldyMailings.step){$('br-coldy-upload-cancel').click();return;}
-    const details=visibleDetails();if(details){details.open=false;details.querySelector('summary')?.focus();return;}
+    const details=visibleDetails(viewTrail.at(-1)?.openSettings);if(details){details.open=false;details.querySelector('summary')?.focus();return;}
     if(!previousView()&&activeView==='mailings')setView('segments',{back:true,cached:true});
   }
   $('br-action-back').addEventListener('click',()=>{goBack();syncBack();});
@@ -1530,7 +1571,6 @@
     if(!preview||preview.checkedAt<Date.now()-86400000||preview.checkedAt>Date.now()+300000)return;
     catalogPreview=preview;acceptSavedCatalog=false;renderSources();updateControls();
   });
-  $('br-source-lineage').addEventListener('toggle',renderSourceLineage);
   $('br-origin-recover').addEventListener('click',recoverSourceOrigins);
   $('br-origin-form').addEventListener('submit',saveSourceOrigin);
   $('br-origin-close').addEventListener('click',()=>{closeSourceOrigin();flushPendingView();});
