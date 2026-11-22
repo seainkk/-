@@ -25,6 +25,8 @@ function callApp(request) {
         getProjectAnalytics: typeof getProjectAnalytics_ === 'function' ? getProjectAnalytics_ : null,
         getProjectAnalyticsCampaigns: typeof getProjectAnalyticsCampaigns_ === 'function' ? getProjectAnalyticsCampaigns_ : null,
         getProjectInfrastructure: typeof getProjectInfrastructure_ === 'function' ? getProjectInfrastructure_ : null,
+        getProjectInfrastructureSelection: typeof getProjectInfrastructureSelection_ === 'function' ? getProjectInfrastructureSelection_ : null,
+        saveProjectInfrastructureSelection: typeof saveProjectInfrastructureSelection_ === 'function' ? saveProjectInfrastructureSelection_ : null,
         refreshProjectInfrastructure: typeof refreshProjectInfrastructure_ === 'function' ? refreshProjectInfrastructure_ : null,
         recoverSourceBaseOrigins: typeof recoverSourceBaseOrigins_ === 'function' ? recoverSourceBaseOrigins_ : null,
         getContactWorkspace: typeof getContactWorkspace_ === 'function' ? getContactWorkspace_ : null,
