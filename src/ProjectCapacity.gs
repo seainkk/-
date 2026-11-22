@@ -20,11 +20,32 @@ function projectCapacityValidate_(saved) {
         [s.gapStartSeconds, s.gapEndSeconds].some(function (value) { return value !== null && projectInfraCount_(value) === null; }))) invalid();
   });
   if (keys.length > PROJECT_INFRASTRUCTURE.maxAccounts) invalid();
+  if (cap.outsideActive && (typeof cap.outsideActive !== 'object' || Array.isArray(cap.outsideActive) ||
+      Object.keys(cap.outsideActive).some(function (id) { return !Array.isArray(cap.assignments[id]) || cap.outsideActive[id] !== true; }))) invalid();
   keys.forEach(function (id) {
     var links = cap.assignments[id];
     if (!/^[1-9]\d*$/.test(id) || !Array.isArray(links) || links.length > ids.size ||
         new Set(links).size !== links.length || links.some(function (key) { return !ids.has(key); })) invalid();
   });
+}
+
+/** Keep only current project bindings. A flag preserves occupancy without storing other campaign names or IDs. */
+function projectCapacitySelected_(context, capacity) {
+  var owners = projectCapacityOwners_(context, capacity.campaigns.map(function (item) { return item.id; }));
+  var project = typeof registryProjectId_ === 'function' ? registryProjectId_() : 'numshield';
+  var visible = new Set(capacity.campaigns.filter(function (item) {
+    var owner = owners[item.id];
+    return owner && owner.bindingState === 'linked' && owner.segmentProjectId === project;
+  }).map(function (item) { return item.id; }));
+  var outside = Object.assign({}, capacity.outsideActive), assignments = {};
+  Object.keys(capacity.assignments).forEach(function (id) {
+    var ids = capacity.assignments[id];
+    assignments[id] = ids.filter(function (uuid) { return visible.has(uuid); });
+    if (ids.length !== assignments[id].length) outside[id] = true;
+  });
+  return { owners:owners, capacity:Object.assign({}, capacity, {
+    assignments:assignments, outsideActive:outside, campaigns:capacity.campaigns.filter(function (item) { return visible.has(item.id); })
+  }) };
 }
 
 function projectCapacityMappings_(response, selected, key) {
@@ -84,16 +105,21 @@ function projectCapacityAdvance_(context, settings, state) {
   }
   try {
     if (!work.mapped) {
-      state.capacity = projectCapacityMappings_(read('/account-campaign-mappings'), state.detailIds, settings.key);
+      var mapping = projectCapacityMappings_(read('/account-campaign-mappings'), state.detailIds, settings.key);
+      state.verifiedProvider = true;
+      state.capacity = projectCapacitySelected_(context, mapping).capacity;
       work.mapped = true;
       // Publish assignments before waiting for any individual campaign schedule.
       if (state.poolOnly && state.capacity.campaigns.length) return;
     }
-    var campaigns = state.capacity.campaigns, deadline = Date.now() + PROJECT_INFRASTRUCTURE.detailBudgetMillis;
+    var campaigns = state.capacity.campaigns, currentCampaigns = projectCapacitySelected_(context,state.capacity).capacity.campaigns;
+    var visibleIds = new Set(currentCampaigns.map(function (campaign) { return campaign.id; }));
+    var deadline = Date.now() + PROJECT_INFRASTRUCTURE.detailBudgetMillis;
     var first = work.cursor, stop = Math.min(first + PROJECT_INFRASTRUCTURE.batch, campaigns.length);
     for (; work.cursor < stop; work.cursor++) {
       if (work.cursor > first && Date.now() >= deadline) break;
       var campaign = campaigns[work.cursor];
+      if (!visibleIds.has(campaign.id)) continue;
       try {
         var detail = read('/campaigns/' + campaign.id);
         if (!detail || !coldyUuid_(detail.id) || detail.id.toLowerCase() !== campaign.id || detail.status !== 'Active')
@@ -122,15 +148,15 @@ function projectCapacityAdvance_(context, settings, state) {
 function projectCapacityOwners_(context, ids) {
   var owners = Object.create(null), folders = Object.create(null), wanted = new Set(ids);
   if (!ids.length) return owners;
+  var projectId = registryProjectId_(), properties = context.properties.getProperties();
   coldyCampaignRegistry_(context).bindings.forEach(function (binding) {
-    if (!wanted.has(binding.campaignId)) return;
+    if (!wanted.has(binding.campaignId) || registrySegmentProject_(context,binding.segmentId,properties) !== projectId) return;
     if (owners[binding.campaignId]) fail_('COLDY_STORAGE', 'У рассылки несколько сегментов.');
     if (!folders[binding.segmentId]) {
       try {
         var folder = segmentFolder_(context, segmentSourceFolder_(context), id_(binding.segmentId));
-        var project = registrySegmentProject_(context, binding.segmentId);
         folders[binding.segmentId] = { bindingState: 'linked', segmentId: folder.getId(), segmentName: folder.getName(),
-          segmentProjectId: project, segmentProjectName: project ? registryProjectName_(project) : null };
+          segmentProjectId: projectId, segmentProjectName: registryProjectName_(projectId) };
       } catch (error) {
         if (['OUTSIDE_SEGMENTS','OUTSIDE_REGISTRY','NOT_FOUND'].indexOf(error.registryCode) < 0) throw error;
         folders[binding.segmentId] = { bindingState: 'unknown', segmentId: null, segmentName: null };
@@ -146,8 +172,10 @@ function projectCapacityPublic_(context, settings, saved, result) {
   var stale = !cap || cap.stale || !Number.isFinite(Date.parse(cap.updatedAt)) ||
     Date.parse(cap.updatedAt) < now - PROJECT_INFRASTRUCTURE.cacheMillis ||
     work && !work.mapped || !saved.inventoryAt || Date.parse(saved.inventoryAt) < now - PROJECT_INFRASTRUCTURE.cacheMillis;
+  var scoped = cap ? projectCapacitySelected_(context,cap) : null;
+  var owners = scoped ? scoped.owners : {};
+  cap = scoped && scoped.capacity;
   var campaigns = cap ? cap.campaigns : [], byId = new Map(), idle = new Map(), zones = new Map();
-  var owners = projectCapacityOwners_(context, campaigns.map(function (item) { return item.id; }));
   var list = campaigns.map(function (item) {
     byId.set(item.id, item);
     var owner = owners[item.id] || { bindingState: 'unlinked', segmentId: null, segmentName: null };
@@ -160,9 +188,11 @@ function projectCapacityPublic_(context, settings, saved, result) {
   result.capacity = { state: !cap ? 'unknown' : stale || partial || work ? 'partial' : 'ready', stale: !!stale,
     updatedAt: cap ? cap.updatedAt : null, campaigns: list };
   result.accounts.forEach(function (account) {
-    var ids = cap && cap.assignments[account.id], state = stale || !Array.isArray(ids) ? 'unknown' : ids.length ? 'busy' : 'free';
-    var value = { state: state, campaignIds: ids || [], availableAt: null, idleFrom: null, idleUntil: null };
-    if (state === 'busy') {
+    var ids = cap && cap.assignments[account.id], outside = !!(cap && cap.outsideActive[account.id]);
+    var state = stale || !Array.isArray(ids) ? 'unknown' : ids.length || outside ? 'busy' :
+      saved.selectedOnly && (!account.updatedAt || account.stale || account.syncError) ? 'unknown' : 'free';
+    var value = { state: state, campaignIds: ids || [], outsideActive:outside, availableAt: null, idleFrom: null, idleUntil: null };
+    if (state === 'busy' && !outside) {
       var key = ids.slice().sort().join('|');
       if (!idle.has(key)) idle.set(key, projectCapacityIdle_(ids.map(function (id) { return byId.get(id).schedule; }), now, zones));
       Object.assign(value, idle.get(key));
@@ -171,8 +201,8 @@ function projectCapacityPublic_(context, settings, saved, result) {
   });
   if (saved && saved.capacityRequested) {
     var mapped = (work ? work.mapped : !!cap) ? 1 : 0;
-    result.syncProgress = { completed: (saved.poolOnly ? 0 : result.detailProgress.completed) + mapped + (work ? work.cursor : campaigns.length),
-      total: (saved.poolOnly ? 0 : result.detailProgress.total) + 1 + (mapped ? campaigns.length : 0) };
+    result.syncProgress = { completed: (saved.poolOnly && !saved.selectedOnly ? 0 : result.detailProgress.completed) + mapped + (work ? work.cursor : campaigns.length),
+      total: (saved.poolOnly && !saved.selectedOnly ? 0 : result.detailProgress.total) + 1 + (mapped ? campaigns.length : 0) };
   }
 }
 

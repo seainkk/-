@@ -1,6 +1,6 @@
 /** Public identifiers and a verifier only. The random shared-link credential is never in source. */
 var REGISTRY_CONFIG = Object.freeze({
-  title: 'Реестр баз',
+  title: 'Центр мультиканального аутрича',
   sharedAccessKeyHash: 'yiKUzWNsQOzwMnF4Fw2_f-9Esxm9ooCyyptJsjYeBG0',
   defaultRootFolderId: '1WKcvDDKqYBo94eXsYc5vKp6OPtOzv6Wh',
   defaultSegmentsFolderId: '1sQ8WrTgdEOPTPYLIwoBwHb6gL_ULT4yu',

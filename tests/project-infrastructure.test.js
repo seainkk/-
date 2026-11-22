@@ -21,7 +21,7 @@ function fixture(options = {}) {
   const properties = new Map(), cache = new Map();
   const calls = { http: [], saves: [], loads: [], locks: 0 };
   const root = { id: ROOT, mimeType: 'application/vnd.google-apps.folder', parents: ['owner_drive_1234567890'], trashed: false };
-  const props = { getProperty: key => properties.get(key) ?? null, setProperty: (key, value) => properties.set(key, String(value)), deleteProperty: key => properties.delete(key) };
+  const props = { getProperties: () => Object.fromEntries(properties), getProperty: key => properties.get(key) ?? null, setProperty: (key, value) => properties.set(key, String(value)), deleteProperty: key => properties.delete(key) };
   const coded = (code, message) => { const error = new Error(`[${code}] ${message}`); error.registryCode = code; return error; };
   class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } }
   const response = (body, status = 200, headers = {}) => ({ getResponseCode: () => status,
@@ -90,11 +90,13 @@ function fixture(options = {}) {
       if (apiKey === KEY && options.monitoringIds !== null && !cache.has(storeKey)) {
         const ids = options.monitoringIds === undefined ? accounts.map(item => String(item.id)) : options.monitoringIds;
         cache.set(storeKey, { version: 1, rootId, credentialHash: hash(apiKey), revision: 1,
-          configured: true, accountIds: plain(c.projectMonitoringIds_(ids, 'INVALID_REQUEST')), receipts: [] });
+          configured: true, accountIds: plain(c.projectMonitoringIds_(ids, 'INVALID_REQUEST')), receipts: [],
+          ...(ids.every(id=>accounts.some(a=>String(a.id)===id))?{accounts:[...ids].sort((a,b)=>+a-+b).map(id=>{const a=accounts.find(a=>String(a.id)===id);return {id,email:a.email,name:a.first_name||'',provider:'google'};})}:{}) });
       }
       return result;
     },
-    get: () => plain(c.getProjectInfrastructure_({})), refresh: input => plain(c.refreshProjectInfrastructure_(input || {})),
+    get: () => plain(c.getProjectInfrastructure_({})),
+    refresh: input => plain(c.refreshProjectInfrastructure_(input || {})),
     tick: value => { now += value; }, setAccounts: value => { accounts = value; },
     revoke: () => { authorized = false; }, switchRoot: () => { rootId = 'other_registry_root_1234567890'; },
     state: () => cache.get(`${ROOT}|infrastructure|${hash(properties.get('COLDY_API_KEY') || '')}`),
@@ -103,7 +105,8 @@ function fixture(options = {}) {
       if (ids === null) { cache.delete(storeKey); return; }
       const previous = cache.get(storeKey);
       cache.set(storeKey, { version: 1, rootId, credentialHash, revision: (previous?.revision || 0) + 1,
-        configured: true, accountIds: plain(c.projectMonitoringIds_(ids, 'INVALID_REQUEST')), receipts: [] });
+        configured: true, accountIds: plain(c.projectMonitoringIds_(ids, 'INVALID_REQUEST')), receipts: [],
+          ...(ids.every(id=>accounts.some(a=>String(a.id)===id))?{accounts:[...ids].sort((a,b)=>+a-+b).map(id=>{const a=accounts.find(a=>String(a.id)===id);return {id,email:a.email,name:a.first_name||'',provider:'google'};})}:{}) });
     },
   };
   return f;
@@ -149,7 +152,7 @@ function capacityFixture(mappings, detail = {}, other = {}) {
   f.configure();
   f.resolveOwners = f.c.projectCapacityOwners_;
   f.c.projectCapacityOwners_ = (context, ids) => Object.fromEntries(ids.map(id => [id, id === ACTIVE_ONE ?
-    {segmentId:'segment_directory_1',segmentName:'Справочник',bindingState:'linked'} :
+    {segmentId:'segment_directory_1',segmentName:'Справочник',segmentProjectId:'numshield',bindingState:'linked'} :
     {segmentId:null,segmentName:null,bindingState:'unlinked'}]));
   return f;
 }
@@ -160,27 +163,28 @@ function readCapacity(f) {
   return result;
 }
 
-test('pool refresh confirms 20 senders before schedules, without detailed account reads in a 1159-account catalog', () => {
+test('pool refresh reads only 20 chosen mailbox IDs and the chosen campaign in a 1159-account organization', () => {
   const ids=Array.from({length:20},(_,i)=>String(i+1));
   const f=capacityFixture(ids.map(id=>[Number(id),[ACTIVE_ONE,ACTIVE_TWO,UNSELECTED]]),{},
     {accounts:Array.from({length:1159},(_,i)=>account(i+1)),monitoringIds:ids,detailBatch:2});
   const owners=f.c.projectCapacityOwners_;
   f.c.projectCapacityOwners_=(ctx,list)=>{assert.equal(f.isLocked(),false,'DTO reads cannot hold the global lock');return owners(ctx,list);};
   const first=f.refresh({includeCapacity:true});
-  assert.equal(first.poolOnly,true);assert.equal(first.capacity.stale,false);assert.equal(first.availableCount,1159);
-  assert.deepEqual(first.accounts.map(a=>a.capacity.state),ids.map(()=>'busy'));assert.deepEqual(f.calls.http,['/accounts','/account-campaign-mappings']);
-  assert.deepEqual(first.syncProgress,{completed:1,total:4});assert.deepEqual(first.detailProgress,{completed:0,total:20});
-  assert.ok(first.accounts.every(a=>a.updatedAt===null&&a.status===null&&a.stale));
-  const partial=f.refresh({cursor:first.nextCursor}), last=f.refresh({cursor:partial.nextCursor});
-  assert.equal(last.nextCursor,null);assert.equal(last.state,'ready');assert.equal(last.capacity.state,'ready');
-  assert.deepEqual(last.syncProgress,{completed:4,total:4});
-  assert.equal(f.calls.http.length,5);assert.equal(f.calls.http.some(p=>p.startsWith('/accounts/')),false);
-  assert.deepEqual(f.refresh({cursor:first.nextCursor}),last);assert.equal(f.calls.http.length,5);
-  const diagnostic=f.refresh({});
-  assert.equal(diagnostic.poolOnly,false);assert.equal(diagnostic.detailProgress.completed,2);assert.equal(diagnostic.accounts[0].status,'Connected');
-  const again=f.refresh({includeCapacity:true});
-  assert.equal(again.accounts[0].status,'Connected');assert.equal(again.accounts[0].updatedAt,diagnostic.accounts[0].updatedAt);
-  assert.equal(again.accounts[0].stale,false);assert.equal(again.accounts[4].stale,true);
+  assert.equal(first.poolOnly,true);
+  assert.deepEqual(f.calls.http,['/account-campaign-mappings']);
+  let result=first;
+  for(let i=0;result.nextCursor&&i<25;i++)result=f.refresh({cursor:result.nextCursor});
+  assert.equal(result.nextCursor,null);assert.equal(result.state,'ready');
+  assert.equal(result.accounts.length,20);assert.equal(result.availableCount,20);
+  assert.ok(result.accounts.every(a=>a.capacity.state==='busy'&&a.capacity.outsideActive&&a.status==='Connected'));
+  assert.ok(result.accounts.every(a=>a.capacity.campaignIds.join()===ACTIVE_ONE));
+  assert.deepEqual(f.calls.http.filter(p=>p.startsWith('/accounts/')).map(p=>p.split('/').pop()),ids);
+  assert.deepEqual(f.calls.http.filter(p=>p.startsWith('/campaigns/')),['/campaigns/'+ACTIVE_ONE]);
+  assert.deepEqual(f.state().accounts.map(a=>a.id),ids);
+  assert.ok(!JSON.stringify(f.state()).includes(UNSELECTED));
+  const n=f.calls.http.length;
+  assert.deepEqual(f.refresh({cursor:first.nextCursor}),result);
+  assert.equal(f.calls.http.length,n);
 });
 
 test('retrying a transient map error resumes pool work without starting diagnostics', () => {
@@ -188,16 +192,17 @@ test('retrying a transient map error resumes pool work without starting diagnost
   const f=capacityFixture(({response})=>failing?response({},503):response({items:[]}));
   const first=f.refresh({includeCapacity:true});assert.ok(first.nextCursor);assert.equal(first.syncPaused,true);
   failing=false;f.tick(first.retryAfterMs+1);
-  const final=f.refresh({cursor:first.nextCursor});
+  let final=f.refresh({cursor:first.nextCursor});
+  while(final.nextCursor&&!final.syncPaused)final=f.refresh({cursor:final.nextCursor});
   assert.equal(final.nextCursor,null);assert.equal(final.capacity.state,'ready');assert.equal(final.syncPaused,false);
   assert.deepEqual(final.accounts.map(a=>a.capacity.state),['free','free','free']);
-  assert.deepEqual(f.calls.http,['/accounts','/account-campaign-mappings','/account-campaign-mappings']);
+  assert.deepEqual(f.calls.http,['/account-campaign-mappings','/account-campaign-mappings','/accounts/1','/accounts/2','/accounts/3']);
 });
 
 test('pre-existing combined capacity cursors still continue detailed mailbox diagnostics and schedules', () => {
   const f=capacityFixture([[1,[ACTIVE_ONE]]],{},{detailBatch:1});
-  f.refresh({includeCapacity:true});
-  const legacy=f.state();delete legacy.poolOnly;legacy.cursorIndex=1;legacy.nextCursor=f.c.projectInfraCursor_(legacy);
+  f.refresh({inventoryOnly:true}); f.refresh({includeCapacity:true});
+  const legacy=f.state();delete legacy.poolOnly;delete legacy.selectedOnly;legacy.cursorIndex=1;legacy.nextCursor=f.c.projectInfraCursor_(legacy);
   const cursor=legacy.nextCursor, result=f.refresh({cursor});
   assert.ok(f.calls.http.includes('/accounts/2'));assert.ok(f.calls.http.includes('/campaigns/'+ACTIVE_ONE));
   assert.equal(result.poolOnly,false);assert.equal(result.detailProgress.completed,2);assert.ok(result.nextCursor);
@@ -208,6 +213,7 @@ test('project selection, cached senders and old cursors stay separate under the 
   let project='numshield';
   const f=capacityFixture([[1,[ACTIVE_ONE]]],{}, {detailBatch:1});
   f.c.registryProjectId_=()=>project;
+  f.refresh({inventoryOnly:true});
   const original=f.refresh({includeCapacity:true});
   assert.ok(original.nextCursor);
   const oldScope=original.monitoring.scopeToken;
@@ -217,7 +223,7 @@ test('project selection, cached senders and old cursors stay separate under the 
   assert.throws(()=>f.refresh({cursor:original.nextCursor}),/COLDY_INFRA_CURSOR_STALE/);
   f.refresh({inventoryOnly:true});
   const picker=f.c.getProjectInfrastructureSelection_({});
-  assert.equal(picker.accounts.length,4);
+  assert.equal(picker.accounts.length,0);
   assert.notEqual(picker.selection.scopeToken,oldScope);
   const payload={accountIds:['3'],expectedRevision:0,scopeToken:oldScope,requestId:'save-neosender-123'};
   assert.throws(()=>f.c.saveProjectInfrastructureSelection_(payload),/COLDY_MONITORING_SCOPE_CHANGED/);
@@ -237,7 +243,7 @@ test('sender pool uses active assignments including unbound campaigns, never old
   const result = readCapacity(f), [one,two,three]=result.accounts;
   assert.equal(result.capacity.state, 'ready');
   assert.equal(one.capacity.state,'busy');
-  assert.deepEqual(one.capacity.campaignIds.slice().sort(), [ACTIVE_ONE,ACTIVE_TWO]);
+  assert.deepEqual(one.capacity.campaignIds,[ACTIVE_ONE]);assert.equal(one.capacity.outsideActive,true);assert.equal(one.capacity.idleFrom,null);
   assert.deepEqual(two.capacity.campaignIds,[ACTIVE_ONE]);
   assert.equal(three.capacity.state,'free');
   assert.deepEqual(three.capacity.campaignIds,[]);
@@ -249,8 +255,8 @@ test('sender pool uses active assignments including unbound campaigns, never old
   assert.equal(selected.schedule.timezone,'Europe/Moscow');
   assert.deepEqual(selected.schedule.days,['monday','tuesday']);
   assert.equal(selected.schedule.gapEndSeconds,120);
-  assert.equal(result.capacity.campaigns.find(c=>c.id===ACTIVE_TWO).bindingState,'unlinked');
-  assert.deepEqual(f.calls.http.filter(path=>path.startsWith('/campaigns/')).sort(), [ACTIVE_ONE,ACTIVE_TWO].map(id=>'/campaigns/'+id));
+  assert.equal(result.capacity.campaigns.some(c=>c.id===ACTIVE_TWO),false);
+  assert.deepEqual(f.calls.http.filter(path=>path.startsWith('/campaigns/')).sort(), ['/campaigns/'+ACTIVE_ONE]);
   assert.equal(f.calls.http.filter(path=>path==='/account-campaign-mappings').length,1);
   assert.doesNotMatch(JSON.stringify([result,...f.cache.values()]),/private template|unselected-only-name|smtp_secret_never_public/);
   const count=f.calls.http.length;
@@ -258,7 +264,7 @@ test('sender pool uses active assignments including unbound campaigns, never old
   assert.equal(f.calls.http.length,count);
 });
 
-test('shared senders expose the actual owner of a foreign active campaign and lose obsolete segment names', () => {
+test('shared senders stay busy without disclosing foreign or unselected campaigns', () => {
   const f=capacityFixture([[1,[ACTIVE_ONE,ACTIVE_TWO]]]);
   f.c.projectCapacityOwners_=f.resolveOwners;
   f.c.coldyCampaignRegistry_=()=>({bindings:[{segmentId:'segment_kitchens',campaignId:ACTIVE_ONE}]});
@@ -268,14 +274,16 @@ test('shared senders expose the actual owner of a foreign active campaign and lo
     assert.equal(id,'segment_kitchens');
     return {getId:()=>id,getName:()=>'Кухни'};
   };
+  f.c.registryProjectId_=()=> 'numshield';
   f.c.registrySegmentProject_=()=> 'neosender';
   f.c.registryProjectName_=id=>id==='neosender'?'Нео Сендер':'Намшилд';
-  const result=readCapacity(f), foreign=result.capacity.campaigns.find(c=>c.id===ACTIVE_ONE);
-  assert.equal(foreign.segmentName,'Кухни');assert.equal(foreign.segmentProjectName,'Нео Сендер');
+  const result=readCapacity(f);
+  assert.deepEqual(result.capacity.campaigns,[]);
   assert.equal(result.accounts[0].capacity.state,'busy');
-  f.c.segmentFolder_=()=>{throw f.coded('OUTSIDE_SEGMENTS','Moved');};
-  const moved=f.get().capacity.campaigns.find(c=>c.id===ACTIVE_ONE);
-  assert.equal(moved.bindingState,'unknown');assert.equal(moved.segmentProjectName,null);assert.equal(moved.segmentName,null);
+  assert.equal(result.accounts[0].capacity.outsideActive,true);
+  assert.equal(result.accounts[0].capacity.idleFrom,null);
+  assert.ok(!JSON.stringify(result).includes(ACTIVE_ONE));
+  assert.ok(!f.calls.http.some(p=>p.startsWith('/campaigns/')));
 });
 
 test('switching project while reading sender assignments or cached inventory denies a mixed snapshot', () => {
@@ -295,7 +303,7 @@ test('only a complete mappings response proves a monitored and listed sender has
   for (const malformed of [{items: [], has_more:true}, {items:[], total:4}, {data:[]},
     {items:[{account_id:1,campaigns:[{id:ACTIVE_ONE,name:'Test',status:'Active'}]},{account_id:2,campaigns:[{id:ACTIVE_ONE.toUpperCase(),name:'Test',status:'Completed'}]}]},
     {items:[{account_id:1,campaigns:[{id:ACTIVE_ONE,name:'Test',status:'New provider state'}]}]}]) {
-    const f=capacityFixture(({response})=>response(malformed)), result=readCapacity(f);
+    const f=capacityFixture(({response})=>response(malformed));f.refresh({inventoryOnly:true});const result=readCapacity(f);
     assert.notEqual(result.capacity.state,'ready');
     assert.notEqual(result.accounts[0].capacity.state,'free');
   }
@@ -316,17 +324,17 @@ test('a cached legacy list and a failed refresh cannot present an unverified mai
   assert.equal(f.calls.http.filter(path=>path==='/account-campaign-mappings').length,2);
 });
 
-test('missing campaign schedules do not release assigned senders, and provider names follow the fresh inventory', () => {
+test('missing campaign schedules do not release assigned senders, and provider names follow the selected account details', () => {
   const f = capacityFixture([[1,[ACTIVE_ONE]]], {[ACTIVE_ONE]:{schedule:null}});
   f.setAccounts([account(1,{first_name:'Новое',last_name:'Имя',detail:{first_name:'Старое',last_name:'Имя'}}),
     account(2),account(3)]);
   const result=readCapacity(f), sender=result.accounts[0];
-  assert.equal(sender.name,'Новое Имя');
+  assert.equal(sender.name,'Старое Имя');
   assert.equal(sender.capacity.state,'busy');
   assert.equal(sender.capacity.idleFrom,null);
   assert.equal(sender.capacity.availableAt,null);
   assert.equal(result.capacity.campaigns.find(c=>c.id===ACTIVE_ONE).schedule,null);
-  f.setAccounts([account(1,{first_name:'',last_name:'',detail:{first_name:'Старое',last_name:'Имя'}})]);
+  f.setAccounts([account(1,{first_name:'Старое',last_name:'Имя',detail:{first_name:'',last_name:''}})]);
   assert.equal(readCapacity(f).accounts[0].name,'');
 });
 
@@ -380,7 +388,8 @@ test('a project without an explicit selection monitors no senders even after lis
   assert.equal(empty.monitoring.selectedCount, 0); assert.deepEqual(empty.monitoring.accountIds, []);
   assert.equal(empty.availableCount, null); assert.equal(empty.totals.accounts, 0);
   assert.deepEqual(f.calls.http, []);
-  const listed = f.refresh();
+  assert.equal(f.refresh().state,'no_selection');assert.deepEqual(f.calls.http,[]);assert.equal(f.state(),undefined);
+  const listed = f.refresh({inventoryOnly:true});
   assert.equal(listed.state, 'no_selection'); assert.equal(listed.availableCount, 1159);
   assert.deepEqual(listed.accounts, []); assert.equal(listed.nextCursor, null);
   assert.deepEqual(f.state().detailIds, []); assert.deepEqual(f.calls.http, ['/accounts']);
@@ -392,14 +401,14 @@ test('only selected senders are returned, counted and fetched while the full inv
   const f = fixture({ monitoringIds: ['2', '4'], accounts: [account(1, { total_sent: 999999, error_text: 'Unselected failure' }), account(2), account(3), account(4)] });
   f.configure(); const result = f.refresh();
   assert.deepEqual(result.accounts.map(item => item.id), ['2', '4']);
-  assert.deepEqual(f.calls.http, ['/accounts', '/accounts/2', '/accounts/4']);
-  assert.equal(result.state, 'ready'); assert.equal(result.availableCount, 4);
+  assert.deepEqual(f.calls.http, ['/accounts/2', '/accounts/4']);
+  assert.equal(result.state, 'ready'); assert.equal(result.availableCount, 2);
   assert.equal(result.monitoring.selectedCount, 2); assert.equal(result.totals.accounts, 2);
   assert.equal(result.totals.sentTotal, 60); assert.equal(result.totals.sentToday, 6);
   assert.equal(result.totals.dailyLimit, 200); assert.equal(result.totals.accountsWithErrors, 0);
-  assert.equal(result.countersScope, 'selected_accounts'); assert.equal(f.state().accounts.length, 4);
+  assert.equal(result.countersScope, 'selected_accounts'); assert.equal(f.state().accounts.length, 2);
   const requests = f.calls.http.length, picker = plain(f.c.getProjectInfrastructureSelection_({}));
-  assert.equal(picker.accounts.length, 4); assert.equal(f.calls.http.length, requests);
+  assert.equal(picker.accounts.length, 2); assert.equal(f.calls.http.length, requests);
   assert.equal(f.get().accounts.length, 2); assert.equal(f.calls.http.length, requests);
 });
 
@@ -417,10 +426,10 @@ test('explicit inventory-only refresh never fetches sender details and leaves a 
 
 test('legacy full-inventory caches do not become an implicit monitoring selection or expose old cursors', () => {
   const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)) });
-  f.configure(); const legacyCursor = f.refresh().nextCursor;
+  f.configure(); const legacyCursor = f.refresh({inventoryOnly:true}).nextCursor;
   delete f.state().detailIds; delete f.state().monitoringSignature; f.select(null);
   const requests = f.calls.http.length, empty = f.get();
-  assert.equal(empty.state, 'no_selection'); assert.equal(empty.availableCount, 7);
+  assert.equal(empty.state, 'no_selection'); assert.equal(empty.availableCount, null);
   assert.deepEqual(empty.accounts, []); assert.equal(empty.nextCursor, null);
   assert.deepEqual(empty.detailProgress, { completed: 0, total: 0 }); assert.equal(f.calls.http.length, requests);
   assert.throws(() => f.refresh({ cursor: legacyCursor }), /COLDY_INFRA_CURSOR_STALE/);
@@ -429,7 +438,7 @@ test('legacy full-inventory caches do not become an implicit monitoring selectio
   assert.deepEqual(selected.accounts.map(item => item.id), ['2']); assert.equal(selected.totals.sentTotal, 20);
   assert.equal(selected.nextCursor, null); assert.deepEqual(selected.detailProgress, { completed: 0, total: 1 });
   assert.equal(f.calls.http.length, requests);
-  f.refresh(); assert.deepEqual(f.calls.http.slice(requests), ['/accounts', '/accounts/2']);
+  f.refresh(); assert.deepEqual(f.calls.http.slice(requests), ['/accounts/2']);
 });
 
 test('a monitoring change during inventory or detail reads stops the old job without persistence or later fanout', () => {
@@ -437,8 +446,8 @@ test('a monitoring change during inventory or detail reads stops the old job wit
     const f = fixture({ monitoringIds: ['2', '4'], accounts: [account(1), account(2), account(3), account(4)],
       transport: ({ path, defaultResponse, f }) => { const result = defaultResponse(); if (path === changeAt) f.select(['4']); return result; } });
     f.configure();
-    assert.throws(() => f.refresh(), /COLDY_MONITORING_CHANGED/);
-    assert.deepEqual(f.calls.http, changeAt === '/accounts' ? ['/accounts'] : ['/accounts', '/accounts/2']);
+    assert.throws(() => f.refresh(changeAt==='/accounts'?{inventoryOnly:true}:{}), /COLDY_MONITORING_CHANGED/);
+    assert.deepEqual(f.calls.http, changeAt === '/accounts' ? ['/accounts'] : ['/accounts/2']);
     assert.equal(f.calls.saves.length, 0); assert.equal(f.state(), undefined);
     assert.deepEqual(f.get().monitoring.accountIds, ['4']);
   }
@@ -446,14 +455,14 @@ test('a monitoring change during inventory or detail reads stops the old job wit
 
 test('saved and acknowledged cursors become stale after a teammate changes the monitoring selection', () => {
   const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 25 }, (_, index) => account(index + 1)) });
-  f.configure(); const first = f.refresh(); f.refresh({ cursor: first.nextCursor });
+  f.configure(); f.refresh({inventoryOnly:true});const first = f.refresh(); f.refresh({ cursor: first.nextCursor });
   f.select(['25']); const requests = f.calls.http.length, current = f.get();
   assert.deepEqual(current.accounts.map(item => item.id), ['25']); assert.equal(current.totals.sentTotal, 250);
   assert.equal(current.nextCursor, null); assert.deepEqual(current.detailProgress, { completed: 0, total: 1 });
   assert.throws(() => f.refresh({ cursor: first.nextCursor }), /COLDY_INFRA_CURSOR_STALE/);
   assert.equal(f.calls.http.length, requests);
   const fresh = f.refresh(); assert.equal(fresh.state, 'ready');
-  assert.deepEqual(f.calls.http.slice(requests), ['/accounts', '/accounts/25']);
+  assert.deepEqual(f.calls.http.slice(requests), ['/accounts/25']);
 });
 
 test('selection changes before the final registry lock cannot persist an old monitoring result', () => {
@@ -462,7 +471,7 @@ test('selection changes before the final registry lock cannot persist an old mon
     beforeLock: current => { if (armed) { armed = false; current.select(['4']); } } });
   f.configure(); armed = true;
   assert.throws(() => f.refresh(), /COLDY_MONITORING_CHANGED/);
-  assert.deepEqual(f.calls.http, ['/accounts', '/accounts/2', '/accounts/4']); assert.equal(f.calls.saves.length, 0);
+  assert.deepEqual(f.calls.http, ['/accounts/2', '/accounts/4']); assert.equal(f.calls.saves.length, 0);
   assert.deepEqual(f.get().monitoring.accountIds, ['4']);
 });
 
@@ -471,7 +480,7 @@ test('a failed fresh inventory after changing selection preserves only the curre
   const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)),
     transport: ({ path, defaultResponse }) => { if (path === '/accounts' && unavailable) throw new Error('Network ' + KEY); return defaultResponse(); } });
   f.configure(); const old = f.refresh(); f.select(['2']); unavailable = true;
-  const failed = f.refresh();
+  const failed = f.refresh({inventoryOnly:true});
   assert.equal(failed.error.code, 'COLDY_NETWORK'); assert.equal(failed.syncPaused, true);
   assert.deepEqual(failed.accounts.map(item => item.id), ['2']); assert.deepEqual(f.state().detailIds, ['2']);
   assert.deepEqual(failed.detailProgress, { completed: 0, total: 1 }); assert.notEqual(failed.nextCursor, old.nextCursor);
@@ -523,16 +532,16 @@ test('first synchronization exposes the complete inventory and a finite first de
   assert.equal(result.connected, true);
   assert.deepEqual(result.detailProgress, { completed: 5, total: 7 });
   assert.match(result.nextCursor, /^[A-Za-z0-9_-]{43}$/);
-  assert.deepEqual(f.calls.http, ['/accounts', '/accounts/1', '/accounts/2', '/accounts/3', '/accounts/4', '/accounts/5']);
+  assert.deepEqual(f.calls.http, ['/accounts/1', '/accounts/2', '/accounts/3', '/accounts/4', '/accounts/5']);
   assert.equal(result.accounts[0].status, 'Connected');
   assert.equal(result.accounts[5].status, null);
   assert.equal(result.accounts[5].stale, true);
-  assert.equal(result.totals.sentTotal, 280);
-  assert.equal(result.totals.sentToday, 28);
+  assert.equal(result.totals.sentTotal, null);
+  assert.equal(result.totals.sentToday, null);
   assert.equal(result.totals.errorCount, null);
   assert.equal(result.accounts[0].warmup.dailyLimit, 20);
   assert.equal(result.accounts[0].warmup.repliesToday, null);
-  assert.equal(result.accounts[6].warmup.startedAt, '2026-11-01');
+  assert.equal(result.accounts[6].warmup.startedAt, null);
 });
 
 test('continuation completes remaining details without another inventory request and safely replays an acknowledged cursor', () => {
@@ -543,15 +552,15 @@ test('continuation completes remaining details without another inventory request
   assert.equal(final.state, 'ready');
   assert.equal(final.nextCursor, null);
   assert.deepEqual(final.detailProgress, { completed: 7, total: 7 });
-  assert.equal(f.calls.http.filter(path => path === '/accounts').length, 1);
-  assert.equal(f.calls.http.length, 8);
+  assert.equal(f.calls.http.filter(path => path === '/accounts').length, 0);
+  assert.equal(f.calls.http.length, 7);
   const before = f.calls.http.length;
   assert.deepEqual(f.refresh({ cursor }), final);
   assert.equal(f.calls.http.length, before);
   assert.throws(() => f.refresh({ cursor: 'A'.repeat(43) }), /COLDY_INFRA_CURSOR_STALE/);
 });
 
-test('production batches synchronize all 1159 senders with one inventory read and bounded continuations', () => {
+test('production batches synchronize all 1159 senders without a directory read and bounded continuations', () => {
   const f = fixture({ accounts: Array.from({ length: 1159 }, (_, index) => account(index + 1)) });
   assert.equal(f.c.PROJECT_INFRASTRUCTURE.batch, 20);
   assert.equal(f.c.PROJECT_INFRASTRUCTURE.maxAccounts, 5000);
@@ -559,7 +568,7 @@ test('production batches synchronize all 1159 senders with one inventory read an
   f.configure(); let result = f.refresh(), batches = 1;
   assert.equal(result.accounts.length, 1159); assert.equal(result.totals.accounts, 1159);
   assert.deepEqual(result.detailProgress, { completed: 20, total: 1159 });
-  assert.equal(f.calls.http.length, 21);
+  assert.equal(f.calls.http.length, 20);
   const firstCursor = result.nextCursor;
   while (result.nextCursor) {
     const previous = result.detailProgress.completed, requests = f.calls.http.length;
@@ -572,7 +581,7 @@ test('production batches synchronize all 1159 senders with one inventory read an
   assert.equal(batches, 58); assert.equal(result.state, 'ready');
   assert.deepEqual(result.detailProgress, { completed: 1159, total: 1159 });
   assert.equal(result.accounts[1158].status, 'Connected');
-  assert.equal(f.calls.http.filter(path => path === '/accounts').length, 1);
+  assert.equal(f.calls.http.filter(path => path === '/accounts').length, 0);
   const details = f.calls.http.filter(path => path.startsWith('/accounts/'));
   assert.equal(details.length, 1159); assert.equal(new Set(details).size, 1159);
   assert.deepEqual(details, Array.from({ length: 1159 }, (_, index) => '/accounts/' + (index + 1)));
@@ -583,15 +592,15 @@ test('production batches synchronize all 1159 senders with one inventory read an
 
 test('the 5000-sender bound accepts a complete inventory and refuses 5001 without replacing it', () => {
   const f = fixture({ accounts: Array.from({ length: 5000 }, (_, index) => account(index + 1)) });
-  f.configure(); const good = f.refresh();
+  f.configure(); const good = f.refresh({inventoryOnly:true});
   assert.equal(good.accounts.length, 5000); assert.equal(good.totals.accounts, 5000);
-  assert.equal(good.accounts[4999].id, '5000'); assert.equal(good.detailProgress.completed, 20);
+  assert.equal(good.accounts[4999].id, '5000'); assert.equal(good.detailProgress.completed, 0);
   const requests = f.calls.http.length;
   f.tick(1); f.setAccounts(Array.from({ length: 5001 }, (_, index) => account(index + 1)));
-  const refused = f.refresh();
+  const refused = f.refresh({inventoryOnly:true});
   assert.equal(refused.error.code, 'COLDY_INFRA_INCOMPLETE');
   assert.equal(refused.accounts.length, 5000); assert.equal(refused.lastSyncAt, good.lastSyncAt);
-  assert.equal(refused.nextCursor, good.nextCursor); assert.equal(refused.detailProgress.completed, 20);
+  assert.equal(refused.nextCursor, good.nextCursor); assert.equal(refused.detailProgress.completed, 0);
   assert.equal(f.calls.http.length, requests + 1, 'No detail reads occur for a refused inventory');
 });
 
@@ -612,7 +621,7 @@ test('detail deadlines reset on continuation and a slow first request still adva
       assert.deepEqual(f.refresh({ cursor }), result); assert.equal(f.calls.http.length, requests);
     }
     assert.equal(result.state, 'ready'); assert.equal(result.detailProgress.completed, 5);
-    assert.deepEqual(f.calls.http, ['/accounts', '/accounts/1', '/accounts/2', '/accounts/3', '/accounts/4', '/accounts/5']);
+    assert.deepEqual(f.calls.http, ['/accounts/1', '/accounts/2', '/accounts/3', '/accounts/4', '/accounts/5']);
   }
 });
 
@@ -642,7 +651,7 @@ test('deadline progress includes a missing sender while rate limits keep their c
   assert.equal(final.detailProgress.completed, 3); assert.equal(final.nextCursor, null);
   assert.equal(final.error, null); assert.equal(final.syncPaused, false);
   assert.equal(final.state, 'partial', 'The missing first sender remains honestly stale');
-  assert.deepEqual(f.calls.http, ['/accounts', '/accounts/1', '/accounts/2', '/accounts/3', '/accounts/3']);
+  assert.deepEqual(f.calls.http, ['/accounts/1', '/accounts/2', '/accounts/3', '/accounts/3']);
 });
 
 test('cached reads never access Coldy or rewrite state, including aged data', () => {
@@ -694,9 +703,9 @@ test('empty confirmed inventory has zero account counters, while an unavailable 
   const f = fixture({ accounts: [] }); f.configure(); const empty = f.refresh();
   assert.equal(empty.state, 'no_selection'); assert.equal(empty.totals.accounts, 0);
   assert.equal(empty.totals.sentTotal, 0); assert.equal(empty.totals.errorCount, null);
-  assert.deepEqual(f.calls.http, ['/accounts']);
+  assert.deepEqual(f.calls.http, []);
   const bad = fixture({ transport: ({ response }) => response({ message: [KEY] }, 500) }); bad.configure();
-  const failed = bad.refresh(); assert.equal(failed.state, 'error');
+  const failed = bad.refresh({inventoryOnly:true}); assert.equal(failed.state, 'error');
   assert.equal(failed.totals.accounts, null); assert.equal(failed.totals.sentTotal, null);
   assert.ok(!JSON.stringify(failed).includes(KEY));
 });
@@ -705,7 +714,7 @@ test('inventory errors retain last-good data and its successful timestamp with a
   let failing = false;
   const f = fixture({ transport: ({ path, response, defaultResponse }) => failing && path === '/accounts' ? response({ error: KEY }, 500) : defaultResponse() });
   f.configure(); const good = f.refresh(); f.tick(1000); failing = true;
-  const bad = f.refresh();
+  const bad = f.refresh({inventoryOnly:true});
   assert.equal(bad.state, 'partial'); assert.equal(bad.stale, true);
   assert.equal(bad.lastSyncAt, good.lastSyncAt); assert.notEqual(bad.updatedAt, good.updatedAt);
   assert.deepEqual(bad.accounts.map(item => [item.id, item.email, item.sentTotal]), good.accounts.map(item => [item.id, item.email, item.sentTotal]));
@@ -739,7 +748,7 @@ test('rate limits are enforced server-side for initial refresh and cursor refres
 test('an inventory 429 also blocks repeated initial refreshes until Retry-After', () => {
   let limited = true;
   const f = fixture({ transport: ({ path, response, defaultResponse }) => path === '/accounts' && limited ? response({}, 429, { 'retry-after': '20' }) : defaultResponse() });
-  f.configure(); const first = f.refresh(); assert.equal(first.state, 'error'); assert.equal(first.retryAfterMs, 20000);
+  f.configure(); const first = f.refresh({inventoryOnly:true}); assert.equal(first.state, 'error'); assert.equal(first.retryAfterMs, 20000);
   f.refresh(); f.get(); assert.equal(f.calls.http.length, 1);
   f.tick(20001); limited = false; assert.equal(f.refresh().state, 'ready');
 });
@@ -749,7 +758,7 @@ test('a changed account identity is not attached to the listed sender', () => {
   f.configure(); const result = f.refresh();
   assert.equal(result.state, 'partial'); assert.equal(result.nextCursor, null);
   assert.equal(result.accounts[0].email, 'sender1@example.test');
-  assert.equal(result.accounts[0].sentTotal, 10);
+  assert.equal(result.accounts[0].sentTotal, null);
   assert.equal(result.accounts[0].status, null);
   assert.equal(result.accounts[0].syncError.code, 'COLDY_INFRA_ACCOUNT_CHANGED');
   assert.equal(result.syncPaused, false, 'One account discrepancy does not block later accounts');
@@ -760,7 +769,7 @@ test('provider authentication and owner-consent failures stay explicit without l
   const f = fixture({ transport: ({ path, response, defaultResponse }) => failAuth && path === '/accounts' ? response({ error: KEY }, 401) : defaultResponse() });
   f.configure(); const first = f.refresh(); assert.equal(first.connected, true);
   f.tick(1); failAuth = true; const lastRequests = f.calls.http.length;
-  const failed = f.refresh();
+  const failed = f.refresh({inventoryOnly:true});
   assert.equal(failed.connected, false);
   assert.equal(failed.syncPaused, true);
   assert.equal(failed.error.code, 'COLDY_AUTH');
@@ -779,7 +788,7 @@ test('an initial failure pauses old pending details instead of inviting an autom
   const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)),
     transport: ({ path, defaultResponse }) => { if (failing && path === '/accounts') throw new Error('Network ' + KEY); return defaultResponse(); } });
   f.configure(); const first = f.refresh(); assert.ok(first.nextCursor);
-  f.tick(1); failing = true; const failed = f.refresh();
+  f.tick(1); failing = true; const failed = f.refresh({inventoryOnly:true});
   assert.equal(failed.nextCursor, first.nextCursor);
   assert.equal(failed.syncPaused, true); assert.equal(failed.error.code, 'COLDY_NETWORK');
   assert.equal(failed.detailProgress.completed, 5);
@@ -798,7 +807,7 @@ test('a missing account stays visible as stale until a complete later inventory 
   const partial = f.refresh();
   assert.equal(partial.accounts[0].status, 'Connected'); assert.equal(partial.accounts[0].stale, true);
   assert.equal(partial.accounts[0].syncError.code, 'COLDY_NOT_FOUND');
-  f.setAccounts([]); const removed = f.refresh(); assert.equal(removed.accounts.length, 0); assert.equal(removed.state, 'partial');
+  f.setAccounts([]); const removed = f.refresh({inventoryOnly:true}); assert.equal(removed.accounts.length, 0); assert.equal(removed.state, 'partial');
   assert.deepEqual(removed.monitoring.accountIds, ['1']); assert.deepEqual(removed.monitoring.missingAccountIds, ['1']);
   assert.equal(removed.totals.accounts, 1); assert.equal(removed.totals.sentTotal, null); assert.ok(removed.warnings.length);
 });
@@ -811,7 +820,7 @@ test('malformed or incomplete inventory cannot replace the last complete sender 
     let bad = false;
     const f = fixture({ transport: ({ path, response, defaultResponse }) => path === '/accounts' && bad ? response(malformed) : defaultResponse() });
     f.configure(); const original = f.refresh(); bad = true;
-    const result = f.refresh();
+    const result = f.refresh({inventoryOnly:true});
     assert.equal(result.accounts.length, 1);
     assert.equal(result.accounts[0].id, original.accounts[0].id);
     assert.equal(result.lastSyncAt, original.lastSyncAt);
@@ -865,11 +874,11 @@ test('older initial inventory responses cannot overwrite a newer completed synch
   const f = fixture({ monitoringIds: ['1', '2', '3'], accounts: [account(1)], transport: ({ path, defaultResponse, f }) => {
     const old = defaultResponse();
     if (path === '/accounts' && !nested) {
-      nested = true; f.tick(1); f.setAccounts([account(2), account(3)]); f.refresh();
+      nested = true; f.tick(1); f.setAccounts([account(2), account(3)]); f.refresh({inventoryOnly:true});
     }
     return old;
   } });
-  f.configure(); const result = f.refresh();
+  f.configure(); const result = f.refresh({inventoryOnly:true});
   assert.deepEqual(result.accounts.map(item => item.id), ['2', '3']);
   assert.deepEqual(f.get().accounts.map(item => item.id), ['2', '3']);
   assert.equal(f.calls.saves.length, 1);
@@ -908,4 +917,46 @@ test('infrastructure parameters are strict and cannot carry arbitrary routes, ac
   for (const input of [null, [], { id: 1 }, { url: 'https://outside.example' }, { cursor: '' }, { cursor: 1 }, { cursor: '../other' }]) assert.throws(() => f.c.refreshProjectInfrastructure_(input), /INVALID_REQUEST/);
   for (const input of [null, [], { refresh: true }, { cursor: 'A'.repeat(43) }]) assert.throws(() => f.c.getProjectInfrastructure_(input), /INVALID_REQUEST/);
   assert.deepEqual(f.calls.http, []); assert.deepEqual(f.calls.saves, []);
+});
+test('targeted picker does not enumerate or store the directory; explicit text search stores only matches', () => {
+  const org = Array.from({length:100},(_,i)=>account(i+1));
+  const f = fixture({accounts:org,monitoringIds:null});
+  f.configure();
+  assert.deepEqual(plain(f.c.getProjectInfrastructureSelection_({})).accounts,[]);
+  assert.deepEqual(f.calls.http,[]);
+  const one = plain(f.c.getProjectInfrastructureSelection_({query:'12'}));
+  assert.deepEqual(one.accounts.map(a=>a.id),['12']);
+  assert.deepEqual(f.calls.http,['/accounts/12']);
+  const same = plain(f.c.getProjectInfrastructureSelection_({query:'sender12@example.test'}));
+  assert.deepEqual(same.accounts.map(a=>a.id),['12']);
+  assert.deepEqual(f.calls.http,['/accounts/12']);
+  const two = plain(f.c.getProjectInfrastructureSelection_({query:'sender95@example.test'}));
+  assert.deepEqual(two.accounts.map(a=>a.id),['95']);
+  assert.deepEqual(f.calls.http,['/accounts/12','/accounts']);
+  assert.equal(f.state(),undefined);
+  assert.ok(!JSON.stringify([...f.cache.values()]).includes('sender50@example.test'));
+  f.c.saveProjectInfrastructureSelection_({accountIds:['12','95'],expectedRevision:0,scopeToken:one.selection.scopeToken,requestId:'select-found-choices'});
+  const checked = f.refresh();
+  assert.deepEqual(checked.accounts.map(a=>a.id),['12','95']);
+  assert.deepEqual(f.calls.http.slice(2),['/accounts/12','/accounts/95']);
+});
+
+test('two tabs share a recent monitored snapshot and partial cursor while manual sync can refresh immediately', () => {
+  const f=capacityFixture([[1,[ACTIVE_ONE]]]);
+  const first=f.refresh({includeCapacity:true,live:true}), n=f.calls.http.length;
+  assert.ok(first.nextCursor);
+  assert.equal(f.refresh({includeCapacity:true,live:true}).nextCursor,first.nextCursor);assert.equal(f.calls.http.length,n);
+  let result=first;while(result.nextCursor)result=f.refresh({cursor:result.nextCursor});
+  const after=f.calls.http.length;
+  assert.deepEqual(f.refresh({includeCapacity:true,live:true}),result);
+  assert.equal(f.calls.http.length,after);
+  f.refresh({includeCapacity:true});assert.ok(f.calls.http.length>after);
+});
+
+test('empty monitoring never asserts provider verification or downloads either directory',()=>{
+  const f=fixture({monitoringIds:null});f.configure();
+  const stamp=f.properties.get(f.c.COLDY.connectionProperty);
+  assert.equal(f.refresh().state,'no_selection');assert.equal(f.refresh({includeCapacity:true}).state,'no_selection');
+  assert.deepEqual(f.calls.http,[]);assert.deepEqual(f.calls.saves,[]);
+  assert.equal(f.properties.get(f.c.COLDY.connectionProperty),stamp);
 });

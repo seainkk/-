@@ -17,6 +17,11 @@ function projectMonitoringRead_(context, settings) {
       typeof state.configured !== 'boolean' || !Array.isArray(state.receipts) || state.receipts.length > PROJECT_MONITORING.maxReceipts ||
       settings.key && JSON.stringify(state).indexOf(settings.key) !== -1) fail_('COLDY_STORAGE', 'Сохранённый выбор ящиков требует проверки.');
   var ids = projectMonitoringIds_(state.accountIds, 'COLDY_STORAGE');
+  if (state.accounts !== undefined && (!Array.isArray(state.accounts) || state.accounts.length !== ids.length ||
+      state.accounts.some(function (item,index) { return !item || item.id !== ids[index] || typeof item.email !== 'string' ||
+        !coldyEmail_(item.email) || typeof item.name !== 'string' || item.provider !== null && typeof item.provider !== 'string'; }))) {
+    fail_('COLDY_STORAGE','Сохранённые сведения о выбранных ящиках требуют проверки.');
+  }
   if (JSON.stringify(ids) !== JSON.stringify(state.accountIds) ||
       !state.configured && (state.revision !== 0 || ids.length || state.receipts.length) ||
       state.configured && state.revision < 1) fail_('COLDY_STORAGE', 'Сохранённый выбор ящиков требует проверки.');
@@ -42,15 +47,53 @@ function projectMonitoringSignature_(context, state) {
     state.revision, state.configured, state.accountIds]));
 }
 
-/** Cached picker inventory only; opening the selection does not fan out to Coldy. */
+/** The picker opens on the selected mailboxes. Provider discovery requires an explicit search. */
 function getProjectInfrastructureSelection_(request) {
   return api_(function () {
-    coldyInput_(request === undefined ? {} : request, []);
+    var input = coldyInput_(request === undefined ? {} : request, ['query']);
+    if (input.query !== undefined && (typeof input.query !== 'string' || !input.query.trim() || input.query.length > 254)) fail_('INVALID_REQUEST', 'Введите ID, название или email ящика.');
     var context = authorize_(), settings = coldySettings_(context), state = projectMonitoringRead_(context, settings);
-    var inventory = projectInfraRead_(context, settings), accounts = inventory && inventory.inventoryAt ? inventory.accounts : [];
+    var inventory = state.accountIds.length || input.query !== undefined ? projectInfraRead_(context, settings) : null, selected = new Set(state.accountIds);
+    var source = inventory && inventory.inventoryAt ? inventory.accounts.filter(function (item) { return !!item.email; }) : [];
+    var chosen = new Map((state.accounts || []).map(function (item) { return [item.id,item]; }));
+    source.forEach(function (item) { if (selected.has(item.id)) chosen.set(item.id,item); });
+    var accounts = Array.from(chosen.values());
+    function choice(item) { return { id:item.id, email:projectInfraEmail_(item.email),
+      name:projectInfraText_(item.name, settings.key, 500), provider:projectInfraNullableText_(item.provider, settings.key, 200) }; }
+    var matches = [];
+    if (input.query !== undefined && settings.configured) {
+      var query = input.query.trim().toLowerCase(), signature = projectMonitoringSignature_(context,state);
+      projectInfraMonitoringCurrent_(context,settings.credentialHash,signature);
+      if (/^[1-9]\d*$/.test(query)) {
+        var id = projectInfraId_(query);
+        try {
+          var detail = coldyApi_(context,'GET','/accounts/' + id);
+          matches = [projectInfraDetail_({id:id,email:null},detail,settings.key,true)];
+        } catch (error) { if (error.registryCode !== 'COLDY_NOT_FOUND') throw error; }
+      } else {
+        if (query.length < 3) fail_('INVALID_REQUEST','Для поиска по названию или email введите минимум три символа.');
+        function matching(item) { return [item.name,item.email].some(function (text) { return String(text || '').toLowerCase().indexOf(query) >= 0; }); }
+        var existingChoices = coldyLoad_(context,'mailboxchoices',projectMonitoringOwner_(settings.credentialHash));
+        var known = new Map();
+        if (existingChoices && Array.isArray(existingChoices.accounts)) existingChoices.accounts.forEach(function (item) { known.set(item.id,item); });
+        source.forEach(function (item) { known.set(item.id,item); });
+        matches = Array.from(known.values()).filter(matching);
+        if (!matches.length) matches = projectInfraInventory_(coldyApi_(context,'GET','/accounts'),settings.key).filter(matching);
+      }
+      matches = matches.slice(0,50).map(choice);
+      if (matches.length) locked_(function () {
+        var fresh = projectInfraMonitoringCurrent_(context,settings.credentialHash,signature);
+        var owner = projectMonitoringOwner_(settings.credentialHash), previous = coldyLoad_(fresh,'mailboxchoices',owner);
+        var found = new Map(previous && Array.isArray(previous.accounts) ? previous.accounts.map(function (account) { return [account.id,account]; }) : []);
+        matches.forEach(function (item) { found.delete(item.id); found.set(item.id,item); });
+        coldySave_(fresh,'mailboxchoices',owner,{accounts:Array.from(found.values()).slice(-PROJECT_MONITORING.maxAccounts)});
+      });
+      projectInfraMonitoringCurrent_(context,settings.credentialHash,signature);
+      var ids = new Set(matches.map(function (item) { return item.id; }));
+      accounts = accounts.filter(function (item) { return !ids.has(item.id); }).concat(matches);
+    }
     var result = { configured: settings.configured, selection: projectMonitoringPublic_(context, state),
-      accounts: accounts.map(function (item) { return { id: item.id, email: projectInfraEmail_(item.email),
-        name: projectInfraText_(item.name, settings.key, 500), provider: projectInfraNullableText_(item.provider, settings.key, 200) }; }),
+      accounts: accounts.map(choice),
       availableCount: accounts.length, inventoryAt: inventory && inventory.inventoryAt || null };
     projectInfraCurrent_(context, settings.credentialHash);
     return result;
@@ -80,10 +123,19 @@ function saveProjectInfrastructureSelection_(request) {
       if (input.expectedRevision !== state.revision) fail_('COLDY_MONITORING_STALE', 'Выбор ящиков уже изменён коллегой. Обновите список и проверьте отметки.');
       if (state.revision >= Number.MAX_SAFE_INTEGER - 1) fail_('COLDY_STORAGE', 'Версия выбора ящиков требует проверки.');
       var inventory = projectInfraRead_(fresh, currentSettings), available = Object.create(null);
-      if (inventory && inventory.inventoryAt) inventory.accounts.forEach(function (item) { available[item.id] = true; });
+      if (inventory && inventory.inventoryAt) inventory.accounts.forEach(function (item) {
+        if (item.email && !(item.syncError && item.syncError.code === 'COLDY_NOT_FOUND')) available[item.id] = item;
+      });
+      if (accountIds.some(function (id) { return !available[id]; })) {
+        var choices = coldyLoad_(fresh,'mailboxchoices',projectMonitoringOwner_(currentSettings.credentialHash));
+        if (choices && Array.isArray(choices.accounts)) choices.accounts.forEach(function (item) { if (!available[item.id]) available[item.id] = item; });
+        (state.accounts || []).forEach(function (item) { if (!available[item.id]) available[item.id] = item; });
+      }
       if (accountIds.some(function (id) { return !available[id]; })) fail_('COLDY_MONITORING_ACCOUNT_MISSING', 'Один из выбранных ящиков недоступен. Обновите список Coldy.');
       var next = { version: PROJECT_MONITORING.version, rootId: fresh.rootId, credentialHash: currentSettings.credentialHash,
         revision: state.revision + 1, accountIds: accountIds, configured: true,
+        accounts: accountIds.map(function (id) { var item = available[id]; return { id:id,email:projectInfraEmail_(item.email),
+          name:projectInfraText_(item.name,settings.key,500),provider:projectInfraNullableText_(item.provider,settings.key,200) }; }),
         receipts: state.receipts.concat([{ requestId: input.requestId, requestHash: requestHash, revision: state.revision + 1 }]).slice(-PROJECT_MONITORING.maxReceipts) };
       projectInfraCurrent_(fresh, currentSettings.credentialHash);
       coldySave_(fresh, 'monitoring', projectMonitoringOwner_(currentSettings.credentialHash), next);

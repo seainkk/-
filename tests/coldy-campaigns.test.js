@@ -31,7 +31,8 @@ function fixture(options = {}) {
     SpreadsheetApp: { openById: id => { if (!books.has(id)) throw new Error('missing workbook'); return books.get(id); } },
   });
   for (const filename of ['Config.gs', 'Code.gs', 'SegmentActions.gs', 'Promouser.gs', 'ColdyCampaigns.gs']) vm.runInContext(readFileSync(new URL('../src/' + filename, import.meta.url), 'utf8'), context, { filename });
-  context.authorize_ = () => { if (!state.access) context.fail_('LINK_ACCESS_REQUIRED', 'link revoked'); return { rootId: state.rootId, properties: {} }; };
+  const properties = new Map();
+  context.authorize_ = () => { if (!state.access) context.fail_('LINK_ACCESS_REQUIRED', 'link revoked'); return { rootId: state.rootId, properties: {getProperty:key=>properties.get(key),setProperty:(key,value)=>properties.set(key,value)} }; };
   context.digest_ = digest;
   const validationCache = options.validationCache || {}; context.pvCache_ = () => validationCache; context.pvCacheRead_ = value => value;
   context.locked_ = fn => { if (locked) throw new Error('nested lock'); locked = true; try { return fn(); } finally { locked = false; } };
@@ -102,6 +103,17 @@ function fixture(options = {}) {
   return { context, calls, state, storage, campaigns, leads, files, books, companySheet, lprSheet, bind, preview, start, advance };
 }
 const posts = f => f.calls.api.filter(call => call.method === 'POST');
+
+test('segment mailing settings return only saved local campaigns without loading the Coldy directory', () => {
+  const f = fixture();
+  f.context.listColdyCampaigns_ = () => assert.fail('Opening a segment must not enumerate the workspace');
+  assert.deepEqual(plain(f.context.getColdyBindings_({segmentId: SEGMENT}).campaigns), []);
+  const own = f.bind();
+  const before = f.calls.api.length;
+  assert.deepEqual(plain(f.context.getColdyBindings_({segmentId: SEGMENT}).campaigns),
+    [{id: own.campaignId, name: own.campaignName, status: own.campaignStatus}]);
+  assert.equal(f.calls.api.length, before);
+});
 
 test('recipient import membership blocks an upload after the manual status changes back to new', () => {
   const f=fixture({companies:[valid('in@example.test',{manual:'новый'}),valid('out@example.test',{manual:'новый'})]});
@@ -327,6 +339,43 @@ test('provider failures do not turn analytics into fake zeroes or leak old succe
   const f = fixture({ api: ({ path, context }) => { if (failSummary && path.startsWith('/analytics/')) context.fail_('COLDY_UNAVAILABLE', 'provider unavailable'); } });
   f.bind(); f.context.refreshColdyMailings_({ segmentId: SEGMENT }); failSummary = true;
   const result = plain(f.context.refreshColdyMailings_({ segmentId: SEGMENT })); assert.equal(result.state, 'partial'); assert.equal(result.totals.leads, 2); assert.equal(result.totals.sent, 15); assert.equal(result.campaigns[0].stale, true); assert.equal(result.freshness, 'stale');
+});
+
+test('two monitoring tabs reuse an active refresh and its recently saved metrics', () => {
+  let overlapping = false, nested;
+  const f = fixture({ api: ({ path }) => {
+    if (overlapping && path.startsWith('/analytics/')) {
+      overlapping = false;
+      nested = f.context.refreshColdyMailings_({ segmentId: SEGMENT, monitor: true });
+    }
+  } });
+  f.bind();
+  const start = f.calls.api.length;
+  overlapping = true;
+  const result = f.context.refreshColdyMailings_({ segmentId: SEGMENT, monitor: true });
+  assert.equal(nested.refreshedCampaigns, 0);
+  assert.equal(result.refreshedCampaigns, 1);
+  assert.equal(f.context.refreshColdyMailings_({ segmentId: SEGMENT, monitor: true }).totals.sent, 15);
+  assert.equal(f.calls.api.length - start, 2);
+});
+
+test('analytics Retry-After pauses automatic and manual provider reads for the same connection', () => {
+  let limited = false;
+  const f = fixture({ api: ({ path, context }) => {
+    if (limited && path.startsWith('/analytics/')) {
+      const error = context.registryError_('COLDY_RATE_LIMIT', 'wait');
+      error.retryAfterMs = 180000;
+      throw error;
+    }
+  } });
+  f.bind(); f.context.refreshColdyMailings_({ segmentId: SEGMENT }); limited = true;
+  const paused = f.context.refreshColdyMailings_({ segmentId: SEGMENT });
+  assert.ok(paused.retryAfterMs > 179000); assert.equal(paused.totals.sent, 15);
+  const calls = f.calls.api.length;
+  for (const monitor of [true, false]) {
+    assert.ok(f.context.refreshColdyMailings_({ segmentId: SEGMENT, monitor }).retryAfterMs > 179000);
+    assert.equal(f.calls.api.length, calls);
+  }
 });
 
 test('automation does nothing without explicit autoUpload, works with new-only eligible contacts and never activates campaigns', () => {

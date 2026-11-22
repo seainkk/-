@@ -5,14 +5,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Реестр баз</title>
+  <title>Центр мультиканального аутрича</title>
   <?!= include_('Styles'); ?>
   <?!= include_('GridStyles'); ?>
   <?!= include_('ProjectStyles'); ?>
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><label id="br-project-switch" class="br-project-switch" hidden>Проект<select id="br-project"><option value="numshield">Намшилд</option><option value="neosender">Нео Сендер</option></select></label><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-analytics" type="button" class="br-button" aria-pressed="false">Аналитика</button><button id="br-view-infrastructure" type="button" class="br-button" aria-pressed="false">Инфраструктура</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Coldy</button><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Центр <span>мультиканального аутрича</span></strong></div><label id="br-project-switch" class="br-project-switch" hidden>Проект<select id="br-project"><option value="numshield">Намшилд</option><option value="neosender">Нео Сендер</option></select></label><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-analytics" type="button" class="br-button" aria-pressed="false">Аналитика</button><button id="br-view-infrastructure" type="button" class="br-button" aria-pressed="false">Инфраструктура</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Coldy</button><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
   <div class="br-back-row" id="br-back-row" hidden><button id="br-action-back" class="br-button" type="button">← Назад</button></div>
   <dialog id="br-coldy-dialog" class="br-provider-dialog" aria-labelledby="br-coldy-title">
     <div class="br-import-heading"><h2 id="br-coldy-title">Подключение Coldy</h2><button id="br-coldy-close" type="button" class="br-button" autofocus>Закрыть</button></div>
@@ -66,7 +66,7 @@
   <div id="br-notice" class="br-notice" role="status" aria-live="polite" hidden></div>
   <div id="br-loading" class="br-loading" aria-live="polite" hidden>Загружаем приложение…</div>
   <section id="br-access-panel" class="br-access-panel" aria-labelledby="br-access-title">
-    <h1 id="br-access-title">Открываем реестр…</h1><p id="br-access-message">Проверяем ссылку…</p><button id="br-access-retry" type="button" class="br-button" disabled>Проверить ссылку снова</button>
+    <h1 id="br-access-title">Открываем сервис…</h1><p id="br-access-message">Проверяем ссылку…</p><button id="br-access-retry" type="button" class="br-button" disabled>Проверить ссылку снова</button>
   </section>
   <?!= include_('GridPanel'); ?>
   <div id="br-segment-resume-row" class="br-back-row" hidden><button id="br-segment-resume" type="button" class="br-button">Вернуться к незавершённому запросу сегмента</button></div>
@@ -211,11 +211,13 @@
         <div class="br-coldy-heading"><h2 id="br-coldy-bindings-title">Рассылки Coldy</h2><button id="br-coldy-mailings-refresh" type="button" class="br-button">Обновить данные Coldy</button></div>
         <p id="br-coldy-bindings-message" class="br-muted" role="status" aria-live="polite"></p>
         <form id="br-coldy-binding-form"><fieldset id="br-coldy-binding-fields" class="br-provider-fields" disabled>
-          <label for="br-coldy-campaign">Привязать существующую рассылку<select id="br-coldy-campaign"><option value="">Выберите рассылку</option></select></label>
+          <label for="br-coldy-find-query">Название, ссылка или ID рассылки Coldy<input id="br-coldy-find-query" type="search" autocomplete="off" maxlength="500"></label>
+          <button id="br-coldy-find" type="button" class="br-button">Найти рассылку</button>
+          <label for="br-coldy-campaign">Рассылка<select id="br-coldy-campaign"><option value="">Выберите рассылку</option></select></label>
           <div class="br-coldy-choices"><label class="br-provider-choice"><input id="br-coldy-companies" type="checkbox" checked>Email компаний</label><label class="br-provider-choice"><input id="br-coldy-lpr" type="checkbox">Email ЛПР</label></div>
           <label class="br-provider-choice"><input id="br-coldy-autoupload" type="checkbox">Автоматически добавлять новые валидные email в эту рассылку</label>
           <label class="br-provider-choice"><input id="br-coldy-active-consent" type="checkbox">Разрешаю добавлять контакты в активную рассылку: Coldy может сразу начать отправку писем</label>
-          <p class="br-muted">Загружаются только проверенные валидные адреса без спорной принадлежности. Удалённые и уже загруженные адреса повторно не добавляются. Загрузка в активную рассылку может вызвать отправку писем. Реестр не включает и не запускает кампании.</p>
+          <p class="br-muted">Загружаются только проверенные валидные адреса без спорной принадлежности. Удалённые и уже загруженные адреса повторно не добавляются. Загрузка в активную рассылку может вызвать отправку писем. Запуском кампании управляют в Coldy.</p>
           <button id="br-coldy-binding-save" type="submit" class="br-button">Сохранить привязку</button>
         </fieldset></form>
         <div id="br-coldy-bindings-list" class="br-coldy-bindings-list"></div>

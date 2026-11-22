@@ -241,6 +241,10 @@ def main():
         service = page.locator('#br-mailings-services .br-mailing-service').filter(has_text='Coldy')
         assert service.locator('dd').all_text_contents() == ['0', '—', '—']
         assert not registry_calls('startColdyUpload')
+        assert page.locator('#br-coldy-campaign option').count() == 1
+        assert not registry_calls('getProjectAnalyticsCampaigns')
+        page.locator('#br-coldy-find-query').fill('Черновик')
+        page.locator('#br-coldy-find-query').press('Enter')
         page.locator('#br-coldy-campaign').select_option('campaign-draft')
         page.locator('#br-coldy-companies').check()
         page.locator('#br-coldy-lpr').check()
@@ -285,6 +289,8 @@ def main():
 
         # A working campaign requires a separate saved opt-in. The UI explains
         # that adding contacts can send email; it never starts the campaign.
+        page.locator('#br-coldy-find-query').fill('Рабочая кампания')
+        page.locator('#br-coldy-find').click()
         page.locator('#br-coldy-campaign').select_option('campaign-active')
         page.locator('#br-coldy-companies').check()
         page.locator('#br-coldy-active-consent').check()

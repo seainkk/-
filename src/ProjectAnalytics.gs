@@ -12,8 +12,9 @@ function getProjectAnalytics_(request) {
 /** Existing campaigns annotated with current ownership; no upload or activation is performed. */
 function getProjectAnalyticsCampaigns_(request) {
   return api_(function () {
-    var input = projectAnalyticsInput_(request, ['segmentId', 'refresh']), context = authorize_(), segmentId = id_(input.segmentId);
+    var input = projectAnalyticsInput_(request, ['segmentId', 'refresh', 'query']), context = authorize_(), segmentId = id_(input.segmentId);
     if (input.refresh !== undefined && typeof input.refresh !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный режим обновления списка рассылок.');
+    var query = input.query === undefined ? null : projectAnalyticsSearch_(input.query);
     var scoped = typeof registryProjectScoped_ === 'function' && registryProjectScoped_(), project = scoped ? registryProjectId_() : null;
     if (scoped && registrySegmentProject_(context, segmentId) !== project) fail_('OUTSIDE_SEGMENTS', 'Сегмент недоступен. Обновите список аналитики.');
     var initial = segmentMetadataBinding_(context);
@@ -26,7 +27,32 @@ function getProjectAnalyticsCampaigns_(request) {
     }
     var settings = coldySettings_(context);
     if (!settings.configured) return { state: 'not_configured', segment: segmentFolderResult_(context, selectedFolder), bindings: [], campaigns: [], configured: false, connected: false, generatedAt: null, cached: true };
-    var listed = coldyReadCampaignCatalog_(context, input.refresh === true, settings);
+    if (!query) {
+      // The monitoring screen needs only this segment's saved choices. No account-wide API or directory read.
+      var saved = coldyCampaignRegistry_(context);
+      projectAnalyticsCurrent_(context, { id: source.getId() });
+      if (!segmentDirectParent_(selectedFolder, source.getId()) || selectedFolder.isTrashed() ||
+          (scoped && registrySegmentProject_(context, segmentId) !== project)) fail_('OUTSIDE_SEGMENTS', 'Сегмент больше недоступен.');
+      var currentSettings = coldySettings_(context);
+      if (currentSettings.credentialHash !== settings.credentialHash || saved.credentialHash !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Подключение Coldy изменилось.');
+      var selected = segmentFolderResult_(context, selectedFolder), ids = new Set(), own = saved.bindings.filter(function (binding) {
+        var campaignId = coldyCampaignId_(binding.campaignId);
+        if (ids.has(campaignId)) fail_('COLDY_STORAGE', 'У рассылки найдены противоречащие привязки. Проверьте журнал Coldy.');
+        ids.add(campaignId);
+        return binding.segmentId === segmentId;
+      });
+      var owners = {}; owners[segmentId] = selected;
+      return { state: 'ready', segment: selected, bindings: own.map(coldyCampaignPublicBinding_),
+        campaigns: own.map(function (binding) { return projectAnalyticsCampaign_({ id: binding.campaignId, name: binding.campaignName, status: binding.campaignStatus }, binding, selected, owners, true); }),
+        configured: true, connected: currentSettings.connected === true, generatedAt: null, cached: true };
+    }
+    var listed;
+    if (query.id) listed = { campaigns: [coldyCampaignRead_(context, query.id)], generatedAt: new Date().toISOString(), cached: false };
+    else if (input.refresh === true) listed = coldyReadCampaignCatalog_(context, true, settings);
+    else {
+      var cached = coldyCachedCampaigns_(context, settings);
+      listed = { campaigns: cached ? cached.campaigns : [], generatedAt: cached && cached.generatedAt, cached: true };
+    }
     var refs = Object.create(null), catalog = projectAnalyticsCatalog_(context, refs);
     if (catalog.state !== 'ready' || catalog.source.id !== source.getId()) fail_('SOURCE_CHANGED', 'Папка сегментов изменилась. Обновите аналитику.');
     var bySegment = Object.create(null), byCampaign = Object.create(null);
@@ -52,17 +78,24 @@ function getProjectAnalyticsCampaigns_(request) {
       if (journal.credentialHash !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите список рассылок.');
       return journal;
     });
-    var current = bySegment[segmentId], seen = Object.create(null), campaigns = [];
+    var current = bySegment[segmentId], seen = Object.create(null), campaigns = [], candidates = 0, matchCount = 0;
     (listed.campaigns || []).forEach(function (campaign) {
       var id = coldyCampaignId_(campaign.id);
       if (seen[id]) fail_('COLDY_RESPONSE', 'Coldy вернул повторяющуюся рассылку.');
       seen[id] = true;
       if (scoped && byCampaign[id] && !bySegment[byCampaign[id].segmentId]) return;
+      var name = projectAnalyticsNormalize_(campaign.name);
+      var matches = query.id ? id === query.id : query.terms.every(function (term) { return name.indexOf(term) >= 0; });
+      if (matches) matchCount++;
+      if (!byCampaign[id] || byCampaign[id].segmentId !== segmentId) {
+        if (!matches) return;
+        if (++candidates > 40) return;
+      }
       campaigns.push(projectAnalyticsCampaign_(campaign, byCampaign[id] || null, current, bySegment, true));
     });
     var bindings = registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; });
     bindings.forEach(function (binding) {
-      if (!seen[binding.campaignId]) campaigns.push(projectAnalyticsCampaign_({ id: binding.campaignId, name: binding.campaignName, status: binding.campaignStatus }, binding, current, bySegment, false));
+      if (!seen[binding.campaignId]) campaigns.push(projectAnalyticsCampaign_({ id: binding.campaignId, name: binding.campaignName, status: binding.campaignStatus }, binding, current, bySegment, !!query.id || input.refresh !== true));
     });
     var collator = new Intl.Collator('ru', { numeric: true });
     campaigns.sort(function (a, b) { return collator.compare(a.name, b.name); });
@@ -70,8 +103,21 @@ function getProjectAnalyticsCampaigns_(request) {
     if (settings.credentialHash !== fresh.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите список рассылок.');
     return { state: listed.state || 'ready', segment: current, bindings: bindings.map(coldyCampaignPublicBinding_),
       campaigns: campaigns, configured: true, connected: fresh.connected === true,
-      generatedAt: listed.generatedAt || null, cached: listed.cached === true };
+      generatedAt: listed.generatedAt || null, cached: listed.cached === true, truncated: candidates > 40, matchCount: matchCount };
   });
+}
+
+function projectAnalyticsNormalize_(name) { return String(name || '').toLowerCase().replace(/ё/g, 'е'); }
+
+function projectAnalyticsSearch_(value) {
+  if (typeof value !== 'string' || value.trim().length < 2 || value.length > 500 || /[\u0000-\u001f]/.test(value)) fail_('INVALID_REQUEST', 'Введите минимум два символа названия, ссылку или ID рассылки Coldy.');
+  var query = value.trim(), uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  var direct = query.match(new RegExp('^(' + uuid + ')$', 'i'));
+  if (!direct && /^https?:\/\//i.test(query)) {
+    if (/^https:\/\/(?:[a-z0-9-]+\.)*coldy\.ai\//i.test(query)) direct = query.match(new RegExp('(?:^|[/#?=&])(' + uuid + ')(?=$|[/#?=&])', 'i'));
+    if (!direct) fail_('INVALID_REQUEST', 'Вставьте ссылку Coldy с ID рассылки или скопируйте её UUID.');
+  }
+  return { id: direct ? direct[1].toLowerCase() : null, terms: projectAnalyticsNormalize_(query).split(/\s+/) };
 }
 
 function projectAnalyticsInput_(request, allowed) {

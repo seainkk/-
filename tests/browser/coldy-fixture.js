@@ -59,7 +59,11 @@
       return { state: 'ready', campaigns: copy(state.campaigns), cached: true, generatedAt: '2026-11-19T10:00:00Z' };
     },
     getColdyBindings() {
-      return { bindings: copy(state.bindings), campaigns: copy(state.campaigns), configured: true, connected: true };
+      return { bindings: copy(state.bindings), campaigns: copy(state.campaigns.filter(item=>state.bindings.some(binding=>binding.campaignId===item.id))), configured: true, connected: true };
+    },
+    getProjectAnalyticsCampaigns({query}) {
+      const matches=state.campaigns.filter(item=>item.name.toLowerCase().includes(query.toLowerCase()));
+      return {campaigns:matches.map(item=>({...copy(item),selectable:true,selected:state.bindings.some(binding=>binding.campaignId===item.id)}))};
     },
     saveColdyBinding(p) {
       requestReceipt(p);

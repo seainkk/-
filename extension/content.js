@@ -95,7 +95,7 @@
   });
   const note = element('p', 'note', 'Кнопки пока недоступны. Здесь появятся новые задачи.');
   note.id = 'registry-tasks-placeholder';
-  const registry = element('a', 'registry', 'Открыть реестр баз ↗');
+  const registry = element('a', 'registry', 'Открыть Центр аутрича ↗');
   registry.href = config.registryUrl;
   registry.target = '_blank';
   registry.rel = 'noopener noreferrer';

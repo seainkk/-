@@ -31,7 +31,7 @@ def main():
                 return {state:'complete',processed:3,added:2,updated:1,excluded:2,fileId:'synthetic-workbook',sheetId:12};
               };
               RegistryProject.configure({transport:window.transport,peekSegments:()=>({
-                 state:'ready',loadedAt,segments:[{id:'segment-a',name:'Segment A',previewNames:['Кухни из снимка','Кухни ЛПР из снимка']},{id:'segment-b',name:'Segment B'}]
+                 state:'ready',loadedAt,segments:[{id:'segment-a',name:'Segment A',previewNames:['Кухни из снимка','Кухни ЛПР из снимка']},{id:'segment-b',name:'Segment B',previewNames:['Other campaign']}]
               })});
               RegistryProject.show('analytics',{ready:true,epoch:1});
               void RegistryProject.refresh({opening:true});
@@ -79,6 +79,9 @@ def main():
         page.evaluate("backend.holdMethods=[];release('getProjectAnalyticsCampaigns')")
         expect(page.locator('[data-recipient-binding="binding-other-0000000002"]')).to_be_enabled()
         page.locator('#pj-segment').select_option('segment-a')
+        page.locator('#pj-selection-open').click()
+        page.locator('#pj-campaign-search').fill('New')
+        page.locator('#pj-campaign-find').click()
         other_campaign = page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]')
         other_campaign.check()
         page.evaluate("release('getSegmentMailings')")
@@ -87,8 +90,8 @@ def main():
         other_campaign.uncheck()
         expect(action).to_be_enabled()
         calls = page.evaluate('backend.calls')
-        assert len([c for c in calls if c['name']=='getProjectAnalyticsCampaigns' and c['payload']['segmentId']=='segment-a']) == 1
-        assert all(c['name'] != 'refreshColdyMailings' for c in calls)
+        assert len([c for c in calls if c['name']=='getProjectAnalyticsCampaigns' and c['payload']['segmentId']=='segment-a' and 'query' not in c['payload']]) == 1
+        assert all(c['payload'].get('monitor') is True and c['payload']['segmentId'] in ['segment-a','segment-b'] for c in calls if c['name']=='refreshColdyMailings')
 
         action.click()
         target.select_option('lpr')

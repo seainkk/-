@@ -38,18 +38,20 @@ function fixture(options = {}) {
   context.coldyLoad_ = (scope, kind, owner) => { calls.journals++; options.onRegistry?.({ rows, props, state }); assert.equal(kind, 'campaignbindings'); return plain(registries.get(scope.rootId + '|' + owner) || null); };
   context.coldySave_ = () => { calls.saves++; throw new Error('Analytics must not mutate bindings'); };
   context.coldyApi_ = () => { calls.provider++; throw new Error('Use existing listing API only'); };
-  context.coldyReadCampaignCatalog_ = (_scope, refresh) => {
-    assert.equal(locked, false, 'Provider listing must run outside global lock'); calls.list.push({ refresh });
+  const readCatalog = refresh => {
+    assert.equal(locked, false, 'Campaign catalog reads must run outside global lock'); calls.list.push({ refresh });
     options.onList?.({ state, props, rows, context });
-    return { state: 'ready', campaigns: options.campaigns || [{ id: CAMPAIGN_A, name: 'Кухни email', status: 'Paused' }, { id: CAMPAIGN_B, name: 'Кухни тест', status: 'Active' }, { id: CAMPAIGN_C, name: 'Общая рассылка', status: 'Draft' }], generatedAt: '2026-11-20T09:01:00.000Z', cached: !refresh };
+    return { state: 'ready', campaigns: options.campaigns || [{ id: CAMPAIGN_A, name: 'Рассылка Кухни email', status: 'Paused' }, { id: CAMPAIGN_B, name: 'Рассылка Кухни тест', status: 'Active' }, { id: CAMPAIGN_C, name: 'Общая рассылка', status: 'Draft' }], generatedAt: '2026-11-20T09:01:00.000Z', cached: !refresh };
   };
+  context.coldyReadCampaignCatalog_ = (_scope,refresh) => { assert.equal(refresh,true,'Provider catalog requires explicit refresh'); return readCatalog(true); };
+  context.coldyCachedCampaigns_ = () => readCatalog(false);
   if (options.onNames) {
     const original = context.getSegmentNames_;
     context.getSegmentNames_ = scope => { const result = original(scope); options.onNames({ props, rows, state, context }); return result; };
   }
   return { context, state, props, rows, registries, calls,
     overview: (request = {}) => plain(runShared(context, () => context.getProjectAnalytics_(request))),
-    campaigns: (request = { segmentId: A }) => plain(runShared(context, () => context.getProjectAnalyticsCampaigns_(request))) };
+    campaigns: (request = { segmentId: A, query: 'Рассылка' }) => plain(runShared(context, () => context.getProjectAnalyticsCampaigns_(request))) };
 }
 
 test('project overview lists immediate segments and categories without spreadsheets or provider requests', () => {
@@ -98,8 +100,30 @@ test('chooser shows current/foreign ownership and leaves existing upload/active 
 });
 
 test('manual campaign refresh delegates the exact existing safe listing path outside script lock', () => {
-  const f = fixture(), result = f.campaigns({ segmentId: A, refresh: true });
+  const f = fixture(), result = f.campaigns({ segmentId: A, refresh: true, query: 'Кухни' });
   assert.deepEqual(f.calls.list, [{ refresh: true }]); assert.equal(result.cached, false); assert.equal(f.calls.provider, 0); assert.equal(f.calls.saves, 0);
+});
+
+test('ordinary project monitoring and manual metric refresh never read the workspace catalog', () => {
+  const f = fixture({bindings:[binding(CAMPAIGN_A),binding(CAMPAIGN_B,B)]});
+  for (const refresh of [false,true]) {
+    const result=f.campaigns({segmentId:A,refresh});
+    assert.deepEqual(result.campaigns.map(row=>row.id),[CAMPAIGN_A]);
+    assert.equal(result.campaigns[0].bindingId,binding(CAMPAIGN_A).id);
+  }
+  assert.equal(f.calls.list.length,0); assert.equal(f.calls.provider,0); assert.equal(f.calls.metadata,0);
+  for(const query of ['', ' ', 'а', 'https://example.test/'+CAMPAIGN_A])assert.throws(()=>f.campaigns({segmentId:A,query}),/INVALID_REQUEST/);
+  assert.equal(f.calls.list.length,0);
+});
+
+test('explicit lookup by Coldy link or UUID reads precisely one campaign', () => {
+  const f=fixture(),ids=[];
+  f.context.coldyCampaignRead_=(_scope,id)=>{ids.push(id);return {id,name:'Одна рассылка',status:'Draft'};};
+  for(const query of [CAMPAIGN_B,'https://app.coldy.ai/campaigns/'+CAMPAIGN_B+'/settings']) {
+    const result=f.campaigns({segmentId:A,query});
+    assert.deepEqual(result.campaigns.map(row=>row.id),[CAMPAIGN_B]);
+  }
+  assert.deepEqual(ids,[CAMPAIGN_B,CAMPAIGN_B]);assert.equal(f.calls.list.length,0);
 });
 
 test('a large catalog takes a single Drive enumeration outside the lock and reads bindings once', () => {
@@ -107,7 +131,7 @@ test('a large catalog takes a single Drive enumeration outside the lock and read
     id: '550e8400-e29b-41d4-a716-' + String(n).padStart(12, '0'), name: 'Кампания ' + n, status: 'Active'
   }));
   const f = fixture({ campaigns, bindings: campaigns.map(campaign => binding(campaign.id, B)) });
-  assert.equal(f.campaigns().campaigns.length, 1200);
+  const result = f.campaigns({ segmentId:A, query:'Кампания' }); assert.equal(result.campaigns.length, 40); assert.equal(result.truncated, true);
   assert.equal(f.calls.list.length, 1);
   assert.equal(f.calls.journals, 1);
   assert.equal(f.calls.metadata, 1);
@@ -123,13 +147,13 @@ test('the detailed chooser exposes unassigned campaigns and only bindings belong
   f.context.registryProjectId_=()=>project;
   f.context.registrySegmentProject_=(_,id)=>id===A?'numshield':'neosender';
   for(const refresh of [false,true]) {
-    const result=f.campaigns({segmentId:A,refresh});
+    const result=f.campaigns({segmentId:A,refresh,query:'Рассылка'});
     assert.deepEqual(result.campaigns.map(item=>item.id).sort(),[CAMPAIGN_A,CAMPAIGN_C].sort());
     assert.deepEqual(result.bindings.map(item=>item.campaignId),[CAMPAIGN_A]);
     assert.throws(()=>f.campaigns({segmentId:B,refresh}),/OUTSIDE_SEGMENTS/);
   }
   project='neosender';
-  assert.deepEqual(f.campaigns({segmentId:B}).campaigns.map(item=>item.id).sort(),[CAMPAIGN_B,CAMPAIGN_C].sort());
+  assert.deepEqual(f.campaigns({segmentId:B,query:'Рассылка'}).campaigns.map(item=>item.id).sort(),[CAMPAIGN_B,CAMPAIGN_C].sort());
 });
 
 test('an archived/outside owner stays blocked without revealing inaccessible folder metadata', () => {
@@ -139,7 +163,7 @@ test('an archived/outside owner stays blocked without revealing inaccessible fol
 });
 
 test('saved campaigns absent from provider list remain selected for explicit removal', () => {
-  const missing = binding(CAMPAIGN_D), f = fixture({ bindings: [missing] }), result = f.campaigns(), choice = result.campaigns.find(campaign => campaign.id === CAMPAIGN_D);
+  const missing = binding(CAMPAIGN_D), f = fixture({ bindings: [missing] }), result = f.campaigns({segmentId:A,query:'рассылка',refresh:true}), choice = result.campaigns.find(campaign => campaign.id === CAMPAIGN_D);
   assert.equal(choice.available, false); assert.equal(choice.selected, true); assert.equal(choice.selectable, false); assert.equal(choice.missing, true); assert.equal(choice.removable, true); assert.equal(choice.bindingId, missing.id); assert.match(choice.blockedReason, /отсутствует/); assert.deepEqual(result.bindings, [missing]);
 });
 

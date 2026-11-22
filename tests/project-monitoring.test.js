@@ -70,7 +70,7 @@ test('the default selection is empty even when a legacy inventory contains every
   assert.equal(dto.selection.revision,0);assert.equal(dto.availableCount,0);assert.equal(dto.inventoryAt,null);
   assert.equal(f.calls.loads.length,0);assert.equal(f.calls.saves.length,0);
   f.configure();f.installInventory();dto=f.get();
-  assert.equal(dto.availableCount,3);assert.equal(dto.accounts.length,3);assert.deepEqual(dto.selection.accountIds,[]);
+  assert.equal(dto.availableCount,0);assert.equal(dto.accounts.length,0);assert.deepEqual(dto.selection.accountIds,[]);
   assert.match(dto.selection.scopeToken,/^[A-Za-z0-9_-]{43}$/);
   assert.ok(dto.accounts.every(row=>Object.keys(row).sort().join(',')==='email,id,name,provider'));
   assert.ok(!JSON.stringify(dto).includes(KEY));assert.ok(!JSON.stringify(dto).includes('smtp-secret'));

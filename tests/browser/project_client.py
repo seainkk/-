@@ -14,7 +14,9 @@ function campaigns(id){const rows=[{id:A,name:'Existing campaign',status:'Active
 function service(id){return {id:'coldy',state:'partial',totals:{sent:100,replies:5,leads:null},campaigns:backend.bindings.filter(x=>x.segmentId===id).map(x=>({id:x.campaignId,name:x.campaignName,status:'Active',sent:x.campaignId===A?100:null,replies:5,leads:null})),generatedAt:'2026-11-22T09:00:00Z'};}
 function monitoring(){return {configured:backend.monitoringConfigured,revision:backend.monitoringRevision,accountIds:[...backend.monitoringIds],scopeToken:backend.monitoringScope};}
 function inventory(){return backend.inventoryLoaded?Array.from({length:backend.largeInventory||6},(_,i)=>({id:'account-'+i,email:(backend.largeInventory?'large-sender-':backend.accountMarker)+i+'@example.test',name:(backend.senderName||'Sender ')+i,provider:'SMTP'})):[];}
-function selectionDto(){return {configured:backend.configured,selection:monitoring(),accounts:inventory(),availableCount:backend.inventoryLoaded?(backend.largeInventory||6):null,inventoryAt:backend.inventoryLoaded?backend.lastSyncAt:null};}
+function selectionDto(query){if(query)backend.inventoryLoaded=true;
+ const q=String(query||'').toLowerCase(),accounts=inventory().filter(a=>backend.monitoringIds.includes(a.id)||q&&[a.email,a.name,a.id].some(v=>v.toLowerCase().includes(q))).slice(0,50);
+ return {configured:backend.configured,selection:monitoring(),accounts,availableCount:accounts.length,inventoryAt:backend.inventoryLoaded?backend.lastSyncAt:null};}
 function poolData(accounts){
  if(!backend.infraSynced||!backend.configured)return {state:'unknown',updatedAt:null,campaigns:[],stale:true};
  const schedule={days:['monday','tuesday','wednesday','thursday','friday'],from:'09:00',to:'18:30',timezone:'Europe/Moscow',gapStartSeconds:60,gapEndSeconds:90};
@@ -36,12 +38,17 @@ function infra(){
 }
 function api(name,p){
  if(name==='getProjectAnalytics')return {state:backend.catalogState||'ready',segments:backend.catalogState?[]:[{id:'segment-a',name:'Segment A'},{id:'segment-b',name:'Segment B'}],coldy:{configured:backend.configured,connected:backend.connected,checkedAt:null}};
- if(name==='getProjectAnalyticsCampaigns')return {state:backend.configured?'ready':'not_configured',configured:backend.configured,connected:backend.connected,segment:{id:p.segmentId,name:p.segmentId==='segment-a'?'Segment A':'Segment B'},bindings:clone(backend.bindings.filter(x=>x.segmentId===p.segmentId)),campaigns:backend.configured?campaigns(p.segmentId):[],generatedAt:'2026-11-22T09:00:00Z',cached:true};
+ if(name==='getProjectAnalyticsCampaigns'){
+  const terms=String(p.query||'').toLowerCase().split(/\s+/).filter(Boolean);
+  let found=0;
+  const result=campaigns(p.segmentId).filter(row=>row.selected||terms.length&&terms.every(term=>row.name.toLowerCase().includes(term))&&++found<=40);
+  return {state:backend.configured?'ready':'not_configured',configured:backend.configured,connected:backend.connected,segment:{id:p.segmentId,name:p.segmentId==='segment-a'?'Segment A':'Segment B'},bindings:clone(backend.bindings.filter(x=>x.segmentId===p.segmentId)),campaigns:backend.configured?result:[],truncated:found>40,matchCount:found,generatedAt:'2026-11-22T09:00:00Z',cached:p.refresh!==true};
+ }
  if(name==='getSegmentMailings')return {services:[service(p.segmentId)]};
  if(name==='refreshColdyMailings')return service(p.segmentId);
  if(name==='saveColdyBinding'){if(backend.receipts[p.requestId])return clone(backend.receipts[p.requestId]);const existing=backend.bindings.find(x=>x.campaignId===p.campaignId);if(existing&&existing.segmentId!==p.segmentId)throw new Error('[COLDY_CAMPAIGN_BOUND] Bound elsewhere');if(existing&&p.preserveExisting)return backend.receipts[p.requestId]={binding:clone(existing)};const binding={...p,id:'binding-created-0000001',campaignName:'New campaign',revision:1};backend.bindings.push(binding);backend.saveMutations++;const result={binding};backend.receipts[p.requestId]=clone(result);if(backend.failAfterSave){backend.failAfterSave=false;throw new Error('[GOOGLE_ERROR] Ответ потерян');}return result;}
  if(name==='removeColdyBinding'){if(backend.receipts[p.requestId])return clone(backend.receipts[p.requestId]);backend.bindings=backend.bindings.filter(x=>x.id!==p.bindingId);return backend.receipts[p.requestId]={removed:true};}
- if(name==='getProjectInfrastructureSelection')return selectionDto();
+ if(name==='getProjectInfrastructureSelection')return selectionDto(p.query);
  if(name==='saveProjectInfrastructureSelection'){
   const previous=backend.monitoringReceipts[p.requestId];if(previous){if(JSON.stringify(previous.payload)!==JSON.stringify(p))throw new Error('[COLDY_MONITORING_REQUEST_MISMATCH] Request changed');return {selection:monitoring(),infrastructure:infra(),replayed:true,savedRevision:previous.revision};}
   if(p.scopeToken!==backend.monitoringScope)throw new Error('[COLDY_MONITORING_SCOPE_CHANGED] Scope changed');
@@ -126,6 +133,13 @@ def main():
         def count(method):
             return page.evaluate('method=>backend.calls.filter(x=>x.name===method).length',method)
 
+        def find_campaign(query):
+            if not page.locator('#pj-campaign-search').is_visible():
+                page.locator('#pj-selection-open').click()
+            page.locator('#pj-campaign-search').fill(query)
+            page.locator('#pj-campaign-find').click()
+            idle()
+
         monitored_setup="backend.monitoringIds=Array.from({length:6},(_,i)=>'account-'+i);backend.monitoringConfigured=true;"
 
         def reset_monitored(setup=''):
@@ -135,10 +149,18 @@ def main():
             page.locator('#pj-infrastructure-select').click()
             expect(page.locator('#pj-mailbox-dialog')).to_be_visible();idle()
 
+        def find_mailbox(query):
+            page.locator('#pj-mailbox-search').fill(query)
+            page.locator('#pj-mailbox-inventory').click();idle()
+
         reset()
         expect(page.locator('#pj-segment')).to_be_enabled()
         page.locator('#pj-segment').select_option('segment-a');idle()
         expect(page.locator('[data-project-campaign="'+ '11111111-1111-4111-8111-111111111111' +'"]')).to_be_checked()
+        expect(page.locator('[data-project-campaign="33333333-3333-4333-8333-333333333333"]')).to_have_count(0)
+        expect(page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]')).to_have_count(0)
+        assert all('query' not in call.get('payload',{}) for call in page.evaluate("backend.calls.filter(c=>c.name==='getProjectAnalyticsCampaigns')"))
+        find_campaign('campaign')
         expect(page.locator('[data-project-campaign="33333333-3333-4333-8333-333333333333"]')).to_be_disabled()
         assert page.locator('#pj-analytics-totals dd').all_text_contents()==['100','5','—']
         assert page.locator('#pj-campaign-rows img').count()==0
@@ -164,42 +186,45 @@ def main():
         assert not any(x['name'].startswith(('start','previewColdyUpload','testColdy')) for x in page.evaluate('backend.calls'))
         assert page.locator('#pj-selection-save').is_disabled()
 
-        reset();page.locator('#pj-segment').select_option('segment-a');idle()
+        reset();page.locator('#pj-segment').select_option('segment-a');idle();find_campaign('New campaign')
         page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]').check()
         teammate=page.evaluate("(()=>{const binding={id:'teammate-binding-0000001',segmentId:'segment-a',campaignId:B,campaignName:'New campaign',includeCompanies:false,includeLpr:true,autoUpload:true,allowActive:true,revision:7};backend.bindings.push(binding);return JSON.parse(JSON.stringify(binding));})()")
         page.locator('#pj-selection-save').click();idle()
         assert page.evaluate('backend.bindings.find(x=>x.campaignId===B)')==teammate
         assert page.evaluate('backend.saveMutations')==0,'Concurrent same-segment binding retains every setting'
 
-        # A large account shows one local page; links and hidden edits survive searching.
+        # Opening a large account returns only monitored campaigns. Explicit searches preserve previous choices.
         reset(setup="""backend.extraCampaigns=Array.from({length:1200},(_,i)=>({id:'bulk-'+i,name:'Архив '+i,status:'Draft'}));
 backend.extraCampaigns.push({id:'kitchen',name:'Намшилд / Кухни ЛПР',status:'Active'},{id:'pinned',name:'Привязана в конце',status:'Active'});
 backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pinned',campaignName:'Привязана в конце',revision:1});""")
         page.locator('#pj-segment').select_option('segment-a');idle()
         campaign_rows=page.locator('#pj-campaign-rows tr')
         search=page.locator('#pj-campaign-search')
-        expect(campaign_rows).to_have_count(40)
+        expect(campaign_rows).to_have_count(3)
         expect(page.locator('[data-project-campaign="pinned"]')).to_be_checked()
-        page.locator('#pj-campaign-more').click();expect(campaign_rows).to_have_count(80)
         reads=count('getProjectAnalyticsCampaigns')
-        search.fill('КУХНИ лпр');expect(campaign_rows).to_have_count(1)
+        find_campaign('Архив');expect(page.locator('#pj-selection-health')).to_contain_text('первые 40')
+        find_campaign('КУХНИ лпр');expect(campaign_rows).to_have_count(4)
         page.locator('[data-project-campaign="kitchen"]').check()
-        search.fill('Архив 1199')
+        find_campaign('Архив 1199')
         page.locator('[data-project-campaign="bulk-1199"]').check()
-        search.fill('Совсем другой запрос')
-        expect(campaign_rows).to_contain_text('По этому запросу рассылок нет')
+        find_campaign('Совсем другой запрос')
+        expect(page.locator('#pj-selection-health')).to_contain_text('В сохранённом справочнике совпадений нет')
         expect(page.locator('#pj-selection-count')).to_have_text('Выбрано: 5')
-        assert count('getProjectAnalyticsCampaigns')==reads
+        assert count('getProjectAnalyticsCampaigns')==reads+4
+        assert page.evaluate("backend.calls.filter(c=>c.name==='getProjectAnalyticsCampaigns'&&c.payload.refresh&&c.payload.query).length") == 0
+        page.locator('#pj-campaign-extend').click();idle()
+        expect(page.locator('#pj-selection-health')).to_contain_text('По этому запросу рассылок нет')
         page.locator('#pj-selection-save').click();idle()
         assert {x['campaignId'] for x in page.evaluate("backend.bindings.filter(b=>b.segmentId==='segment-a')")}=={
             '11111111-1111-4111-8111-111111111111','44444444-4444-4444-8444-444444444444','kitchen','bulk-1199','pinned'}
         assert count('removeColdyBinding')==0
         page.locator('#pj-segment').select_option('segment-b');idle();expect(search).to_have_value('')
-        search.fill('чужой поиск');page.evaluate('RegistryProject.lock()');expect(search).to_have_value('')
+        page.locator('#pj-selection-open').click();search.fill('чужой поиск');page.evaluate('RegistryProject.lock()');expect(search).to_have_value('')
 
         # Refresh rebases explicit user changes instead of deleting a teammate's binding.
         for clean in [False,True]:
-            reset();page.locator('#pj-segment').select_option('segment-a');idle()
+            reset();page.locator('#pj-segment').select_option('segment-a');idle();find_campaign('New')
             chosen=page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]')
             chosen.check()
             if clean:chosen.uncheck()
@@ -272,7 +297,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.wait_for_timeout(350)
         assert count('refreshProjectInfrastructure')==4,'Two schedule and two explicit diagnostics batches'
         calls=page.evaluate("backend.calls.filter(x=>x.name==='refreshProjectInfrastructure')")
-        assert calls[0]['payload']=={'includeCapacity':True}
+        assert calls[0]['payload']=={'includeCapacity':True,'live':True}
         assert [call['payload'] for call in calls[1:]]==[{'cursor':'pool-schedule-cursor'},{},{'cursor':'details-5'}]
         assert page.locator('#pj-account-rows tr').count()==6
         expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
@@ -298,13 +323,13 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         assert page.locator('#pj-account-rows tr').count()==0
         expect(page.locator('#pj-infrastructure-empty')).to_contain_text('Выберите почты для мониторинга')
         open_mailboxes()
-        assert page.locator('#pj-mailbox-rows input').count()==100
+        assert page.locator('#pj-mailbox-rows input').count()==0
         assert page.locator('#pj-mailbox-rows input:checked').count()==0
         search=page.locator('#pj-mailbox-search')
-        search.fill('LARGE-SENDER-1158@EXAMPLE.TEST')
+        find_mailbox('LARGE-SENDER-1158@EXAMPLE.TEST')
         assert page.locator('#pj-mailbox-rows input').count()==1
         page.locator('[data-monitoring-account="account-1158"]').check()
-        search.fill('large-sender-1@example.test')
+        find_mailbox('large-sender-1@example.test')
         page.locator('[data-monitoring-account="account-1"]').check()
         expect(page.locator('#pj-mailbox-count')).to_contain_text('Выбрано: 2')
         assert count('refreshProjectInfrastructure')==0
@@ -326,7 +351,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
 
         # A fresh client reads the team's saved selection. Cancel discards a
         # local change; clear persists an empty selection and stops refreshes.
-        reset('infrastructure',setup="backend.largeInventory=1159;backend.monitoringIds=['account-1','account-1158'];backend.monitoringConfigured=true;backend.monitoringRevision=1;backend.infraSynced=true;backend.largeCompleted=2")
+        reset('infrastructure',setup="backend.largeInventory=1159;backend.monitoringIds=['account-1','account-1158'];backend.monitoringConfigured=true;backend.monitoringRevision=1;backend.infraSynced=true;backend.largeCompleted=2;backend.lastSyncAt=new Date(Date.now()).toISOString()")
         assert count('refreshProjectInfrastructure')==0
         assert page.locator('#pj-account-rows tr').count()==2
         open_mailboxes();page.locator('#pj-mailbox-clear').click()
@@ -345,16 +370,17 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         open_mailboxes()
         assert page.locator('#pj-mailbox-rows input').count()==0
         assert count('refreshProjectInfrastructure')==0
-        page.locator('#pj-mailbox-inventory').click();idle()
-        assert page.locator('#pj-mailbox-rows input').count()==100
-        assert page.evaluate("backend.calls.filter(call=>call.name==='refreshProjectInfrastructure').map(call=>call.payload)")==[{'inventoryOnly':True}]
+        find_mailbox('large-sender-1158@example.test')
+        assert page.locator('#pj-mailbox-rows input').count()==1
+        assert count('refreshProjectInfrastructure')==0
+        assert page.evaluate("backend.calls.filter(call=>call.name==='getProjectInfrastructureSelection').map(call=>call.payload)")==[{}, {'query':'large-sender-1158@example.test'}]
         assert page.evaluate('backend.detailIds')==[]
         page.locator('#pj-mailbox-cancel').click()
 
         # Unknown acknowledgement keeps the exact UUID/payload through soft
         # invalidation and reopening. A newer teammate selection wins on replay.
         reset('infrastructure',setup='backend.largeInventory=1159')
-        open_mailboxes();page.locator('[data-monitoring-account="account-0"]').check()
+        open_mailboxes();find_mailbox('account-0');page.locator('[data-monitoring-account="account-0"]').check()
         page.evaluate('backend.failAfterMonitoringSave=true')
         page.locator('#pj-mailbox-save').click();idle()
         expect(page.locator('#pj-mailbox-retry')).to_be_visible()
@@ -363,7 +389,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.evaluate('RegistryProject.invalidate()')
         expect(page.locator('#pj-mailbox-retry')).to_be_visible()
         page.locator('#pj-mailbox-cancel').click();open_mailboxes()
-        assert count('getProjectInfrastructureSelection')==1
+        assert count('getProjectInfrastructureSelection')==2
         expect(page.locator('#pj-mailbox-retry')).to_be_visible()
         page.evaluate("backend.monitoringIds=['account-2'];backend.monitoringRevision++")
         page.locator('#pj-mailbox-retry').click();idle()
@@ -378,7 +404,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         # A known optimistic conflict does not retry or overwrite a teammate.
         # Loading the saved selection is an explicit review action.
         reset('infrastructure')
-        open_mailboxes();page.locator('[data-monitoring-account="account-0"]').check()
+        open_mailboxes();find_mailbox('account-0');page.locator('[data-monitoring-account="account-0"]').check()
         page.evaluate("backend.monitoringIds=['account-1'];backend.monitoringRevision=1;backend.monitoringConfigured=true")
         page.locator('#pj-mailbox-save').click();idle()
         expect(page.locator('#pj-mailbox-reload')).to_be_visible()
@@ -387,14 +413,14 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         assert page.evaluate('backend.monitoringIds')==['account-1']
         page.locator('#pj-mailbox-reload').click();idle()
         expect(page.locator('[data-monitoring-account="account-1"]')).to_be_checked()
-        expect(page.locator('[data-monitoring-account="account-0"]')).not_to_be_checked()
+        expect(page.locator('[data-monitoring-account="account-0"]')).to_have_count(0)
         assert count('saveProjectInfrastructureSelection')==1
         page.locator('#pj-mailbox-cancel').click()
 
         # A hard credential/access reset scrubs both the picker and its frozen
         # operation. A held old response cannot reopen or repopulate the dialog.
         reset('infrastructure')
-        open_mailboxes();page.locator('[data-monitoring-account="account-0"]').check()
+        open_mailboxes();find_mailbox('account-0');page.locator('[data-monitoring-account="account-0"]').check()
         page.evaluate("backend.holdMethods=['saveProjectInfrastructureSelection']")
         page.locator('#pj-mailbox-save').click()
         page.wait_for_function("backend.pending.some(call=>call.name==='saveProjectInfrastructureSelection')")
@@ -412,7 +438,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         # Leaving before a queued save is dispatched cancels the stale write.
         # Reopening offers the same UUID so its outcome can be confirmed safely.
         reset('infrastructure')
-        open_mailboxes();page.locator('[data-monitoring-account="account-0"]').check()
+        open_mailboxes();find_mailbox('account-0');page.locator('[data-monitoring-account="account-0"]').check()
         page.evaluate("backend.holdBeforeMethods=['saveProjectInfrastructureSelection']")
         page.locator('#pj-mailbox-save').click()
         page.wait_for_function("backend.pending.some(call=>call.name==='saveProjectInfrastructureSelection')")
@@ -495,6 +521,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
 
         reset()
         page.locator('#pj-segment').select_option('segment-a');idle()
+        find_campaign('New')
         page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]').check()
         page.locator('[data-remove-project-campaign="44444444-4444-4444-8444-444444444444"]').click()
         page.evaluate("backend.holdMethods=['saveColdyBinding']")
@@ -525,6 +552,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         expect(page.locator('#br-coldy-dialog')).to_be_visible()
         page.wait_for_function('backend.active===0')
         page.locator('#br-coldy-close').click()
+        find_campaign('New')
         page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]').check()
         assert page.evaluate('RegistryProject.isEditing()') is True
         before=count('getProjectAnalyticsCampaigns')
@@ -536,7 +564,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.locator('#br-view-analytics').click()
         page.locator('#br-view-infrastructure').click();idle()
         assert count('getProjectInfrastructure')==infra_reads,'Fresh project infrastructure is reused on a quick return'
-        open_mailboxes();page.locator('[data-monitoring-account="account-0"]').check()
+        open_mailboxes();find_mailbox('account-0');page.locator('[data-monitoring-account="account-0"]').check()
         page.locator('#pj-mailbox-save').click();idle()
         assert page.locator('#pj-account-rows tr').count()==1
         page.locator('#br-view-analytics').click();idle()
