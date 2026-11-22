@@ -25,10 +25,21 @@ function include_(name) {
 /** Minimal app startup: the former Drive-tree screen is no longer rendered. */
 function getAppBootstrap_() {
   return api_(function () {
-    var context = authorize_(), root = registryRoot_(context);
+    var context = authorize_(), registry;
+    if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.get === 'function') {
+      var folder;
+      try { folder = Drive.Files.get(context.rootId, {fields:'id,name,mimeType,trashed', supportsAllDrives:true}); }
+      catch (error) { fail_('NOT_FOUND', 'Корневая папка реестра недоступна.'); }
+      if (!folder || folder.id !== context.rootId || folder.trashed !== false || folder.mimeType !== 'application/vnd.google-apps.folder' || typeof folder.name !== 'string')
+        fail_('NOT_FOUND', 'Корневая папка реестра недоступна.');
+      registry = {id:folder.id, name:folder.name};
+    } else {
+      var root = registryRoot_(context);
+      registry = {id:root.getId(), name:root.getName()};
+    }
     return {
       user: { email: '', isAdmin: false, accessMode: 'link' },
-      registry: { id: root.getId(), name: root.getName() }
+      registry: registry
     };
   });
 }

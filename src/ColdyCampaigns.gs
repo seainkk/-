@@ -223,22 +223,42 @@ function coldyRefreshBoundMetrics_(context, segmentId) {
     return { bindings: selected, total: all.length, credentialHash: registry.credentialHash };
   });
   snapshot.bindings.forEach(function (binding) {
-    var old = locked_(function () { coldyCampaignScope_(context, segmentId); return coldyLoad_(context, 'campaignanalytics', coldyCampaignAnalyticsOwner_(context, binding)); });
-    var campaign = null, summary = null, campaignError = '', summaryError = '';
-    // Provider requests deliberately run outside the global script lock.
-    try { campaign = coldyCampaignRead_(context, binding.campaignId); }
-    catch (error) { if (coldyCampaignAccessError_(error)) throw error; campaignError = error.registryCode || 'COLDY_RESPONSE'; }
-    try { summary = coldyApi_(context, 'GET', '/analytics/campaigns/' + coldyCampaignId_(binding.campaignId) + '/summary?period=all&type=event'); }
-    catch (error) { if (coldyCampaignAccessError_(error)) throw error; summaryError = error.registryCode || 'COLDY_RESPONSE'; }
-    if (snapshot.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился во время обновления показателей.');
-    locked_(function () {
+    var id = coldyCampaignId_(binding.campaignId);
+    function guard() {
       coldyCampaignScope_(context, segmentId);
-      var registry = coldyCampaignRegistry_(context), current = coldyCampaignBinding_(registry, segmentId, binding.id);
       if (snapshot.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Повторите обновление показателей.');
-      if (current.revision !== binding.revision) fail_('COLDY_BINDING_CHANGED', 'Связь рассылки изменилась. Обновите показатели.');
+      var current = coldyCampaignBinding_(coldyCampaignRegistry_(context), segmentId, binding.id);
+      if (current.campaignId !== id || current.revision !== binding.revision) fail_('COLDY_BINDING_CHANGED', 'Связь рассылки изменилась. Обновите показатели.');
+    }
+    var results;
+    try {
+      results = coldyGetBatch_(context,['/campaigns/' + id, '/analytics/campaigns/' + id + '/summary?period=all&type=event'],guard);
+    } catch (error) {
+      if (['COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_RESPONSE'].indexOf(error.registryCode) < 0) throw error;
+      results = [{error:error},{error:error}];
+    }
+    var throttled = null, campaign = null, summary = results[1].value, campaignError = '', summaryError = '';
+    results.forEach(function (result) {
+      var error = result.error;
+      if (!error) return;
+      if (error.registryCode === 'COLDY_RATE_LIMIT') {
+        if (!throttled || (error.retryAfterMs || 0) > (throttled.retryAfterMs || 0)) throttled = error;
+      } else if (coldyCampaignAccessError_(error)) throw error;
+    });
+    if (results[0].error) campaignError = results[0].error.registryCode;
+    else {
+      try { campaign = coldyCampaignDetail_(id,results[0].value); }
+      catch (error) { campaignError = error.registryCode || 'COLDY_RESPONSE'; }
+    }
+    if (results[1].error) summaryError = results[1].error.registryCode;
+    if (summary && summary.campaign_id != null && String(summary.campaign_id).toLowerCase() !== id) {
+      summary = null; summaryError = 'COLDY_RESPONSE';
+    }
+    locked_(function () {
+      guard();
       var owner = coldyCampaignAnalyticsOwner_(context, binding), latest = coldyLoad_(context, 'campaignanalytics', owner);
-      if (latest && latest.lastAttemptAt && latest.lastAttemptAt >= startedAt && JSON.stringify(latest) !== JSON.stringify(old)) return;
-      var before = old && old.credentialHash === snapshot.credentialHash ? old : {}, now = new Date().toISOString();
+      if (latest && latest.lastAttemptAt > startedAt) return;
+      var before = latest && latest.campaignId === id && latest.credentialHash === snapshot.credentialHash ? latest : {}, now = new Date().toISOString();
       var sent = campaign ? coldyCampaignMetric_(campaign.total_sent) : null, replies = campaign ? coldyCampaignMetric_(campaign.replies_emails) : null, leads = summary ? coldyCampaignMetric_(summary.interested) : null;
       var sentAt = sent !== null ? now : before.sentUpdatedAt || null, repliesAt = replies !== null ? now : before.repliesUpdatedAt || null, leadsAt = leads !== null ? now : before.leadsUpdatedAt || null;
       var known = [sentAt, repliesAt, leadsAt].filter(Boolean).map(Date.parse), stale = sent === null || replies === null || leads === null;
@@ -248,6 +268,7 @@ function coldyRefreshBoundMetrics_(context, segmentId) {
         sentUpdatedAt: sentAt, repliesUpdatedAt: repliesAt, leadsUpdatedAt: leadsAt, updatedAt: known.length ? new Date(Math.min.apply(null, known)).toISOString() : null,
         lastAttemptAt: startedAt, stale: stale, lastError: campaignError || summaryError || (stale ? 'COLDY_RESPONSE' : '') });
     });
+    if (throttled) throw throttled;
   });
   var result = coldySegmentMailings_(context, segmentId); result.refreshedCampaigns = snapshot.bindings.length; result.hasMore = snapshot.total > snapshot.bindings.length;
   if (result.hasMore) result.message += ' За один цикл обновляются до 10 выбранных рассылок.';
@@ -309,6 +330,9 @@ function coldyCampaignLocalId_(value) { if (typeof value !== 'string' || !/^[A-Z
 function coldyCampaignRead_(context, campaignId) {
   var credentialHash = coldyCredentialHash_(context), value = coldyApi_(context, 'GET', '/campaigns/' + coldyCampaignId_(campaignId));
   if (credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился во время чтения рассылки.');
+  return coldyCampaignDetail_(campaignId,value);
+}
+function coldyCampaignDetail_(campaignId,value) {
   if (!value || coldyCampaignId_(value.id) !== campaignId || typeof value.name !== 'string' || ['Active', 'Draft', 'Completed', 'Paused'].indexOf(value.status) === -1) fail_('COLDY_RESPONSE', 'Coldy вернул неизвестное состояние рассылки.');
   return { id: campaignId, name: value.name.slice(0, 500), status: value.status, total_sent: value.total_sent, replies_emails: value.replies_emails };
 }

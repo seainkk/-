@@ -204,7 +204,7 @@ test('public surface is limited to the shell, verified transports and the author
 
 test('all contact, validation and automation RPCs require the current shared credential', () => {
   const f=fixture(); let entered=0;
-  const methods=['getProjectAnalytics','getProjectAnalyticsCampaigns','getProjectInfrastructure','getProjectInfrastructureSelection','saveProjectInfrastructureSelection','refreshProjectInfrastructure','getContactWorkspace','syncWorkbookContacts','continueContactSync','getPromouserSettings','configurePromouser','getPromouserBalance','getValidationState','advanceWorkbookValidation','refreshWorkbookValidation','payValidationOrder','previewSegmentRecords','importSegmentRecords','continueSegmentRecords','syncSegmentPeople','getContactAutomationState','enableContactAutomation','disableContactAutomation'];
+  const methods=['getServiceLimits','getProjectAnalytics','getProjectAnalyticsCampaigns','getProjectInfrastructure','getProjectInfrastructureSelection','saveProjectInfrastructureSelection','refreshProjectInfrastructure','getContactWorkspace','syncWorkbookContacts','continueContactSync','getPromouserSettings','configurePromouser','getPromouserBalance','getValidationState','advanceWorkbookValidation','refreshWorkbookValidation','payValidationOrder','previewSegmentRecords','importSegmentRecords','continueSegmentRecords','syncSegmentPeople','getContactAutomationState','enableContactAutomation','disableContactAutomation'];
   for(const method of methods) f.context[method+'_']=()=>{entered++;f.context.authorize_();return{safe:true};};
   for(const method of methods){assert.throws(()=>f.call(method,'Z'.repeat(43),{}),/LINK_ACCESS_REQUIRED/);assert.equal(f.context.SHARED_REQUEST_SCOPE_,null);}
   assert.equal(entered,0);

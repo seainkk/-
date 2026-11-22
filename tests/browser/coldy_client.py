@@ -60,11 +60,15 @@ def main():
             return page.evaluate('(method)=>backend.calls.filter(call=>call.name===method)', method)
 
         def open_settings():
+            if not page.locator('#br-settings-dialog').is_visible():
+                page.locator('#br-settings-open').click()
             page.locator('#br-coldy-open').click()
             expect(page.locator('#br-coldy-dialog')).to_be_visible()
             registry_idle()
 
         def open_mailings():
+            if page.locator('#br-settings-dialog').is_visible():
+                page.locator('#br-settings-close').click()
             page.locator('#br-view-segments').click()
             page.wait_for_selector('[data-segment="existing-segment"]')
             registry_idle()

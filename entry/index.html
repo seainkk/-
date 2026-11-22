@@ -8,16 +8,16 @@
   <style>
     :root{color-scheme:light;--bg:#fff;--ink:#08090e;--muted:#6c6e79;--soft:#f7f7f8;--line:#e9e9ee;--blue:#4753ff;--blue-hover:#3441ed;--blue-soft:#eef0ff}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Vela Sans",Arial,sans-serif;-webkit-font-smoothing:antialiased}button{font:inherit;cursor:pointer;border:1px solid transparent;border-radius:100px;padding:11px 22px;background:var(--blue);color:#fff;font-weight:600;line-height:1.3;transition:background .18s ease,box-shadow .18s ease}button:hover{background:var(--blue-hover)}button:focus-visible{outline:3px solid #aab0ff;outline-offset:3px}button:disabled{cursor:default;opacity:.46}[hidden]{display:none!important}
-    .entry-bar{height:44px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 22px;border-bottom:1px solid var(--line);font-size:12px;background:var(--bg)}.entry-brand{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;letter-spacing:-.45px;line-height:1.18;min-width:0}.entry-mark{display:inline-block;width:17px;height:17px;border-radius:50%;background:radial-gradient(circle at 27% 22%,#a8d4ff 0,#6fa8ff 25%,#4753ff 69%,#3947f4 100%);box-shadow:inset 0 0 0 1px #4753ff12;flex:0 0 auto}.entry-wordmark b{font-weight:700;color:var(--blue)}.entry-bar button{font-size:11px;min-height:30px;padding:5px 15px;white-space:nowrap;flex:0 0 auto}.entry-copy-status{margin-left:auto;min-width:0;color:var(--muted);overflow-wrap:anywhere;font-size:11px;line-height:1.25;text-align:right}
+    .entry-bar{height:44px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 22px;border-bottom:1px solid var(--line);font-size:12px;background:var(--bg)}.entry-brand{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;letter-spacing:-.45px;line-height:1.18;min-width:0}.entry-mark{display:inline-block;width:17px;height:17px;border-radius:50%;background:radial-gradient(circle at 27% 22%,#a8d4ff 0,#6fa8ff 25%,#4753ff 69%,#3947f4 100%);box-shadow:inset 0 0 0 1px #4753ff12;flex:0 0 auto}.entry-wordmark b{font-weight:700;color:var(--blue)}
     .entry-card{margin:clamp(45px,13vh,140px) auto 36px;max-width:620px;padding:40px;border:1px solid #f0f0f3;border-radius:30px;background:var(--soft)}.entry-card h1{font-size:34px;line-height:1.18;margin:0 0 18px;font-weight:700;letter-spacing:-1.1px}.entry-card p{margin:0 0 24px;color:var(--muted);font-size:16px;line-height:1.6}.entry-help{font-size:13px}.entry-spinner{height:27px;width:27px;display:inline-block;border:3px solid #dfe2ff;border-top-color:var(--blue);border-radius:50%;animation:spin .85s linear infinite;margin-bottom:23px}@keyframes spin{to{transform:rotate(360deg)}}
-    #entry-frame-host{height:calc(100dvh - 44px);min-height:400px}#entry-frame-host iframe{display:block;width:100%;height:100%;border:0;background:var(--bg)}.entry-clipboard{position:fixed;left:-9999px;opacity:0;pointer-events:none}
-    @media(max-width:640px){.entry-bar{padding:6px 12px;gap:8px}.entry-brand{font-size:12px;gap:6px;letter-spacing:-.35px}.entry-mark{width:14px;height:14px}.entry-bar button{font-size:10.5px;padding:5px 11px;min-height:29px}.entry-copy-status{font-size:10px;max-width:68px}.entry-card{margin:38px 16px;padding:28px 24px;border-radius:26px}.entry-card h1{font-size:29px;letter-spacing:-.8px}.entry-card p{font-size:15px;line-height:1.55}.entry-card button{padding:12px 20px;min-height:44px}.entry-spinner{margin-bottom:20px}}
-    @media(max-width:359px){.entry-bar{padding-inline:10px;gap:6px}.entry-copy-status{max-width:54px;font-size:9px}.entry-bar button{font-size:10px;padding-inline:10px}.entry-card{margin-inline:12px;padding:25px 21px}.entry-card h1{font-size:27px}}
+    #entry-frame-host{height:calc(100dvh - 44px);min-height:400px}#entry-frame-host iframe{display:block;width:100%;height:100%;border:0;background:var(--bg)}
+    @media(max-width:640px){.entry-bar{padding:6px 12px;gap:8px}.entry-brand{font-size:12px;gap:6px;letter-spacing:-.35px}.entry-mark{width:14px;height:14px}.entry-card{margin:38px 16px;padding:28px 24px;border-radius:26px}.entry-card h1{font-size:29px;letter-spacing:-.8px}.entry-card p{font-size:15px;line-height:1.55}.entry-card button{padding:12px 20px;min-height:44px}.entry-spinner{margin-bottom:20px}}
+    @media(max-width:359px){.entry-bar{padding-inline:10px;gap:6px}.entry-card{margin-inline:12px;padding:25px 21px}.entry-card h1{font-size:27px}}
     @media(prefers-reduced-motion:reduce){.entry-spinner{animation:none}button{transition:none}}
   </style>
 </head>
 <body data-state="locked">
-  <header class="entry-bar"><div class="entry-brand"><span class="entry-mark" aria-hidden="true"></span><span class="entry-wordmark">Центр <b>мультиканального аутрича</b></span></div><span id="entry-copy-status" class="entry-copy-status" role="status" aria-live="polite"></span><button id="entry-copy" type="button" hidden disabled>Скопировать ссылку</button></header>
+  <header class="entry-bar"><div class="entry-brand"><span class="entry-mark" aria-hidden="true"></span><span class="entry-wordmark">Центр <b>мультиканального аутрича</b></span></div></header>
   <main id="entry-card" class="entry-card" aria-labelledby="entry-title">
     <span id="entry-spinner" class="entry-spinner" aria-hidden="true" hidden></span>
     <h1 id="entry-title">Для входа нужна закрытая ссылка</h1>
@@ -36,7 +36,6 @@
 
     function keyFromHash(value){const match=typeof value==='string'?value.match(/^#access_key=([A-Za-z0-9_-]{43})$/):null;return match?match[1]:null;}
     function appUrl(key){if(typeof key!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return GOOGLE_APP_URL+'#access_key='+key;}
-    function entryUrl(key){if(typeof key!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');const url=new URL(window.location.href);url.search='';url.hash='access_key='+key;if(url.pathname.endsWith('/index.html'))url.pathname=url.pathname.slice(0,-10);return url.href;}
     function googleOrigin(origin){try{const url=new URL(origin);return url.origin===origin&&!url.port&&url.protocol==='https:'&&(url.hostname==='script.google.com'||url.hostname==='script.googleusercontent.com'||/^[a-z0-9-]+-script\.googleusercontent\.com$/.test(url.hostname));}catch(error){return false;}}
     function frameSource(source){if(!currentFrame||!source)return false;try{let node=source;for(let depth=0;node&&depth<8;depth++){if(node===currentFrame.contentWindow)return true;const parent=node.parent;if(!parent||parent===node)return false;node=parent;}}catch(error){return false;}return false;}
     function isBackEntry(){return window.history.state?.basesRegistryBack===true;}
@@ -68,7 +67,7 @@
     function clearFrame(releaseBack=false){
       canBack=false;appWindow=null;appOrigin='';
       if(releaseBack)syncBackEntry();else{backArmed=false;releasingBack=false;}
-      if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}const old=currentFrame;currentFrame=null;if(old)old.remove();ready=false;$('entry-frame-host').hidden=true;$('entry-copy').hidden=true;$('entry-copy').disabled=true;$('entry-copy-status').textContent='';
+      if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}const old=currentFrame;currentFrame=null;if(old)old.remove();ready=false;$('entry-frame-host').hidden=true;
     }
     function showState(state,title,message,retry){document.body.dataset.state=state;$('entry-card').hidden=false;$('entry-title').textContent=title;$('entry-message').textContent=message;$('entry-spinner').hidden=state!=='loading';$('entry-retry').hidden=!retry;}
     function openEntry(){
@@ -84,26 +83,19 @@
       frame.src=appUrl(accessKey);currentFrame=frame;$('entry-frame-host').append(frame);
       loadingTimer=setTimeout(()=>{if(currentFrame===frame&&!ready)showState('error','Подключение заняло больше времени','Повторите подключение. Если сервис снова не откроется, передайте владельцу этот экран.',true);},45000);
     }
-    async function copyEntry(){
-      if(!ready||!accessKey)return;
-      const url=entryUrl(accessKey);let copied=false;
-      try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(url);copied=true;}}catch(error){/* Try the user-gesture fallback without showing the credential. */}
-      if(!copied){const field=document.createElement('textarea');field.value=url;field.className='entry-clipboard';field.setAttribute('readonly','');field.setAttribute('aria-hidden','true');document.body.append(field);try{field.select();copied=document.execCommand('copy')===true;}catch(error){/* Do not expose the private URL in an error. */}finally{field.remove();$('entry-copy').focus();}}
-      $('entry-copy-status').textContent=copied?'Ссылка скопирована':'Скопируйте полный адрес из строки браузера.';
-    }
     window.addEventListener('message',(event)=>{
       if(!googleOrigin(event.origin)||!frameSource(event.source)||!event.data||typeof event.data!=='object')return;
       if(ready&&(event.source!==appWindow||event.origin!==appOrigin))return;
       if(event.data.type==='bases-registry-ready'){
         appWindow=event.source;appOrigin=event.origin;
-        if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-frame-host').hidden=false;$('entry-copy').hidden=false;$('entry-copy').disabled=false;
+        if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-frame-host').hidden=false;
       }else if(ready&&event.data.type==='bases-registry-navigation'&&typeof event.data.canBack==='boolean'){
         canBack=event.data.canBack;syncBackEntry();
       }else if(event.data.type==='bases-registry-locked'){
         clearFrame(true);showState('locked','Нужна действующая закрытая ссылка','Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.',false);
       }
     });
-    $('entry-copy').addEventListener('click',copyEntry);$('entry-retry').addEventListener('click',openEntry);window.addEventListener('hashchange',openEntry);window.addEventListener('popstate',popEntry);
+    $('entry-retry').addEventListener('click',openEntry);window.addEventListener('hashchange',openEntry);window.addEventListener('popstate',popEntry);
     window.addEventListener('pointerup',syncBackEntry);window.addEventListener('keyup',syncBackEntry);
     window.addEventListener('pagehide',()=>clearFrame());window.addEventListener('pageshow',event=>{if(event.persisted)openEntry();});
     openEntry();

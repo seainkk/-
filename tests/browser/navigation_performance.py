@@ -153,6 +153,7 @@ def main():
         # A slow catalog read must not hold the public settings panel hostage.
         reset("backend.holdMethods=['getSourceBases'];")
         held('getSourceBases')
+        page.locator('#br-settings-open').click()
         page.locator('#br-provider-open').click()
         expect(page.locator('#br-provider-dialog')).to_be_visible()
         page.wait_for_function("backend.calls.some(call=>call.name==='getPromouserSettings')")
@@ -162,6 +163,7 @@ def main():
         assert page.evaluate('backend.maxActiveReads') == 2
         concurrency()
         page.locator('#br-provider-close').click()
+        page.locator('#br-settings-close').click()
         page.locator('#br-view-segments').click()
         expect(page.locator('[data-segment="existing-segment"]')).to_be_visible()
         page.evaluate("backend.segments[0].name='Сегмент второго проекта'")

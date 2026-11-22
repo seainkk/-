@@ -232,8 +232,11 @@
     const progress=response?.progress;
     let message=forecastError||response?.message||'';
     if(!forecastError&&response?.retryAfterMs>0&&Date.now()<forecastRetryAt)message=message||'Coldy попросил подождать. Расчёт продолжится после паузы.';
-    else if(!message&&(forecastBusy||response?.pending))message=progress?
-      'Идёт расчёт. Рассылок обработано '+number(progress.campaignsDone)+' из '+number(progress.campaignsTotal)+', контактов проверено '+number(progress.contactsRead)+'.':'Получаем данные для прогноза…';
+    if(!forecastError&&progress&&(response.pending||response.retryAfterMs>0)){
+      const counts='Рассылок обработано '+number(progress.campaignsDone)+' из '+number(progress.campaignsTotal)+', контактов проверено '+number(progress.contactsRead)+'.';
+      message=(message||'Идёт расчёт.')+' '+counts;
+    }
+    else if(!message&&(forecastBusy||response?.pending))message='Получаем данные для прогноза…';
     else if(!message&&response)message=({no_selection:'Для расчёта выберите почты мониторинга и привяжите рассылки проекта.',not_configured:'Для расчёта подключите Coldy.',error:'Не удалось получить прогноз. Повторите расчёт.'})[response.state]||'';
     health('pj-forecast-health',message,!!forecastError||response?.state==='error');
     if(!period){$('pj-forecast-totals').replaceChildren();$('pj-forecast-context').textContent='';return;}

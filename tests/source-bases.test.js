@@ -34,7 +34,7 @@ const rowFor = (id, overrides = {}) => HEADERS.map(key => ({
 
 function fixture(options = {}) {
   const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
-  const calls = { drive: [], opens: [], writes: [], reads: [], grows: [], events: [], folderLists: [], typedScans: [], ancestryReads: [], flushes: 0, lockDepth: 0 };
+  const calls = { drive: [], opens: [], writes: [], reads: [], formulaReads: [], grows: [], events: [], folderLists: [], typedScans: [], ancestryReads: [], flushes: 0, lockDepth: 0 };
   const folders = new Map(), files = new Map();
   const propertiesStore = {
     getProperty: key => properties.get(key) ?? null,
@@ -93,7 +93,7 @@ function fixture(options = {}) {
       const result = {
         getValues: () => { calls.reads.push({ sheet: name, row, rowCount, locked: calls.lockDepth > 0 }); return matrix(value => value); },
         getDisplayValues: () => matrix(value => String(value)),
-        getFormulas: () => matrix((value, r, c) => state.formulas.get(`${r}:${c}`) || ''),
+        getFormulas: () => { calls.formulaReads.push(name); return matrix((value, r, c) => state.formulas.get(`${r}:${c}`) || ''); },
         getValue: () => readAt(row, column),
         setValues: values => {
           calls.writes.push({ kind: 'values', sheet: name, row, column, values: structuredClone(values), locked: calls.lockDepth > 0 });
@@ -217,8 +217,109 @@ function fixture(options = {}) {
     const values = sourceSheet.state.rows.find((row, index) => index > 0 && row[0] === id);
     return values ? Object.fromEntries(HEADERS.map((name, index) => [name, values[index]])) : null;
   };
-  return { context, calls, folders, files, sourceSheet, relationSheet, properties, list, patch, record, makeFolder: folder, makeFile: file };
+  return { context, calls, folders, files, book, sourceSheet, relationSheet, properties, list, patch, record, makeFolder: folder, makeFile: file };
 }
+
+function enableCatalogBatch(f, amend = response => response) {
+  const requests = [];
+  f.context.Sheets = { Spreadsheets: { get(id, options) {
+    const request = { id, ...plain(options), locked: f.calls.lockDepth > 0 };
+    requests.push(request);
+    const sheets = request.ranges.map(range => {
+      const name = /^'([A-Za-z]+)'!A1:[A-M]\d+$/.exec(range)[1];
+      const sheet = f.book.getSheetByName(name);
+      const rowData = sheet.state.rows.map((row, r) => ({ values: row.map((item, c) => {
+        const formula = sheet.state.formulas.get(`${r + 1}:${c + 1}`);
+        if (formula) return { userEnteredValue: { formulaValue: formula }, effectiveValue: { stringValue: '' } };
+        if (item === '' || item == null) return {};
+        if (item instanceof Date) return { userEnteredValue: { numberValue: 1 }, effectiveValue: { numberValue: 1 }, effectiveFormat: { numberFormat: { type: 'DATE_TIME' } } };
+        const key = typeof item === 'string' ? 'stringValue' : typeof item === 'number' ? 'numberValue' : 'boolValue';
+        return { userEnteredValue: { [key]: item }, effectiveValue: { [key]: item } };
+      }) }));
+      return { properties: { title: name, sheetId: sheet.getSheetId() }, data: [{ rowData }] };
+    });
+    return amend({ spreadsheetId: id, sheets });
+  } } };
+  return requests;
+}
+
+test('catalogue reads all four service ranges in one bounded request with the same cards and project assignments', () => {
+  const f = fixture({
+    originRows: [['selectionFileId','sourceId','sourceName','criteria'], [NATIVE, CSV, '=Исходная база', '']],
+    projectRows: [['fileId','projectIds','revision','receipts'], [NATIVE, '["numshield"]', 1, JSON.stringify([['A'.repeat(43), 'B'.repeat(43)]])]],
+  });
+  const baseline = f.list();
+  assert.equal(baseline.state, 'ready');
+  assert.equal(f.calls.formulaReads.length, 4);
+  assert.equal(f.calls.reads.length, 4);
+  f.calls.reads.length = f.calls.formulaReads.length = 0;
+  const requests = enableCatalogBatch(f);
+  assert.deepEqual(f.list().items, baseline.items);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].id, STORAGE);
+  assert.equal(requests[0].locked, true);
+  assert.deepEqual(requests[0].ranges, ["'SourceBases'!A1:M5","'SourceBaseSegments'!A1:D1","'SourceBaseOrigins'!A1:D2","'SourceBaseProjects'!A1:D2"]);
+  assert.match(requests[0].fields, /userEnteredValue,effectiveValue,effectiveFormat/);
+  assert.deepEqual(f.calls.reads, []);
+  assert.deepEqual(f.calls.formulaReads, []);
+});
+
+test('catalogue batches preserve formulas as an error, even when a formula evaluates to an empty string', () => {
+  const f = fixture({ originRows: [['selectionFileId','sourceId','sourceName','criteria'], [NATIVE, CSV, 'Исходная', '']] });
+  f.book.getSheetByName('SourceBaseOrigins').state.formulas.set('2:4', '=T(1)');
+  enableCatalogBatch(f);
+  const item = f.list().items.find(item => item.id === NATIVE);
+  assert.equal(item.originAvailable, false);
+  assert.equal(item.status, 'collection');
+  f.calls.writes.length = 0;
+  f.relationSheet.state.formulas.set('1:4', '=T(1)');
+  assert.equal(f.list().state, 'storage_unavailable');
+  assert.deepEqual(f.calls.writes, []);
+});
+
+test('batched legacy records retain migration and native date handling, with a per-sheet fallback', () => {
+  const f = fixture({ sourceRows: [HEADERS.slice(0, 11), rowFor(CSV).slice(0, 11)],
+    originRows: [['selectionFileId','sourceId','sourceName','criteria']] });
+  enableCatalogBatch(f);
+  assert.equal(f.list().state, 'ready');
+  assert.deepEqual(f.sourceSheet.state.rows[0], HEADERS);
+  assert.deepEqual(f.calls.reads, []);
+  const row = f.sourceSheet.state.rows.find(row => row[0] === CSV);
+  row[9] = new Date('2026-11-22T14:09:03Z');
+  const item = f.list().items.find(item => item.id === CSV);
+  assert.equal(item.updatedAt, row[9].toISOString());
+  assert.deepEqual(f.calls.reads.map(r => r.sheet), ['SourceBases']);
+});
+
+test('malformed or unavailable batch data uses the canonical reader and unbound storage is never requested', () => {
+  for (const amend of [response => ({ ...response, spreadsheetId: OTHER }), response => ({ ...response, sheets: [] }),
+    () => { throw new Error('Service unavailable'); }]) {
+    const f = fixture(), baseline = f.list().items;
+    f.calls.reads.length = 0;
+    const requests = enableCatalogBatch(f, amend);
+    assert.deepEqual(f.list().items, baseline);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(f.calls.reads.map(r => r.sheet), ['SourceBases', 'SourceBaseSegments']);
+  }
+  const moved = fixture({ storageParent: OTHER }), forbidden = enableCatalogBatch(moved);
+  assert.equal(moved.list().state, 'storage_unavailable');
+  assert.deepEqual(forbidden, []);
+});
+
+test('unexpected columns, omitted rows and Sheets error cells cannot turn an incomplete catalogue into an empty range', () => {
+  const invalid = fixture({ sourceRows: [[...HEADERS, 'manual column']] });
+  const requests = enableCatalogBatch(invalid);
+  assert.equal(invalid.list().state, 'storage_unavailable');
+  assert.ok(requests.every(request => request.ranges.every(range => !range.startsWith("'SourceBases'!"))));
+  assert.deepEqual(invalid.calls.writes, []);
+  for (const change of [rows => rows.pop(), rows => { rows[0].values[0].effectiveValue = { errorValue: {type: 'REF'} }; }]) {
+    const f = fixture(), baseline = f.list().items;
+    f.calls.reads.length = 0;
+    enableCatalogBatch(f, response => { change(response.sheets[0].data[0].rowData); return response; });
+    assert.deepEqual(f.list().items, baseline);
+    assert.deepEqual(f.calls.reads.map(entry => entry.sheet), ['SourceBases']);
+  }
+});
 
 test('source-base APIs authorize before Drive or service storage access', () => {
   for (const options of [

@@ -552,6 +552,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         expect(page.locator('#br-coldy-dialog')).to_be_visible()
         page.wait_for_function('backend.active===0')
         page.locator('#br-coldy-close').click()
+        page.locator('#br-settings-close').click()
         find_campaign('New')
         page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]').check()
         assert page.evaluate('RegistryProject.isEditing()') is True
@@ -575,12 +576,12 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         expect(page.locator('#pj-selection-save')).to_be_enabled()
         page.locator('#pj-analytics-connect').click();idle()
         page.locator('#br-coldy-test').click();idle()
-        page.locator('#br-coldy-close').click();idle()
+        page.locator('#br-coldy-close').click();page.locator('#br-settings-close').click();idle()
         expect(page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]')).to_be_checked()
         page.locator('#pj-analytics-connect').click();idle()
         page.locator('#br-coldy-provider').select_option('coldy')
         page.locator('#br-coldy-save').click();idle()
-        page.locator('#br-coldy-close').click();idle()
+        page.locator('#br-coldy-close').click();page.locator('#br-settings-close').click();idle()
         expect(page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]')).to_be_checked()
         page.set_viewport_size({'width':390,'height':844})
         assert page.evaluate('document.documentElement.scrollWidth<=window.innerWidth+1'),'Five-tab header must not overflow mobile viewport'

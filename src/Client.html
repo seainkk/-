@@ -23,6 +23,7 @@
   let pendingImportExit=null,backAvailable=false;
   let suspendedSegment=null;
   let providerSession=null,coldySession=null,coldyMailings=null;
+  let settingsSession=null,settingsTimer=null;
   let dashboard=null,dashboardLoading=false,dashboardAnalysisLoading=false,dashboardAnalysisTimer=null,dashboardRequest=0,dashboardError=null,lastDashboardAttempt=0,lastDashboardLoaded=0,renderedDashboardKey=null;
   let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0,lastMailingsLoaded=0;
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
@@ -39,6 +40,7 @@
   function notifyEntry(state){try{if(window.top!==window)window.top.postMessage({type:state==='ready'?'bases-registry-ready':'bases-registry-locked'},'https://seainkk.github.io');}catch(ignored){}}
   function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
   function isReadRpc(method,payload){
+    if(method==='getServiceLimits')return true;
     if(method==='getSegmentMailings'&&payload?.live)return false;
     if(method==='getProjectAnalyticsCampaigns')return payload?.refresh!==true;
     return ['getSourceBasesRevision','getProjectAnalytics','getColdyBindings','getProjectInfrastructure','getProjectInfrastructureSelection','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);
@@ -76,9 +78,10 @@
   function renderAccess(){
     $('br-access-panel').hidden=accessReady;$('br-access-title').textContent=busy?'Открываем сервис…':'Для входа нужна закрытая ссылка';$('br-access-message').textContent=accessMessage||(busy?'Проверяем ссылку…':'Откройте полную ссылку, которую вам передал владелец сервиса.');$('br-access-retry').disabled=busy||networkPending>0;
     $('br-project-switch').hidden=!accessReady;$('br-project').value=activeProjectId;
-    const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-provider-open').hidden=!accessReady;$('br-coldy-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
+    const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-settings-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message){
+    closeServiceSettings(false);
     sourceProbeAt=0;sourceCheckedAt=0;sourceProbe=null;
     projectDrafts.clear();claimRequests.clear();mailingSegmentId=null;sourceSaving=null;segmentSaving=false;segmentEditorEpoch++;
     $('br-coldy-binding-form').reset();$('br-coldy-upload-preview').hidden=true;$('br-segment-normalized-preview').hidden=true;
@@ -120,11 +123,91 @@
     }catch(error){if(startupEpoch!==accessEpoch)return;const parsed=failure(error);lockAccess(parsed.code==='LINK_ACCESS_REQUIRED'?'Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.':parsed.message);sourceLoading=false;}
     finally{busy=false;$('br-loading').hidden=true;render();if(accessReady&&startupEpoch===accessEpoch){armViewTimer();if(!sourceLoading)refreshActiveView({opening:true});}flushPendingView();}
   }
+  function settingsVisible(session){return !!session&&settingsSession===session&&accessReady&&session.epoch===accessEpoch&&$('br-settings-dialog').open&&!providerSession&&!coldySession&&!document.hidden;}
+  function renderLimit(provider,data,status){
+    const id='br-settings-'+provider+'-',list=$(id+'limits'),note=$(id+'note');
+    list.replaceChildren();note.textContent='';
+    $(id+'status').textContent=status||(!data?'':data.configured===false?'Подключение не настроено':data.active===true?'Подключение активно':data.active===false?'Ключ отклонён':'Ключ сохранён. Подключение не подтверждено.');
+    if(!data)return;
+    for(const item of data.items||[]){
+      const row=document.createElement('div'),label=document.createElement('dt'),value=document.createElement('dd');
+      label.textContent=item.label;
+      value.textContent=Number.isFinite(item.value)?new Intl.NumberFormat('ru-RU',{maximumFractionDigits:item.unit==='USD'?8:4}).format(item.value)+(item.unit?' '+item.unit:''):'Нет данных';
+      row.append(label,value);list.append(row);
+    }
+    const checked=Date.parse(data.checkedAt);
+    const stamp=Number.isFinite(checked)?'Проверено '+new Date(checked).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК':'';
+    note.textContent=[data.message,stamp].filter(Boolean).join(' · ');
+  }
+  async function readServiceLimit(provider){
+    const session=settingsSession,check=session?.[provider];
+    if(!settingsVisible(session)||!check||check.pending||Date.now()<check.next)return;
+    const valid=()=>settingsVisible(session)&&session[provider]===check,started=Date.now();
+    clearTimeout(check.timer);check.timer=null;check.pending=true;
+    try{
+      if(check.afterSave){await workspaceRpcQueue;if(!valid())return;check.afterSave=false;}
+      const data=await workspaceRpc('getServiceLimits',{provider},valid);
+      if(!data||!valid())return;
+      check.continuing=data.pending===true;
+      check.next=Math.max(check.continuing?Date.now()+2500:started+60000,Date.now()+(Number(data.retryAfterMs)||0));
+      renderLimit(provider,data,check.continuing&&data.active!==true?'Проверяем данные сервиса…':'');
+      if(check.continuing)check.timer=setTimeout(()=>readServiceLimit(provider),check.next-Date.now());
+    }catch(error){if(valid()){check.continuing=false;check.next=Date.now()+60000;renderLimit(provider,null,'Подключение не подтверждено. '+failure(error).message);}}
+    finally{check.pending=false;}
+  }
+  function pollSettings(){
+    if(!settingsVisible(settingsSession))return;
+    void readServiceLimit('promouser');void readServiceLimit('coldy');
+  }
+  function armSettings(){
+    if(settingsTimer!==null){clearInterval(settingsTimer);settingsTimer=null;}
+    if(!settingsSession)return;
+    for(const provider of ['promouser','coldy']){
+      const check=settingsSession[provider];clearTimeout(check.timer);
+      if(check.continuing&&settingsVisible(settingsSession)&&check.next>Date.now())check.timer=setTimeout(()=>readServiceLimit(provider),check.next-Date.now());
+    }
+    if(settingsVisible(settingsSession)){pollSettings();settingsTimer=setInterval(pollSettings,60000);}
+  }
+  function closeServiceSettings(resume=true){
+    const current=settingsSession;
+    if(settingsTimer!==null){clearInterval(settingsTimer);settingsTimer=null;}
+    if(settingsSession){clearTimeout(settingsSession.coldy.timer);clearTimeout(settingsSession.promouser.timer);}
+    settingsSession=null;
+    if($('br-settings-dialog').open)$('br-settings-dialog').close();
+    for(const provider of ['coldy','promouser'])renderLimit(provider,null);
+    $('br-settings-copy-status').textContent='';
+    if(resume&&current?.gridReturn&&accessReady&&current.epoch===accessEpoch)current.gridReturn(current.changed===true,current.changed?workspaceRpcQueue:null);
+  }
+  function openServiceSettings(provider,gridReturn){
+    if(!accessReady||settingsSession||providerSession||coldySession||gridIsOpen()&&!gridReturn||window.RegistryProject?.hasPending?.())return false;
+    settingsSession={epoch:accessEpoch,coldy:{next:0},promouser:{next:0},gridReturn};
+    for(const name of ['coldy','promouser'])renderLimit(name,null,'Проверяем подключение…');
+    $('br-settings-dialog').showModal();updateControls();
+    if(provider==='coldy')openColdySettings();else armSettings();
+    return true;
+  }
+  function pauseServiceLimits(){
+    if(!settingsSession)return;
+    if(settingsTimer!==null){clearInterval(settingsTimer);settingsTimer=null;}
+    clearTimeout(settingsSession.coldy.timer);clearTimeout(settingsSession.promouser.timer);
+  }
+  function serviceKeyMayChange(provider){
+    if(!settingsSession)return;
+    settingsSession.changed=true;
+    settingsSession[provider]={next:0,afterSave:true};renderLimit(provider,null,'Проверяем подключение…');
+  }
   async function copySharedLink(){
-    if(!accessReady||!accessKey)return;
-    const value=sharedUrl(accessKey);
-    try{if(!navigator.clipboard?.writeText)throw new Error('Clipboard unavailable');await navigator.clipboard.writeText(value);notice('Закрытая ссылка скопирована.');}
-    catch(error){const field=document.createElement('textarea');field.value=value;field.readOnly=true;field.style.position='fixed';field.style.opacity='0';document.body.append(field);field.select();let copied=false;try{copied=document.execCommand('copy');}catch(ignored){}field.remove();notice(copied?'Закрытая ссылка скопирована.':'Не удалось скопировать ссылку. Скопируйте полный адрес страницы из адресной строки браузера.',copied?'info':'error');}
+    const session=settingsSession;
+    if(!accessReady||!accessKey||!settingsVisible(session))return;
+    const value=sharedUrl(accessKey);let copied=false;
+    try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(value);copied=true;}}catch(ignored){}
+    if(!settingsVisible(session))return;
+    if(!copied){
+      const field=document.createElement('textarea');field.value=value;field.readOnly=true;field.style.position='fixed';field.style.opacity='0';
+      $('br-settings-dialog').append(field);
+      try{field.select();copied=document.execCommand('copy')===true;}catch(ignored){}finally{field.remove();$('br-share-copy').focus();}
+    }
+    $('br-settings-copy-status').textContent=copied?'Закрытая ссылка скопирована.':'Не удалось скопировать ссылку. Скопируйте полный адрес страницы входа из браузера.';
   }
   function closeProviderSettings(){
     providerSession=null;
@@ -132,6 +215,7 @@
     $('br-provider-key').value='';
     const dialog=$('br-provider-dialog');
     if(dialog.open)dialog.close();
+    armSettings();
   }
   function renderProviderSettings(current){
     $('br-provider-fields').disabled=!!current.pending||!current.settings;
@@ -142,7 +226,7 @@
   }
   function showProviderValues(current,settings){
     current.settings=settings;
-    $('br-provider-configured').textContent=settings.configured?'Ключ уже подключён.':'API-ключ ещё не подключён.';
+    $('br-provider-configured').textContent=settings.configured?'Ключ сохранён.':'API-ключ ещё не подключён.';
     $('br-provider-enabled').checked=settings.enabled===true;
     $('br-provider-limit').value=String(settings.autoPayLimitUsd??0);
   }
@@ -152,7 +236,8 @@
     $('br-provider-automation-message').textContent=data.needsOwnerSetup?'Включение требует разрешения владельца.':data.installed?'Фоновая обработка подключённых таблиц включена.':'Фоновая обработка подключённых таблиц выключена.';
   }
   async function openProviderSettings(){
-    if(!accessReady||providerSession||coldySession||gridIsOpen())return;
+    if(!accessReady||providerSession||coldySession||gridIsOpen()&&!settingsSession?.gridReturn)return;
+    pauseServiceLimits();$('br-provider-close').textContent=settingsSession?'← Назад':'Закрыть';
     const current={pending:'load',settings:null,automation:null,needsOwnerAuth:false};
     providerSession=current;
     $('br-provider-configured').textContent='';
@@ -198,6 +283,7 @@
   function saveProviderSettings(event){
     event.preventDefault();
     if(!providerSession?.settings||providerSession.pending)return;
+    serviceKeyMayChange('promouser');
     const payload={enabled:$('br-provider-enabled').checked,autoPayLimitUsd:$('br-provider-limit').valueAsNumber};
     const key=$('br-provider-key').value.trim();
     if(key)payload.apiKey=key;
@@ -209,6 +295,7 @@
   }
   function showProviderBalance(){
     if(!providerSession?.settings?.configured)return;
+    if(settingsSession)settingsSession.promouser.next=0;
     runProviderAction('balance','getPromouserBalance',{},(current,data,message)=>{
       current.needsOwnerAuth=false;
       message.textContent='Баланс Promouser: $'+String(data.balance);
@@ -221,7 +308,7 @@
   }
   function showColdyOwnerHelp(code=''){$('br-coldy-owner').hidden=code!=='COLDY_OWNER_AUTH_REQUIRED';}
   function showColdyFailure(error){const parsed=failure(error);showColdyOwnerHelp(parsed.code);$('br-coldy-message').textContent=parsed.message;}
-  function closeColdySettings(){coldySession=null;showColdyOwnerHelp();$('br-coldy-form').reset();$('br-coldy-key').value='';if($('br-coldy-dialog').open)$('br-coldy-dialog').close();}
+  function closeColdySettings(){coldySession=null;showColdyOwnerHelp();$('br-coldy-form').reset();$('br-coldy-key').value='';if($('br-coldy-dialog').open)$('br-coldy-dialog').close();armSettings();}
   function renderColdySettings(current=coldySession){
     if(!current||coldySession!==current)return;const pending=!!current.pending;
     $('br-coldy-fields').disabled=pending||!current.settings;$('br-coldy-close').disabled=false;$('br-coldy-test').disabled=pending||current.settings?.configured!==true;
@@ -232,17 +319,21 @@
     $('br-coldy-provider').value=data.emailValidationProvider==='coldy'?'coldy':'promouser';
   }
   async function openColdySettings(){
-    if(!accessReady||coldySession||providerSession||gridIsOpen()||window.RegistryProject?.hasPending?.())return;const current={pending:'load',settings:null};coldySession=current;showColdyOwnerHelp();$('br-coldy-message').textContent='Загружаем настройки…';$('br-coldy-configured').textContent='';$('br-coldy-key').value='';$('br-coldy-dialog').showModal();renderColdySettings(current);
+    if(!accessReady||coldySession||providerSession||gridIsOpen()&&!settingsSession?.gridReturn||window.RegistryProject?.hasPending?.())return;
+    pauseServiceLimits();$('br-coldy-close').textContent=settingsSession?'← Назад':'Закрыть';
+    const current={pending:'load',settings:null};coldySession=current;showColdyOwnerHelp();$('br-coldy-message').textContent='Загружаем настройки…';$('br-coldy-configured').textContent='';$('br-coldy-key').value='';$('br-coldy-dialog').showModal();renderColdySettings(current);
     try{const data=await workspaceRpc('getColdySettings',{});if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='';}}catch(error){if(coldySession===current)showColdyFailure(error);}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   async function saveColdySettings(event){
     event.preventDefault();const current=coldySession;if(!current?.settings||current.pending)return;
+    serviceKeyMayChange('coldy');
     const payload={emailValidationProvider:$('br-coldy-provider').value,autoValidateEmails:false};
     const key=$('br-coldy-key').value.trim();if(key)payload.apiKey=key;$('br-coldy-key').value='';current.pending='save';showColdyOwnerHelp();$('br-coldy-message').textContent='Сохраняем подключение…';renderColdySettings(current);
     try{const data=await workspaceRpc('configureColdy',payload);if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='Настройки сохранены. Ранее проверенные контакты сохраняют результаты.';if(coldyMailings)coldyMailings.loaded=false;window.RegistryProject?.invalidate?.({credentialsChanged:data.credentialChanged===true||(data.credentialChanged===undefined&&!!key)});if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;}}
     catch(error){if(coldySession===current)showColdyFailure(error);}finally{delete payload.apiKey;if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   async function testColdyConnection(){
+    if(settingsSession)settingsSession.coldy.next=0;
     const current=coldySession;if(!current?.settings?.configured||current.pending)return;current.pending='test';showColdyOwnerHelp();$('br-coldy-message').textContent='Читаем список рассылок…';renderColdySettings(current);
     try{const data=await workspaceRpc('testColdyConnection',{});if(coldySession===current){showColdyOwnerHelp();current.settings.connected=data.connected===true;window.RegistryProject?.invalidate?.();if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;$('br-coldy-configured').textContent='Coldy подключён.';$('br-coldy-message').textContent='Подключение подтверждено. Рассылок: '+Number(data.campaignCount||0)+'. Платные проверки не запускались.';}}
     catch(error){if(coldySession===current)showColdyFailure(error);}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
@@ -254,7 +345,7 @@
   function coldyTimestamp(value){const date=new Date(value);return Number.isFinite(date.getTime())?date.toLocaleString('ru-RU'):'';}
   function renderColdyBindings(current=coldyMailings){
     if(!coldyMailingsAlive(current)||current.segmentId!==mailingSegmentId)return;const data=current.data,disabled=!!current.busy,unresolved=!!current.failed&&!!current.step;
-    $('br-coldy-bindings-message').textContent=current.error||(current.busy?current.busyMessage||'Обновляем Coldy…':!data?'Загружаем привязки…':data.configured?'Выберите существующую рассылку Coldy для этого сегмента.':'Сначала сохраните API-ключ через «Подключение Coldy» в шапке.');
+    $('br-coldy-bindings-message').textContent=current.error||(current.busy?current.busyMessage||'Обновляем Coldy…':!data?'Загружаем привязки…':data.configured?'Выберите существующую рассылку Coldy для этого сегмента.':'Откройте «Настройки» и сохраните API-ключ Coldy.');
     $('br-coldy-binding-fields').disabled=disabled||unresolved||!data?.configured;$('br-coldy-mailings-refresh').disabled=disabled||!data?.configured;
     const select=$('br-coldy-campaign'),selected=select.value;select.replaceChildren();const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Выберите рассылку';select.append(placeholder);
     const choices=new Map((data?.campaigns||[]).map(campaign=>[campaign.id,campaign]));
@@ -392,7 +483,7 @@
   function requesting(){return networkPending-readPending>0||busy||sourceLoading||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading;}
   // Reading a list must not prevent opening a cached form or typing into it.
   function editingBlocked(){return !accessReady||busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||gridIsOpen();}
-  function formIsOpen(){return importOpen||!!segmentEditor||!!originSession||sourceDrafts.size>0||projectDrafts.size>0||gridIsOpen()||!!providerSession||!!coldySession||!!coldyMailings?.busy||!!coldyMailings?.editing||!!coldyMailings?.preview||!!window.RegistryProject?.isEditing?.();}
+  function formIsOpen(){return importOpen||!!segmentEditor||!!originSession||!!settingsSession||sourceDrafts.size>0||projectDrafts.size>0||gridIsOpen()||!!providerSession||!!coldySession||!!coldyMailings?.busy||!!coldyMailings?.editing||!!coldyMailings?.preview||!!window.RegistryProject?.isEditing?.();}
   function gridIsOpen(){return window.RegistryGrid?.isOpen?.()===true;}
   function workspaceRpc(method,payload,canDispatch){
     const epoch=accessEpoch;
@@ -403,7 +494,7 @@
   function openGridWorkbook(id){
     if(!accessReady||importing||sourceSaving||segmentSaving||segmentEditor||coldySession||providerSession||coldyMailings?.busy)return;
     if(!window.RegistryGrid?.open){notice('Редактор таблиц ещё загружается. Обновите страницу.','error');return;}
-    window.RegistryGrid.open({id,transport:workspaceRpc,onScopeError:message=>notice(message,'error'),onClose:()=>{render();armViewTimer();flushPendingView();}});armViewTimer();updateControls();
+    window.RegistryGrid.open({id,transport:workspaceRpc,openSettings:resume=>openServiceSettings(null,resume),onScopeError:message=>notice(message,'error'),onClose:()=>{render();armViewTimer();flushPendingView();}});armViewTimer();updateControls();
   }
   function sourceInSection(item,section){const kinds=normalizeContents(item?.contents);return !kinds.length||kinds.includes(section);}
   function renderRegistrySections(){
@@ -1220,7 +1311,7 @@
     root.dataset.view=activeView;window.RegistryProject?.show?.(activeView,{ready:accessReady,epoch:accessEpoch});renderSources();renderSegments();renderMailings();renderContactPreview();renderRegistrySections();renderAccess();updateControls();
   }
   function updateControls(){
-    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
+    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-settings-open').disabled=!accessReady||gridIsOpen()||!!window.RegistryProject?.hasPending?.();$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
     for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
     for(const add of root.querySelectorAll('[data-add-source]')){const item=sourceItem(add.dataset.addSource);add.disabled=!readySource(item)||sourceDrafts.has(item.id)||editing||importOpen||!!segmentEditor;}
     for(const analyze of root.querySelectorAll('[data-preview-source]'))analyze.disabled=editing||importOpen||!!segmentEditor;
@@ -1318,7 +1409,7 @@
     return open.findLast(node=>node.contains(document.activeElement))||open.at(-1);
   }
   function canGoBack(){
-    return accessReady&&!!(originSession||providerSession||coldySession||gridIsOpen()||importOpen||segmentEditor&&!segmentEditor.closeRequested||activeView==='sources'&&contactPreview||activeView==='mailings'||viewTrail.length||visibleDetails());
+    return accessReady&&!!(originSession||settingsSession||providerSession||coldySession||gridIsOpen()||importOpen||segmentEditor&&!segmentEditor.closeRequested||activeView==='sources'&&contactPreview||activeView==='mailings'||viewTrail.length||visibleDetails());
   }
   function syncBack(force=false){
     const next=canGoBack();
@@ -1328,7 +1419,7 @@
   }
   function goBack(){
     if(!accessReady)return;
-    const dialog=root.querySelector('dialog[open]');
+    const dialog=providerSession?$('br-provider-dialog'):coldySession?$('br-coldy-dialog'):root.querySelector('dialog[open]');
     if(dialog){dialog.querySelector('button[id$="-close"]')?.click();return;}
     if(gridIsOpen()){window.RegistryGrid.back?.();return;}
     if(importOpen){closePreparedImport(!!preparedImport&&!preparedImport.confirmationRequested);return;}
@@ -1362,6 +1453,10 @@
   $('br-origin-close').addEventListener('click',()=>{closeSourceOrigin();flushPendingView();});
   $('br-origin-dialog').addEventListener('cancel',event=>{event.preventDefault();closeSourceOrigin();flushPendingView();});
   $('br-access-retry').addEventListener('click',startSharedAccess);$('br-share-copy').addEventListener('click',copySharedLink);
+  $('br-settings-open').addEventListener('click',()=>openServiceSettings());
+  $('br-settings-close').addEventListener('click',()=>{closeServiceSettings();flushPendingView();});
+  $('br-settings-dialog').addEventListener('cancel',event=>{event.preventDefault();closeServiceSettings();flushPendingView();});
+  document.addEventListener('visibilitychange',armSettings);
   $('br-coldy-open').addEventListener('click',openColdySettings);
   $('br-coldy-close').addEventListener('click',()=>{if(!$('br-coldy-close').disabled){closeColdySettings();flushPendingView();}});
   $('br-coldy-dialog').addEventListener('cancel',event=>{event.preventDefault();if(!$('br-coldy-close').disabled){closeColdySettings();flushPendingView();}});
@@ -1431,7 +1526,7 @@
     if(!accessReady||dashboard?.state!=='ready'||!lastDashboardLoaded||pendingSyncViews.has('segments')||Date.now()-lastDashboardLoaded>60000)return null;
     return {state:dashboard.state,source:dashboard.source,loadedAt:lastDashboardLoaded,segments:dashboard.items.map(({id,name,category,url,coldyMailings})=>({id,name,category,url,previewNames:coldyMailings?.previewNames}))};
   }
-  window.RegistryProject?.configure?.({transport:workspaceRpc,peekSegments:peekProjectSegments,canPoll:()=>!formIsOpen()&&!viewMutationBlocked(),openConnection:openColdySettings,onStateChange:()=>updateControls(),onMutation:()=>{mailings=null;lastMailingsLoaded=0;if(coldyMailings)coldyMailings.loaded=false;}});
+  window.RegistryProject?.configure?.({transport:workspaceRpc,peekSegments:peekProjectSegments,canPoll:()=>!formIsOpen()&&!viewMutationBlocked(),openConnection:()=>openServiceSettings('coldy'),onStateChange:()=>updateControls(),onMutation:()=>{mailings=null;lastMailingsLoaded=0;if(coldyMailings)coldyMailings.loaded=false;}});
   render();startSharedAccess();
 })();
 </script>
