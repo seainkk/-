@@ -29,6 +29,8 @@ async function project(run) {
   await writeFile(path.join(cwd, '.clasp.json'), JSON.stringify({ scriptId: 'test-script-id', rootDir: 'src' }));
   await mkdir(path.join(cwd, 'src'));
   await writeFile(path.join(cwd, 'src/appsscript.json'), JSON.stringify(SHARED_MANIFEST));
+  await writeFile(path.join(cwd, 'src/Index.html'), '<main>Registry</main>\n<?!= include_(\'Client\'); ?>');
+  await writeFile(path.join(cwd, 'src/Client.html'), '<script>/* static client */</script>');
   try { await run(cwd); } finally { await rm(cwd, { force: true, recursive: true }); }
 }
 
@@ -41,15 +43,29 @@ test('deployment refuses a missing existing ID before touching clasp', async () 
 test('deployment updates the existing ID then verifies actual anonymous owner execution with private temporary credentials', async () => {
   await project(async cwd => {
     const calls = [], logs = [];
-    let authPath;
+    let authPath, staging;
     const result = await deploy({ cwd, env: { CI: 'true', CLASPRC_JSON: SECRET, APPS_SCRIPT_DEPLOYMENT_ID: DEPLOYMENT, GITHUB_SHA: 'a'.repeat(40) }, log: message => logs.push(message),
-      invoke: async args => {
+      invoke: async (args, options) => {
         calls.push(args);authPath = args[1];
         assert.equal(args[0], '--auth');assert.equal(args[2], '--json');
         assert.equal(await readFile(authPath, 'utf8'), SECRET);
-        assert.equal((await stat(authPath)).mode & 0o777, 0o600);
+        // Windows exposes ACL-managed user-temp files as 0666 in fs.stat. CI checks the POSIX permissions.
+        if (process.platform !== 'win32') assert.equal((await stat(authPath)).mode & 0o777, 0o600);
+        assert.equal(path.dirname(path.dirname(authPath)),tmpdir());
         const command = args[3];
-        if (command === 'push') return '{}';
+        if (command === 'push') {
+          staging = options.cwd;
+          assert.notEqual(staging, cwd);
+          assert.equal(options.packageDir, cwd, 'use the pinned clasp from the real checkout');
+          assert.equal(await readFile(path.join(staging, '.clasp.json'),'utf8'), await readFile(path.join(cwd, '.clasp.json'),'utf8'));
+          assert.equal(await readFile(path.join(staging, 'src/appsscript.json'),'utf8'), JSON.stringify(SHARED_MANIFEST));
+          assert.equal(await readFile(path.join(staging, 'src/RegistryShell.html'),'utf8'), '<main>Registry</main>\n<script>/* static client */</script>');
+          assert.equal(await readFile(path.join(staging, 'src/Index.html'),'utf8'), await readFile(path.join(cwd, 'src/Index.html'),'utf8'));
+          assert.ok(path.relative(staging,authPath).startsWith('..'), 'OAuth file is outside the clasp project');
+          await assert.rejects(stat(path.join(cwd, 'src/RegistryShell.html')), {code:'ENOENT'});
+          return '{}';
+        }
+        assert.equal(options.cwd,cwd);
         if (command === 'version') return '{"versionNumber":17}';
         if (command === 'redeploy') return JSON.stringify({ deploymentId: DEPLOYMENT, versionNumber:17 });
         throw new Error('Unexpected clasp command');
@@ -68,6 +84,7 @@ test('deployment updates the existing ID then verifies actual anonymous owner ex
     assert.equal(result.url, 'https://script.google.com/macros/s/' + DEPLOYMENT + '/exec');
     assert.equal(logs.join('\n').includes('never-log-this'),false);
     await assert.rejects(stat(authPath), { code:'ENOENT' });
+    await assert.rejects(stat(staging), { code:'ENOENT' });
   });
 });
 

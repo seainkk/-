@@ -39,9 +39,13 @@ function getSourceBases_() {
         var origins = sourceBaseReadOrigins_(storage);
         var projects = sourceBaseReadProjects_(storage);
         var items = discovered.map(function (file) { return sourceBaseItem_(file, records[file.id], associations, origins, projects); });
-        return sourceBasesResponse_(binding, storage.public, items, true, true);
+        var result = sourceBasesResponse_(binding, storage.public, items, true, true);
+        if (typeof sourceBasesRevisionToken_ === 'function') result.revision = sourceBasesRevisionToken_(current, binding, discovered);
+        return result;
       } catch (error) {
-        if (error.registryCode && ['AUTH_REQUIRED', 'ACCESS_DENIED', 'SETUP_REQUIRED', 'OUTSIDE_REGISTRY', 'BUSY'].indexOf(error.registryCode) !== -1) throw error;
+        if (['AUTH_REQUIRED', 'ACCESS_DENIED', 'SETUP_REQUIRED', 'LINK_ACCESS_REQUIRED', 'LINK_SETUP_REQUIRED',
+          'SOURCE_CHANGED', 'OUTSIDE_REGISTRY', 'BUSY'].indexOf(error.registryCode) !== -1) throw error;
+        if (authorize_().rootId !== current.rootId) fail_('SOURCE_CHANGED','Папка реестра изменилась. Обновите реестр.');
         var descriptor = error.sourceStorage || storageDescriptor;
         var message = error.registryCode && /^STORAGE_/.test(error.registryCode)
           ? error.message.replace(/^\[[A-Z_]+\]\s*/, '')
@@ -154,6 +158,79 @@ function sourceBasesSource_(context) {
 }
 
 function sourceBasesDiscover_(context, source) {
+  var files;
+  if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.list === 'function' && typeof Drive.Files.get === 'function') {
+    files = sourceBasesDriveListing_(context, source);
+  }
+  // A missing files array is not sufficient evidence that a folder is empty.
+  if (!files) files = sourceBasesDiscoverLegacy_(context, source);
+  var current = authorize_(), binding = sourceBasesSource_(current);
+  if (current.rootId !== context.rootId || binding.state !== 'ready' || binding.folder.getId() !== source.getId()) {
+    fail_('SOURCE_CHANGED', 'Папка исходных баз изменилась. Обновите реестр.');
+  }
+  return files;
+}
+
+/** One listing returns both metadata and actual parent IDs for every item on the page. */
+function sourceBasesDriveListing_(context, source) {
+  var sourceId = id_(source.getId()), storageId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
+  var root = Drive.Files.get(sourceId, { fields:'id,mimeType,trashed,driveId', supportsAllDrives:true });
+  if (!root || root.id !== sourceId || root.trashed || root.mimeType !== 'application/vnd.google-apps.folder') {
+    fail_('SOURCE_CHANGED','Папка исходных баз изменилась. Обновите реестр.');
+  }
+  var files = new Map(), folders = new Set([sourceId]), level = [sourceId], depth = 0;
+  function checkFolders(ids) {
+    ids.forEach(function (id) {
+      if (id === sourceId) return;
+      var folder = folderById_(id);
+      if (folder.isTrashed() || !insideRegistry_(folder, sourceId)) fail_('SOURCE_CHANGED','Вложенная папка изменилась во время чтения реестра.');
+    });
+  }
+  while (level.length) {
+    var children = [];
+    for (var start = 0; start < level.length; start += 20) {
+      var group = level.slice(start, start + 20), parents = new Set(group), tokens = new Set();
+      checkFolders(group);
+      var query = { q:"trashed = false and (" + group.map(function (id) { return "'" + id + "' in parents"; }).join(' or ') + ')',
+        pageSize:1000, fields:'nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,parents,trashed)',
+        supportsAllDrives:true, includeItemsFromAllDrives:true, corpora:root.driveId ? 'drive' : 'user' };
+      if (root.driveId) query.driveId = root.driveId;
+      do {
+        var page = Drive.Files.list(query);
+        if (!page || page.incompleteSearch) fail_('SOURCE_CHANGED','Google Диск не подтвердил полный список исходных баз.');
+        if (!Array.isArray(page.files)) return null;
+        page.files.forEach(function (item) {
+          if (!item || !Array.isArray(item.parents) || !item.parents.some(function (id) { return parents.has(id); }) ||
+              typeof item.name !== 'string' || typeof item.mimeType !== 'string') {
+            fail_('SOURCE_CHANGED','Google Диск не подтвердил расположение исходных баз.');
+          }
+          var id = id_(item.id);
+          if (item.trashed || id === storageId) return;
+          if (item.mimeType === 'application/vnd.google-apps.folder') {
+            if (folders.has(id)) return;
+            if (depth >= REGISTRY_CONFIG.maxTreeDepth || folders.size >= REGISTRY_CONFIG.maxSourceFolders)
+              fail_('SOURCE_LIMIT','Слишком много папок исходных баз. Список не был сохранён частично.');
+            folders.add(id); children.push(id);
+          } else if (!files.has(id)) {
+            if (files.size >= REGISTRY_CONFIG.maxSourceBaseRows) fail_('SOURCE_LIMIT','Исходных баз больше 5000. Список не был сохранён частично.');
+            var info = item.webViewLink ? sourceBaseMetadataValues_(id,item.name,item.mimeType,item.webViewLink) :
+              sourceBaseMetadata_(sourceBasesFile_(context,source,id));
+            files.set(id,info);
+          }
+        });
+        var next = page.nextPageToken;
+        if (!next) break;
+        if (typeof next !== 'string' || tokens.has(next)) fail_('SOURCE_CHANGED','Google Диск вернул неполный список исходных баз.');
+        tokens.add(next); query.pageToken = next;
+      } while (true);
+      checkFolders(group);
+    }
+    level = children; depth++;
+  }
+  return Array.from(files.values()).sort(byName_);
+}
+
+function sourceBasesDiscoverLegacy_(context, source) {
   var files = [], seenFiles = Object.create(null), seenFolders = Object.create(null), folderCount = 0;
   var sourceId = source.getId();
   var storageId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
@@ -195,8 +272,10 @@ function sourceBasesFile_(context, source, fileId) {
 function sourceBaseMetadata_(file, fileId, mimeType) {
   fileId = id_(fileId === undefined ? file.getId() : fileId);
   mimeType = String(mimeType === undefined ? file.getMimeType() : mimeType);
-  var name = String(file.getName());
-  var url = String(file.getUrl());
+  return sourceBaseMetadataValues_(fileId, String(file.getName()), mimeType, String(file.getUrl()));
+}
+
+function sourceBaseMetadataValues_(fileId, name, mimeType, url) {
   if (!/^https:\/\/(?:docs|drive|script)\.google\.com\//.test(url)) url = 'https://drive.google.com/file/d/' + fileId + '/view';
   var formats = {
     'application/vnd.google-apps.spreadsheet': 'Google Таблицы',

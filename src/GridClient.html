@@ -84,6 +84,46 @@
     try{const data=await rpc(current,'getGridRange',{id:current.id,sheetId,row,column,rowCount:Math.min(WINDOW_ROWS,meta.rowCount-row+1),columnCount:Math.min(WINDOW_COLUMNS,meta.columnCount-column+1)},()=>alive(current)&&request===current.loadSequence&&String(current.sheetId)===String(sheetId));if(!data||!alive(current)||request!==current.loadSequence||String(current.sheetId)!==String(sheetId))return;mergeRange(current,data);current.loading=false;draw();if(options.focus)$('rg-grid-viewport').focus({preventScroll:true});}
     catch(error){if(alive(current)&&request===current.loadSequence){current.loading=false;setError(error,current);}}
   }
+  async function refreshVisible(){
+    const current=session,meta=sheet(current);
+    if(!meta||current.livePending||Date.now()-current.liveCheckedAt<30000)return;
+    const view=$('rg-grid-viewport'),sheetId=current.sheetId,load=current.loadSequence,edit=current.editSequence;
+    const top=view.scrollTop,left=view.scrollLeft;
+    const valid=()=>alive(current)&&current.sheetId===sheetId&&current.loadSequence===load&&current.editSequence===edit&&
+      !document.hidden&&!panel.hidden&&!dragging&&!current.loading&&!current.transition&&!current.error&&!hasPending()&&
+      !current.formulaFocused&&$('rg-grid-editor').hidden&&$('rg-grid-validation').hidden&&top===view.scrollTop&&left===view.scrollLeft;
+    if(!valid())return;
+    const row=Math.max(current.window.row,Math.min(meta.rowCount,Math.floor(top/ROW_HEIGHT)+1));
+    const column=Math.max(current.window.column,Math.min(meta.columnCount,Math.floor(left/COLUMN_WIDTH)+1));
+    const rowCount=Math.min(Math.ceil(view.clientHeight/ROW_HEIGHT)+1,meta.rowCount-row+1,WINDOW_ROWS);
+    const columnCount=Math.min(Math.ceil(view.clientWidth/COLUMN_WIDTH)+1,meta.columnCount-column+1,WINDOW_COLUMNS);
+    current.livePending=true;current.liveCheckedAt=Date.now();
+    try{
+      const data=await rpc(current,'getGridRange',{id:current.id,sheetId,row,column,rowCount,columnCount},valid);
+      if(!data||!valid()||String(data.sheetId)!==String(sheetId))return;
+      let changed=data.totalRows!==meta.rowCount||data.totalColumns!==meta.columnCount;
+      const revisions=new Set();
+      for(let r=0;r<data.values.length;r++)for(let c=0;c<data.values[r].length;c++){
+        const id=key(row+r,column+c),previous=current.cache.get(id);
+        if(!previous||previous.display!==gridText(data.values[r][c]))changed=true;
+        if(previous&&previous.version!==data.versions?.[r]?.[c]){revisions.add(id);changed=true;}
+      }
+      if(changed){
+        if(revisions.size){
+          const validHistory=entry=>!entry.before.some((cells,r)=>cells.some((_,c)=>revisions.has(key(entry.row+r,entry.column+c))));
+          current.undo=current.undo.filter(validHistory);current.redo=current.redo.filter(validHistory);
+          for(const id of revisions)current.committed.delete(id);
+        }
+        mergeRange(current,data);draw();
+      }
+      $('rg-grid-live').textContent='Проверено в '+new Date(current.liveCheckedAt).toLocaleTimeString('ru-RU');
+    }catch(error){
+      const problem=gridFailure(error);
+      if(alive(current)&&/^(LINK_|OUTSIDE_|SOURCE_CHANGED|GRID_PROTECTED|NOT_FOUND)/.test(problem.code)){lock(true);current.onScopeError?.(problem.message);return;}
+      if(!valid())return;
+      $('rg-grid-live').textContent=problem.code==='GRID_SHEET_MISSING'?'Лист удалён. Обновите таблицу.':'Не удалось обновить видимые ячейки';
+    }finally{current.livePending=false;}
+  }
   function contactProgress(current,message,error=false){if(!alive(current))return;current.contactMessage=message||'';current.contactError=error;const box=$('rg-grid-contact-progress');box.hidden=!message;box.dataset.error=String(error);$('rg-grid-contact-message').textContent=message;$('rg-grid-contact-retry').hidden=!current.contactFailed;update();}
   async function loadContactWorkspace(current){if(current.workspacePending)return current.workspacePending;const pending=(async()=>{try{if(!alive(current))return;const workspace=await current.transport('getContactWorkspace',{id:current.id});if(alive(current)){current.workspace=workspace;current.workspaceLoaded=true;current.workspaceError=null;update();}}catch(error){if(alive(current)){current.workspaceLoaded=true;current.workspaceError=gridFailure(error);update();}}})();current.workspacePending=pending;try{await pending;}finally{if(current.workspacePending===pending)current.workspacePending=null;}}
   function sourceSheet(current,id){return (current.workspace?.sourceSheetIds||[]).some(value=>String(value)===String(id));}
@@ -146,8 +186,9 @@
   function renderAutomation(current,data){if(!alive(current))return;current.automation=data;$('rg-grid-automation-toggle').textContent=data.installed?'Отключить фоновую обработку':'Включить обработку изменений в Google Таблицах';$('rg-grid-automation-message').textContent=data.needsOwnerSetup?'Владельцу нужно один раз разрешить фоновую обработку в Apps Script. Ручная кнопка работает.':data.installed?'Изменения, внесённые прямо в Google Таблицах, обрабатываются примерно раз в 5 минут. Уже проверенные контакты пропускаются.':'Можно включить фоновую обработку новых строк, внесённых прямо в Google Таблицах.';}
   async function toggleAutomation(){const current=session;if(!current||current.validationBusy||current.contactBusy)return;current.validationBusy=true;$('rg-grid-automation-toggle').disabled=true;try{const data=await rpc(current,current.automation?.installed?'disableContactAutomation':'enableContactAutomation',{});if(alive(current))renderAutomation(current,data);}catch(error){if(alive(current))$('rg-grid-automation-message').textContent=gridFailure(error).message;}finally{if(alive(current)){current.validationBusy=false;$('rg-grid-automation-toggle').disabled=false;renderValidation(current);}}}
   function validationPollDelay(data,now){if(!data||data.configured!==true||data.enabled!==true||data.canAutoAdvance===false)return null;if(data.canAutoAdvance===true)return Math.max(15000,validationTime(data.nextActionAt)-now);const jobs=(data.jobs||[]).filter(job=>!['complete','complete_shared','completed','failed','cancelled','review','result_review','creation_uncertain','credential_changed','result_error','quoted','awaiting_payment'].includes(job.state)&&job.canPay!==true);if(!jobs.length)return null;return Math.max(15000,Math.min(...jobs.map(job=>validationTime(job.nextPollAt)||now+15000))-now);}
-  function scheduleValidationPoll(current){clearTimeout(current.validationTimer);current.validationTimer=null;if(!alive(current)||$('rg-grid-validation').hidden)return;const delay=validationPollDelay(current.validation,Date.now());if(delay===null)return;current.validationTimer=setTimeout(()=>pollValidation(current),delay);}
-  async function pollValidation(current){if(!alive(current)||$('rg-grid-validation').hidden)return;if(current.transition||current.contactBusy||current.validationBusy||hasPending()){scheduleValidationPoll(current);return;}current.validationBusy=true;renderValidation(current);try{await flush(current);const data=await rpc(current,'refreshWorkbookValidation',{id:current.id,requestId:requestId()});if(alive(current)){current.validation=data;current.validationMessage=null;}}catch(error){if(alive(current))current.validationMessage=gridFailure(error).message;}finally{if(alive(current)){current.validationBusy=false;renderValidation(current);scheduleValidationPoll(current);}}}
+  function validationVisible(current){return alive(current)&&!document.hidden&&!$('rg-grid-validation').hidden;}
+  function scheduleValidationPoll(current){clearTimeout(current.validationTimer);current.validationTimer=null;if(!validationVisible(current))return;const delay=validationPollDelay(current.validation,Date.now());if(delay===null)return;current.validationTimer=setTimeout(()=>pollValidation(current),delay);}
+  async function pollValidation(current){if(!validationVisible(current))return;if(current.transition||current.contactBusy||current.validationBusy||hasPending()){scheduleValidationPoll(current);return;}current.validationBusy=true;renderValidation(current);try{await flush(current);const data=await rpc(current,'refreshWorkbookValidation',{id:current.id,requestId:requestId()},()=>validationVisible(current));if(data&&alive(current)){current.validation=data;current.validationMessage=null;}}catch(error){if(alive(current))current.validationMessage=gridFailure(error).message;}finally{if(alive(current)){current.validationBusy=false;renderValidation(current);scheduleValidationPoll(current);}}}
   async function saveProvider(event){event.preventDefault();const current=session;if(!current||current.validationBusy||current.contactBusy)return;const limit=Number($('rg-grid-provider-limit').value);if(!Number.isFinite(limit)||limit<0||limit>1000){$('rg-grid-provider-message').textContent='Введите лимит от 0 до 1 000 долларов.';return;}const payload={enabled:$('rg-grid-provider-enabled').checked,autoPayLimitUsd:limit};const key=$('rg-grid-provider-key').value.trim();if(key)payload.apiKey=key;$('rg-grid-provider-key').value='';current.validationBusy=true;$('rg-grid-provider-message').textContent='Сохраняем подключение…';renderValidation(current);try{await flush(current);const settings=await rpc(current,'configurePromouser',payload);delete payload.apiKey;if(!alive(current))return;current.providerSettings=settings;$('rg-grid-provider-configured').textContent=settings.configured?'Ключ подключён и хранится на сервере.':'Ключ не подключён.';$('rg-grid-provider-message').textContent='Подключение сохранено. Кнопка проверки обрабатывает только новые контакты.';}catch(error){delete payload.apiKey;if(alive(current))$('rg-grid-provider-message').textContent=gridFailure(error).message;}finally{if(alive(current)){current.validationBusy=false;renderValidation(current);}}}
   async function payValidation(current,job){if(!alive(current)||current.validationBusy||current.contactBusy||job.canPay!==true||job.cost===null||job.cost===undefined)return;current.validationBusy=true;renderValidation(current);try{await flush(current);let receipt=current.payRequests.get(job.jobId);if(!receipt||receipt.cost!==job.cost){receipt={id:requestId(),cost:job.cost};current.payRequests.set(job.jobId,receipt);}const data=await rpc(current,'payValidationOrder',{id:current.id,jobId:job.jobId,requestId:receipt.id,expectedCostUsd:job.cost});if(alive(current)){current.validation=data;current.validationMessage=null;}}catch(error){if(alive(current)){const failure=gridFailure(error);current.validationMessage=failure.message;if(failure.code==='PV_COST_CHANGED'){try{current.validation=await rpc(current,'getValidationState',{id:current.id});}catch(ignored){}}}}finally{if(alive(current)){current.validationBusy=false;renderValidation(current);scheduleValidationPoll(current);}}}
   async function providerBalance(){const current=session;if(!current||current.validationBusy||current.contactBusy)return;current.validationBusy=true;renderValidation(current);try{const data=await rpc(current,'getPromouserBalance',{});if(alive(current))$('rg-grid-provider-message').textContent='Баланс Promouser: $'+String(data.balance);}catch(error){if(alive(current))$('rg-grid-provider-message').textContent=gridFailure(error).message;}finally{if(alive(current)){current.validationBusy=false;renderValidation(current);}}}
@@ -189,10 +230,10 @@
   async function loadColdyValidation(current,canApply=()=>alive(current)){
     if(!canApply())return;try{const data=await rpc(current,'getColdyValidationState',{id:current.id},canApply);if(canApply()){current.coldyValidation=data;current.coldyMessage=null;renderColdyValidation(current);scheduleColdyValidationPoll(current);}}catch(error){if(canApply()){current.coldyMessage=gridFailure(error).message;renderColdyValidation(current);}}
   }
-  function scheduleColdyValidationPoll(current){clearTimeout(current.coldyValidationTimer);current.coldyValidationTimer=null;if(!alive(current)||$('rg-grid-validation').hidden||current.coldyFailed)return;const delay=coldyValidationPollDelay(current.coldyValidation,Date.now());if(delay!==null)current.coldyValidationTimer=setTimeout(()=>pollColdyValidation(current),delay);}
+  function scheduleColdyValidationPoll(current){clearTimeout(current.coldyValidationTimer);current.coldyValidationTimer=null;if(!validationVisible(current)||current.coldyFailed)return;const delay=coldyValidationPollDelay(current.coldyValidation,Date.now());if(delay!==null)current.coldyValidationTimer=setTimeout(()=>pollColdyValidation(current),delay);}
   async function pollColdyValidation(current){
-    if(!alive(current)||$('rg-grid-validation').hidden||current.coldyFailed)return;if(current.transition||current.validationOpening||current.contactBusy||current.validationBusy||hasPending()){scheduleColdyValidationPoll(current);return;}current.validationBusy=true;current.coldyMessage='Обновляем ранее запущенную проверку…';current.coldyStep={method:'advanceColdyValidation',payload:{id:current.id,requestId:requestId()}};renderValidation(current);
-    try{await flush(current);const step=current.coldyStep,data=await rpc(current,step.method,step.payload);if(alive(current)){current.coldyValidation=data;current.coldyMessage=null;current.coldyStep=null;}}
+    if(!validationVisible(current)||current.coldyFailed)return;if(current.transition||current.validationOpening||current.contactBusy||current.validationBusy||hasPending()){scheduleColdyValidationPoll(current);return;}current.validationBusy=true;current.coldyMessage='Обновляем ранее запущенную проверку…';current.coldyStep={method:'advanceColdyValidation',payload:{id:current.id,requestId:requestId()}};renderValidation(current);
+    try{await flush(current);const step=current.coldyStep,data=await rpc(current,step.method,step.payload,()=>validationVisible(current));if(alive(current)){if(data)current.coldyValidation=data;current.coldyMessage=null;current.coldyStep=null;}}
     catch(error){if(alive(current)){current.coldyMessage=gridFailure(error).message;current.coldyFailed=true;}}finally{if(alive(current)){current.validationBusy=false;renderValidation(current);scheduleColdyValidationPoll(current);}}
   }
   async function refreshColdyValidation(){
@@ -303,6 +344,9 @@
   async function open(options={}){
     if(!panel)throw new Error('Редактор таблиц недоступен. Обновите страницу.');if(session){if(hasPending())return false;lock(false);}if(typeof options.transport!=='function'||!options.id)throw new Error('Не указана таблица для открытия.');
     const current={epoch:++generation,id:String(options.id),transport:options.transport,onClose:options.onClose,bodyOverflow:document.body.style.overflow,returnFocus:document.activeElement,book:null,sheetId:null,cache:new Map(),committed:new Map(),dirty:new Map(),queue:[],failed:null,inFlight:null,error:null,waiters:[],rpcTail:Promise.resolve(),active:{row:1,column:1},selection:{r1:1,c1:1,r2:1,c2:1},window:{row:1,column:1},loadSequence:0,editSequence:0,undo:[],redo:[],loading:true,transition:false,formulaFocused:false,formulaDirty:false,workspace:null,workspaceLoaded:false,contactBusy:false,contactFailed:false,contactDirty:false,contactStep:null,contactTimer:null,validation:null,validationTimer:null,validationBusy:false,validationOpenEpoch:0,payRequests:new Map(),coldyValidation:null,coldyValidationTimer:null,coldyPreview:null,coldyStep:null,coldyFailed:false,phonePreview:null,phoneStep:null,phoneFailed:false,pvEmailPreview:null,pvEmailStep:null,pvEmailFailed:false};session=current;panel.hidden=false;document.body.style.overflow='hidden';$('rg-grid-title').textContent='Открываем таблицу…';$('rg-grid-editor').hidden=true;hint('Двойной щелчок или F2 — изменить ячейку. Enter — подтвердить, Esc — отменить ввод.');notify(current);
+    current.liveCheckedAt=Date.now();
+    current.onScopeError=options.onScopeError;
+    $('rg-grid-live').textContent='Проверка изменений каждые 30 секунд';
     try{
       const data=await refreshBook(current,current.sheetId,true);
       if(alive(current)&&data?.initialRange&&String(data.initialRange.sheetId)===String(current.sheetId)){
@@ -312,8 +356,9 @@
       return alive(current);
     }catch(error){if(alive(current)){current.loading=false;setError(error,current);}return false;}
   }
-  window.RegistryGrid={open,lock,back,isOpen:()=>!!session,hasPending};
+  window.RegistryGrid={open,lock,back,isOpen:()=>!!session,hasPending,refreshVisible};
   if(!panel)return;
+  document.addEventListener('visibilitychange',()=>{if(session){scheduleValidationPoll(session);scheduleColdyValidationPoll(session);}});
   for(const [id,kind] of [['rg-grid-pv-email-preview','pvEmail'],['rg-grid-phone-preview','phone'],['rg-grid-coldy-preview','coldy']]){
     $(id).addEventListener('click',()=>{if(session)session.lastValidationPreview=kind;});
   }

@@ -11,27 +11,18 @@ const makeLead=(id,more={})=>({id,campaign_id:campaign,email:'privacy@example.te
   chosen_sender:12,status:'Not contacted',stop_sending:false,amount_sequences_sent:0,id_previous_sending_sequence:0,...more});
 
 function fixture(leads,options={}){
-  const ctx={rootId:'synthetic-root'},calls=[];
   const mod=vm.createContext({
     fail_(code){throw new Error(code);},
     digest_:value=>createHash('sha256').update(value).digest('hex'),
-    coldyUuid_:value=>typeof value==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value),
-    coldyApi_(context,method,path){
-      assert.equal(context,ctx);assert.equal(method,'GET');
-      const url=new URL(path,'https://example.test');assert.equal(url.pathname,'/leads/campaign/'+campaign);
-      const offset=Number(url.searchParams.get('offset')),limit=Number(url.searchParams.get('limit'));assert.equal(limit,200);
-      calls.push({offset,method});
-      return {total:leads.length,offset,limit,items:leads.slice(offset,offset+limit),...options.override};
-    }
+    coldyUuid_:value=>typeof value==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)
   });
   vm.runInContext(script,mod);
   const detail={id:campaign,sequences:[{id:3,delay:4,campaign_id:campaign,body:'PrivateText'},{id:1,delay:0,campaign_id:campaign}],
     sending_priority:'sequence_emails',is_stop_sending_on_reply:true,is_stop_sending_on_company_reply:false};
   const sequence=mod.projectForecastSequence_(detail);
-  let guards=0;
-  const guard=id=>{assert.equal(id,campaign);guards++;if(guards===options.revokeAt)throw Error('LINK_ACCESS_REQUIRED');};
-  const page=(offset=0,total=null)=>mod.projectForecastDemandPage_(ctx,campaign,offset,guard,total,sequence);
-  return {mod,detail,sequence,page,calls,guards:()=>guards};
+  const page=(offset=0,total=null)=>mod.projectForecastDemandPage_(campaign,offset,total,sequence,
+    {total:leads.length,offset,limit:200,items:leads.slice(offset,offset+200),...options.override});
+  return {mod,detail,sequence,page};
 }
 
 test('reads campaign sequence IDs in documented step order and retains only planning settings',()=>{
@@ -52,7 +43,7 @@ test('uses confirmed sender, previous step and last-send minute; protected field
     makeLead(2,{...common,date_last_sequence_send:'2026-11-22T09:09:47Z'}),makeLead(3,{chosen_sender:0,sender:'last@example.test'}),
     makeLead(4,{stop_sending:true}),makeLead(5,{status:'Bounce'}),makeLead(6,{...common,reply_text:'PrivateReply'}),
     makeLead(7,{chosen_sender:undefined}),makeLead(8,{status:'Provider extension'}),makeLead(9,{verification_status:'invalid'})]);
-  const page=f.page();assert.equal(f.guards(),2);assert.equal(page.total,9);assert.equal(page.nextOffset,null);
+  const page=f.page();assert.equal(page.total,9);assert.equal(page.nextOffset,null);
   assert.deepEqual(plain(page.cohorts[0]),{disposition:'eligible',senderId:12,sentSteps:1,previousStepId:1,lastSentAt:'2026-11-22T09:10:00.000Z',count:2});
   const unassigned=page.cohorts.find(item=>item.disposition==='eligible'&&item.sentSteps===0);
   assert.equal(unassigned.senderId,null);assert.equal(unassigned.count,2);
@@ -93,10 +84,9 @@ test('cohorts merge only across contiguous verified pages; replay cannot count a
   const empty=fixture([]);assert.equal(empty.mod.projectForecastAppendDemand_(null,empty.page()).complete,true);
 });
 
-test('rejects changed totals, short pages, other campaigns, duplicate IDs, missing guard and revoked scope',()=>{
+test('rejects changed totals, short pages, other campaigns, duplicate IDs and invalid offsets',()=>{
   const leads=[makeLead(1),makeLead(2)];assert.throws(()=>fixture(leads).page(0,3),/COLDY_FORECAST_CHANGED/);
   for(const override of [{offset:2},{limit:100},{items:[leads[0]]},{items:[leads[0],leads[0]]},{items:[leads[0],makeLead(2,{campaign_id:other})]}])
     assert.throws(()=>fixture(leads,{override}).page(),/COLDY_FORECAST_CHANGED/);
-  for(const revokeAt of [1,2]){const f=fixture(leads,{revokeAt});assert.throws(()=>f.page(),/LINK_ACCESS_REQUIRED/);assert.equal(f.calls.length,revokeAt-1);}
-  const f=fixture(leads);assert.throws(()=>f.mod.projectForecastDemandPage_({},campaign,0,null,null,f.sequence),/INVALID_REQUEST/);assert.equal(f.calls.length,0);
+  const f=fixture(leads);assert.throws(()=>f.page(-1),/INVALID_REQUEST/);
 });

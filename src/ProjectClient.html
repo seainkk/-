@@ -296,7 +296,7 @@
   }
   async function refresh(options={}){
     if(!ready||!view)return;
-    if(options.automatic)return Promise.all([pollSelected(),readForecast()]);
+    if(options.automatic)return Promise.all([pollProjectView(),readForecast()]);
     if(view==='analytics'&&(recipientImport?.open||recipientImport?.running))return;
     const mark=token(),requestedView=view;
     if(view==='analytics'){
@@ -308,6 +308,20 @@
       if(options.opening&&infrastructureFresh())return;
       return loadInfrastructure();
     }
+  }
+  async function pollProjectView(){
+    if(!pollVisible()||isLoading())return;
+    const mark=token(),target=view;
+    if(target==='analytics'){
+      if(!recentPoll(catalogLoadedAt))await loadCatalog();
+      if(!alive(mark)||target!==view||!pollVisible())return;
+      const context=currentContext();
+      if(segmentId&&!context?.data?.bindings?.length&&!recentPoll(context?.loadedAt))return loadSegment(segmentId);
+    }else if(target==='infrastructure'&&!infrastructure?.monitoring?.accountIds?.length){
+      if(!recentPoll(infraLoadedAt))await loadInfrastructure();
+      return;
+    }
+    if(alive(mark)&&view===target&&pollVisible())await pollSelected();
   }
   function changeSelection(id,checked){
     const context=currentContext();if(!context?.data||context.operation||context.loading)return;

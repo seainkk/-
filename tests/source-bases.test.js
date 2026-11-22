@@ -249,6 +249,78 @@ test('each refresh reads file types once and independently checks current Drive 
   assert.equal(reads, 2);
 });
 
+function installDriveListing(f, alter, driveId) {
+  const calls = [];
+  f.context.Drive = { Files:{
+    get(id, options) {
+      assert.equal(id,SOURCE); assert.ok(options.fields.includes('driveId')); assert.equal(options.supportsAllDrives,true);
+      calls.push('get'); return {id,mimeType:'application/vnd.google-apps.folder',trashed:false,driveId};
+    },
+    list(options) {
+      assert.equal(options.pageSize,1000); assert.equal(options.corpora,driveId ? 'drive' : 'user');
+      assert.equal(options.driveId,driveId); assert.ok(options.fields.includes('parents'));
+      const ids = [...options.q.matchAll(/'([A-Za-z0-9_-]+)' in parents/g)].map(m=>m[1]);
+      assert.ok(ids.length>0 && ids.length<=20);
+      const records = [...f.files.values(), ...f.folders.values()].filter(item=>ids.includes(item.parent)&&!item.trashed)
+        .map(item=>({id:item.id,name:item.name,mimeType:item.mime||'application/vnd.google-apps.folder',parents:[item.parent],
+          trashed:false,webViewLink:item.url}));
+      const from = Number(options.pageToken||0), page = {files:records.slice(from,from+1000)};
+      if(from+1000<records.length)page.nextPageToken=String(from+1000);
+      calls.push('list'); return alter ? alter(page,ids,calls) : page;
+    }
+  }};
+  return calls;
+}
+
+test('paged Drive listing preserves all catalog fields and bounds discovery operations on 1204 synthetic files', t=>{
+  const f=fixture();
+  for(let i=0;i<1200;i++)f.makeFile('batch_source_'+String(i).padStart(9,'0'),'База '+i,'text/csv',SOURCE);
+  const discover=f.context.sourceBasesDiscover_;
+  f.context.sourceBasesDiscover_=f.context.sourceBasesDiscoverLegacy_;
+  f.list();
+  function calls(){return f.calls.drive.length + f.calls.ancestryReads.length + f.calls.events.filter(e=>e.kind==='scan').length + f.calls.folderLists.length;}
+  const baseline=calls(), legacy=f.list(), before=calls()-baseline, checkpoint=calls(), writes=f.calls.writes.length;
+  f.context.sourceBasesDiscover_=discover;
+  const advanced=installDriveListing(f,null,'synthetic-shared-drive'), fresh=f.list(), after=calls()-checkpoint+advanced.length;
+  assert.equal(fresh.items.length,1204);assert.deepEqual(fresh.items,legacy.items);
+  assert.equal(f.calls.writes.length,writes);
+  assert.deepEqual(advanced,['get','list','list','list']);assert.ok(after<before/20);
+  t.diagnostic('Drive list, lookup and ancestry operations for the same 1204 cards: '+before+' legacy, '+after+' batched.');
+});
+
+test('Drive snapshot refuses incomplete pages, stale parents, repeated cursors and a source moved during reading', ()=>{
+  for(const mode of ['incomplete','file-moved','folder-moved','root-moved','cursor','partial-page']){
+    const f=fixture(); f.list(); const writes=f.calls.writes.length, records=plain(f.sourceSheet.state.rows);
+    installDriveListing(f,(page,ids)=>{
+      if(mode==='incomplete')return {...page,incompleteSearch:true};
+      if(mode==='cursor')return {...page,nextPageToken:'1'};
+      if(mode==='file-moved'){const first=page.files.find(a=>a.id===CSV); if(first)first.parents=[OTHER];}
+      if(mode==='folder-moved'&&ids.includes(CHILD))f.folders.get(CHILD).parent=OTHER;
+      if(mode==='root-moved'&&ids.includes(CHILD))f.folders.get(SOURCE).parent=OTHER;
+      if(mode==='partial-page'&&ids.includes(CHILD))throw Error('Drive read failed');
+      return page;
+    });
+    assert.throws(()=>f.list(),/SOURCE_CHANGED|GOOGLE_ERROR/);
+    assert.deepEqual(plain(f.sourceSheet.state.rows),records);assert.equal(f.calls.writes.length,writes);
+  }
+});
+
+test('missing optional Drive links and empty projections use the verified DriveApp fallback',()=>{
+  const f=fixture(), baseline=f.list();
+  installDriveListing(f,(page)=>{ for(const item of page.files)delete item.webViewLink; return page; });
+  assert.deepEqual(f.list().items,baseline.items);
+  installDriveListing(f,()=>({}));
+  assert.deepEqual(f.list().items,baseline.items);
+});
+
+test('loss of access during the final revision read cannot expose a read-only catalog',()=>{
+  for(const code of ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED','SOURCE_CHANGED']){
+    const f=fixture();
+    f.context.sourceBasesRevisionToken_=()=>f.context.fail_(code,'scope changed');
+    assert.throws(()=>f.list(),new RegExp(code));
+  }
+});
+
 test('immutable origins link multiple selections to one original without opening it, and recover a lost write', () => {
   const f = fixture({ loseOriginReply: true });
   const another = 'native_selection_1234567890', original = 'external_original_9876543210';

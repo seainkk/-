@@ -62,9 +62,9 @@ def main():
         assert all(call['p']=={'segmentId':'segment-a','monitor':True}
                    for call in page.evaluate("backend.calls.filter(call=>call.name==='refreshColdyMailings')"))
 
-        page.evaluate("backend.monitoringIds=['account-0','account-1'];backend.monitoringConfigured=true;RegistryProject.invalidate()")
-        page.evaluate("RegistryProject.refresh({opening:true})")
-        idle()
+        # A teammate selects the first mailboxes while this project is already open.
+        page.evaluate("backend.monitoringIds=['account-0','account-1'];backend.monitoringConfigured=true")
+        tick(60000)
         initial = count('refreshProjectInfrastructure')
         assert initial > 0
         tick(120000)

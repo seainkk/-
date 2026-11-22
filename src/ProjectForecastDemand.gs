@@ -65,18 +65,15 @@ function projectForecastCohortKey_(cohort) {
   return JSON.stringify([cohort.disposition,cohort.senderId,cohort.sentSteps,cohort.previousStepId,cohort.lastSentAt]);
 }
 
-/** Never store message subjects, bodies, identities or addresses in forecast state. */
-function projectForecastDemandPage_(context,campaignId,offset,guard,expectedTotal,sequence) {
-  if (!coldyUuid_(campaignId) || !Number.isSafeInteger(offset) || offset < 0 || typeof guard !== 'function' ||
+/** Normalize one guarded batch response without carrying recipient identities into the forecast. */
+function projectForecastDemandPage_(campaignId,offset,expectedTotal,sequence,page) {
+  if (!coldyUuid_(campaignId) || !Number.isSafeInteger(offset) || offset < 0 ||
       expectedTotal != null && (!Number.isSafeInteger(expectedTotal) || expectedTotal < 0)) {
     fail_('INVALID_REQUEST', 'Проверьте параметры расчёта получателей.');
   }
   campaignId = campaignId.toLowerCase();
   sequence = sequence || {stopOnReply:null, stopOnCompanyReply:null};
   var limit = 200;
-  guard(campaignId);
-  var page = coldyApi_(context, 'GET', '/leads/campaign/' + campaignId + '?limit=' + limit + '&offset=' + offset);
-  guard(campaignId);
   if (!page || !Array.isArray(page.items) || !Number.isSafeInteger(page.total) || page.total < offset ||
       page.offset !== offset || page.limit !== limit || page.items.length !== Math.min(limit, page.total-offset) ||
       expectedTotal != null && expectedTotal !== page.total) {

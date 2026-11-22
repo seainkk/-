@@ -10,6 +10,7 @@
   const projectDrafts=new Map(),claimRequests=new Map();
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,readPending=0,mutationGeneration=0,pendingView=null,formMode=null;
   let sourceData=null,sourceTimer=null,lastSourceAttempt=0,lastSourceLoaded=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
+  let sourceProbeAt=0,sourceCheckedAt=0,sourceProbe=null;
   let importOpen=false,importMode='file',importing=false,importFileSelection=0,registrySection='companies',liveUploadForm=null;
   let uploadEntryView='sources',uploadSegmentOptions=null;
   let preparedImport=null,preparedEpoch=0,preparedPollTimer=null,accessEpoch=0,workspaceRpcQueue=Promise.resolve();
@@ -40,7 +41,7 @@
   function isReadRpc(method,payload){
     if(method==='getSegmentMailings'&&payload?.live)return false;
     if(method==='getProjectAnalyticsCampaigns')return payload?.refresh!==true;
-    return ['getProjectAnalytics','getColdyBindings','getProjectInfrastructure','getProjectInfrastructureSelection','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);
+    return ['getSourceBasesRevision','getProjectAnalytics','getColdyBindings','getProjectInfrastructure','getProjectInfrastructureSelection','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);
   }
   async function readRpc(method,payload,canDispatch){
     const epoch=accessEpoch;
@@ -52,7 +53,7 @@
   function workspaceMutationBlocked(){return viewMutationBlocked()||sourceLoading||networkPending-readPending>0||networkPending>=2;}
   function scheduleSegmentAnalysis(){
     if(dashboardAnalysisTimer!==null||dashboardError)return;const epoch=accessEpoch;
-    dashboardAnalysisTimer=setTimeout(()=>{dashboardAnalysisTimer=null;if(accessReady&&epoch===accessEpoch&&activeView==='segments'&&dashboard?.analysisPending===true&&!dashboardError&&!formIsOpen()&&!viewMutationBlocked())refreshSegments({background:true,fullAnalysis:true});},250);
+    dashboardAnalysisTimer=setTimeout(()=>{dashboardAnalysisTimer=null;if(accessReady&&epoch===accessEpoch&&activeView==='segments'&&!document.hidden&&dashboard?.analysisPending===true&&!dashboardError&&!formIsOpen()&&!viewMutationBlocked())refreshSegments({background:true,fullAnalysis:true});},250);
   }
   function rpc(name,payload){
     if(!accessKey)return Promise.reject(new Error('Для входа нужна полная закрытая ссылка.'));
@@ -78,6 +79,7 @@
     const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-share-copy').hidden=!accessReady;$('br-provider-open').hidden=!accessReady;$('br-coldy-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message){
+    sourceProbeAt=0;sourceCheckedAt=0;sourceProbe=null;
     projectDrafts.clear();claimRequests.clear();mailingSegmentId=null;sourceSaving=null;segmentSaving=false;segmentEditorEpoch++;
     $('br-coldy-binding-form').reset();$('br-coldy-upload-preview').hidden=true;$('br-segment-normalized-preview').hidden=true;
     for(const id of ['br-coldy-campaign','br-coldy-bindings-list','br-coldy-bindings-message','br-coldy-upload-counts','br-coldy-upload-sample','br-coldy-upload-warnings','br-coldy-upload-message','br-mailings-health','br-segment-preview-counts','br-segment-preview-tables','br-segment-preview-review','br-segment-error'])$(id).replaceChildren();
@@ -401,7 +403,7 @@
   function openGridWorkbook(id){
     if(!accessReady||importing||sourceSaving||segmentSaving||segmentEditor||coldySession||providerSession||coldyMailings?.busy)return;
     if(!window.RegistryGrid?.open){notice('Редактор таблиц ещё загружается. Обновите страницу.','error');return;}
-    window.RegistryGrid.open({id,transport:workspaceRpc,onClose:()=>{render();armViewTimer();flushPendingView();}});updateControls();
+    window.RegistryGrid.open({id,transport:workspaceRpc,onScopeError:message=>notice(message,'error'),onClose:()=>{render();armViewTimer();flushPendingView();}});armViewTimer();updateControls();
   }
   function sourceInSection(item,section){const kinds=normalizeContents(item?.contents);return !kinds.length||kinds.includes(section);}
   function renderRegistrySections(){
@@ -532,7 +534,9 @@
     if(sourceSaving){node.textContent='Сохраняем выбранные отметки…';return;}
     if(sourceData?.state==='storage_unavailable'){node.textContent='Общее хранилище недоступно. Файлы можно открывать; изменение отметок отключено.'+(sourceData.storage?.message?' '+sourceData.storage.message:'');return;}
     if(sourceData&&sourceData.state!=='ready'){node.textContent='Источник исходных баз недоступен. Реестр и сегменты продолжают работать.';return;}
-    node.textContent=formIsOpen()||sourceFocused()?'Автообновление приостановлено на время редактирования.':'Список обновляется каждую минуту, пока раздел открыт.';
+    const checked=Math.max(lastSourceLoaded,sourceCheckedAt);
+    node.textContent=formIsOpen()||sourceFocused()?'Автообновление приостановлено на время редактирования.':
+      (sourceData?.revision?'Проверка изменений каждые 30 секунд.':'Список обновляется каждую минуту, пока раздел открыт.')+(checked?' Проверено в '+new Date(checked).toLocaleTimeString('ru-RU')+'.':'');
   }
   function renderSources(){
     $('br-sources-view').hidden=activeView!=='sources';if(activeView!=='sources')return;
@@ -615,16 +619,33 @@
     }
     if(window.scrollX!==oldX||window.scrollY!==oldY)window.scrollTo(oldX,oldY);
   }
+  function sourcesVisible(){return accessReady&&activeView==='sources'&&!document.hidden&&!formIsOpen()&&!sourceFocused()&&!viewMutationBlocked();}
+  async function pollSources(){
+    if(!sourcesVisible()||requesting()||sourceProbe)return;
+    const now=Date.now(),since=now-Math.max(lastSourceAttempt,sourceProbeAt);
+    if(since<(sourceData?.revision?30000:60000))return;
+    if(!sourceData?.revision||now-lastSourceLoaded>=120000)return refreshSourceBases({automatic:true});
+    const epoch=accessEpoch,previous=sourceData,mutation=mutationGeneration;
+    const current=()=>sourcesVisible()&&epoch===accessEpoch&&previous===sourceData&&mutation===mutationGeneration;
+    const probe={};sourceProbe=probe;sourceProbeAt=now;
+    try{
+      const result=await readRpc('getSourceBasesRevision',{},current);
+      if(!result||!current())return;
+      if(result.revision!==previous.revision||!result.revision)await refreshSourceBases({automatic:true});
+      else{sourceRefreshError=null;sourceCheckedAt=Date.now();renderSourcesHealth();}
+    }catch(error){if(current()){sourceRefreshError=failure(error).message;renderSourcesHealth();}}
+    finally{if(sourceProbe===probe)sourceProbe=null;}
+  }
   async function refreshSourceBases(options={}){
     if(requesting()||sourceLoading)return;
     const epoch=accessEpoch;
-    if(options.automatic&&(activeView!=='sources'||document.hidden||formMode||sourceDrafts.size||projectDrafts.size||sourceFocused()||importOpen||!options.opening&&Date.now()-lastSourceAttempt<15000))return;
+    if(options.automatic&&!sourcesVisible())return;
     sourceLoading=true;lastSourceAttempt=Date.now();updateControls();if(!sourceData&&activeView==='sources')renderSources();renderSourcesHealth();
-    try{const result=await rpc('getSourceBases');if(!accessReady||epoch!==accessEpoch)return;const previous=sourceData;sourceData=result;sourceRefreshError=null;lastSourceLoaded=Date.now();
+    try{const result=await rpc('getSourceBases');if(!accessReady||epoch!==accessEpoch||options.automatic&&!sourcesVisible())return;const previous=sourceData;sourceData=result;sourceRefreshError=null;lastSourceLoaded=Date.now();
       for(const id of new Set([...sourceDrafts.keys(),...projectDrafts.keys()])){if(!sourceData.items.some((item)=>item.id===id)){const old=previous?.items.find((item)=>item.id===id);if(old)sourceData.items.push(Object.assign({},old,{present:false}));}}
       for(const [id,message] of sourceMessages)if(!message.error)sourceMessages.delete(id);
       if(activeView==='sources')renderSources();if(!options.automatic&&!options.preserveNotice)notice(null);
-    }catch(error){if(accessReady&&epoch===accessEpoch)sourceRefreshError=failure(error).message;}
+    }catch(error){if(accessReady&&epoch===accessEpoch&&(!options.automatic||sourcesVisible()))sourceRefreshError=failure(error).message;}
     finally{if(epoch!==accessEpoch)return;sourceLoading=false;updateControls();if(activeView==='sources')renderSources();renderSourcesHealth();if(segmentEditor)renderSegmentSources();flushPendingView();}
   }
   function updateProjectFields(waiting){
@@ -690,7 +711,7 @@
     }if(count>20)throw new Error('За один раз можно добавить до 20 листов.');return loads;
   }
   function segmentById(id){return dashboard?.items?.find((item)=>item.id===id);}
-  function renderSegmentsHealth(){const node=$('br-segments-health');node.classList.toggle('br-error',!!dashboardError);node.textContent=dashboardError?'Не удалось обновить сегменты. '+dashboardError:dashboardLoading?'Обновляем сегменты…':dashboard?.analysisPending===true?'Список готов. Сведения о контактах обновляются в фоне.':formIsOpen()?'Автообновление приостановлено на время редактирования.':'Данные обновляются каждую минуту, пока раздел открыт.';}
+  function renderSegmentsHealth(){const node=$('br-segments-health');node.classList.toggle('br-error',!!dashboardError);node.textContent=dashboardError?'Не удалось обновить сегменты. '+dashboardError:dashboardLoading?'Обновляем сегменты…':dashboard?.analysisPending===true?'Список готов. Сведения о контактах обновляются в фоне.':formIsOpen()?'Автообновление приостановлено на время редактирования.':'Данные обновляются каждую минуту, пока раздел открыт.'+(lastDashboardLoaded?' Проверено в '+new Date(lastDashboardLoaded).toLocaleTimeString('ru-RU')+'.':'');}
   function renderUnassignedSegments(items){
     const list=$('br-unassigned-rows');list.replaceChildren();$('br-unassigned').hidden=!items?.length;
     for(const item of items||[]){
@@ -755,12 +776,14 @@
     if(focusKey)Array.from(target.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===focusKey)?.focus({preventScroll:true});if(window.scrollY!==oldY)window.scrollTo(0,oldY);
   }
   async function refreshSegments(options={}){
-    if(!accessReady||viewMutationBlocked()||dashboardLoading||dashboardAnalysisLoading)return;if(options.automatic&&(activeView!=='segments'||document.hidden||formIsOpen()||Date.now()-lastDashboardAttempt<15000))return;
+    if(!accessReady||viewMutationBlocked()||dashboardLoading||dashboardAnalysisLoading)return;if(options.automatic&&(activeView!=='segments'||document.hidden||formIsOpen()||Date.now()-lastDashboardAttempt<60000))return;
     const epoch=accessEpoch,request=++dashboardRequest,mutation=mutationGeneration,light=!dashboard&&!options.manual&&!options.sync&&!options.fullAnalysis;
+    const current=()=>accessReady&&epoch===accessEpoch&&request===dashboardRequest&&
+      (!(options.background||options.automatic)||activeView==='segments'&&!document.hidden&&!formIsOpen()&&!viewMutationBlocked());
     if(options.background)dashboardAnalysisLoading=true;else dashboardLoading=true;lastDashboardAttempt=Date.now();updateControls();renderSegmentsHealth();
     try{
-      const result=await readRpc('getSegmentsDashboard',light?{includeAnalysis:false}:{},()=>accessReady&&epoch===accessEpoch&&request===dashboardRequest&&(!options.background||activeView==='segments'&&!formIsOpen()&&!viewMutationBlocked()));
-      if(!result||!accessReady||epoch!==accessEpoch||request!==dashboardRequest||mutation!==mutationGeneration)return;
+      const result=await readRpc('getSegmentsDashboard',light?{includeAnalysis:false}:{},current);
+      if(!result||!current()||mutation!==mutationGeneration)return;
       dashboard=result;dashboardError=null;lastDashboardLoaded=Date.now();
       if(segmentError?.code==='SEGMENT_CATEGORY_CONFLICT'&&segmentEditor){
         const item=segmentById(segmentEditor.id);
@@ -768,7 +791,7 @@
       }
       if(activeView==='segments')renderSegments();if(segmentEditor)renderSegmentEditor();
     }
-    catch(error){if(accessReady&&epoch===accessEpoch&&request===dashboardRequest)dashboardError=failure(error).message;}
+    catch(error){if(current())dashboardError=failure(error).message;}
     finally{if(epoch!==accessEpoch||request!==dashboardRequest)return;dashboardLoading=false;dashboardAnalysisLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();if(dashboard?.analysisPending===true&&activeView==='segments'&&!formIsOpen())scheduleSegmentAnalysis();}
   }
   function renderMailings(){
@@ -1218,16 +1241,17 @@
     syncBack();
   }
   function clearViewTimer(){if(viewTimer!==null){clearInterval(viewTimer);viewTimer=null;}}
-  function armViewTimer(){clearViewTimer();if(accessReady&&!document.hidden&&['sources','segments','mailings','analytics','infrastructure'].includes(activeView))viewTimer=setInterval(()=>refreshActiveView({automatic:true}),60000);}
+  function armViewTimer(){clearViewTimer();if(accessReady&&!document.hidden&&['sources','segments','mailings','analytics','infrastructure'].includes(activeView))viewTimer=setInterval(()=>refreshActiveView({automatic:true}),activeView==='sources'||gridIsOpen()?30000:60000);}
   async function refreshActiveView(options={}){
     if(!accessReady)return;
+    if(options.automatic&&gridIsOpen()){if(!document.hidden&&!viewMutationBlocked())return window.RegistryGrid.refreshVisible?.();return;}
     if(viewMutationBlocked()||requesting()&&activeView==='sources'){if(options.opening)pendingView=activeView;return;}
     if(options.automatic&&(document.hidden||formIsOpen()))return;
     if(['analytics','infrastructure'].includes(activeView))return window.RegistryProject?.refresh?.(options);
     const loadedAt=activeView==='sources'?sourceData&&lastSourceLoaded:activeView==='segments'?dashboard&&lastDashboardLoaded:mailings?.segment?.id===mailingSegmentId&&lastMailingsLoaded;
     if(options.opening&&!pendingSyncViews.has(activeView)&&loadedAt&&Date.now()-loadedAt<30000)return;
     pendingSyncViews.delete(activeView);
-    if(activeView==='sources')return refreshSourceBases(Object.assign({},options,{preserveNotice:!options.manual}));
+    if(activeView==='sources')return options.automatic?pollSources():refreshSourceBases(Object.assign({},options,{preserveNotice:!options.manual}));
     if(activeView==='segments')return refreshSegments(options);
     if(activeView==='mailings')return refreshMailings(options);
   }

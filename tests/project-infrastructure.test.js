@@ -163,6 +163,104 @@ function readCapacity(f) {
   return result;
 }
 
+// Exercise the actual production batch transport. Never record Authorization or raw responses.
+function parallelReads(f, after) {
+  const groups = [], fetch = f.c.UrlFetchApp.fetch;
+  f.c.UrlFetchApp.fetchAll = requests => {
+    groups.push(requests.map(r => new URL(r.url).pathname));
+    const responses = requests.map(({url,...options}) => {
+      assert.equal(options.headers.Authorization,'Bearer '+KEY);
+      assert.equal(options.muteHttpExceptions,true);
+      return fetch(url,options);
+    });
+    if (after) after(f);
+    return responses;
+  };
+  return groups;
+}
+
+test('twenty selected senders share four guarded HTTP groups with no directory request or private provider fields',()=>{
+  const accounts=Array.from({length:30},(_,i)=>account(i+1)),ids=accounts.slice(10).map(a=>String(a.id));
+  const f=fixture({accounts,monitoringIds:ids});f.configure();
+  const groups=parallelReads(f);
+  const r=f.refresh();
+  assert.equal(r.nextCursor,null);assert.equal(r.detailProgress.completed,20);
+  assert.deepEqual(groups.map(group=>group.length),[5,5,5,5]);
+  assert.deepEqual(f.calls.http,ids.map(id=>'/accounts/'+id));
+  assert.ok(f.calls.loads.filter(load=>load.kind==='monitoring').length<20,'validate each group without re-reading selection per mailbox');
+  assert.equal(JSON.stringify([r,f.state()]).includes('smtp_secret_never_public'),false);
+  assert.equal(JSON.stringify([r,f.state()]).includes(KEY),false);
+});
+
+test('a batch honors the longest Retry-After and only accepts the contiguous prefix before a temporary error',()=>{
+  let limited=true;
+  const accounts=Array.from({length:7},(_,i)=>account(i+1));
+  const f=fixture({accounts,transport:({path,response,defaultResponse})=>limited&&['/accounts/3','/accounts/5'].includes(path)?
+    response({message:'private-provider-field'},429,{'Retry-After':path==='/accounts/3'?'20':'60'}):defaultResponse()});
+  f.configure();const groups=parallelReads(f), paused=f.refresh();
+  assert.deepEqual(groups.map(x=>x.length),[5]);assert.equal(paused.detailProgress.completed,2);
+  assert.equal(paused.retryAfterMs,60000);assert.equal(paused.error.code,'COLDY_RATE_LIMIT');
+  assert.equal(JSON.stringify([paused,f.state()]).includes('private-provider-field'),false);
+  const calls=f.calls.http.length;f.refresh({cursor:paused.nextCursor});
+  assert.equal(f.calls.http.length,calls);
+  f.tick(60001);limited=false;
+  const final=f.refresh({cursor:paused.nextCursor}); assert.equal(final.nextCursor,null);
+  assert.equal(final.detailProgress.completed,7);assert.deepEqual(f.calls.http.slice(calls),['/accounts/3','/accounts/4','/accounts/5','/accounts/6','/accounts/7']);
+});
+
+test('selection, root and credential checks discard an in-flight batch without saving or exposing it',()=>{
+  for (const [invalidate,code] of [
+    [f=>f.select(['1']),'COLDY_MONITORING_CHANGED'],[f=>f.revoke(),'LINK_ACCESS_REQUIRED'],
+    [f=>f.switchRoot(),'SOURCE_CHANGED'],[f=>f.properties.set('COLDY_API_KEY','a-different-private-key'),'COLDY_CREDENTIAL_CHANGED']
+  ]) {
+    const f=fixture({accounts:[account(1),account(2)]});f.configure();parallelReads(f,invalidate);
+    const before=f.calls.saves.length;
+    assert.throws(()=>f.refresh(),e=>e.registryCode===code);
+    assert.equal(f.calls.saves.length,before);
+  }
+});
+
+test('a failed fetchAll never reissues its URLs synchronously or includes a provider exception in diagnostics',()=>{
+  const f=fixture({accounts:[account(1),account(2)]});f.configure();
+  let calls=0;f.c.UrlFetchApp.fetchAll=()=>{calls++;throw Error('token '+KEY+' internal sender@example.test');};
+  const r=f.refresh();assert.equal(calls,1);assert.deepEqual(f.calls.http,[]);
+  assert.equal(r.error.code,'COLDY_NETWORK');assert.equal(r.detailProgress.completed,0);
+  assert.equal(JSON.stringify([r,f.state()]).includes('internal sender'),false);
+});
+
+test('a later unauthorized batch response revokes connection even when an earlier result was throttled',()=>{
+  const accounts=[account(1),account(2),account(3)];
+  let invalid=false;
+  const f=fixture({accounts,transport:({path,response,defaultResponse})=>invalid&&path==='/accounts/3'?response({},401):
+    invalid&&path==='/accounts/2'?response({},429,{'Retry-After':'20'}):defaultResponse()});
+  f.configure();parallelReads(f);f.refresh();assert.ok(f.properties.get(f.c.COLDY.connectionProperty));
+  invalid=true;
+  const r=f.refresh();assert.equal(r.error.code,'COLDY_AUTH');assert.equal(r.connected,false);
+  assert.equal(f.properties.has(f.c.COLDY.connectionProperty),false);
+});
+
+test('batch transport rejects mixed campaigns, directory reads and unrelated endpoints before calling the provider',()=>{
+  const f=fixture();f.configure();const groups=parallelReads(f);
+  for (const paths of [[],['/accounts'],['/accounts/1','/campaigns/'+ACTIVE_ONE],['/email-verifications/5'],
+    ['/campaigns/'+ACTIVE_ONE,'/leads/campaign/'+ACTIVE_TWO+'?limit=200&offset=0'],['/accounts/1','/accounts/1']]) {
+    assert.throws(()=>f.c.coldyGetBatch_(f.c.authorize_(),paths,()=>{}),/INVALID_REQUEST/);
+  }
+  assert.equal(groups.length,0);assert.equal(f.calls.http.length,0);
+});
+
+test('after a long mailbox pass the same generation rechecks membership once without restarting its sender details',()=>{
+  const f=capacityFixture([[1,[ACTIVE_ONE]],[2,[ACTIVE_ONE]],[3,[]]]);parallelReads(f);
+  let r=f.refresh({includeCapacity:true});const generation=f.state().generation;
+  r=f.refresh({cursor:r.nextCursor});
+  f.tick(300001);
+  let steps=0;
+  while(r.nextCursor && steps++<6) r=f.refresh({cursor:r.nextCursor});
+  assert.equal(r.nextCursor,null);assert.equal(r.capacity.stale,false);assert.equal(r.capacity.state,'ready');
+  assert.equal(f.state().generation,generation);assert.equal(f.state().finalCapacityCheck,true);
+  assert.equal(f.calls.http.filter(p=>p==='/account-campaign-mappings').length,2);
+  assert.deepEqual(f.calls.http.filter(p=>/^\/accounts\//.test(p)),['/accounts/1','/accounts/2','/accounts/3']);
+});
+
 function forecastFixture(total = 15) {
   const f = capacityFixture([[1,[ACTIVE_ONE]],[4,[UNSELECTED]]],{
     [ACTIVE_ONE]:{sequences:[{id:7,delay:0}],sending_priority:'sequence_emails',
@@ -207,6 +305,52 @@ test('project forecast reads only selected cohorts, resumes without double count
   assert.doesNotMatch(JSON.stringify(report),/private recipient|sensitive@example|seenIds|cohorts/);
   assert.doesNotMatch(JSON.stringify(f.calls.saves.filter(x=>x.kind==='sendingforecast')),/private recipient|sensitive@example/);
   f.select([]); assert.equal(f.forecast().state,'no_selection'); assert.equal(f.calls.http.length,count);
+});
+
+function enableForecastFetchAll(f, changeResponse) {
+  const batches=[];
+  f.c.UrlFetchApp.fetchAll=requests=>{
+    const paths=Array.from(requests,r=>r.url.slice(f.c.COLDY.base.length));
+    batches.push(paths.map(p=>p.startsWith('/leads/') ? Number(new URL(p,'https://example.test').searchParams.get('offset')) : 'detail'));
+    return Array.from(requests,(r,i)=>{
+      const path=paths[i];
+      assert.equal(r.method,'get');assert.equal(f.isLocked(),false);
+      if(path==='/campaigns/'+ACTIVE_ONE)return f.c.UrlFetchApp.fetch(r.url,r);
+      assert.ok(path.startsWith('/leads/campaign/'+ACTIVE_ONE+'?limit=200&offset='));
+      const page=f.c.coldyApi_({rootId:ROOT},'GET',path);
+      return changeResponse?.(page) || f.response(page);
+    });
+  };
+  return batches;
+}
+
+test('native forecast batches use only established offsets and retry a rate-limited page from the last contiguous receipt',()=>{
+  const f=forecastFixture(1801);readCapacity(f);
+  let limited=true;
+  const batches=enableForecastFetchAll(f,page=>limited && page.offset===400 ? f.response({},429,{'Retry-After':'120'}) : null);
+  const paused=f.forecast();
+  assert.deepEqual(batches,[['detail',0],[200,400,600,800,1000]]);
+  assert.equal(paused.progress.contactsRead,400);assert.equal(paused.retryAfterMs,120000);
+  assert.equal(f.forecast().retryAfterMs,120000);assert.equal(batches.length,2);
+  f.tick(120001);limited=false;
+  const report=f.complete();
+  assert.deepEqual(batches.slice(2),[[400,600,800,1000,1200],[1400,1600,1800]]);
+  assert.equal(report.progress.contactsRead,1801);assert.equal(report.state,'ready');
+  assert.doesNotMatch(JSON.stringify(report),/sensitive@example|private recipient|seenIds|cohorts/);
+});
+
+test('native forecast checks mailbox and segment membership after the batch before using any returned page',()=>{
+  for(const mode of ['mailboxes','binding']){
+    const f=forecastFixture(601);readCapacity(f);
+    enableForecastFetchAll(f,page=>{
+      if(page.offset===200){
+        if(mode==='mailboxes')f.select([]);
+        else f.c.projectCapacityOwners_=()=>({});
+      }
+    });
+    assert.throws(()=>f.forecast(),/COLDY_MONITORING_CHANGED/);
+    assert.equal(f.calls.saves.filter(s=>s.kind==='sendingforecast').length,0);
+  }
 });
 
 test('forecast abandons results after a concurrent mailbox removal and reports provider cooldown without requesting more pages',()=>{

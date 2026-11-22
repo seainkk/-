@@ -4,7 +4,7 @@ var COLDY = Object.freeze({
   keyProperty: 'COLDY_API_KEY', connectionProperty: 'COLDY_CONNECTION',
   autoProperty: 'COLDY_AUTO_VALIDATE_EMAILS', providerProperty: 'EMAIL_VALIDATION_PROVIDER',
   folderProperty: 'COLDY_STATE_FOLDER_ID', cacheMillis: 300000,
-  maxJsonCharacters: 15000000, maxResponseCharacters: 12000000,
+  maxJsonCharacters: 15000000, maxResponseCharacters: 12000000, readBatchSize: 5,
   fields: 'id,mimeType,parents,trashed,appProperties,version'
 });
 
@@ -136,7 +136,7 @@ function coldyApi_(context, method, path, payload, options) {
   if (!settings.configured) fail_('COLDY_KEY_REQUIRED', 'Подключите API-ключ Coldy в настройках.');
   method = typeof method === 'string' ? method.toUpperCase() : '';
   var address = coldyPath_(method, path), inputOptions = options === undefined ? {} : coldyInput_(options, ['idempotencyKey']);
-  var request = { method: method.toLowerCase(), headers: { Authorization: 'Bearer ' + settings.key, Accept: 'application/json' }, muteHttpExceptions: true, followRedirects: false };
+  var request = coldyRequestOptions_(method, settings.key);
   if (inputOptions.idempotencyKey !== undefined) {
     if (typeof inputOptions.idempotencyKey !== 'string' || !/^[A-Za-z0-9_.:-]{8,200}$/.test(inputOptions.idempotencyKey) || method !== 'POST' || address !== '/email-verifications') fail_('INVALID_REQUEST', 'Некорректный ключ повторного запроса Coldy.');
     request.headers['Idempotency-Key'] = inputOptions.idempotencyKey;
@@ -148,9 +148,68 @@ function coldyApi_(context, method, path, payload, options) {
   // Check scope and credential again immediately before the external action.
   current = coldyCurrent_(context, true);
   if (coldyCredentialHash_(current) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Повторите действие.');
-  var response, status, body, parsed;
+  var response;
   try {
     response = UrlFetchApp.fetch(COLDY.base + address, request);
+  } catch (error) { coldyTransportFailure_(error, method); }
+  return coldyResponse_(context, settings, method, response);
+}
+
+function coldyRequestOptions_(method, key) {
+  return { method:method.toLowerCase(), headers:{Authorization:'Bearer ' + key, Accept:'application/json'}, muteHttpExceptions:true, followRedirects:false };
+}
+
+/** A bounded read of verified mailbox IDs or pages of one verified campaign. No writes, redirects or directory queries. */
+function coldyGetBatch_(context, paths, guard) {
+  if (!Array.isArray(paths) || !paths.length || paths.length > COLDY.readBatchSize || typeof guard !== 'function')
+    fail_('INVALID_REQUEST', 'Некорректная группа запросов Coldy.');
+  var scope, seen = new Set();
+  var addresses = paths.map(function (path) {
+    var address = coldyPath_('GET',path), accounts = /^\/accounts\/[1-9]\d*$/.test(address);
+    var campaign = address.match(/^\/campaigns\/([\w-]+)$/) || address.match(/^\/leads\/campaign\/([\w-]+)\?limit=\d+&offset=\d+$/);
+    var owner = accounts ? 'accounts' : campaign && campaign[1].toLowerCase();
+    if (!owner || scope && owner !== scope || seen.has(address)) fail_('INVALID_REQUEST', 'Запросы Coldy относятся к разным областям или повторяются.');
+    scope = owner; seen.add(address); return address;
+  });
+  function failure(error) {
+    if (!error || ['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_RESPONSE','COLDY_NOT_FOUND','COLDY_FORBIDDEN','COLDY_CONFLICT','COLDY_PROVIDER'].indexOf(error.registryCode) < 0) throw error;
+    return {error:error};
+  }
+  if (addresses.length === 1 || typeof UrlFetchApp === 'undefined' || typeof UrlFetchApp.fetchAll !== 'function') {
+    var pause = null;
+    return addresses.map(function (address) {
+      if (pause) return pause;
+      guard();
+      try { return {value:coldyApi_(context,'GET',address)}; }
+      catch (error) {
+        var result = failure(error);
+        if (['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE'].indexOf(error.registryCode) >= 0) pause = result;
+        return result;
+      } finally { guard(); }
+    });
+  }
+  var current = coldyCurrent_(context,true), settings = coldySettings_(current);
+  if (!settings.configured) fail_('COLDY_KEY_REQUIRED','Подключите API-ключ Coldy в настройках.');
+  var requests = addresses.map(function (address) { return Object.assign({url:COLDY.base + address},coldyRequestOptions_('GET',settings.key)); });
+  guard();
+  if (coldyCredentialHash_(coldyCurrent_(context,false)) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите действие.');
+  var responses;
+  try { responses = UrlFetchApp.fetchAll(requests); }
+  catch (error) { coldyTransportFailure_(error,'GET'); }
+  finally {
+    guard();
+    if (coldyCredentialHash_(coldyCurrent_(context,false)) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите действие.');
+  }
+  if (!Array.isArray(responses) || responses.length !== addresses.length) fail_('COLDY_NETWORK','Google не подтвердил все ответы Coldy. Повторите чтение позже.');
+  return responses.map(function (response) {
+    try { return {value:coldyResponse_(context,settings,'GET',response)}; }
+    catch (error) { return failure(error); }
+  });
+}
+
+function coldyResponse_(context, settings, method, response) {
+  var status, body, parsed;
+  try {
     status = response.getResponseCode(); body = response.getContentText();
   } catch (error) { coldyTransportFailure_(error, method); }
   if (status < 200 || status >= 300) {
