@@ -222,6 +222,20 @@ function projectInfraMonitoringCurrent_(context, credentialHash, signature) {
   if (projectMonitoringSignature_(fresh, monitoring) !== signature) fail_('COLDY_MONITORING_CHANGED', 'Выбор почт изменился. Обновите данные и начните новую синхронизацию.');
   return fresh;
 }
+function projectInfraMonitoringGuard_(context, credentialHash, signature, observation) {
+  var project = typeof registryProjectId_ === 'function' ? registryProjectId_() : 'numshield';
+  return function () {
+    if (typeof registryProjectId_ === 'function' && registryProjectId_() !== project)
+      fail_('COLDY_MONITORING_CHANGED','Проект изменился. Обновите данные.');
+    // Reuse the validated JSON only while the file, its ancestry and strong version still match.
+    if (observation.unchanged && observation.unchanged()) {
+      var current = coldyCurrent_(context,false);
+      if (coldyCredentialHash_(current) !== credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Обновите данные.');
+      return current;
+    }
+    return projectInfraMonitoringCurrent_(context,credentialHash,signature);
+  };
+}
 function projectInfraMonitoringMatches_(saved, signature) { return !!saved && saved.monitoringSignature === signature && Array.isArray(saved.detailIds); }
 function projectInfraSelectedIds_(accounts, selectedIds) {
   var available = Object.create(null);

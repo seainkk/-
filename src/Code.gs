@@ -12,6 +12,7 @@ function doGet() {
     var page;
     try { page = HtmlService.createHtmlOutputFromFile('RegistryShell'); }
     catch (noBundle) { page = HtmlService.createTemplateFromFile('Index').evaluate(); } // Direct clasp push from src.
+    page.setFaviconUrl('https://seainkk.github.io/-/favicon.png');
     return page.setTitle(REGISTRY_CONFIG.title).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
   }
   catch (error) { return HtmlService.createHtmlOutput('<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Центр мультиканального аутрича</title><body style="font:16px/1.6 system-ui;margin:40px;max-width:650px"><h1>Центр мультиканального аутрича</h1><p>Не удалось открыть интерфейс. Обратитесь к владельцу сервиса.</p></body></html>'); }
@@ -23,12 +24,18 @@ function include_(name) {
 }
 
 /** Minimal app startup: the former Drive-tree screen is no longer rendered. */
-function getAppBootstrap_() {
+function getAppBootstrap_(request) {
   return api_(function () {
     var context = authorize_(), registry;
+    var options = request === undefined ? {} : object_(request);
+    if (Object.keys(options).some(function (key) { return key !== 'includeSourcePreview'; }) ||
+        (options.includeSourcePreview !== undefined && typeof options.includeSourcePreview !== 'boolean')) {
+      fail_('INVALID_REQUEST', 'Неизвестные параметры загрузки реестра.');
+    }
     if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.get === 'function') {
       var folder;
-      try { folder = Drive.Files.get(context.rootId, {fields:'id,name,mimeType,trashed', supportsAllDrives:true}); }
+      var fields = options.includeSourcePreview ? 'id,name,mimeType,trashed,driveId' : 'id,name,mimeType,trashed';
+      try { folder = Drive.Files.get(context.rootId, {fields:fields, supportsAllDrives:true}); }
       catch (error) { fail_('NOT_FOUND', 'Корневая папка реестра недоступна.'); }
       if (!folder || folder.id !== context.rootId || folder.trashed !== false || folder.mimeType !== 'application/vnd.google-apps.folder' || typeof folder.name !== 'string')
         fail_('NOT_FOUND', 'Корневая папка реестра недоступна.');
@@ -37,10 +44,15 @@ function getAppBootstrap_() {
       var root = registryRoot_(context);
       registry = {id:root.getId(), name:root.getName()};
     }
-    return {
+    var result = {
       user: { email: '', isAdmin: false, accessMode: 'link' },
       registry: registry
     };
+    if (options.includeSourcePreview && folder && typeof sourceBasesStartupPreview_ === 'function') {
+      var preview = sourceBasesStartupPreview_(context, folder);
+      if (preview) result.catalogPreview = preview;
+    }
+    return result;
   });
 }
 

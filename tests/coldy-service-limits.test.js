@@ -16,12 +16,18 @@ function fixture(count,options = {}) {
   const c = vm.createContext({Date:Clock,registryError_:coded,fail_:code => {throw coded(code);},Utilities:{getUuid:() => 'request-' + ++serial},
     registryProjectId_:() => project,locked_:fn => {
       assert.equal(isLocked,false); isLocked = true; try {return fn();} finally {isLocked = false;}
-    },projectMonitoringSignature_:signature,projectMonitoringRead_:() => ({accountIds:selected.slice()}),
+    },projectMonitoringSignature_:signature,projectMonitoringRead_:(_context,_settings,observation) => {
+      if(options.observe){const initial=signature();observation.unchanged=()=>options.observe()&&initial===signature();}
+      return {accountIds:selected.slice()};
+    },
     projectInfraMonitoringCurrent_:(_ctx,hash,sig) => {
       if (hash !== key || sig !== signature()) throw coded('COLDY_MONITORING_CHANGED'); return context;
     }});
   for (const file of ['Coldy.gs','ProjectInfrastructure.gs','ColdyServiceLimits.gs']) vm.runInContext(source(file),c);
+  c.coldyCurrent_=()=>context;c.coldyCredentialHash_=()=>key;
+  let journalRechecks=0;
   c.projectInfraMonitoringCurrent_ = (_ctx,hash,sig) => {
+    journalRechecks++;
     if (hash !== key || sig !== signature()) throw coded('COLDY_MONITORING_CHANGED'); return context;
   };
   c.coldyGetBatch_ = (_ctx,paths,guard) => {
@@ -36,10 +42,18 @@ function fixture(count,options = {}) {
     options.afterBatch?.(round,f); guard(); return answers;
   };
   const f = {read:() => c.coldyServiceLimits_(context,settings),settings,calls,store,selected,connectionKey:c.COLDY.connectionProperty,
-    tick:ms => {now += ms;},time:ms => {now = ms;},project:value => {project = value;},revise:() => {revision++;}};
+    tick:ms => {now += ms;},time:ms => {now = ms;},project:value => {project = value;},revise:() => {revision++;},journalRechecks:()=>journalRechecks};
   return f;
 }
 const values = result => Array.from(result.items,item => item.value);
+
+test('stable monitored files are read once and a revision change between mailbox batches discards the result',()=>{
+  const f=fixture(20,{observe:()=>true});
+  assert.equal(f.read().active,true);assert.equal(f.journalRechecks(),0);assert.equal(f.calls.length,4);
+  const changed=fixture(20,{observe:()=>true,afterBatch:(round,f)=>{if(round===1)f.revise();}});
+  assert.throws(changed.read,{registryCode:'COLDY_MONITORING_CHANGED'});
+  assert.equal(changed.journalRechecks(),1);assert.equal(changed.calls.length,1);
+});
 
 test('Coldy reads only selected mailbox GETs, clamps remaining per mailbox and never invents billing credits',() => {
   const f = fixture(2,{answer:id => ({value:{id,daily_limit:id === 1 ? 10 : 30,sent_today:id === 1 ? 20 : 4,

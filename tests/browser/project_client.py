@@ -21,7 +21,7 @@ function poolData(accounts){
  if(!backend.infraSynced||!backend.configured)return {state:'unknown',updatedAt:null,campaigns:[],stale:true};
  const schedule={days:['monday','tuesday','wednesday','thursday','friday'],from:'09:00',to:'18:30',timezone:'Europe/Moscow',gapStartSeconds:60,gapEndSeconds:90};
  const campaignList=[{id:A,name:'Намшилд / Кухни',status:'Active',segmentName:'Кухни',segmentProjectName:'Проект 2',bindingState:'linked',schedule,waitSchedule:true,endAt:null},
-  {id:B,name:'Веб-студии',status:'Active',bindingState:'unlinked',schedule:null,endAt:null},
+  {id:B,name:'Веб-студии',status:'Active',bindingState:'unlinked',schedule:null,lastKnownSchedule:{...schedule,from:'10:00'},scheduleState:'pending',scheduleUpdatedAt:'2026-11-21T12:00:00Z',endAt:null},
   {id:C,name:'Только в другом пуле',status:'Active',bindingState:'linked',schedule:null,endAt:null}];
  for(const item of accounts){
   const busy=item.id==='account-0',unknown=item.id==='account-2'||backend.uncertainCapacity;
@@ -144,6 +144,26 @@ def main():
 
         def reset_monitored(setup=''):
             reset('infrastructure',setup=monitored_setup+setup)
+
+        for view,method in [('infrastructure','getProjectInfrastructure'),('analytics','getProjectAnalytics')]:
+            page.goto('about:blank');page.set_content(HTML)
+            page.evaluate('([view,method])=>{backend.holdMethods=[method];start(view);}',[view,method])
+            page.wait_for_function('backend.active>0')
+            section=page.locator('#pj-'+view+'-view')
+            expect(section.locator('#pj-'+view+'-connect')).to_have_text('Настройки Coldy')
+            expect(section.locator('#pj-'+view+'-connection')).to_be_hidden()
+            assert 'Подключите' not in section.inner_text()
+            page.evaluate('method=>{backend.holdMethods=[];release(method);}',method);idle()
+            expect(section.locator('#pj-'+view+'-connection')).to_be_hidden()
+            reads=count(method)
+            page.evaluate('RegistryProject.confirmConnection(false)')
+            expect(section.locator('#pj-'+view+'-connection')).to_contain_text('Ключ Coldy сохранён')
+            page.evaluate('RegistryProject.confirmConnection(true)')
+            expect(section.locator('#pj-'+view+'-connection')).to_be_hidden()
+            assert count(method)==reads
+            reset(view,setup='backend.configured=false;backend.connected=false')
+            expect(section.locator('#pj-'+view+'-connect')).to_have_text('Подключить Coldy')
+            expect(section.locator('#pj-'+view+'-connection')).to_contain_text('Подключите API Coldy')
 
         def open_mailboxes():
             page.locator('#pj-infrastructure-select').click()
@@ -273,7 +293,9 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         expect(page.locator('#pj-schedule-rows')).not_to_contain_text('Только в другом пуле')
         expect(page.locator('#pj-schedule-rows')).to_contain_text('Пн–Пт · 09:00–18:30')
         expect(page.locator('#pj-schedule-rows')).to_contain_text('Ожидает расписания')
-        expect(page.locator('#pj-schedule-rows')).to_contain_text('График неизвестен')
+        expect(page.locator('#pj-schedule-rows')).to_contain_text('Пн–Пт · 10:00–18:30')
+        expect(page.locator('#pj-schedule-rows')).to_contain_text('Сохранённый график')
+        expect(page.locator('#pj-schedule-rows')).to_contain_text('Запрашиваем график…')
         sender.get_by_role('button',name='Показать расписание · Намшилд / Кухни').click()
         assert page.evaluate("document.activeElement.id.startsWith('pj-schedule-')")
         page.locator('#pj-capacity-filter').select_option('free')
@@ -373,8 +395,31 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         find_mailbox('large-sender-1158@example.test')
         assert page.locator('#pj-mailbox-rows input').count()==1
         assert count('refreshProjectInfrastructure')==0
-        assert page.evaluate("backend.calls.filter(call=>call.name==='getProjectInfrastructureSelection').map(call=>call.payload)")==[{}, {'query':'large-sender-1158@example.test'}]
+        assert page.evaluate("backend.calls.filter(call=>call.name==='getProjectInfrastructureSelection').map(call=>call.payload)")==[{'query':'large-sender-1158@example.test'}]
         assert page.evaluate('backend.detailIds')==[]
+        page.locator('#pj-mailbox-cancel').click()
+
+        # The project already has a verified pool. Typing and changing a
+        # checkbox remain local while an explicit provider search is in flight.
+        reset('infrastructure', setup="backend.monitoringIds=['account-0'];backend.monitoringConfigured=true;backend.senderName='Белоцветов '")
+        open_mailboxes()
+        assert count('getProjectInfrastructureSelection')==0
+        search.fill('белоцветов')
+        expect(page.locator('#pj-mailbox-rows input')).to_have_count(1)
+        assert count('getProjectInfrastructureSelection')==0
+        page.evaluate("backend.holdMethods=['getProjectInfrastructureSelection']")
+        page.locator('#pj-mailbox-inventory').click()
+        expect(search).to_be_enabled()
+        page.locator('[data-monitoring-account="account-0"]').uncheck()
+        search.fill('sender1@example.test')
+        page.locator('#pj-mailbox-inventory').click()
+        page.evaluate("release('getProjectInfrastructureSelection');release('getProjectInfrastructureSelection')")
+        idle()
+        expect(search).to_have_value('sender1@example.test')
+        expect(page.locator('[data-monitoring-account="account-1"]')).to_be_visible()
+        search.fill('')
+        expect(page.locator('[data-monitoring-account="account-0"]')).not_to_be_checked()
+        expect(page.locator('[data-monitoring-account="account-2"]')).to_have_count(0)
         page.locator('#pj-mailbox-cancel').click()
 
         # Unknown acknowledgement keeps the exact UUID/payload through soft
@@ -389,7 +434,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.evaluate('RegistryProject.invalidate()')
         expect(page.locator('#pj-mailbox-retry')).to_be_visible()
         page.locator('#pj-mailbox-cancel').click();open_mailboxes()
-        assert count('getProjectInfrastructureSelection')==2
+        assert count('getProjectInfrastructureSelection')==1
         expect(page.locator('#pj-mailbox-retry')).to_be_visible()
         page.evaluate("backend.monitoringIds=['account-2'];backend.monitoringRevision++")
         page.locator('#pj-mailbox-retry').click();idle()

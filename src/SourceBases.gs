@@ -42,6 +42,7 @@ function getSourceBases_() {
         var items = discovered.map(function (file) { return sourceBaseItem_(file, records[file.id], associations, origins, projects); });
         var result = sourceBasesResponse_(binding, storage.public, items, true, true);
         if (typeof sourceBasesRevisionToken_ === 'function') result.revision = sourceBasesRevisionToken_(current, binding, discovered);
+        sourceBasesRememberPreviewTypes_(current.rootId, binding.source.id, storage.public.id, items);
         return result;
       } catch (error) {
         if (['AUTH_REQUIRED', 'ACCESS_DENIED', 'SETUP_REQUIRED', 'LINK_ACCESS_REQUIRED', 'LINK_SETUP_REQUIRED',
@@ -60,6 +61,72 @@ function getSourceBases_() {
       }
     });
   });
+}
+
+// The preview shares only live names of direct children. A single bounded Drive
+// page proves that the sources folder itself belongs to the authorised root.
+// Custom nested bindings, large results and subfolders are filled by the full
+// catalogue already loading in parallel, without delaying entry for a tree scan.
+function sourceBasesStartupPreview_(context, root) {
+  if (typeof Drive.Files.list !== 'function') return null;
+  var props = context.properties;
+  var sourceId = (props.getProperty('SOURCE_BASES_FOLDER_ID') || '').trim() || REGISTRY_CONFIG.defaultSourceBasesFolderId;
+  var storageId = props.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
+  var folderMime = 'application/vnd.google-apps.folder';
+  var page;
+  try {
+    var sourceParent = "'" + id_(sourceId) + "' in parents";
+    var rootFolders = "('" + context.rootId + "' in parents and mimeType = '" + folderMime + "')";
+    var query = {q:'trashed = false and (' + sourceParent + ' or ' + rootFolders + ')',
+      pageSize:200, fields:'nextPageToken,incompleteSearch,files(id,name,mimeType,parents,trashed)', supportsAllDrives:true,
+      includeItemsFromAllDrives:true, corpora:root.driveId ? 'drive' : 'user'};
+    if (root.driveId) query.driveId = root.driveId;
+    page = Drive.Files.list(query);
+  } catch (unavailable) { return null; }
+  if (!page || page.incompleteSearch || !Array.isArray(page.files)) return null;
+  function liveChild(item, parent) {
+    return item && item.trashed === false && Array.isArray(item.parents) && item.parents.length === 1 && item.parents[0] === parent;
+  }
+  if (sourceId !== context.rootId && !page.files.some(function (item) {
+    return liveChild(item, context.rootId) && item.id === sourceId && item.mimeType === folderMime;
+  })) return null;
+  var fresh = authorize_();
+  if (fresh.rootId !== context.rootId ||
+      ((fresh.properties.getProperty('SOURCE_BASES_FOLDER_ID') || '').trim() || REGISTRY_CONFIG.defaultSourceBasesFolderId) !== sourceId ||
+      (fresh.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId) !== storageId) return null;
+  var types = {};
+  try {
+    var saved = CacheService.getScriptCache().get(sourceBasesPreviewTypesKey_(context.rootId, sourceId, storageId));
+    types = JSON.parse(saved) || {};
+  } catch (unavailable) { /* The list still works before types are known. */ }
+  var items = [];
+  page.files.forEach(function (item) {
+    if (!liveChild(item, sourceId) || !/^[\w-]{10,200}$/.test(item.id) || item.id === storageId ||
+        !item.mimeType || item.mimeType === folderMime || typeof item.name !== 'string' || !item.name) return;
+    var bits = types[item.id], contents = [];
+    if (bits === 1 || bits === 3) contents.push('companies');
+    if (bits === 2 || bits === 3) contents.push('lpr');
+    items.push({name:item.name, contents:contents});
+  });
+  var partial = !!page.nextPageToken || page.files.some(function (item) {
+    return liveChild(item,sourceId) && item.mimeType === folderMime;
+  });
+  return items.length ? {items:items.sort(byName_), checkedAt:Date.now(), partial:partial} : null;
+}
+
+function sourceBasesPreviewTypesKey_(rootId, sourceId, storageId) {
+  return 'catalog-types-v1-' + digest_(JSON.stringify([rootId,sourceId,storageId]));
+}
+
+function sourceBasesRememberPreviewTypes_(rootId, sourceId, storageId, items) {
+  try {
+    var cache = CacheService.getScriptCache(), types = Object.create(null);
+    items.slice(0,200).forEach(function (item) {
+      if (!Array.isArray(item.contents)) return;
+      types[item.id] = (item.contents.indexOf('companies') >= 0 ? 1 : 0) + (item.contents.indexOf('lpr') >= 0 ? 2 : 0);
+    });
+    cache.put(sourceBasesPreviewTypesKey_(rootId, sourceId, storageId), JSON.stringify(types), 21600);
+  } catch (unavailable) { /* Optional type hints, never a source of permissions or file names. */ }
 }
 
 function updateSourceBase_(request) {

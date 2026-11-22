@@ -126,3 +126,26 @@ test('embedded status messages go only to the fixed entry origin without a crede
   ]);
   assert.equal(JSON.stringify(calls).includes(KEY), false);
 });
+
+test('only bounded catalog titles and classifications can reach the authenticated Pages preview', () => {
+  const sent=[];
+  const context=vm.createContext({accessReady:false,window:{top:{postMessage:(data,origin)=>sent.push({data,origin})}}});
+  vm.runInContext(['catalogNames','normalizeContents','sendEntryCatalog','notifyEntry'].map(source).join('\n'),context);
+  const rows=[{name:' Тест ',contents:['lpr','private','companies'],id:'private-id',url:'private-url',contacts:['secret-email']}];
+  const preview=context.catalogNames(rows,100);
+  context.sendEntryCatalog(preview);
+  assert.equal(sent.length,0);
+  context.accessReady=true;
+  context.notifyEntry('ready',true);
+  context.sendEntryCatalog(preview);
+  context.sendEntryCatalog(null);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)),[
+    {data:{type:'bases-registry-ready',catalogPending:true},origin:'https://seainkk.github.io'},
+    {data:{type:'bases-registry-catalog',items:[{name:'Тест',contents:['companies','lpr']}],checkedAt:100},origin:'https://seainkk.github.io'},
+    {data:{type:'bases-registry-catalog',items:null,checkedAt:0},origin:'https://seainkk.github.io'}
+  ]);
+  assert.equal(context.catalogNames(Array(201).fill(rows[0]),100),null);
+  assert.equal(context.catalogNames([{name:' '}],100),null);
+  assert.equal(context.catalogNames(rows,NaN),null);
+  assert.equal(context.catalogNames([{name:'x'.repeat(300)}],100).items[0].name.length,200);
+});

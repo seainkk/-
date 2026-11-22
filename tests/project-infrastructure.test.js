@@ -179,6 +179,59 @@ function parallelReads(f, after) {
   return groups;
 }
 
+test('three bound campaign schedules share one request group; a refresh displays previous windows without treating them as current',()=>{
+  const ids=[ACTIVE_ONE,ACTIVE_TWO,UNSELECTED],details={};
+  const f=capacityFixture([[1,ids]],details);
+  f.c.projectCapacityOwners_=(context,wanted)=>Object.fromEntries(wanted.map(id=>[id,{segmentId:'segment_allowed',
+    segmentName:'Кухни',segmentProjectId:'numshield',bindingState:'linked'}]));
+  const groups=parallelReads(f);
+  const complete=readCapacity(f);
+  assert.deepEqual(groups.filter(paths=>paths[0].includes('/campaigns/')).map(paths=>paths.length),[3]);
+  assert.deepEqual(complete.capacity.campaigns.map(c=>c.scheduleState),['ready','ready','ready']);
+  const observed=complete.capacity.campaigns[0].scheduleUpdatedAt;
+  f.tick(360000);
+  const saved=f.get().capacity.campaigns[0];
+  assert.equal(saved.schedule,null);assert.equal(saved.scheduleState,'stale');assert.equal(saved.lastKnownSchedule.from,'09:00');
+  const working=f.refresh({includeCapacity:true});
+  assert.equal(working.capacity.campaigns.length,3);
+  assert.ok(working.capacity.campaigns.every(c=>c.scheduleState==='pending'&&c.schedule===null&&c.lastKnownSchedule.from==='09:00'));
+  assert.equal(working.capacity.campaigns[0].scheduleUpdatedAt,observed);
+  assert.equal(working.accounts[0].capacity.idleUntil,null,'Last known windows do not supply idle or forecast inputs');
+  details[ACTIVE_TWO]={schedule:null};
+  const fresh=f.refresh({cursor:working.nextCursor});
+  assert.deepEqual(fresh.capacity.campaigns.map(c=>c.scheduleState),['ready','unavailable','ready']);
+  assert.equal(fresh.capacity.campaigns[1].lastKnownSchedule,null);
+});
+
+test('throttled campaign detail keeps last known hours and retries only the failed ID after cooldown',()=>{
+  const ids=[ACTIVE_ONE,ACTIVE_TWO],f=capacityFixture([[1,ids]]);
+  f.c.projectCapacityOwners_=(ctx,wanted)=>Object.fromEntries(wanted.map(id=>[id,{segmentId:'our_segment',segmentProjectId:'numshield',bindingState:'linked'}]));
+  const fetch=f.c.UrlFetchApp.fetch;let throttle=false;
+  f.c.UrlFetchApp.fetch=(url,options)=>throttle&&url.endsWith(ACTIVE_ONE)?f.response({},429,{'Retry-After':'75'}):fetch(url,options);
+  parallelReads(f);readCapacity(f);throttle=true;
+  const mapped=f.refresh({includeCapacity:true}),limited=f.refresh({cursor:mapped.nextCursor});
+  assert.equal(limited.syncPaused,true);assert.ok(limited.retryAfterMs>=75000);
+  assert.equal(limited.capacity.campaigns[0].scheduleState,'error');assert.equal(limited.capacity.campaigns[0].lastKnownSchedule.from,'09:00');
+  assert.equal(limited.capacity.campaigns[1].scheduleState,'ready');assert.equal(limited.accounts[0].capacity.idleUntil,null);
+  const before=f.calls.http.length;
+  f.refresh({cursor:limited.nextCursor});assert.equal(f.calls.http.length,before);
+  f.tick(limited.retryAfterMs+1);throttle=false;
+  const resumed=f.refresh({cursor:limited.nextCursor});
+  assert.deepEqual(f.calls.http.slice(before),['/campaigns/'+ACTIVE_ONE]);
+  assert.ok(resumed.capacity.campaigns.every(c=>c.scheduleState==='ready'));
+});
+
+test('a changed segment binding during a group of schedule reads discards the whole group',()=>{
+  const ids=[ACTIVE_ONE,ACTIVE_TWO];let segment='our_segment';
+  const f=capacityFixture([[1,ids]]);
+  f.c.projectCapacityOwners_=(ctx,wanted)=>Object.fromEntries(wanted.map(id=>[id,{segmentId:segment,segmentProjectId:'numshield',bindingState:'linked'}]));
+  parallelReads(f,()=>{segment='another_segment';});
+  const mapped=f.refresh({includeCapacity:true}),saves=f.calls.saves.length;
+  assert.throws(()=>f.refresh({cursor:mapped.nextCursor}),/COLDY_MONITORING_CHANGED/);
+  assert.equal(f.calls.saves.length,saves);
+  assert.ok(f.state().capacity.campaigns.every(c=>c.schedule===null));
+});
+
 test('twenty selected senders share four guarded HTTP groups with no directory request or private provider fields',()=>{
   const accounts=Array.from({length:30},(_,i)=>account(i+1)),ids=accounts.slice(10).map(a=>String(a.id));
   const f=fixture({accounts,monitoringIds:ids});f.configure();
@@ -391,6 +444,23 @@ test('expiry during an active forecast cannot starve recipients; final publicati
   assert.equal(waiting.forecast,null);assert.equal(waiting.pending,true);
   const finished=f.complete();assert.equal(finished.state,'ready');assert.equal(finished.progress.contactsRead,5201);
   assert.deepEqual(f.offsets,Array.from({length:27},(_,i)=>i*200));
+});
+
+test('forecast preview uses the dated report without touching Coldy and requires the same selection and real campaign owner',()=>{
+  const f=forecastFixture(12), completed=f.complete(), before=f.calls.http.length;
+  const get=()=>f.c.getProjectForecastPreview_({});
+  const preview=plain(get());
+  assert.deepEqual(preview.forecast,completed.forecast); assert.equal(preview.generatedAt,completed.generatedAt);
+  f.tick(86400000);
+  const tomorrow=plain(get());
+  assert.equal(tomorrow.forecast.days[0].date,completed.forecast.days[1].date);
+  assert.equal(tomorrow.forecast.periods[0].expected,completed.forecast.days[1].expected);
+  assert.equal(tomorrow.forecast.periods[2].expected,null);
+  assert.equal(tomorrow.generatedAt,completed.generatedAt);
+  const owners=f.c.projectCapacityOwners_; f.c.projectCapacityOwners_=()=>({});
+  assert.equal(get(),null);
+  f.c.projectCapacityOwners_=owners; f.select([]);
+  assert.equal(get(),null);assert.equal(f.calls.http.length,before);
 });
 
 test('a mailbox quota changed during final computation reuses verified recipients but never publishes the old limits',()=>{
@@ -1289,6 +1359,25 @@ test('targeted picker does not enumerate or store the directory; explicit text s
   const checked = f.refresh();
   assert.deepEqual(checked.accounts.map(a=>a.id),['12','95']);
   assert.deepEqual(f.calls.http.slice(2),['/accounts/12','/accounts/95']);
+});
+
+test('mailbox lookup finds all matching names and reuses positive and negative results only within the project and credential', () => {
+  const matches=[account(1,{last_name:'Белоцветов'}),account(2,{last_name:'Белоцветова'}),account(3)];
+  const f=fixture({accounts:matches,monitoringIds:null}),recent=new Map();
+  f.c.CacheService={getScriptCache:()=>({get:key=>recent.get(key)||null,put:(key,value,ttl)=>{assert.equal(ttl,60);recent.set(key,value);}})};
+  let project='numshield';f.c.registryProjectId_=()=>project;f.configure();
+  const search=query=>plain(f.c.getProjectInfrastructureSelection_({query})).accounts.map(account=>account.id);
+  assert.deepEqual(search('1'),['1']);
+  assert.deepEqual(search('Белоцветов'),['1','2'],'A known mailbox cannot shadow the second surname match');
+  const writes=f.calls.saves.length;
+  assert.deepEqual(search('белоцветов'),['1','2']);
+  assert.equal(f.calls.saves.length,writes);
+  assert.deepEqual(search('несовпадение'),[]);assert.deepEqual(search('несовпадение'),[]);
+  assert.deepEqual(f.calls.http,['/accounts/1','/accounts','/accounts']);
+  assert.ok([...recent.values()].every(value=>JSON.parse(value).every(id=>/^\d+$/.test(id))));
+  project='neosender';assert.deepEqual(search('несовпадение'),[]);assert.deepEqual(f.calls.http.at(-1),'/accounts');
+  assert.equal(f.calls.http.length,4);
+  f.configure('other_fixture_secret');assert.deepEqual(search('несовпадение'),[]);assert.equal(f.calls.http.length,5);
 });
 
 test('two tabs share a recent monitored snapshot and partial cursor while manual sync can refresh immediately', () => {

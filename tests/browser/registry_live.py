@@ -10,6 +10,11 @@ def main():
     grid = Path(__file__).with_name('grid-fixture.js').read_text(encoding='utf-8')
     fixture = grid + """
 const fullCatalog=api.getSourceBases;
+const bootstrapCatalog=api.getAppBootstrap;
+api.getAppBootstrap=payload=>({...bootstrapCatalog(),catalogPreview:payload?.includeSourcePreview?{
+  checkedAt:Date.now(),items:[{name:'Быстрый список',contents:['companies']},{name:'Тип ещё не указан',contents:[]}]
+}:null});
+backend.holdMethods=['getSourceBases'];
 backend.revision='v1';
 api.getSourceBases=()=>({...fullCatalog(),revision:backend.revision});
 api.getSourceBasesRevision=()=>({revision:backend.revision});
@@ -23,6 +28,23 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         errors=[]
         page.on('pageerror',lambda error:errors.append(str(error)))
         page.set_content(integrated_html().replace('api.getColdySettings=',fixture+'api.getColdySettings=',1))
+        titles=page.locator('#br-sources-items h2')
+        expect(titles).to_have_text(['Быстрый список','Тип ещё не указан'])
+        expect(page.locator('#br-sources-health')).to_contain_text('в фоне')
+        expect(page.locator('#br-sources-items a, #br-sources-items button')).to_have_count(0)
+        expect(page.locator('#br-source-project-filter')).to_be_disabled()
+        page.locator('#br-source-search').fill('Быстрый')
+        expect(titles).to_have_text(['Быстрый список'])
+        page.locator('#br-source-search').fill('')
+        page.locator('#br-section-lpr').click()
+        expect(titles).to_have_text(['Тип ещё не указан'])
+        page.locator('#br-section-companies').click()
+        assert not page.evaluate("backend.calls.some(c=>/Coldy|ServiceLimits/i.test(c.name))")
+        page.evaluate("backend.failSource=true;backend.holdMethods=[];releaseRpc('getSourceBases')")
+        expect(page.locator('#br-sources-health')).to_contain_text('Показаны последние данные')
+        expect(titles).to_have_text(['Быстрый список','Тип ещё не указан'])
+        page.wait_for_function('backend.active===0')
+        page.locator('#br-refresh').click()
         source=page.locator('[data-source-id="source-companies"]')
         expect(source).to_be_visible()
         header=page.locator('header.br-header')
@@ -41,18 +63,20 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
             page.evaluate('ms=>tick(ms)',ms)
             page.wait_for_function('backend.active===0')
 
-        assert calls('getSourceBases')==1
+        assert calls('getSourceBases')==2
+        expect(page.locator('#br-source-project-filter')).to_be_enabled()
+        expect(page.get_by_role('heading',name='Быстрый список')).to_have_count(0)
         tick(31000)
-        assert calls('getSourceBasesRevision')==1 and calls('getSourceBases')==1
+        assert calls('getSourceBasesRevision')==1 and calls('getSourceBases')==2
         page.evaluate("backend.sources[0].name='Новое название';backend.revision='v2'")
         tick(31000)
         expect(source.locator('h2')).to_have_text('Новое название')
-        assert calls('getSourceBases')==2
-        tick(121000)
         assert calls('getSourceBases')==3
+        tick(121000)
+        assert calls('getSourceBases')==4
         page.locator('#br-refresh').click()
         page.wait_for_function('backend.active===0')
-        assert calls('getSourceBases')==4
+        assert calls('getSourceBases')==5
         # A stale reply cannot refresh this project after switching to another screen.
         page.evaluate("backend.holdAfterMethods=['getSourceBasesRevision'];backend.revision='v3';tick(31000)")
         page.wait_for_function("backend.pending.some(p=>p.method==='getSourceBasesRevision')")
@@ -62,7 +86,7 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         expect(segment).to_be_visible()
         expect(bases).to_have_attribute('aria-pressed','false')
         page.wait_for_function('backend.dashboardFullGets>0&&backend.active===0')
-        assert calls('getSourceBases')==4
+        assert calls('getSourceBases')==5
         page.evaluate("backend.segments[0].name='Сегмент после изменения'")
         tick(61000)
         expect(segment.locator('.br-segment-row-name')).to_have_text('Сегмент после изменения')

@@ -27,6 +27,7 @@ test('the published shell is byte-for-byte the authored Index with the existing 
 
 test('doGet serves the release in one HTML Service read without an auth or data lookup', () => {
   const calls = [], page = {
+    setFaviconUrl(url) { this.favicon=url; return this; },
     setTitle(title) { this.title=title; return this; },
     setXFrameOptionsMode(value) { this.frame=value; return this; }
   };
@@ -38,6 +39,7 @@ test('doGet serves the release in one HTML Service read without an auth or data 
   assert.equal(context.doGet(), page);
   assert.deepEqual(calls, ['RegistryShell']);
   assert.equal(page.title,'Registry');
+  assert.equal(page.favicon,'https://seainkk.github.io/-/favicon.png');
   assert.equal(page.frame,'ALLOWALL');
 });
 

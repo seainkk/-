@@ -1,4 +1,4 @@
-/** Shared sender selection. No provider request or business-sheet write is performed here. */
+/** Shared sender selection and explicit, bounded mailbox discovery. */
 var PROJECT_MONITORING = Object.freeze({ version: 1, maxAccounts: 5000, maxReceipts: 200 });
 
 // Keep the original journal address and request fingerprints for the first project.
@@ -7,8 +7,8 @@ function projectMonitoringOwner_(credentialHash) {
   return project === 'numshield' ? credentialHash : credentialHash + ':' + project;
 }
 
-function projectMonitoringRead_(context, settings) {
-  var owner = projectMonitoringOwner_(settings.credentialHash), state = settings.configured ? coldyLoad_(context, 'monitoring', owner) : null;
+function projectMonitoringRead_(context, settings, observation) {
+  var owner = projectMonitoringOwner_(settings.credentialHash), state = settings.configured ? coldyLoad_(context, 'monitoring', owner, observation) : null;
   if (owner !== projectMonitoringOwner_(settings.credentialHash)) fail_('COLDY_MONITORING_CHANGED', 'Проект изменился. Обновите выбор почт.');
   if (!state) return { version: PROJECT_MONITORING.version, rootId: context.rootId,
     credentialHash: settings.credentialHash, revision: 0, accountIds: [], configured: false, receipts: [] };
@@ -52,8 +52,12 @@ function getProjectInfrastructureSelection_(request) {
   return api_(function () {
     var input = coldyInput_(request === undefined ? {} : request, ['query']);
     if (input.query !== undefined && (typeof input.query !== 'string' || !input.query.trim() || input.query.length > 254)) fail_('INVALID_REQUEST', 'Введите ID, название или email ящика.');
-    var context = authorize_(), settings = coldySettings_(context), state = projectMonitoringRead_(context, settings);
-    var inventory = state.accountIds.length || input.query !== undefined ? projectInfraRead_(context, settings) : null, selected = new Set(state.accountIds);
+    var context = authorize_(), settings = coldySettings_(context), observation = {};
+    var state = projectMonitoringRead_(context, settings, observation);
+    var selected = new Set(state.accountIds);
+    // Modern selections already carry the sender identities. Read the larger
+    // infrastructure journal only to recover a legacy selection without them.
+    var inventory = selected.size && !Array.isArray(state.accounts) ? projectInfraRead_(context, settings) : null;
     var source = inventory && inventory.inventoryAt ? inventory.accounts.filter(function (item) { return !!item.email; }) : [];
     var chosen = new Map((state.accounts || []).map(function (item) { return [item.id,item]; }));
     source.forEach(function (item) { if (selected.has(item.id)) chosen.set(item.id,item); });
@@ -63,39 +67,51 @@ function getProjectInfrastructureSelection_(request) {
     var matches = [];
     if (input.query !== undefined && settings.configured) {
       var query = input.query.trim().toLowerCase(), signature = projectMonitoringSignature_(context,state);
-      projectInfraMonitoringCurrent_(context,settings.credentialHash,signature);
-      if (/^[1-9]\d*$/.test(query)) {
+      var guard = projectInfraMonitoringGuard_(context,settings.credentialHash,signature,observation);
+      var owner = projectMonitoringOwner_(settings.credentialHash);
+      var candidates = coldyLoad_(context,'mailboxchoices',owner);
+      var known = new Map(accounts.map(function (item) { return [item.id,item]; }));
+      (candidates && candidates.accounts || []).forEach(function (item) { known.set(item.id,item); });
+      var lookup = digest_(JSON.stringify(['mailbox-search:v1',context.rootId,owner,query])), cache, cachedIds;
+      try {
+        cache=CacheService.getScriptCache();cachedIds=JSON.parse(cache.get(lookup));
+      } catch (unavailable) { /* The provider can answer directly when cache is unavailable. */ }
+      var numeric=/^[1-9]\d*$/.test(query);
+      if(!numeric && query.length<3)fail_('INVALID_REQUEST','Для поиска по названию или email введите минимум три символа.');
+      var reusable=Array.isArray(cachedIds)&&cachedIds.length<=50&&cachedIds.every(function(id){return typeof id==='string'&&known.has(id);});
+      if(reusable){
+        matches=cachedIds.map(function(id){return known.get(id);});
+      } else if (numeric) {
         var id = projectInfraId_(query);
         try {
-          var detail = coldyApi_(context,'GET','/accounts/' + id);
+          var detail = coldyApi_(guard(),'GET','/accounts/' + id);
           matches = [projectInfraDetail_({id:id,email:null},detail,settings.key,true)];
         } catch (error) { if (error.registryCode !== 'COLDY_NOT_FOUND') throw error; }
       } else {
-        if (query.length < 3) fail_('INVALID_REQUEST','Для поиска по названию или email введите минимум три символа.');
         function matching(item) { return [item.name,item.email].some(function (text) { return String(text || '').toLowerCase().indexOf(query) >= 0; }); }
-        var existingChoices = coldyLoad_(context,'mailboxchoices',projectMonitoringOwner_(settings.credentialHash));
-        var known = new Map();
-        if (existingChoices && Array.isArray(existingChoices.accounts)) existingChoices.accounts.forEach(function (item) { known.set(item.id,item); });
-        source.forEach(function (item) { known.set(item.id,item); });
-        matches = Array.from(known.values()).filter(matching);
-        if (!matches.length) matches = projectInfraInventory_(coldyApi_(context,'GET','/accounts'),settings.key).filter(matching);
+        // A partial local match on a surname must not hide other matching mailboxes.
+        matches = Array.from(known.values()).filter(function(item){return item.email===query;});
+        if (!matches.length) matches = projectInfraInventory_(coldyApi_(guard(),'GET','/accounts'),settings.key).filter(matching);
       }
       matches = matches.slice(0,50).map(choice);
-      if (matches.length) locked_(function () {
-        var fresh = projectInfraMonitoringCurrent_(context,settings.credentialHash,signature);
-        var owner = projectMonitoringOwner_(settings.credentialHash), previous = coldyLoad_(fresh,'mailboxchoices',owner);
+      var changed=matches.some(function(item){return !known.has(item.id)||JSON.stringify(choice(known.get(item.id)))!==JSON.stringify(item);});
+      if (changed) locked_(function () {
+        var fresh = guard();
+        var previous = coldyLoad_(fresh,'mailboxchoices',owner);
         var found = new Map(previous && Array.isArray(previous.accounts) ? previous.accounts.map(function (account) { return [account.id,account]; }) : []);
         matches.forEach(function (item) { found.delete(item.id); found.set(item.id,item); });
         coldySave_(fresh,'mailboxchoices',owner,{accounts:Array.from(found.values()).slice(-PROJECT_MONITORING.maxAccounts)});
       });
-      projectInfraMonitoringCurrent_(context,settings.credentialHash,signature);
+      guard();
+      if(cache&&!reusable)try { cache.put(lookup,JSON.stringify(matches.map(function(item){return item.id;})),60); } catch(unavailable) {}
       var ids = new Set(matches.map(function (item) { return item.id; }));
       accounts = accounts.filter(function (item) { return !ids.has(item.id); }).concat(matches);
     }
     var result = { configured: settings.configured, selection: projectMonitoringPublic_(context, state),
       accounts: accounts.map(choice),
       availableCount: accounts.length, inventoryAt: inventory && inventory.inventoryAt || null };
-    projectInfraCurrent_(context, settings.credentialHash);
+    if(input.query!==undefined)result.matchIds=matches.map(function(item){return item.id;});
+    if(input.query===undefined||!settings.configured)projectInfraCurrent_(context, settings.credentialHash);
     return result;
   });
 }
