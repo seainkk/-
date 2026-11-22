@@ -15,12 +15,15 @@ def main():
         page.on('pageerror', lambda error: errors.append(str(error)))
         def setup(hold_metrics=False):
             page.evaluate("""hold=>{
-              backend.holdMethods=hold?['getProjectAnalytics','getSegmentMailings']:[];
+              backend.holdMethods=hold?['getProjectAnalytics','getProjectAnalyticsCampaigns','getSegmentMailings']:[];
+              const loadedAt=Date.now()-10;
               const base=window.transport;
               window.transport=async (name,p,guard)=>{
                 if(name!=='syncColdyRecipients'){
                   while(backend.active>=2){if(guard&&!guard())return null;await new Promise(resolve=>setTimeout(resolve,5));}
-                  return base(name,p,guard);
+                  const result=await base(name,p,guard);
+                  if(name==='getProjectAnalyticsCampaigns'&&p.segmentId===backend.deniedSegment)throw new Error('[OUTSIDE_SEGMENTS] Сегмент недоступен');
+                  return result;
                 }
                 backend.calls.push({name,payload:clone(p)});
                 if(!p.cursor)return {state:'processing',nextCursor:'page-two',processed:2,added:2,updated:0};
@@ -28,7 +31,7 @@ def main():
                 return {state:'complete',processed:3,added:2,updated:1,excluded:2,fileId:'synthetic-workbook',sheetId:12};
               };
               RegistryProject.configure({transport:window.transport,peekSegments:()=>({
-                 state:'ready',segments:[{id:'segment-a',name:'Segment A'},{id:'segment-b',name:'Segment B'}]
+                 state:'ready',loadedAt,segments:[{id:'segment-a',name:'Segment A',previewNames:['Кухни из снимка','Кухни ЛПР из снимка']},{id:'segment-b',name:'Segment B'}]
               })});
               RegistryProject.show('analytics',{ready:true,epoch:1});
               void RegistryProject.refresh({opening:true});
@@ -42,6 +45,13 @@ def main():
             return page.evaluate("backend.calls.filter(c=>c.name==='syncColdyRecipients').map(c=>c.payload)")
 
         setup(hold_metrics=True)
+        rows=page.locator('#pj-campaign-rows')
+        hints=page.locator('#pj-campaign-shown')
+        expect(hints).to_have_text('Сохранённые привязки · обновляем список')
+        expect(rows).to_contain_text('Кухни ЛПР из снимка')
+        expect(rows.locator('button,input')).to_have_count(0)
+        expect(page.locator('#pj-selection-save')).to_be_disabled()
+        page.evaluate("release('getProjectAnalyticsCampaigns')")
         action = page.locator('[data-recipient-binding="binding-existing-00000001"]')
         expect(action).to_be_enabled()
         assert page.locator('[data-recipient-binding]').count() == 1
@@ -60,8 +70,13 @@ def main():
         assert not import_calls()
 
         # A response for the previous segment must not replace a warm chooser or its draft.
-        page.evaluate("backend.holdMethods=[];release('getProjectAnalytics')")
+        page.evaluate("backend.holdMethods=['getProjectAnalyticsCampaigns'];release('getProjectAnalytics')")
         page.locator('#pj-segment').select_option('segment-b')
+        expect(hints).to_have_text('Сохранённые привязки · обновляем список')
+        expect(rows).to_contain_text('Other campaign')
+        expect(rows).not_to_contain_text('Кухни из снимка')
+        expect(rows.locator('button,input')).to_have_count(0)
+        page.evaluate("backend.holdMethods=[];release('getProjectAnalyticsCampaigns')")
         expect(page.locator('[data-recipient-binding="binding-other-0000000002"]')).to_be_enabled()
         page.locator('#pj-segment').select_option('segment-a')
         other_campaign = page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]')
@@ -103,6 +118,15 @@ def main():
         expect(target).to_be_enabled()
         page.keyboard.press('Escape')
         expect(dialog).to_be_hidden()
+        page.reload()
+        setup(hold_metrics=True)
+        expect(rows).to_contain_text('Кухни из снимка')
+        page.evaluate("backend.deniedSegment='segment-a';backend.holdMethods=[];release('getProjectAnalyticsCampaigns');release('getProjectAnalytics')")
+        expect(page.locator('#pj-analytics-health')).to_contain_text('Сегмент недоступен')
+        expect(rows).not_to_contain_text('Кухни из снимка')
+        expect(rows.locator('button,input')).to_have_count(0)
+        page.wait_for_function('backend.active===0')
+        expect(rows.locator('button,input')).to_have_count(0)
         assert not errors, errors
         browser.close()
         print('Coldy recipient import, warm segment switch and delayed metrics passed')

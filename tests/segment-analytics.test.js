@@ -151,8 +151,11 @@ test('campaign counts use a single journal for visible segments and keep contact
   f.context.coldyCampaignRegistry_ = () => {
     reads++;
     return { credentialHash: 'account', bindings: [
-      { segmentId: SEGMENT, campaignStatus: 'Active' }, { segmentId: SEGMENT, campaignStatus: 'Completed' },
-      { segmentId: other, campaignStatus: 'Active' }, { segmentId: other, campaignStatus: '' },
+      { segmentId: SEGMENT, campaignStatus: 'Active', campaignName: 'Кухни', id:'private-binding-id' },
+      { segmentId: SEGMENT, campaignStatus: 'Completed', campaignName: 'Кухни ЛПР' },
+      { segmentId: other, campaignStatus: 'Active', campaignName: 'Рассылка другого проекта' },
+      { segmentId: other, campaignStatus: '' },
+      ...Array.from({length:12},(_,i)=>({segmentId:extra,campaignStatus:'Draft',campaignName:'Архив '+i})),
     ] };
   };
   const dashboard = (projectId, includeAnalysis) => plain(f.context.callApp({ method: 'getSegmentsDashboard', payload: { includeAnalysis }, accessKey: TEST_ACCESS_KEY, projectId }));
@@ -160,13 +163,15 @@ test('campaign counts use a single journal for visible segments and keep contact
     const list = dashboard('numshield', includeAnalysis).items;
     assert.equal(list.length, 2);
     const card = list.find(item => item.id === SEGMENT);
-    assert.deepEqual(card.coldyMailings, { linked: 2, activeAtBinding: 1 });
+    assert.deepEqual(card.coldyMailings, { linked: 2, activeAtBinding: 1, previewNames:['Кухни','Кухни ЛПР'] });
+    assert.ok(!JSON.stringify(list).includes('private-binding-id')&&!JSON.stringify(list).includes('Рассылка другого проекта'));
     assert.equal(card.channels.email.inWork, null);
     assert.notEqual(card.overallStatus, 'in_work');
-    assert.deepEqual(list.find(item => item.id === extra).coldyMailings, { linked: 0, activeAtBinding: 0 });
+    assert.deepEqual(list.find(item => item.id === extra).coldyMailings, { linked: 12, activeAtBinding: 0,
+      previewNames:Array.from({length:10},(_,i)=>'Архив '+i) });
     const neo = dashboard('neosender', includeAnalysis).items;
     assert.deepEqual(neo.map(item => item.id), [other]);
-    assert.deepEqual(neo[0].coldyMailings, { linked: 2, activeAtBinding: null });
+    assert.deepEqual(neo[0].coldyMailings, { linked: 2, activeAtBinding: null, previewNames:['Рассылка другого проекта'] });
   }
   assert.equal(reads, 4);
   f.context.coldyCampaignRegistry_ = () => { throw Error('Missing journal'); };

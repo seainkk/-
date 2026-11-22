@@ -24,17 +24,20 @@ function getSegmentsDashboard_(request) {
   });
 }
 
-/** Read one team-wide binding journal. Each card receives only its counts. */
+/** Project cards receive counts and up to ten display names from the same journal. */
 function segmentDashboardMailings_(context, items) {
   if (!items.length || typeof coldyCampaignRegistry_ !== 'function') return;
   var counts = new Map(), registry;
-  items.forEach(function (item) { counts.set(item.id, { linked: 0, activeAtBinding: 0 }); });
+  items.forEach(function (item) { counts.set(item.id, { linked: 0, activeAtBinding: 0, previewNames: [] }); });
   try {
     registry = coldyCampaignRegistry_(context);
     registry.bindings.forEach(function (binding) {
       var summary = counts.get(binding.segmentId);
       if (!summary) return;
       summary.linked++;
+      if (summary.previewNames.length < 10 && typeof binding.campaignName === 'string' && binding.campaignName.trim()) {
+        summary.previewNames.push(binding.campaignName.trim().slice(0, 200));
+      }
       if (['Active', 'Draft', 'Paused', 'Completed'].indexOf(binding.campaignStatus) < 0) summary.activeAtBinding = null;
       else if (summary.activeAtBinding !== null && binding.campaignStatus === 'Active') summary.activeAtBinding++;
     });
@@ -44,7 +47,11 @@ function segmentDashboardMailings_(context, items) {
     if (['SOURCE_CHANGED', 'COLDY_SCOPE_CHANGED', 'OUTSIDE_REGISTRY'].indexOf(error.registryCode) >= 0 || /^LINK_/.test(error.registryCode || '')) throw error;
     return;
   }
-  items.forEach(function (item) { item.coldyMailings = counts.get(item.id); });
+  var scoped = typeof registryProjectScoped_ === 'function' && registryProjectScoped_();
+  var properties = scoped ? context.properties.getProperties() : null;
+  items.forEach(function (item) {
+    if (!scoped || registrySegmentProject_(context, item.id, properties) === registryProjectId_()) item.coldyMailings = counts.get(item.id);
+  });
 }
 
 /** Render the usable catalog before reading contact-presence data from books. */
