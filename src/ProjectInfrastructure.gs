@@ -29,9 +29,10 @@ function getProjectInfrastructure_(request) {
 /** One inventory plus a bounded detail batch; the saved cursor continues later. */
 function refreshProjectInfrastructure_(request) {
   return api_(function () {
-    var input = coldyInput_(request === undefined ? {} : request, ['cursor', 'inventoryOnly']);
+    var input = coldyInput_(request === undefined ? {} : request, ['cursor', 'inventoryOnly', 'includeCapacity']);
     if (input.cursor !== undefined && (typeof input.cursor !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(input.cursor))) fail_('INVALID_REQUEST', 'Некорректное продолжение синхронизации почт.');
     if (input.inventoryOnly !== undefined && typeof input.inventoryOnly !== 'boolean' || input.inventoryOnly === true && input.cursor !== undefined) fail_('INVALID_REQUEST', 'Некорректный режим обновления списка почт.');
+    if (input.includeCapacity !== undefined && (typeof input.includeCapacity !== 'boolean' || input.cursor !== undefined || input.inventoryOnly === true)) fail_('INVALID_REQUEST', 'Некорректный режим обновления занятости почт.');
     var context = authorize_(), settings = coldySettings_(context), before = projectInfraRead_(context, settings), started = Date.now();
     if (!settings.configured) return projectInfraPublic_(context, null);
     var monitoring = projectMonitoringRead_(context, settings), monitoringSignature = projectMonitoringSignature_(context, monitoring);
@@ -63,8 +64,11 @@ function refreshProjectInfrastructure_(request) {
           accounts: accounts, detailIds: projectInfraSelectedIds_(accounts, monitoring.accountIds), monitoringSignature: monitoringSignature,
           cursorIndex: 0, processedCursors: [], nextCursor: null, inventoryAt: now,
           updatedAt: now, lastAttemptAt: now, retryAt: 0, warnings: [], lastError: null };
+        if (before && before.capacity && projectInfraMonitoringMatches_(before, monitoringSignature)) state.capacity = before.capacity;
+        if (input.includeCapacity && state.detailIds.length) { state.capacityRequested = true; state.capacityWork = { mapped: false, cursor: 0 }; }
       } else state = JSON.parse(JSON.stringify(before));
       if (input.inventoryOnly !== true) projectInfraDetails_(context, settings, state);
+      if (state.capacityWork && !state.lastError) projectCapacityAdvance_(context, settings, state);
     } catch (error) {
       if (projectInfraScopeError_(error)) throw error;
       return projectInfraFailure_(context, settings, started, before, error, monitoringSignature);
@@ -75,15 +79,15 @@ function refreshProjectInfrastructure_(request) {
         if (!latest || latest.generation !== before.generation) fail_('COLDY_INFRA_CURSOR_STALE', 'Список почт изменился. Обновите его перед продолжением.');
         if (latest.processedCursors.indexOf(input.cursor) !== -1) return projectInfraPublic_(fresh, latest);
         if (latest.cursorIndex !== before.cursorIndex || latest.nextCursor !== input.cursor) fail_('COLDY_INFRA_CURSOR_STALE', 'Продолжение уже обработано. Обновите список почт.');
-        if (state.cursorIndex > before.cursorIndex) state.processedCursors.push(input.cursor);
+        if (state.cursorIndex > before.cursorIndex || (before.capacityWork && JSON.stringify(state.capacityWork) !== JSON.stringify(before.capacityWork))) state.processedCursors.push(input.cursor);
       } else if (latest && latest.generation !== (before && before.generation) && latest.startedAt >= started) {
         return projectInfraPublic_(fresh, latest);
       }
       state.processedCursors = state.processedCursors.slice(-PROJECT_INFRASTRUCTURE.maxReceipts);
-      state.nextCursor = state.cursorIndex < state.detailIds.length ? projectInfraCursor_(state) : null;
+      state.nextCursor = state.cursorIndex < state.detailIds.length || state.capacityWork ? projectInfraCursor_(state) : null;
       state.updatedAt = new Date().toISOString();
       state.lastAttemptAt = state.updatedAt;
-      coldySave_(fresh, 'infrastructure', settings.credentialHash, state);
+      coldySave_(fresh, 'infrastructure', projectMonitoringOwner_(settings.credentialHash), state);
       // A successful authenticated account read also verifies this connection.
       if (!state.lastError) fresh.properties.setProperty(COLDY.connectionProperty, JSON.stringify({ version: COLDY.version,
         rootId: fresh.rootId, credentialHash: settings.credentialHash, checkedAt: state.updatedAt }));
@@ -130,7 +134,7 @@ function projectInfraFailure_(context, settings, started, before, error, monitor
   return locked_(function () {
     var fresh = projectInfraMonitoringCurrent_(context, settings.credentialHash, monitoringSignature), latest = projectInfraRead_(fresh, coldySettings_(fresh));
     if (latest && (latest.generation !== (before && before.generation) && latest.startedAt >= started ||
-        before && latest.generation === before.generation && latest.cursorIndex > before.cursorIndex)) return projectInfraPublic_(fresh, latest);
+        before && latest.generation === before.generation && (latest.cursorIndex > before.cursorIndex || latest.nextCursor !== before.nextCursor))) return projectInfraPublic_(fresh, latest);
     var now = new Date().toISOString(), saved = latest || { version: PROJECT_INFRASTRUCTURE.version, rootId: fresh.rootId,
       credentialHash: settings.credentialHash, generation: digest_('infrastructure-error|' + Utilities.getUuid()), startedAt: started,
       accounts: [], cursorIndex: 0, processedCursors: [], nextCursor: null, inventoryAt: null };
@@ -139,17 +143,19 @@ function projectInfraFailure_(context, settings, started, before, error, monitor
       saved.generation = digest_('infrastructure-error|' + Utilities.getUuid() + '|' + started);
       saved.startedAt = started;
       saved.detailIds = projectInfraSelectedIds_(saved.accounts, monitoring.accountIds);
+      delete saved.capacity; delete saved.capacityWork; delete saved.capacityRequested;
       saved.monitoringSignature = monitoringSignature;
       saved.cursorIndex = 0; saved.processedCursors = [];
       saved.nextCursor = saved.detailIds.length ? projectInfraCursor_(saved) : null;
     }
     saved.lastError = projectInfraError_(error);
+    if (saved.capacity) saved.capacity.stale = true;
     saved.lastAttemptAt = now;
     saved.updatedAt = now;
     saved.warnings = [saved.lastError.message];
     saved.accounts.forEach(function (item) { item.stale = true; });
     if (error.registryCode === 'COLDY_RATE_LIMIT' || error.registryCode === 'COLDY_UNAVAILABLE') saved.retryAt = Date.now() + Math.max(15000, Math.min(86400000, error.retryAfterMs || 0));
-    coldySave_(fresh, 'infrastructure', settings.credentialHash, saved);
+    coldySave_(fresh, 'infrastructure', projectMonitoringOwner_(settings.credentialHash), saved);
     return projectInfraPublic_(fresh, saved);
   });
 }
@@ -174,7 +180,8 @@ function projectInfraSelectedIds_(accounts, selectedIds) {
 
 function projectInfraRead_(context, settings) {
   if (!settings.configured) return null;
-  var saved = coldyLoad_(context, 'infrastructure', settings.credentialHash);
+  var owner = projectMonitoringOwner_(settings.credentialHash), saved = coldyLoad_(context, 'infrastructure', owner);
+  if (owner !== projectMonitoringOwner_(settings.credentialHash)) fail_('COLDY_MONITORING_CHANGED', 'Проект изменился. Обновите список почт.');
   if (!saved) return null;
   if (saved.version !== PROJECT_INFRASTRUCTURE.version || saved.rootId !== context.rootId || saved.credentialHash !== settings.credentialHash ||
       typeof saved.generation !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(saved.generation) || !Number.isFinite(saved.startedAt) ||
@@ -199,6 +206,7 @@ function projectInfraRead_(context, settings) {
       detailSeen[id] = true;
     });
   }
+  if (saved.capacity || saved.capacityWork) projectCapacityValidate_(saved);
   return saved;
 }
 
@@ -212,7 +220,7 @@ function projectInfraInventory_(response, key) {
     var id = projectInfraId_(item.id), email = projectInfraEmail_(item.email);
     if (seen[id]) fail_('COLDY_RESPONSE', 'Coldy вернул повторяющийся идентификатор ящика.');
     seen[id] = true;
-    return { id: id, email: email, name: [projectInfraText_(item.first_name, key, 200), projectInfraText_(item.last_name, key, 200)].filter(Boolean).join(' '),
+    return { id: id, email: email, listedName: item.first_name !== undefined || item.last_name !== undefined, name: [projectInfraText_(item.first_name, key, 200), projectInfraText_(item.last_name, key, 200)].filter(Boolean).join(' '),
       provider: projectInfraNullableText_(item.service, key, 200), status: null, sentTotal: projectInfraCount_(item.total_sent),
       sentToday: projectInfraCount_(item.sent_today), dailyLimit: projectInfraCount_(item.limit), errorCount: null,
       errors: projectInfraProviderErrors_(item.error_text, key), tags: projectInfraTags_(item.tags, key),
@@ -223,7 +231,7 @@ function projectInfraInventory_(response, key) {
 function projectInfraDetail_(listed, response, key) {
   if (!response || typeof response !== 'object' || Array.isArray(response) || projectInfraId_(response.id) !== listed.id || projectInfraEmail_(response.email) !== listed.email) fail_('COLDY_INFRA_ACCOUNT_CHANGED', 'Сведения о ящике изменились во время синхронизации.');
   return { id: listed.id, email: listed.email,
-    name: [projectInfraText_(response.first_name, key, 200), projectInfraText_(response.last_name, key, 200)].filter(Boolean).join(' ') || listed.name,
+    name: listed.listedName ? listed.name : [projectInfraText_(response.first_name, key, 200), projectInfraText_(response.last_name, key, 200)].filter(Boolean).join(' ') || listed.name,
     provider: projectInfraNullableText_(response.provider, key, 200) || listed.provider,
     status: projectInfraNullableText_(response.status, key, 200),
     sentTotal: response.total_sent === undefined ? listed.sentTotal : projectInfraCount_(response.total_sent),
@@ -270,6 +278,7 @@ function projectInfraPublic_(context, saved) {
     retryAfterMs: retryAfterMs, syncPaused: !!activeError || retryAfterMs > 0,
     error: activeError ? { code: projectInfraText_(activeError.code, settings.key, 100), message: projectInfraText_(activeError.message, settings.key) } : null,
     stale: !emptySelection && (inventoryStale || !!activeError || missing.length > 0), countersScope: 'selected_accounts', cached: !!saved };
+  projectCapacityPublic_(context, settings, jobMatches ? saved : null, result);
   projectInfraMonitoringCurrent_(context, settings.credentialHash, signature);
   return result;
 }
@@ -284,7 +293,11 @@ function projectInfraTotals_(accounts, known) {
     errorCount: null, accountsWithErrors: known ? accounts.filter(function (item) { return item.errors.length > 0; }).length : null };
 }
 
-function projectInfraCursor_(state) { return digest_(JSON.stringify(['infrastructure-cursor', state.rootId, state.credentialHash, state.generation, state.monitoringSignature, state.cursorIndex])); }
+function projectInfraCursor_(state) {
+  var parts = ['infrastructure-cursor', state.rootId, state.credentialHash, state.generation, state.monitoringSignature, state.cursorIndex];
+  if (state.capacityWork) parts.push(state.capacityWork.mapped, state.capacityWork.cursor);
+  return digest_(JSON.stringify(parts));
+}
 function projectInfraId_(value) {
   var text = typeof value === 'number' ? String(value) : value;
   if (typeof text !== 'string' || !/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(Number(text)) || String(Number(text)) !== text) fail_('COLDY_RESPONSE', 'Coldy вернул неподдерживаемый идентификатор ящика.');

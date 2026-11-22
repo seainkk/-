@@ -24,7 +24,7 @@ function fixture(options={}) {
     Drive:{Files:{get:id=>{if(id!==rootId)throw coded('OUTSIDE_REGISTRY','Wrong root');return{...root,id:rootId};}}},
     UrlFetchApp:{fetch:()=>{calls.http.push('unexpected');throw Error('Monitoring selection must not contact a provider');}},
   });
-  for(const name of ['Coldy.gs','ProjectInfrastructure.gs','ProjectMonitoring.gs'])vm.runInContext(readFileSync(new URL('../src/'+name,import.meta.url),'utf8'),c);
+  for(const name of ['Coldy.gs','ProjectInfrastructure.gs','ProjectMonitoring.gs','ProjectCapacity.gs'])vm.runInContext(readFileSync(new URL('../src/'+name,import.meta.url),'utf8'),c);
   c.coldyLoad_=(context,kind,owner)=>{
     c.coldyCurrent_(context,true);calls.loads.push({rootId:context.rootId,kind,owner});
     const value=cache.get(`${context.rootId}|${kind}|${owner}`);

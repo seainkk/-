@@ -38,7 +38,9 @@ function previewSegmentRecords_(request) {
 function importSegmentRecords_(request) {
   return api_(function () {
     var context = authorize_(), input = segmentInput_(request, ['segmentId', 'planToken', 'requestId']);
-    var segmentId = id_(input.segmentId), requestId = segmentRequestId_(input.requestId), plan = segmentRecordsLoadPreview_(context, input.planToken, segmentId);
+    var segmentId = id_(input.segmentId), requestId = segmentRequestId_(input.requestId);
+    if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(context, segmentId);
+    var plan = segmentRecordsLoadPreview_(context, input.planToken, segmentId);
     var job = segmentRecordsAllocateJob_(context, plan, input.planToken, requestId);
     return segmentRecordsRunJob_(job.id, requestId);
   });
@@ -48,6 +50,7 @@ function continueSegmentRecords_(request) {
   return api_(function () {
     var context = authorize_(), input = segmentInput_(request, ['segmentId', 'jobId', 'requestId']), job = segmentRecordsReadJob_(context, input.jobId);
     if (job.segmentId !== id_(input.segmentId)) fail_('OUTSIDE_SEGMENTS', 'Эта загрузка относится к другому сегменту.');
+    if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(context, job.segmentId);
     if (job.requestId !== segmentRequestId_(input.requestId)) fail_('REQUEST_REUSED', 'Продолжите загрузку с прежним идентификатором запроса.');
     return segmentRecordsRunJob_(job.id, job.requestId);
   });
@@ -121,6 +124,7 @@ function segmentRecordsReadySources_(context, sources, targetKind) {
 }
 
 function segmentRecordsTargets_(context, segmentId, create, deferMasters, newDirectory) {
+  if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(context, segmentId);
   var folder = segmentFolder_(context, segmentSourceFolder_(context), segmentId), storage = sourceBasesStorage_(context), tracking = segmentTrackingStorage_(context, storage, false), tables = {};
   tracking.tables.filter(function (table) { return table.segmentId === segmentId; }).forEach(function (table) { tables[table.kind] = table.fileId; });
   if ((!tables.companies || !tables.lpr) && create) {
@@ -530,6 +534,7 @@ function segmentRecordsActiveJob_(context, segmentId) {
 function segmentRecordsAllocateJob_(context, plan, token, requestId) {
   return locked_(function () {
     var current = authorize_(), id = digest_([current.rootId, plan.segmentId, requestId].join('|')), oldRaw = current.properties.getProperty(SEGMENT_RECORD_IMPORT.jobPrefix + id);
+    if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(current, plan.segmentId);
     if (oldRaw) { var old = segmentRecordsReadJob_(current, id); if (old.planToken !== token) fail_('REQUEST_REUSED', 'Идентификатор загрузки уже использован с другим предпросмотром.'); return old; }
     var active = segmentRecordsActiveJob_(current, plan.segmentId); if (active) fail_('BUSY', 'Предыдущая загрузка в сегмент ещё не завершена. Сначала продолжите её.');
     var index; try { index = JSON.parse(current.properties.getProperty(SEGMENT_RECORD_IMPORT.indexKey) || '[]'); } catch (error) { fail_('SEGMENT_JOB_MISSING', 'Журнал загрузок требует проверки.'); }
@@ -547,6 +552,7 @@ function segmentRecordsAllocateJob_(context, plan, token, requestId) {
 function segmentRecordsRunJob_(jobId, requestId) {
   var claim = locked_(function () {
     var context = authorize_(), job = segmentRecordsReadJob_(context, jobId);
+    if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(context, job.segmentId);
     if (job.requestId !== requestId) fail_('REQUEST_REUSED', 'Используйте прежний идентификатор загрузки.');
     if (job.leaseUntil > Date.now()) fail_('BUSY', 'Эта загрузка сейчас выполняется. Повторите проверку через несколько секунд.');
     job.lease = Utilities.getUuid(); job.leaseUntil = Date.now() + SEGMENT_RECORD_IMPORT.leaseMillis; segmentRecordsSaveJob_(context, job); return { context: context, job: job, lease: job.lease };
@@ -634,7 +640,10 @@ function segmentRecordsAdvance_(context, targets, plan, job) {
   if (job.phase === 'relations') {
     locked_(function () {
       var fresh = authorize_(), storage = sourceBasesStorage_(fresh), database = sourceBasesReadDatabase_(storage);
-      if (plan.mode === 'registry') plan.sources.forEach(function (binding) { requireReadySourceBase_(fresh, storage, database, binding.id, binding.expectedRevision); segmentRememberRelation_(fresh, storage, database, binding.id, plan.segmentId); });
+      if (plan.mode === 'registry') plan.sources.forEach(function (binding) {
+        requireReadySourceBase_(fresh, storage, database, binding.id, binding.expectedRevision);
+        segmentRememberRelation_(fresh, storage, database, binding.id, plan.segmentId, job.id);
+      });
     });
     segmentRecordsEnroll_(targets, plan.targetKind); job.state = 'complete'; job.phase = 'complete'; segmentRecordsSaveJob_(context, job);
     if (context.properties.getProperty('SEGMENT_RECORD_ACTIVE_' + job.segmentId) === job.id) context.properties.deleteProperty('SEGMENT_RECORD_ACTIVE_' + job.segmentId);

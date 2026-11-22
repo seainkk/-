@@ -4,7 +4,7 @@ var SHARED_REQUEST_SCOPE_ = null;
 function callApp(request) {
   return api_(function () {
     var input = object_(request);
-    if (Object.keys(input).some(function (name) { return ['method', 'payload', 'accessKey'].indexOf(name) === -1; })) fail_('INVALID_REQUEST', 'В запросе есть неизвестные поля.');
+    if (Object.keys(input).some(function (name) { return ['method', 'payload', 'accessKey', 'projectId'].indexOf(name) === -1; })) fail_('INVALID_REQUEST', 'В запросе есть неизвестные поля.');
     return withSharedAccess_(input.accessKey, function () {
       var methods = {
         getAppBootstrap: getAppBootstrap_, getBootstrap: getBootstrap_,
@@ -22,6 +22,7 @@ function callApp(request) {
       // Explicit optional handlers keep isolated legacy fixtures usable; the
       // release check requires every feature module in the deployed project.
       var contactMethods = {
+        claimRegistrySegment: typeof claimRegistrySegment_ === 'function' ? claimRegistrySegment_ : null,
         getProjectAnalytics: typeof getProjectAnalytics_ === 'function' ? getProjectAnalytics_ : null,
         getProjectAnalyticsCampaigns: typeof getProjectAnalyticsCampaigns_ === 'function' ? getProjectAnalyticsCampaigns_ : null,
         getProjectInfrastructure: typeof getProjectInfrastructure_ === 'function' ? getProjectInfrastructure_ : null,
@@ -70,7 +71,7 @@ function callApp(request) {
       Object.keys(contactMethods).forEach(function (name) { if (typeof contactMethods[name] === 'function') methods[name] = contactMethods[name]; });
       if (typeof input.method !== 'string' || !Object.prototype.hasOwnProperty.call(methods, input.method)) fail_('INVALID_REQUEST', 'Неизвестное действие приложения.');
       return methods[input.method](input.payload);
-    });
+    }, input.projectId === undefined ? 'numshield' : input.projectId);
   });
 }
 
@@ -80,19 +81,20 @@ function uploadSourceBase(form) {
     var input = object_(form);
     return withSharedAccess_(input.accessKey, function () {
       var clean = Object.create(null);
-      Object.keys(input).forEach(function (name) { if (name !== 'accessKey') clean[name] = input[name]; });
+      Object.keys(input).forEach(function (name) { if (name !== 'accessKey' && name !== 'projectId') clean[name] = input[name]; });
       if (clean.flow === 'prepared') { delete clean.flow; return stagePreparedUpload_(clean); }
       return uploadSourceBase_(clean);
-    });
+    }, input.projectId === undefined ? 'numshield' : input.projectId);
   });
 }
 
-function withSharedAccess_(accessKey, callback) {
+function withSharedAccess_(accessKey, callback, projectId) {
   if (typeof accessKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(accessKey)) fail_('LINK_ACCESS_REQUIRED', sharedAccessMessage_());
   var properties = PropertiesService.getScriptProperties(), keyHash = digest_(accessKey);
   if (!sharedHashEqual_(keyHash, sharedConfiguredHash_(properties))) fail_('LINK_ACCESS_REQUIRED', sharedAccessMessage_());
   var previous = SHARED_REQUEST_SCOPE_;
-  SHARED_REQUEST_SCOPE_ = { keyHash: keyHash };
+  if (projectId !== undefined && ['numshield', 'neosender'].indexOf(projectId) < 0) fail_('INVALID_REQUEST', 'Выберите доступный проект.');
+  SHARED_REQUEST_SCOPE_ = { keyHash: keyHash, projectId: projectId };
   try { return callback(); } finally { SHARED_REQUEST_SCOPE_ = previous; }
 }
 

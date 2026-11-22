@@ -45,11 +45,11 @@ function runner(){
   if(name==='withSuccessHandler')return callback=>{success=callback;return proxy;};
   if(name==='withFailureHandler')return callback=>{fail=callback;return proxy;};
   return(...args)=>{
-   let p=args[0],method=name,key;
+   let p=args[0],method=name,key,projectId;
    const liveForm=name==='uploadSourceBase'?p:null;
-   if(name==='callApp'){key=p.accessKey;method=p.method;p=p.payload;backend.transport.push({name,args:args.length,method,keyMatches:key===MOCK_KEY});}
+   if(name==='callApp'){key=p.accessKey;projectId=p.projectId;method=p.method;p=p.payload;backend.transport.push({name,args:args.length,method,projectId,keyMatches:key===MOCK_KEY});}
    const readOnly=/^(?:get|list)/.test(method)||method==='previewSourceBaseContacts',tag=method==='getSegmentsDashboard'?method+(p?.includeAnalysis===false?':light':':full'):method;
-   if(!liveForm)backend.calls.push({name:method,p:clone(p??null),readOnly,tag});
+   if(!liveForm)backend.calls.push({name:method,p:clone(p??null),readOnly,tag,projectId});
    backend.active++;backend.maxActive=Math.max(backend.maxActive,backend.active);
    if(readOnly){backend.activeReads++;backend.maxActiveReads=Math.max(backend.maxActiveReads,backend.activeReads);}else{backend.activeWrites++;backend.maxActiveWrites=Math.max(backend.maxActiveWrites,backend.activeWrites);}
    const snapshot=()=>backend.counterSnapshots.push({active:backend.active,reads:backend.activeReads,writes:backend.activeWrites});snapshot();
@@ -59,15 +59,15 @@ function runner(){
     // hiding disabled-field races with an eager FormData snapshot.
     if(liveForm){
      await new Promise(resolve=>setTimeout(resolve,backend.uploadSerializationDelay??10));
-     const fd=new FormData(liveForm),file=fd.get('file');key=fd.get('accessKey');
-     backend.dispatches.push({form:liveForm instanceof HTMLFormElement,args:args.length,keys:[...fd.keys()],file:file instanceof File,fileName:file?.name,contentsJSON:fd.get('contentsJSON'),requestId:fd.get('requestId'),section:fd.get('section'),name:fd.get('name'),status:fd.get('status'),flow:fd.get('flow'),keyMatches:key===MOCK_KEY,keyDisabled:liveForm.querySelector('[name="accessKey"]').disabled,disabledFieldsets:liveForm.querySelectorAll('fieldset[disabled]').length,inertAtSerialization:liveForm.inert});
-     p=Object.fromEntries(fd);delete p.accessKey;p.file=file instanceof File?{name:file.name,size:file.size,type:file.type}:null;
+     const fd=new FormData(liveForm),file=fd.get('file');key=fd.get('accessKey');projectId=fd.get('projectId');
+     backend.dispatches.push({form:liveForm instanceof HTMLFormElement,args:args.length,projectId,keys:[...fd.keys()],file:file instanceof File,fileName:file?.name,contentsJSON:fd.get('contentsJSON'),requestId:fd.get('requestId'),section:fd.get('section'),name:fd.get('name'),status:fd.get('status'),flow:fd.get('flow'),keyMatches:key===MOCK_KEY,keyDisabled:liveForm.querySelector('[name="accessKey"]').disabled,disabledFieldsets:liveForm.querySelectorAll('fieldset[disabled]').length,inertAtSerialization:liveForm.inert});
+     p=Object.fromEntries(fd);delete p.accessKey;delete p.projectId;p.file=file instanceof File?{name:file.name,size:file.size,type:file.type}:null;
      backend.transport.push({name,args:args.length,keyMatches:key===MOCK_KEY});backend.calls.push({name:method,p:clone(p??null)});
     }
     if(backend.holdMethods.includes(method)||backend.holdMethods.includes(tag))await new Promise(resolve=>backend.pending.push({method,tag,payload:clone(p??null),phase:'before',resolve}));
     if(backend.revoked||key!==MOCK_KEY)throw new Error('[LINK_ACCESS_REQUIRED] Для входа нужна действующая закрытая ссылка.');
     if(!['callApp','uploadSourceBase'].includes(name))throw new Error('Unkeyed direct endpoint rejected');
-    const value=await api[method](p);
+    const value=await api[method](p,projectId);
     if(backend.holdAfterMethods.includes(method)||backend.holdAfterMethods.includes(tag))await new Promise(resolve=>backend.pending.push({method,tag,payload:clone(p??null),phase:'after',resolve}));
     return value;
    }).then(value=>{finish();success(clone(value));},error=>{finish();fail(error);});

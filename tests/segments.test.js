@@ -18,7 +18,7 @@ const emptyIterator = () => ({ hasNext: () => false, next: () => { throw new Err
 function fixture(options = {}) {
   const properties = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const driveCalls = [];
-  const propertyStore = { getProperty: key => properties.get(key) ?? null, getProperties: () => Object.fromEntries(properties) };
+  const propertyStore = { getProperty: key => properties.get(key) ?? null, getProperties: () => Object.fromEntries(properties), setProperty: (key, value) => properties.set(key, value) };
   const rootFolder = {
     getId: () => ROOT, getName: () => registry.name, isTrashed: () => false,
     getFolders: emptyIterator, getFilesByType: emptyIterator,
@@ -40,14 +40,52 @@ function fixture(options = {}) {
     },
     SpreadsheetApp: { openById: () => { throw new Error('Segments must never read a spreadsheet'); } },
   });
-  const sources = ['Config.gs', 'Code.gs', 'Segments.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
+  const sources = ['Config.gs', 'Code.gs', 'Segments.gs', 'RegistryProjects.gs'].map(name => readFileSync(`${sourceDir}${name}`, 'utf8')).join('\n');
   vm.runInContext(sources, context, { filename: 'segments-backend.gs' });
   installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
   return {
-    context, driveCalls,
+    context, driveCalls, propertyStore,
     build: (folders = [], files = []) => plain(context.buildSegments_({ properties: propertyStore }, registry, folders, files)),
   };
 }
+
+test('each project has its own partners and clients and can claim the same legacy segment only once', () => {
+  const f = fixture(), ctx = { rootId: ROOT, properties: f.propertyStore };
+  const studios = 'web_studios_segment_123', kitchens = 'kitchens_segment_123', neo = 'new_clients_segment_123';
+  const folders = [folder(SOURCE, 'Аутричи'), folder(studios, 'Веб-студии', SOURCE), folder(kitchens, 'Кухни', SOURCE), folder(neo, 'Другие клиенты', SOURCE)];
+  const build = () => plain(f.context.buildSegments_(ctx, registry, folders, [file('kitchens_book_123', 'Компании', kitchens)]));
+  const project = id => { f.context.SHARED_REQUEST_SCOPE_ = { projectId: id }; };
+  project('numshield');
+  assert.deepEqual(build().unassigned.map(it => it.id).sort(), [studios, kitchens, neo].sort());
+  f.context.registryAssignSegment_(ctx, studios);
+  f.context.registryAssignSegment_(ctx, kitchens);
+  assert.equal(f.context.registryAssignSegment_(ctx, kitchens), 'numshield');
+  assert.deepEqual(build().items.map(it => [it.name, it.category, it.tableCount]), [['Веб-студии', 'partners', 0], ['Кухни', 'clients', 1]]);
+  project('neosender');
+  assert.deepEqual(build().items, []);
+  assert.deepEqual(build().unassigned.map(it => it.id), [neo]);
+  assert.throws(() => f.context.registryAssignSegment_(ctx, studios), /OUTSIDE_PROJECT/);
+  assert.throws(() => f.context.registryRequireSegment_(ctx, kitchens), /OUTSIDE_PROJECT/);
+  f.context.registryAssignSegment_(ctx, neo);
+  assert.deepEqual(build().items.map(it => it.id), [neo]);
+});
+
+test('nested Drive operations resolve the real project and keep the shared catalog accessible', () => {
+  const f = fixture(), ctx = { rootId: ROOT, properties: f.propertyStore };
+  function node(id, parent, isFolder = true) {
+    return { getId: () => id, isTrashed: () => false, ...(isFolder ? { getFolders: emptyIterator } : {}),
+      getParents: () => { const list = parent ? [parent] : []; return { hasNext: () => !!list.length, next: () => list.shift() }; } };
+  }
+  const root = node(ROOT), source = node(SOURCE, root), shared = node('shared_source_file_123', root, false);
+  const segment = node('kitchens_segment_123', source), sub = node('nested_folder_12345', segment), sheet = node('working_file_123456', sub, false);
+  f.context.SHARED_REQUEST_SCOPE_ = { projectId: 'numshield' };
+  f.context.segmentMetadataBinding_ = () => ({ state: 'ready', folder: source });
+  f.context.registryAssignSegment_(ctx, segment.getId());
+  assert.equal(f.context.registryGuardItem_(ctx, sheet), SOURCE);
+  f.context.SHARED_REQUEST_SCOPE_ = { projectId: 'neosender' };
+  for (const item of [segment, sub, sheet]) assert.throws(() => f.context.registryGuardItem_(ctx, item), /OUTSIDE_PROJECT/);
+  assert.equal(f.context.registryGuardItem_(ctx, shared), SOURCE);
+});
 
 test('the bound default folder ID wins over names and does not require a matching label', () => {
   const f = fixture();

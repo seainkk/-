@@ -102,6 +102,22 @@ test('manual campaign refresh delegates the exact existing safe listing path out
   assert.deepEqual(f.calls.list, [{ refresh: true }]); assert.equal(result.cached, false); assert.equal(f.calls.provider, 0); assert.equal(f.calls.saves, 0);
 });
 
+test('the detailed chooser exposes unassigned campaigns and only bindings belonging to the selected project', () => {
+  const f=fixture({bindings:[binding(CAMPAIGN_A),binding(CAMPAIGN_B,B)]});
+  let project='numshield';
+  f.context.registryProjectScoped_=()=>true;
+  f.context.registryProjectId_=()=>project;
+  f.context.registrySegmentProject_=(_,id)=>id===A?'numshield':'neosender';
+  for(const refresh of [false,true]) {
+    const result=f.campaigns({segmentId:A,refresh});
+    assert.deepEqual(result.campaigns.map(item=>item.id).sort(),[CAMPAIGN_A,CAMPAIGN_C].sort());
+    assert.deepEqual(result.bindings.map(item=>item.campaignId),[CAMPAIGN_A]);
+    assert.throws(()=>f.campaigns({segmentId:B,refresh}),/OUTSIDE_SEGMENTS/);
+  }
+  project='neosender';
+  assert.deepEqual(f.campaigns({segmentId:B}).campaigns.map(item=>item.id).sort(),[CAMPAIGN_B,CAMPAIGN_C].sort());
+});
+
 test('an archived/outside owner stays blocked without revealing inaccessible folder metadata', () => {
   const f = fixture({ bindings: [binding(CAMPAIGN_A, ARCHIVED)] }), choice = f.campaigns().campaigns.find(campaign => campaign.id === CAMPAIGN_A);
   assert.equal(choice.selected, false); assert.equal(choice.selectable, false); assert.equal(choice.ownerSegmentId, null); assert.equal(choice.ownerSegmentName, null); assert.equal(choice.bindingId, null);

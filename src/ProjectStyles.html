@@ -23,8 +23,25 @@
 #bases-registry-app .pj-metrics dd{font-size:27px;line-height:1.2;font-weight:600;letter-spacing:-.5px;margin:0;overflow-wrap:anywhere}
 #bases-registry-app .pj-table-wrap{max-width:100%;overflow:auto;overscroll-behavior-x:contain}
 #bases-registry-app .pj-table{width:100%;border-collapse:collapse;font-size:12px;text-align:left}
+#bases-registry-app .pj-campaign-filter{display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap;margin:0 20px 12px}
+#bases-registry-app .pj-campaign-filter label{font-size:12px;font-weight:600}
+#bases-registry-app .pj-campaign-filter input{max-width:100%;width:260px;min-height:36px;padding:6px 10px;border:1px solid var(--br-line);border-radius:9px}
+#bases-registry-app #pj-campaign-more{margin:10px 20px}
 #bases-registry-app .pj-campaign-table{min-width:690px}
 #bases-registry-app .pj-infrastructure-table{min-width:780px}
+#bases-registry-app .pj-pool-table{min-width:760px}
+#bases-registry-app .pj-schedule-table{min-width:630px}
+#bases-registry-app #pj-capacity-filter{background:#fff;color:var(--br-ink);border:1px solid var(--br-line);border-radius:9px;padding:7px 10px;font:inherit}
+#bases-registry-app label[for=pj-capacity-filter]{font-size:12px;color:var(--br-muted)}
+#bases-registry-app .pj-diagnostics summary{padding:15px 19px;cursor:pointer;font-size:13px;font-weight:600}
+#bases-registry-app .pj-pool-table td,#bases-registry-app .pj-schedule-table td{padding-block:9px;line-height:1.45}
+#bases-registry-app .pj-assignment+.pj-assignment{margin-top:3px}
+#bases-registry-app .pj-assignment small{color:var(--br-muted);font:inherit;font-size:11px}
+#bases-registry-app .pj-jump{appearance:none;border:0;background:none;color:var(--br-blue);padding:0;text-align:left;font:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:2px;text-decoration-color:#c0c8fa}
+#bases-registry-app .pj-schedule-table tr:focus{outline:2px solid var(--br-blue);outline-offset:-2px}
+#bases-registry-app .pj-badge[data-tone=busy]{color:#373d9c;background:#edeffe}
+#bases-registry-app #pj-infrastructure-health:empty{display:none}
+#bases-registry-app .pj-unavailable{color:var(--br-muted)}
 #bases-registry-app .pj-table th{padding:10px 17px;background:var(--br-nav);font-size:11px;font-weight:500;color:var(--br-muted);white-space:nowrap}
 #bases-registry-app .pj-table td{padding:13px 17px;border-bottom:1px solid var(--br-line);vertical-align:top;overflow-wrap:anywhere}
 #bases-registry-app .pj-table tbody tr:last-child td{border-bottom:0}
@@ -55,6 +72,18 @@
 #bases-registry-app .pj-mailbox-row>span{min-width:0}
 #bases-registry-app .pj-mailbox-row small{display:block;color:var(--br-muted);margin-top:3px}
 #bases-registry-app .pj-mailbox-footer{margin-top:16px}
+@media(max-width:720px){
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table){display:block;min-width:0}
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table) thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table) tbody{display:block}
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table) tr{display:grid;gap:5px;padding:11px 14px;border-top:1px solid var(--br-line)}
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table) td{display:grid;grid-template-columns:minmax(110px,37%) 1fr;align-items:start;gap:3px 9px;padding:0;border:0}
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table) td::before{content:attr(data-label);grid-row:1 / span 12;color:var(--br-muted);font-size:11px}
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table) td>*{grid-column:2;justify-self:start;margin:0}
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table) td:first-child{display:block;margin-bottom:3px}
+  #bases-registry-app :is(.pj-pool-table,.pj-schedule-table) td:first-child::before{display:none}
+}
 @media(max-width:760px){#bases-registry-app .br-header{padding-inline:14px;gap:12px}#bases-registry-app .br-view-nav{order:3;flex-basis:100%;max-width:100%;flex-wrap:wrap;border-radius:16px;gap:3px}#bases-registry-app .br-view-nav .br-button{flex:1 1 auto;min-width:0;padding:9px 10px;font-size:11px}#bases-registry-app .br-header-actions{max-width:100%;gap:5px}#bases-registry-app .br-header-actions .br-button{white-space:normal}}
 @media(max-width:650px){#bases-registry-app .pj-view{padding:20px 14px 32px}#bases-registry-app .pj-heading{gap:13px}#bases-registry-app .pj-toolbar .br-button{min-height:40px;padding:9px 13px;font-size:11px}#bases-registry-app .pj-filter{align-items:flex-start;gap:8px}#bases-registry-app .pj-filter label{flex-basis:100%}#bases-registry-app .pj-filter select{flex:1;min-width:0}#bases-registry-app .pj-filter>span{flex-basis:100%;margin:3px 0 0}#bases-registry-app .pj-card-heading{padding:16px 14px 10px}#bases-registry-app .pj-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}#bases-registry-app .pj-metrics>div{padding:13px}#bases-registry-app .pj-metrics dd{font-size:24px}#bases-registry-app .pj-table :is(th,td){padding:11px 13px}#bases-registry-app .pj-footnote{padding:12px 14px}}
+@media(max-width:720px){#pj-infrastructure-content .pj-card :is(.pj-pool-table,.pj-schedule-table) td{padding:0}}
 </style>

@@ -99,6 +99,27 @@ function fixture(options = {}) {
   return { context, calls, resources, books, properties, sourceBook, sourceSheet, companyBook, peopleBook, status, preview, start, next, finish, master, config, addSource };
 }
 
+test('a foreign project cannot reserve a segment job or acquire its lease through a previous plan or job ID', () => {
+  const f = fixture(), preview = f.preview();
+  const plan = f.context.segmentRecordsLoadPreview_(f.config, preview.planToken, SEGMENT);
+  let allow = false;
+  f.context.registryRequireSegment_ = (_scope, id) => {
+    assert.equal(id, SEGMENT);
+    if (!allow) f.context.fail_('OUTSIDE_PROJECT', 'Другой проект');
+  };
+  const before = [...f.properties];
+  assert.throws(() => f.start(preview), /OUTSIDE_PROJECT/);
+  assert.throws(() => f.context.segmentRecordsAllocateJob_(f.config, plan, preview.planToken, 'different-scope-job'), /OUTSIDE_PROJECT/);
+  assert.deepEqual([...f.properties], before);
+  allow = true;
+  const job = f.start(preview);
+  allow = false;
+  const active = [...f.properties];
+  assert.throws(() => f.next(job), /OUTSIDE_PROJECT/);
+  assert.throws(() => f.context.segmentRecordsRunJob_(job.jobId, job.requestId), /OUTSIDE_PROJECT/);
+  assert.deepEqual([...f.properties], active);
+});
+
 test('dashboard recovery exposes only the live receipt belonging to this registry and actual segment', () => {
   const f = fixture();
   const processing = f.start(f.preview());

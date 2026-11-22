@@ -25,6 +25,22 @@ test('connection saves report credential rotation without treating same-key sett
   assert.equal(f.calls.fetch.length,0);
 });
 
+test('campaign catalog reads and connection counts use the current project even for an existing provider cache',()=>{
+  const extra='710f6f14-1f31-4571-9ca3-d3ec89ba22aa';
+  const f=fixture({transport:({response})=>response({items:[{id:CAMPAIGN,name:'Закреплена',status:'Active'},{id:extra,name:'Общая',status:'Draft'}]})});
+  f.configure();
+  let project='numshield';
+  f.c.registryProjectScoped_=()=>true;f.c.registryProjectId_=()=>project;
+  f.c.registrySegmentProject_=()=> 'neosender';
+  f.c.coldyCampaignId_=id=>id.toLowerCase();
+  f.context.properties.getProperties=()=>({});
+  f.c.coldyCampaignRegistry_=()=>({credentialHash:f.c.coldyCredentialHash_(f.context),bindings:[{segmentId:'foreign_segment',campaignId:CAMPAIGN}]});
+  assert.equal(f.c.testColdyConnection_({}).campaignCount,1);
+  for(const refresh of [false,true]) assert.deepEqual(plain(f.c.listColdyCampaigns_({refresh})).campaigns.map(item=>item.id),[extra]);
+  project='neosender';
+  const own=plain(f.c.listColdyCampaigns_({}));assert.equal(own.cached,true);assert.deepEqual(own.campaigns.map(item=>item.id),[CAMPAIGN,extra]);
+});
+
 
 
 function fixture(options={}) {

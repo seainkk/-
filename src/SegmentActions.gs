@@ -51,6 +51,7 @@ function segmentMutation_(kind, request) {
     if (input.expectedCategory !== undefined) args.expectedCategory = input.expectedCategory;
     return locked_(function () {
       var context = authorize_(), parent = segmentSourceFolder_(context);
+      if (kind === 'update' && typeof registryRequireSegment_ === 'function') registryRequireSegment_(context, segmentId);
       var storage = sourceBasesStorage_(context);
       segmentRequireStorageWrite_(storage);
       // Empty segments and name-only changes do not consume source records or
@@ -74,6 +75,11 @@ function segmentMutation_(kind, request) {
           folder = segmentFolder_(context, parent, recoveredFolderId);
         }
       }
+      if (kind === 'create' && folder && typeof registrySegmentProject_ === 'function') {
+        var owner = registrySegmentProject_(context, folder.getId());
+        if (owner && owner !== registryProjectId_()) fail_('OUTSIDE_PROJECT', 'Сегмент уже относится к другому проекту.');
+        if (!owner && journal.value.creationProjectId !== registryProjectId_()) fail_('SEGMENT_PROJECT_REQUIRED', 'Сначала закрепите существующий сегмент за проектом в разделе «Сегменты».');
+      }
       var tracking = categoryOnly ? null : segmentTrackingStorage_(context, storage, true);
       if (!categoryOnly) segmentPreflight_(storage, database, tracking, folder ? folder.getId() : null, plans, requestId);
       try {
@@ -86,6 +92,7 @@ function segmentMutation_(kind, request) {
           return { segment: segmentFolderResult_(context, folder), loadedSheets: [], recovered: recovered };
         }
         if (!folder) folder = segmentCreateFolder_(context, parent, name, journal);
+        if (kind === 'create' && typeof registryAssignSegment_ === 'function') registryAssignSegment_(context, folder.getId());
         segmentApplyCategory_(context, folder, journal, kind === 'create' && !journal.existing && recovered);
         var desiredName = name === null ? folder.getName() : name;
         var tables = segmentEnsureTables_(context, folder, desiredName, storage, tracking, journal);
@@ -264,7 +271,8 @@ function segmentPrepareLoads_(context, storage, database, loads) {
 }
 
 function segmentJournal_(context, kind, requestId, args, folder) {
-  var key = 'SEGMENT_ACTION_' + digest_(context.email + '|' + kind + '|' + requestId).slice(0, 32);
+  var projectSuffix = typeof registryProjectId_ === 'function' && registryProjectId_() === 'neosender' ? '|neosender' : '';
+  var key = 'SEGMENT_ACTION_' + digest_(context.email + '|' + kind + '|' + requestId + projectSuffix).slice(0, 32);
   var fingerprint = digest_(JSON.stringify(args)), raw = context.properties.getProperty(key);
   if (raw) {
     var value;
@@ -350,6 +358,9 @@ function segmentCreateArtifact_(context, parent, role, name, journal, lookupOnly
   if (journal.lookupMisses) delete journal.lookupMisses[lookupKey];
   journal.value.stage = stage;
   journal.value.creating[role] = true;
+  // A prior request can recover this receipt after Drive creates its folder
+  // but before the ownership property is saved. Old folders require a claim.
+  if (role === 'folder' && typeof registryProjectId_ === 'function') journal.value.creationProjectId = registryProjectId_();
   segmentSaveJournal_(context, journal);
   var created;
   try {
@@ -599,7 +610,7 @@ function segmentCopyPlans_(context, storage, database, tracking, folder, tables,
   // A source/segment association means every leaf requested in THIS action has
   // an acknowledged destination ID. No relationship is invented for a partial
   // or uncertain copy, and retry re-reads/deduplicates existing relationships.
-  plans.forEach(function (plan) { segmentRememberRelation_(context, storage, database, plan.sourceId, folder.getId()); });
+  plans.forEach(function (plan) { segmentRememberRelation_(context, storage, database, plan.sourceId, folder.getId(), requestId); });
   results.forEach(function (result) {
     var record = segmentFindLoad_(tracking, result.sourceId, result.sourceSheetId, folder.getId());
     if (record.stage !== 'complete') {
@@ -618,7 +629,13 @@ function segmentFindSheet_(book, sheetId) {
   return book.getSheets().filter(function (sheet) { return sheet.getSheetId() === sheetId; })[0] || null;
 }
 
-function segmentRememberRelation_(context, storage, database, sourceId, segmentId) {
+function segmentRememberRelation_(context, storage, database, sourceId, segmentId, operationId) {
+  if (typeof registryProjectId_ === 'function') {
+    segmentFolder_(context, segmentSourceFolder_(context), segmentId);
+    var project = registrySegmentProject_(context, segmentId);
+    if (project !== registryProjectId_()) fail_('OUTSIDE_PROJECT', 'Выбранный сегмент не закреплён за текущим проектом.');
+    sourceBaseAddProject_(context, storage, sourceId, project, 'segment:' + segmentId + ':' + operationId);
+  }
   if (database.relations.some(function (relation) { return relation.fileId === sourceId && relation.segmentId === segmentId; })) return;
   var row = storage.relationsSheet.getLastRow() + 1;
   var record = { fileId: sourceId, segmentId: segmentId, createdAt: new Date().toISOString(), createdBy: context.email, row: row };

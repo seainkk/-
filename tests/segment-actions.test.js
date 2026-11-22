@@ -213,6 +213,28 @@ test('empty creation always creates folder plus two native tables directly insid
   assert.ok(f.calls.creates.every(metadata => metadata.parents.length === 1 && metadata.appProperties.registrySegmentAction));
 });
 
+test('a confirmed source load attaches the real source to the selected segment project, even with an existing relation', () => {
+  const f = fixture();
+  f.context.registryProjectId_ = () => 'neosender';
+  f.context.registrySegmentProject_ = (_scope, id) => id === SEGMENT ? 'neosender' : null;
+  const assignments = [];
+  f.context.sourceBaseAddProject_ = (_scope, storage, fileId, projectId, operationId) => {
+    assert.ok(f.calls.locks > 0);
+    assignments.push([storage.public.id, fileId, projectId, operationId]);
+  };
+  const input = request();
+  f.context.updateSegment(input);
+  f.context.updateSegment(input);
+  assert.ok(assignments.length >= 2);
+  for (const [storageId, fileId, projectId, operationId] of assignments) {
+    assert.equal(storageId, STORAGE);
+    assert.equal(fileId, MIXED);
+    assert.equal(projectId, 'neosender');
+    assert.equal(operationId, 'segment:' + SEGMENT + ':' + input.requestId);
+  }
+  assert.equal(f.relations.state.rows.filter(row => row[0] === MIXED && row[1] === SEGMENT).length, 1);
+});
+
 test('creation stores an explicit category without changing the Drive parent, and validates category values', () => {
   const f = fixture();
   const input = { name: 'Веб-студии', category: 'clients', requestId: 'category-create-001' };
@@ -460,6 +482,66 @@ test('Drive operation markers recover creations even after bounded receipt evict
   const recovered = plain(f.context.createSegment(input));
   assert.equal(recovered.segment.id, first.segment.id);
   assert.equal(f.calls.creates.length, creates);
+});
+
+test('replaying a pre-project create waits for an explicit claim, both with an old receipt and after eviction', () => {
+  for (const evict of [false, true]) {
+    const f = fixture(), input = { name: 'Старые кухни', requestId: 'legacy-project-create-001' };
+    const old = f.context.createSegment(input).segment;
+    if (evict) f.properties.delete('SEGMENT_ACTION_' + f.context.digest_(SHARED_ACTOR + '|create|' + input.requestId).slice(0, 32));
+    vm.runInContext(readFileSync(new URL('../src/RegistryProjects.gs', import.meta.url), 'utf8'), f.context);
+    const rpc = (method, payload, projectId) => f.context.callApp({ method, payload, projectId, accessKey: TEST_ACCESS_KEY });
+    assert.throws(() => rpc('createSegment', input, 'numshield'), /SEGMENT_PROJECT_REQUIRED/);
+    assert.equal(f.properties.has('REGISTRY_SEGMENT_PROJECT_' + old.id), false);
+    rpc('claimRegistrySegment', { segmentId: old.id, requestId: 'claim-old-kitchens-001' }, 'numshield');
+    assert.equal(rpc('createSegment', input, 'numshield').segment.id, old.id);
+    assert.equal(f.calls.creates.length, 3);
+  }
+});
+
+test('two projects can recover their own identically named segments after a lost create reply and a matching request ID', () => {
+  const f = fixture({ failCreateRole: 'folder' });
+  vm.runInContext(readFileSync(new URL('../src/RegistryProjects.gs', import.meta.url), 'utf8'), f.context);
+  const payload = { name: 'Кухни', requestId: 'same-projects-request-001' };
+  const create = projectId => f.context.callApp({ method: 'createSegment', payload, projectId, accessKey: TEST_ACCESS_KEY }).segment;
+  assert.throws(() => create('numshield'), /SEGMENT_RECOVERY_REQUIRED/);
+  const other = create('neosender'), first = create('numshield');
+  assert.notEqual(first.id, other.id);
+  assert.deepEqual([...first.files, ...other.files].map(file => file.id).length, 4);
+  assert.equal(new Set([...first.files, ...other.files].map(file => file.id)).size, 4);
+  assert.equal(create('numshield').id, first.id);
+  assert.equal(create('neosender').id, other.id);
+  assert.equal(f.calls.creates.length, 6);
+});
+
+test('the old Drive tree and generic mutations exclude the private preparation folder and its contents', () => {
+  const f = fixture();
+  vm.runInContext(readFileSync(new URL('../src/RegistryProjects.gs', import.meta.url), 'utf8'), f.context);
+  const staging = 'private_staging_001', nested = 'private_subdir_001';
+  f.folder(staging, 'Подготовка', ROOT); f.folder(nested, 'Черновики', staging);
+  f.files.get(GENERAL).parent = nested;
+  f.properties.set('PREPARED_STAGING_FOLDER_ID', staging);
+  const bootstrap = f.context.getBootstrap();
+  assert.ok(bootstrap.folders.every(item => item.id !== staging && item.id !== nested));
+  assert.ok(bootstrap.files.every(item => item.id !== GENERAL));
+  assert.ok(!f.calls.fileListings.includes(staging));
+  for (const parentId of [staging, nested]) {
+    assert.throws(() => f.context.createFolder({ parentId, name: 'Новая', requestId: 'new-private-folder-001' }), /PROTECTED_FILE/);
+    assert.throws(() => f.context.createBase({ parentId, name: 'Новая', requestId: 'new-private-sheet-001' }), /PROTECTED_FILE/);
+    assert.throws(() => f.context.renameItem({ id: parentId, kind: 'folder', name: 'Название' }), /PROTECTED_FILE/);
+  }
+  assert.throws(() => f.context.renameItem({ id: GENERAL, kind: 'file', name: 'Название' }), /PROTECTED_FILE/);
+});
+
+test('a generic folder creation receipt rechecks the project of the folder when replayed', () => {
+  const f = fixture();
+  vm.runInContext(readFileSync(new URL('../src/RegistryProjects.gs', import.meta.url), 'utf8'), f.context);
+  const requestId = 'old-common-folder-001', name = 'Сегмент';
+  f.properties.set('CREATE_' + f.context.digest_(SHARED_ACTOR + '|folder|' + requestId).slice(0, 32), JSON.stringify({
+    fingerprint: JSON.stringify([OUTREACH, name]), status: 'done', result: { folder: { id: SEGMENT, name, parentId: OUTREACH } },
+  }));
+  f.properties.set('REGISTRY_SEGMENT_PROJECT_' + SEGMENT, JSON.stringify({ rootId: ROOT, projectId: 'neosender' }));
+  assert.throws(() => f.context.createFolder({ parentId: OUTREACH, name, requestId }), /OUTSIDE_PROJECT/);
 });
 
 test('persistent fingerprint rejects changed payload after receipt eviction', () => {

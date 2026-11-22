@@ -144,8 +144,10 @@ function confirmPreparedBase_(request) {
       if (preparedSheetId_(input.sheetId) !== draft.sheetId || typeof input.previewToken !== 'string' || input.previewToken !== draft.previewToken || !draft.canConfirm) fail_('PREVIEW_REQUIRED', 'Сначала получите полный предпросмотр выбранного листа.');
       preparedCheckSnapshot_(context, draft);
       if (!draft.confirmRequestId) {
-        if (destination && destination.segmentId) segmentFolder_(context, segmentSourceFolder_(context), destination.segmentId);
-        if (destination) draft.destination = destination;
+        if (destination) {
+          if (destination.segmentId) preparedCheckSegment_(context, destination.segmentId);
+          draft.destination = destination;
+        }
         draft.confirmRequestId = input.requestId; draft.state = 'processing'; draft.phase = 'create';
         preparedSave_(context, draft);
       }
@@ -200,7 +202,7 @@ function listPreparedJobs_(request) {
     if (Object.keys(input).length) fail_('INVALID_REQUEST', 'Для списка подготовок параметры не нужны.');
     var context = authorize_(); registryRoot_(context);
     var index;
-    try { index = JSON.parse(context.properties.getProperty(PREPARED_IMPORT.indexProperty) || '[]'); } catch (error) { fail_('PREVIEW_STORAGE', 'Журнал подготовки требует проверки.'); }
+    try { index = JSON.parse(context.properties.getProperty(sourceImportProjectKey_(PREPARED_IMPORT.indexProperty)) || '[]'); } catch (error) { fail_('PREVIEW_STORAGE', 'Журнал подготовки требует проверки.'); }
     if (!Array.isArray(index) || index.length > PREPARED_IMPORT.maxDrafts) fail_('PREVIEW_STORAGE', 'Журнал подготовки требует проверки.');
     var items = [];
     index.forEach(function (id) {
@@ -209,7 +211,7 @@ function listPreparedJobs_(request) {
       if (!text) return;
       try { draft = JSON.parse(text); } catch (error) { fail_('PREVIEW_STORAGE', 'Журнал черновика повреждён.'); }
       if (!draft || draft.version !== 1 || draft.draftId !== id) fail_('PREVIEW_STORAGE', 'Журнал черновика повреждён.');
-      if (draft.rootId !== context.rootId || draft.state !== 'processing' || !Number.isFinite(Date.parse(draft.expiresAt)) || Date.parse(draft.expiresAt) <= Date.now()) return;
+      if (draft.rootId !== context.rootId || (draft.projectId || 'numshield') !== sourceImportProjectId_() || draft.state !== 'processing' || !Number.isFinite(Date.parse(draft.expiresAt)) || Date.parse(draft.expiresAt) <= Date.now()) return;
       if (typeof draft.confirmRequestId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(draft.confirmRequestId) || !Number.isSafeInteger(draft.sheetId) || draft.sheetId < 0) fail_('PREVIEW_STORAGE', 'У подтверждённой подготовки отсутствуют параметры восстановления.');
       items.push({ draftId: draft.draftId, name: draft.name, section: draft.section, state: 'processing', sheetId: draft.sheetId, requestId: draft.confirmRequestId, expiresAt: draft.expiresAt, progress: { stage: draft.phase, label: 'Подготовка ещё не завершена. Можно продолжить с сохранённого этапа.' } });
       if (draft.destination) items[items.length - 1].destination = draft.destination;
@@ -233,28 +235,29 @@ function preparedVersion_(file) { return file.version !== undefined ? String(fil
 function preparedKey_(draftId) { return 'PREPARED_DRAFT_' + preparedDraftId_(draftId); }
 
 function preparedAllocate_(context, common) {
-  var draftId = digest_(context.rootId + '|' + context.email + '|prepared|' + common.kind + '|' + common.requestId).slice(0, 36);
+  var draftId = digest_(sourceImportProjectKey_(context.rootId + '|' + context.email + '|prepared|' + common.kind + '|' + common.requestId)).slice(0, 36);
   var fingerprint = digest_(JSON.stringify([context.rootId, common.kind, common.name, common.section, common.status, common.sourceFingerprint]));
   return locked_(function () {
     var current = authorize_();
     if (current.rootId !== context.rootId) fail_('SOURCE_CHANGED', 'Корневая папка изменилась. Повторите запрос.');
     var existing = preparedRead_(current, draftId, true);
     if (existing) { if (existing.fingerprint !== fingerprint) fail_('REQUEST_REUSED', 'Запрос подготовки уже использован с другими параметрами.'); return existing; }
-    var folder = preparedEnsureFolder_(current), index;
-    try { index = JSON.parse(current.properties.getProperty(PREPARED_IMPORT.indexProperty) || '[]'); } catch (error) { fail_('PREVIEW_STORAGE', 'Журнал подготовки требует проверки.'); }
+    var folder = preparedEnsureFolder_(current), indexKey = sourceImportProjectKey_(PREPARED_IMPORT.indexProperty), index;
+    try { index = JSON.parse(current.properties.getProperty(indexKey) || '[]'); } catch (error) { fail_('PREVIEW_STORAGE', 'Журнал подготовки требует проверки.'); }
     if (!Array.isArray(index)) fail_('PREVIEW_STORAGE', 'Журнал подготовки требует проверки.');
     while (index.length >= PREPARED_IMPORT.maxDrafts) {
       var position = -1;
-      for (var i = 0; i < index.length; i++) { var old = preparedRead_(current, index[i], true); if (!old || old.state === 'complete' || old.state === 'cancelled') { position = i; break; } }
+      for (var i = 0; i < index.length; i++) { var old = preparedRead_(current, index[i], true); if (!old || ((old.projectId || 'numshield') === sourceImportProjectId_() && (old.state === 'complete' || old.state === 'cancelled'))) { position = i; break; } }
       if (position < 0) fail_('PREVIEW_BUSY', 'Слишком много незавершённых подготовок. Отмените или завершите прежние черновики.');
       current.properties.deleteProperty(preparedKey_(index.splice(position, 1)[0]));
     }
     var draft = { version: 1, draftId: draftId, rootId: current.rootId, folderId: folder.getId(), fingerprint: fingerprint, kind: common.kind, original: common.original || null, name: common.name, section: common.section, status: common.status, state: 'staged', phase: '', stageFileId: '', stageAttempted: false, outputId: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + PREPARED_IMPORT.ttlMillis).toISOString() };
+    draft.projectId = sourceImportProjectId_();
     if (common.origin) draft.origin = common.origin;
     // A pruned completed receipt must never create a second result.
     var earlier = preparedFindArtifact_(current, draft, 'output');
     if (earlier) fail_('ALREADY_PREPARED', 'Результат этого запроса уже существует: ' + spreadsheetUrl_(earlier.id));
-    preparedSave_(current, draft); index.push(draftId); current.properties.setProperty(PREPARED_IMPORT.indexProperty, JSON.stringify(index));
+    preparedSave_(current, draft); index.push(draftId); current.properties.setProperty(indexKey, JSON.stringify(index));
     return draft;
   });
 }
@@ -278,6 +281,7 @@ function preparedSave_(context, draft, claimingLease) {
 function preparedWithLease_(draftId, callback, allowExpired) {
   var claim = locked_(function () {
     var context = authorize_(), draft = preparedRead_(context, preparedDraftId_(draftId));
+    if ((draft.projectId || 'numshield') !== sourceImportProjectId_()) fail_('OUTSIDE_PROJECT', 'Эта подготовка принадлежит другому проекту.');
     if (draft.state === 'cancelled') { if (allowExpired) return { context: context, draft: draft, cancelled: true }; fail_('DRAFT_CANCELLED', 'Черновик отменён.'); }
     if (!allowExpired && draft.state !== 'complete' && Date.parse(draft.expiresAt) <= Date.now()) fail_('DRAFT_EXPIRED', 'Срок предпросмотра истёк. Загрузите базу заново.');
     if (draft.leaseUntil > Date.now()) fail_('BUSY', 'Эта подготовка ещё выполняется. Повторите запрос через несколько секунд.');
@@ -606,10 +610,17 @@ function preparedVerifyResult_(context, book, draft, plan) {
   });
 }
 
+function preparedCheckSegment_(context, segmentId) {
+  segmentFolder_(context, segmentSourceFolder_(context), segmentId);
+  if (typeof registryProjectId_ === 'function' && registrySegmentProject_(context, segmentId) !== registryProjectId_()) fail_('OUTSIDE_PROJECT', 'Выбранный сегмент не закреплён за текущим проектом.');
+}
+
 function preparedPublish_(context, draft, plan, metadata) {
   return locked_(function () {
     var preparation = importPrepare_(), current = preparation.context;
     if (current.rootId !== draft.rootId) fail_('SOURCE_CHANGED', 'Корневая папка изменилась.');
+    if ((draft.projectId || 'numshield') !== sourceImportProjectId_()) fail_('OUTSIDE_PROJECT', 'Эта подготовка принадлежит другому проекту.');
+    if (draft.destination && draft.destination.segmentId) preparedCheckSegment_(current, draft.destination.segmentId);
     var file = preparedOutput_(current, draft, true), record = preparation.database.records[file.id];
     if (!record && preparation.database.lastRow >= REGISTRY_CONFIG.maxSourceBaseRows + 1) fail_('STORAGE_LIMIT', 'В реестре нет места для новой базы.');
     var origins = sourceBaseReadOrigins_(preparation.storage);
@@ -635,6 +646,7 @@ function preparedPublish_(context, draft, plan, metadata) {
       var origin = sourceBaseOrigin_(file.id, draft.origin.id, draft.origin.name, criteria);
       sourceBaseSaveOrigin_(preparation.storage, origins, file.id, origin);
     }
+    if (draft.destination) sourceBaseAddProject_(current, preparation.storage, file.id, draft.projectId || 'numshield', 'prepare:' + draft.draftId);
     draft.metadataCommitted = true; draft.state = 'complete'; draft.phase = 'done'; preparedSave_(current, draft);
     return preparedCompleteResponse_(current, draft, preparation, origins);
   });
@@ -647,7 +659,7 @@ function preparedCompleteResponse_(context, draft, preparation, origins) {
   var record = database.records[file.id], metadata = { id: file.id, name: file.name, fileName: file.name, mimeType: file.mimeType, format: 'Google Таблицы', url: spreadsheetUrl_(file.id) };
   if (!record) fail_('CREATION_UNCERTAIN', 'Файл создан, но его запись в реестре ещё не подтверждена. Продолжите тот же запрос.');
   var relations = database.relations.filter(function (relation) { return relation.fileId === file.id; });
-  var result = { state: 'complete', draftId: draft.draftId, jobId: draft.draftId, file: { id: file.id, name: file.name, url: metadata.url }, item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(relations, context), origins === undefined ? sourceBaseReadOrigins_(storage) : origins) };
+  var result = { state: 'complete', draftId: draft.draftId, jobId: draft.draftId, file: { id: file.id, name: file.name, url: metadata.url }, item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(relations, context), origins === undefined ? sourceBaseReadOrigins_(storage) : origins, sourceBaseReadProjects_(storage)) };
   if (draft.destination) result.destination = draft.destination;
   return result;
 }
@@ -698,7 +710,7 @@ function preparedCleanupComplete_(context, draft) {
 
 /** Bounded housekeeping of abandoned, never-confirmed scratch files only. */
 function preparedSweepExpired_(context) {
-  var text = context.properties.getProperty(PREPARED_IMPORT.indexProperty), index;
+  var text = context.properties.getProperty(sourceImportProjectKey_(PREPARED_IMPORT.indexProperty)), index;
   if (!text) return;
   try { index = JSON.parse(text); } catch (error) { fail_('PREVIEW_STORAGE', 'Журнал подготовки требует проверки.'); }
   if (!Array.isArray(index) || index.length > PREPARED_IMPORT.maxDrafts) fail_('PREVIEW_STORAGE', 'Журнал подготовки требует проверки.');
@@ -707,7 +719,7 @@ function preparedSweepExpired_(context) {
     var draft;
     try { draft = preparedRead_(authorize_(), index[i], true); }
     catch (error) { if (error.registryCode === 'OUTSIDE_REGISTRY') continue; throw error; }
-    if (!draft || draft.state !== 'staged' || draft.confirmRequestId || draft.outputId || draft.leaseUntil > Date.now() || !Number.isFinite(Date.parse(draft.expiresAt)) || Date.parse(draft.expiresAt) > Date.now()) continue;
+    if (!draft || (draft.projectId || 'numshield') !== sourceImportProjectId_() || draft.state !== 'staged' || draft.confirmRequestId || draft.outputId || draft.leaseUntil > Date.now() || !Number.isFinite(Date.parse(draft.expiresAt)) || Date.parse(draft.expiresAt) > Date.now()) continue;
     try { cancelPreparedBase_({ draftId: draft.draftId }); cleaned++; }
     catch (error) {
       if (error.registryCode === 'LINK_ACCESS_REQUIRED' || error.registryCode === 'LINK_SETUP_REQUIRED') throw error;

@@ -50,6 +50,14 @@ function buildSegments_(context, registry, folders, files, includePendingImports
   });
   var segments = (children[source.id] || []).slice().sort(byName_);
   var categoryProperties = segments.length ? context.properties.getProperties() : {};
+  if (typeof registryProjectScoped_ === 'function' && registryProjectScoped_()) {
+    result.unassigned = [];
+    segments = segments.filter(function (segment) {
+      var owner = registrySegmentProject_(context, segment.id, categoryProperties);
+      if (!owner) result.unassigned.push({id:segment.id,name:segment.name});
+      return owner === registryProjectId_();
+    });
+  }
   result.items = segments.map(function (segment) {
     var folderIds = [], queue = [segment.id], visited = Object.create(null);
     while (queue.length) {
@@ -202,6 +210,7 @@ function getSegmentsMetadata_(context, includePendingImports) {
   if (binding.state !== 'ready') return binding;
   var registry = binding.registry, source = binding.folder;
   var folders = [{ id: source.getId(), name: source.getName(), parentId: registry.id }], files = [], visited = Object.create(null), count = 0;
+  var ownership = typeof registryProjectScoped_ === 'function' && registryProjectScoped_() ? context.properties.getProperties() : null;
   var serviceId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
   function visit(folder, depth) {
     if (visited[folder.getId()]) return;
@@ -220,6 +229,7 @@ function getSegmentsMetadata_(context, includePendingImports) {
       if (child.isTrashed() || visited[child.getId()]) continue;
       if (++count > REGISTRY_CONFIG.maxTreeEntries) fail_('REGISTRY_LIMIT', 'В папке сегментов превышен лимит папок и таблиц.');
       folders.push({ id: child.getId(), name: child.getName(), parentId: folder.getId() });
+      if (depth === 0 && ownership && registrySegmentProject_(context, child.getId(), ownership) !== registryProjectId_()) continue;
       visit(child, depth + 1);
     }
   }

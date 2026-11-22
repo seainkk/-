@@ -33,6 +33,7 @@ function getBootstrap_() {
     var context = authorize_();
     var root = registryRoot_(context);
     var serviceId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
+    var stagingId = context.properties.getProperty('PREPARED_STAGING_FOLDER_ID');
     var folders = [], files = [], visited = {}, count = 0;
     function visit(folder, depth) {
       if (visited[folder.getId()]) return;
@@ -49,7 +50,7 @@ function getBootstrap_() {
       var folderIterator = folder.getFolders();
       while (folderIterator.hasNext()) {
         var child = folderIterator.next();
-        if (child.isTrashed() || visited[child.getId()]) continue;
+        if (child.isTrashed() || child.getId() === stagingId || visited[child.getId()]) continue;
         count++;
         if (count > REGISTRY_CONFIG.maxTreeEntries) fail_('REGISTRY_LIMIT', 'Реестр превышает лимит первой версии: 500 папок и баз.');
         folders.push({ id: child.getId(), name: child.getName(), parentId: folder.getId() });
@@ -57,10 +58,22 @@ function getBootstrap_() {
       }
     }
     visit(root, 0);
+    var registry = { id: root.getId(), name: root.getName() };
+    var segments = buildSegments_(context, registry, folders, files);
+    if (typeof registryProjectScoped_ === 'function' && registryProjectScoped_()) {
+      if (segments.source) {
+        var allowed = new Set(segments.items.map(function (item) { return item.id; })), hidden = new Set();
+        // The traversal emits parents before descendants.
+        folders = folders.filter(function (folder) {
+          if (hidden.has(folder.parentId) || (folder.parentId === segments.source.id && !allowed.has(folder.id))) hidden.add(folder.id);
+          return !hidden.has(folder.id);
+        });
+        files = files.filter(function (file) { return !hidden.has(file.parentId); });
+      } else if (segments.state !== 'source_missing') { folders = []; files = []; }
+    }
     folders.sort(byName_);
     files.sort(byName_);
-    var registry = { id: root.getId(), name: root.getName() };
-    return { user: { email: '', isAdmin: false, accessMode: 'link' }, registry: registry, folders: folders, files: files, segments: buildSegments_(context, registry, folders, files) };
+    return { user: { email: '', isAdmin: false, accessMode: 'link' }, registry: registry, folders: folders, files: files, segments: segments };
   });
 }
 
@@ -69,6 +82,7 @@ function createBase_(request) {
     var context = authorize_(), input = object_(request), name = itemName_(input.name);
     return locked_(function () {
       var folder = registryFolder_(context, input.parentId);
+      if (typeof registryGuardItem_ === 'function') registryGuardItem_(context, folder);
       return creation_(context, 'base', input.requestId, [folder.getId(), name], function () {
         var book = SpreadsheetApp.create(name);
         var file;
@@ -92,8 +106,10 @@ function createFolder_(request) {
     var context = authorize_(), input = object_(request), name = itemName_(input.name);
     return locked_(function () {
       var parent = registryFolder_(context, input.parentId);
+      var outreachId = typeof registryGuardItem_ === 'function' ? registryGuardItem_(context, parent) : null;
       return creation_(context, 'folder', input.requestId, [parent.getId(), name], function () {
         var folder = parent.createFolder(name);
+        if (parent.getId() === outreachId) registryAssignSegment_(context, folder.getId());
         return { folder: { id: folder.getId(), name: folder.getName(), parentId: parent.getId() } };
       });
     });
@@ -107,6 +123,7 @@ function renameItem_(request) {
     return locked_(function () {
       var item = input.kind === 'folder' ? registryFolder_(context, input.id) : registryFile_(context, input.id);
       if (item.getId() === context.rootId) fail_('ROOT_PROTECTED', 'Корневую папку реестра переименовывают через Google Диск.');
+      if (typeof registryGuardItem_ === 'function') registryGuardItem_(context, item);
       item.setName(name);
       return { id: item.getId(), name: item.getName(), kind: input.kind };
     });
@@ -167,14 +184,21 @@ function insideRegistry_(item, rootId) {
 
 function creation_(context, kind, requestId, args, callback) {
   if (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) fail_('INVALID_REQUEST', 'Не удалось определить запрос создания. Откройте форму ещё раз.');
-  var key = 'CREATE_' + digest_(context.email + '|' + kind + '|' + requestId).slice(0,32);
+  var projectSuffix = typeof registryProjectId_ === 'function' && registryProjectId_() === 'neosender' ? '|neosender' : '';
+  var key = 'CREATE_' + digest_(context.email + '|' + kind + '|' + requestId + projectSuffix).slice(0,32);
   var fingerprint = JSON.stringify(args);
   var existing = context.properties.getProperty(key);
   if (existing) {
     var receipt;
     try { receipt = JSON.parse(existing); } catch (error) { fail_('CREATION_UNCERTAIN', 'Обновите реестр перед повторным созданием.'); }
     if (receipt.fingerprint !== fingerprint) fail_('REQUEST_REUSED', 'Этот запрос создания уже использован. Откройте форму ещё раз.');
-    if (receipt.status === 'done') return receipt.result;
+    if (receipt.status === 'done') {
+      if (typeof registryGuardItem_ === 'function') {
+        var artifact = kind === 'folder' ? registryFolder_(context, receipt.result.folder.id) : registryFile_(context, receipt.result.file.id);
+        registryGuardItem_(context, artifact);
+      }
+      return receipt.result;
+    }
     fail_('CREATION_UNCERTAIN', 'Предыдущий запрос ещё не подтверждён. Обновите реестр перед повторным созданием, чтобы избежать дубликата.');
   }
   var index;

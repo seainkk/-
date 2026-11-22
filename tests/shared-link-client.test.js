@@ -34,12 +34,13 @@ test('the shared key is read only from one strictly formed URL fragment', () => 
 test('ordinary requests carry the bearer in the outer envelope without changing business data', () => {
   const { sharedRequest } = helpers('sharedRequest');
   const payload = { id: 'source_123', status: 'ready', expectedRevision: 4 };
-  const request = sharedRequest('updateSourceBase', payload, KEY);
+  const request = sharedRequest('updateSourceBase', payload, KEY, 'neosender');
+  assert.equal(request.projectId, 'neosender');
   assert.equal(request.method, 'updateSourceBase');
   assert.equal(request.accessKey, KEY);
   assert.equal(request.payload, payload);
   assert.deepEqual(payload, { id: 'source_123', status: 'ready', expectedRevision: 4 });
-  assert.deepEqual(Object.keys(sharedRequest('getAppBootstrap', undefined, KEY)).sort(), ['accessKey', 'method']);
+  assert.deepEqual(Object.keys(sharedRequest('getAppBootstrap', undefined, KEY, 'numshield')).sort(), ['accessKey', 'method', 'projectId']);
   for (const key of ['', null, 'short', KEY + '?', KEY + '\n']) assert.throws(() => sharedRequest('getSourceBases', {}, key));
 });
 
@@ -54,10 +55,10 @@ test('the copied link has a fixed app origin and keeps the bearer out of the que
 });
 
 function rpcFixture(key = KEY) {
-  const calls = [], locks = [], field = { value: '', disabled: false };
-  const context = vm.createContext({ accessKey: key, networkPending: 0, Promise, setTimeout() {}, $: () => field, failure(error) { const match = String(error.message).match(/\[([A-Z_]+)\]/); return { code: match?.[1], message: error.message }; }, lockAccess(message) { locks.push(message); }, flushPendingView() {} });
+  const calls = [], locks = [], field = { value: '', disabled: false }, project = { value: '' };
+  const context = vm.createContext({ activeProjectId: 'neosender', accessKey: key, networkPending: 0, Promise, setTimeout() {}, $: id => id === 'br-upload-project' ? project : field, failure(error) { const match = String(error.message).match(/\[([A-Z_]+)\]/); return { code: match?.[1], message: error.message }; }, lockAccess(message) { locks.push(message); }, flushPendingView() {} });
   const handlers = {};
-  const runner = { withSuccessHandler(fn) { handlers.success = fn; return runner; }, withFailureHandler(fn) { handlers.failure = fn; return runner; }, callApp(request) { calls.push({ kind: 'dispatch', request }); }, uploadSourceBase(form) { calls.push({ kind: 'upload', form, tokenAtDispatch: field.value, disabledAtDispatch: field.disabled }); } };
+  const runner = { withSuccessHandler(fn) { handlers.success = fn; return runner; }, withFailureHandler(fn) { handlers.failure = fn; return runner; }, callApp(request) { calls.push({ kind: 'dispatch', request }); }, uploadSourceBase(form) { calls.push({ kind: 'upload', form, tokenAtDispatch: field.value, projectId: project.value, disabledAtDispatch: field.disabled }); } };
   context.google = { script: { run: runner } };
   vm.runInContext(source('sharedRequest') + '\n' + source('accessFailure') + '\n' + source('rpc'), context);
   return { context, calls, locks, field, handlers };
@@ -70,6 +71,7 @@ test('the live RPC transports ordinary operations only through the keyed dispatc
   assert.equal(f.calls[0].kind, 'dispatch');
   assert.equal(f.calls[0].request.accessKey, KEY);
   assert.equal(f.calls[0].request.method, 'getSegmentMailings');
+  assert.equal(f.calls[0].request.projectId, 'neosender');
   assert.equal(f.calls[0].request.payload, payload);
   f.handlers.success({ state: 'not_connected' });
   assert.equal((await result).state, 'not_connected');
@@ -83,6 +85,7 @@ test('the upload dispatches one live form with its named key populated', async (
   assert.equal(f.calls[0].kind, 'upload');
   assert.equal(f.calls[0].form, form);
   assert.equal(f.calls[0].tokenAtDispatch, KEY);
+  assert.equal(f.calls[0].projectId, 'neosender');
   assert.equal(f.calls[0].disabledAtDispatch, false);
   f.handlers.success({ file: { id: 'created_123' } });
   await pending;
