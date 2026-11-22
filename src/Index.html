@@ -117,13 +117,6 @@
           <nav class="br-registry-sections" aria-label="Раздел реестра"><button id="br-section-companies" type="button" class="br-button" aria-pressed="true">Компании</button><button id="br-section-lpr" type="button" class="br-button" aria-pressed="false">ЛПР</button></nav>
           <div class="br-source-heading-actions"><button id="br-import-open" type="button" class="br-button br-primary" disabled>＋ Загрузить базу</button><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div>
         </div>
-        <details id="br-source-lineage" class="br-source-lineage" hidden>
-          <summary>Исходные базы и выборки</summary>
-          <div class="br-source-heading-actions"><button type="button" class="br-button" id="br-origin-recover">Восстановить связи прошлых импортов</button><span id="br-origin-recovery-status" role="status" aria-live="polite"></span></div>
-          <div class="br-lineage-scroll" role="region" aria-label="Связи баз по всем разделам" tabindex="0">
-            <table aria-label="Исходные базы, выборки и сегменты"><thead><tr><th scope="col">Исходная база</th><th scope="col">Рабочая база / выборка</th><th scope="col">Критерии</th><th scope="col">Сегменты</th></tr></thead><tbody id="br-lineage-rows"></tbody></table>
-          </div>
-        </details>
         <section id="br-prepared-jobs" class="br-prepared-jobs" hidden aria-label="Незавершённая подготовка"><div id="br-prepared-jobs-list"></div></section>
         <section id="br-import-panel" class="br-import-panel" hidden aria-labelledby="br-import-title">
           <div class="br-import-heading"><h2 id="br-import-title">Добавить базу компаний</h2><button id="br-import-cancel" type="button" class="br-button">Закрыть</button></div>
@@ -203,6 +196,7 @@
         <p id="br-sources-health" class="br-segments-health" role="status" aria-live="polite"></p>
         <div id="br-sources-empty" class="br-segments-empty" role="status" hidden><h2 id="br-sources-empty-title"></h2><p id="br-sources-empty-description"></p></div>
         <div id="br-sources-items" class="br-source-items"></div>
+        <div id="br-origin-recovery" class="br-source-heading-actions" hidden><button type="button" class="br-button" id="br-origin-recover">Восстановить связи прошлых импортов</button><span id="br-origin-recovery-status" class="br-muted" role="status" aria-live="polite"></span></div>
       </section>
     <section id="br-segments-view" class="br-segments-view" hidden aria-labelledby="br-segments-title">
       <div class="br-list-heading">
