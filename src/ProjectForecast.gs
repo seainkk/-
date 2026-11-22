@@ -79,8 +79,8 @@ function getProjectSendingForecast_(request) {
       state.forecast = projectForecastCalculate_(infra, state.work, now);
       state.generatedAt = new Date().toISOString();
       state.work = null;
-    } else if (!state.forecast) {
-      state.forecast = projectForecastCalculate_(infra, {}, now);
+    } else if (!state.generatedAt) {
+      state.forecast = projectForecastCalculate_(infra, state.work, now);
     }
     // Optimistic checkpoint. Competing tabs can read the same page, but only one advances it.
     var committed = locked_(function () {

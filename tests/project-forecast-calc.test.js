@@ -68,11 +68,11 @@ test('per-campaign overall and first/followup limits and fixed sender do not dup
   assert.equal(r.reasons.length,0);
 });
 
-test('overnight New York window converts into Moscow Tuesday, and an overlap does not double the mailbox slots',()=>{
+test('overnight New York window converts into Moscow Tuesday; model shares the clock, while the limit allows independent campaign timers',()=>{
   const ny={days:['monday'],from:'23:30',to:'00:30',timezone:'America/New_York',gapStartSeconds:1800,gapEndSeconds:1800};
   const ru={days:['tuesday'],from:'07:30',to:'08:30',timezone:'Europe/Moscow',gapStartSeconds:1800,gapEndSeconds:1800};
   const r=calc([account(1,['k','l'])],[campaign('k',{schedule:ny}),campaign('l',{schedule:ru})],{k:demand([lead(20)]),l:demand([lead(20)])});
-  assert.deepEqual(r.days.slice(0,3).map(r=>[r.expected,r.capacity]),[[0,0],[2,2],[0,0]]);
+  assert.deepEqual(r.days.slice(0,3).map(r=>[r.expected,r.capacity]),[[0,0],[2,4],[0,0]]);
 });
 
 test('fall DST transition repeats the local 01:00 hourly window in New York',()=>{

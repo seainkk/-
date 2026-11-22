@@ -52,7 +52,8 @@ function projectForecastLeadCohort_(lead,sequence) {
       replied && (sequence.stopOnReply === true || sequence.stopOnCompanyReply === true)) disposition = 'stopped';
   else if (lead.stop_sending !== false || ['Not contacted','Sent','Opened','Replied'].indexOf(lead.status) < 0 ||
       replied && (sequence.stopOnReply === null || sequence.stopOnCompanyReply === null) ||
-      !hasStep || (!selectedSender && sender !== null && sender !== 0 && !(sender === undefined && firstSend)) ||
+      !hasStep || previous != null && previous !== 0 && previousId === null ||
+      (!selectedSender && sender !== null && sender !== 0 && !(sender === undefined && firstSend)) ||
       sent === 0 && (previous != null && previous !== 0 || !noRecordedSend || !firstSend) ||
       (sent > 0 || previousId !== null) && lead.status === 'Not contacted') disposition = 'unknown';
   // Stopped leads have no demand, irrespective of their last step, sender and timestamp.

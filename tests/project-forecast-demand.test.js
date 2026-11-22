@@ -73,6 +73,7 @@ test('keeps unassigned first contacts in the eligible pool; partial evidence nev
   const prior={status:'Sent',id_previous_sending_sequence:1,amount_sequences_sent:undefined,date_last_sequence_send:'2026-11-22T09:09:47Z'};
   assert.equal(normalize(prior).disposition,'eligible');assert.equal(normalize(prior).sentSteps,null);
   assert.equal(normalize({...prior,chosen_sender:undefined}).disposition,'unknown');
+  assert.equal(normalize({...prior,amount_sequences_sent:1,id_previous_sending_sequence:'invalid'}).disposition,'unknown');
 });
 
 test('cohorts merge only across contiguous verified pages; replay cannot count a recipient twice',()=>{

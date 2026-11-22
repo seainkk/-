@@ -245,11 +245,11 @@
     const hasScenario=item=>item.expected===null&&Number.isFinite(item.modeled);
     if(hasScenario(period))totals.push(['По разобранной части (сценарий)',period.modeled]);
     metrics('pj-forecast-totals',totals);
-    if(report.queue&&response.generatedAt){
+    if(report.queue&&(response.generatedAt||response.progress?.contactsRead>0)){
       const q=report.queue,parts=['первого письма ждут '+number(q.pendingInitial),'повторного — '+number(q.pendingFollowups)];
       if(q.unresolved>0)parts.push('неизвестен отправитель или следующий шаг у '+number(q.unresolved));
       if(q.unreadCampaigns>0)parts.push('ещё не полностью прочитано рассылок '+number(q.unreadCampaigns));
-      queue.textContent='В очереди на момент расчёта '+parts.join(', ')+'.';queue.hidden=false;
+      queue.textContent=(response.generatedAt?'В очереди на момент расчёта ':'Среди уже прочитанных адресатов ')+parts.join(', ')+'.';queue.hidden=false;
     }
     $('pj-forecast-daily').hidden=forecastDays===1;
     const displayedDays=(report.days||[]).filter(day=>day.date>=period.from&&day.date<=period.to),dailyScenario=displayedDays.some(hasScenario);

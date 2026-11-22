@@ -241,23 +241,17 @@ function projectForecastPool_(pool, rows, reasons, now, today, day, budget, queu
   }
 }
 
-/** Network quotas can only reduce this upper bound. For overlapping windows apply a mailbox limit once. */
+/** Coldy defines the gap per campaign but does not specify a cross-campaign timer on a shared mailbox. */
 function projectForecastSlotBound_(campaigns, index, start) {
-  var intervals = [], minGap = Infinity;
+  var slots = 0;
   for (var i = 0; i < campaigns.length; i++) {
     var c = campaigns[i];
     if (!c.windows || c.minGap == null || c.minGap === 0) return Infinity;
-    minGap = Math.min(minGap,c.minGap * 1000);
-    c.windows[index].forEach(function (w) { if (w[1] > start) intervals.push([Math.max(start,w[0]),w[1]]); });
+    c.windows[index].forEach(function (w) {
+      if (w[1] > start) slots += Math.ceil((w[1] - Math.max(start,w[0])) / (c.minGap * 1000));
+    });
   }
-  intervals.sort(function (a,b) { return a[0] - b[0]; });
-  var merged = [];
-  intervals.forEach(function (w) {
-    var last = merged[merged.length - 1];
-    if (last && w[0] <= last[1]) last[1] = Math.max(last[1],w[1]);
-    else merged.push(w);
-  });
-  return merged.reduce(function (sum,w) { return sum + Math.ceil((w[1] - w[0]) / minGap); },0);
+  return slots;
 }
 
 function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
