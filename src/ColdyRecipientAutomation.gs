@@ -64,9 +64,22 @@ function coldyIncomingIssue_(error){
   if(['COLDY_TARGET_CHANGED','COLDY_TARGETS_REQUIRED','SEGMENT_TARGETS_REQUIRED','NOT_FOUND'].includes(code))return 'target';
   if(['COLDY_STORAGE','COLDY_STORAGE_UNCERTAIN','COLDY_STORAGE_LIMIT','PROJECT_STORAGE'].includes(code))return 'storage';
   if(['OUTSIDE_REGISTRY','OUTSIDE_PROJECT','COLDY_SCOPE_CHANGED','COLDY_BINDING_CHANGED','COLDY_CREDENTIAL_CHANGED'].includes(code))return 'scope';
+  if(code==='CONTACT_SYNC_JOB_ACTIVE')return 'contact_job';
   if(code==='BUSY')return 'busy';
   if(code==='COLDY_RECIPIENT_LEASE_EXPIRED')return 'timeout';
   return 'unknown';
+}
+
+// Mirror only confirmed cursors. The private scan itself contains email addresses and lead records.
+function coldyIncomingProgress_(scan){
+  if(!scan)return null;
+  if(scan.phase==='read' && Number.isSafeInteger(scan.total))
+    return {phase:'read',read:scan.offset,total:scan.total};
+  if(scan.phase!=='write')return null;
+  var kind=scan.kinds[scan.targetIndex];
+  if(kind!=='companies'&&kind!=='lpr')return null;
+  return {phase:'write',kind:kind,total:scan.rows.length,checked:scan.position,
+    matched:scan.position===0?0:Number.isSafeInteger(scan.matched)?scan.matched:null};
 }
 
 /** Attach status to already selected bindings only. Catalogue and grid opens do not enumerate campaigns. */
@@ -85,6 +98,7 @@ function coldyIncomingDecorate_(context,bindings,rows){
     var status={enabled:timer.enabled,needsOwnerSetup:timer.needsOwnerSetup,state:timer.enabled?state:'off',
       lastSyncedAt:mark.lastSyncedAt||null,lastSuppressionAt:mark.lastSuppressionAt||null,suppressionPending:mark.suppressionPending===true,
       lastTickAt:clock.at||null,lastAttemptAt:mark.attempt?new Date(mark.attempt).toISOString():null,
+      progress:timer.enabled&&mark.progressRevision===b.revision?mark.progress||null:null,
       issue:mark.issue||clock.issue||null,nextRetryAt:retryAt>Date.now()?new Date(retryAt).toISOString():null};
     b.recipientSync=status;
     if(byId.has(b.campaignId)) byId.get(b.campaignId).recipientSync=status;
@@ -110,7 +124,19 @@ function coldyIncomingStep_(context,job,guard,deadline){
   var b=job.b, mark=job.mark;
   var state=coldyLoad_(context,'recipientpoll',job.owner)||{};
   if(state.bindingRevision!==b.revision) state={bindingRevision:b.revision};
-  function save(){locked_(function(){guard();coldySave_(context,'recipientpoll',job.owner,state);});}
+  function updateProgress(){
+    var progress=coldyIncomingProgress_(state.scan);
+    if((!mark.progress&&!progress) || mark.progressRevision===b.revision && JSON.stringify(progress)===JSON.stringify(mark.progress))return false;
+    mark.progress=progress;mark.progressRevision=b.revision;
+    return true;
+  }
+  function save(){
+    locked_(function(){
+      guard();coldySave_(context,'recipientpoll',job.owner,state);
+      if(updateProgress())context.properties.setProperty('COLDY_INCOMING_'+job.owner,JSON.stringify(mark));
+    });
+  }
+  updateProgress();
   var scan=state.scan, hadCheckpoint=!!scan;
   // Both activities keep independent cursors. A long blacklist lookup cannot hold up fresh lead events.
   if(!scan) state.scan=scan={phase:'read',offset:0,total:null,rows:[]};
@@ -184,7 +210,12 @@ function coldyIncomingStep_(context,job,guard,deadline){
       var binding=Object.assign({},b,{campaignName:scan.campaignName,campaignStatus:scan.campaignStatus});
       // Persist the proven snapshot before the first uncertain external write. A retry is idempotent.
       if(!staged){save();staged=true;}
-      if(batch.length) coldyRecipientSheetWrite_(context,binding,kind,target,batch,guard,null,{existingOnly:true});
+      if(batch.length){
+        var before=scan.position===0?0:scan.matched;
+        var receipt=coldyRecipientSheetWrite_(context,binding,kind,target,batch,guard,null,{existingOnly:true});
+        // A partial checkpoint created before matched counts existed can only report how many were checked.
+        scan.matched=Number.isSafeInteger(before)&&Number.isSafeInteger(receipt.existing)?before+receipt.existing:null;
+      }
       scan.position+=batch.length;
       if(scan.position>=rows.length){
         var after=coldyRecipientSheetVersion_(guard(),b,kind,target,contactSyncMetadata_(target.fileId));
@@ -315,7 +346,8 @@ function coldyRecipientTick_(event){
     var context=timerGuard(), settings=coldySettings_(context);
     if(!settings.configured) return;
     var credential=settings.credentialHash, pauseKey='COLDY_INCOMING_PAUSE_'+digest_(context.rootId+'|'+credential);
-    var pausedUntil=Number(props.getProperty(pauseKey));
+    var sharedPause=coldyGetPause_(context,settings);
+    var pausedUntil=Math.max(Number(props.getProperty(pauseKey))||0,sharedPause?Date.now()+sharedPause.retryAfterMs:0);
     if(pausedUntil>Date.now()){heartbeat('rate_limit',pausedUntil);return;}
     var bindings=coldyCampaignRegistry_(context).bindings, snapshot=props.getProperties(), jobs=[];
     bindings.forEach(function(b){

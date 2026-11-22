@@ -32,7 +32,7 @@ function fixture(){
     sharedConfiguredHash_:()=>state.key,authorize_:()=>{if(r.SHARED_REQUEST_SCOPE_?.keyHash!==state.key)fail('LINK_ACCESS_REQUIRED');return context;},
     registryRoot_:()=>{},api_:fn=>fn(),locked_:fn=>fn(),fail_:fail,registryError_:code=>Object.assign(Error(code),{registryCode:code}),
     digest_:s=>createHash('sha256').update(s).digest('base64url'),
-    coldyCredentialHash_:()=>state.credential,coldySettings_:()=>({configured:true,credentialHash:state.credential}),coldyInput_:()=>{},
+    coldyCredentialHash_:()=>state.credential,coldySettings_:()=>({configured:true,credentialHash:state.credential}),coldyInput_:()=>{},coldyGetPause_:()=>null,
     registryProjectId_:()=>r.SHARED_REQUEST_SCOPE_.projectId,registrySegmentProject_:(_c,id)=>projects[id],registryProjectName_:p=>['numshield','neosender'].includes(p)?p:'',
     coldyCampaignScope_:(_c,seg)=>{if(projects[seg]!==r.SHARED_REQUEST_SCOPE_.projectId)fail('COLDY_SCOPE_CHANGED');},
     coldyCampaignRegistry_:()=>({bindings:copy(bindings)}),coldyCampaignBinding_:(registry,seg,id)=>{
@@ -45,6 +45,7 @@ function fixture(){
     coldyRecipientSheetWrite_:(_c,bind,kind,target,rows,guard,_before,opts)=>{
       guard();assert.equal(opts.existingOnly,true);assert.equal(projects[bind.segmentId],r.SHARED_REQUEST_SCOPE_.projectId);
       writes.push({id:bind.campaignId,kind,target:copy(target),rows:copy(rows)});
+      return {processed:rows.length,existing:rows.length};
     },
     coldyGetBatch_:(_c,list,guard)=>{
       guard();const results=list.map(path=>{
@@ -179,15 +180,50 @@ test('after mixed replies a 1267-recipient campaign keeps the contiguous prefix,
   assert.equal(f.writes.length,0);assert.equal(f.saves.length,1);
   f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],[]);
   assert.equal(Date.parse(f.bindings[0].recipientSync.nextRetryAt),f.state.now+180000);
+  assert.deepEqual(copy(f.bindings[0].recipientSync.progress),{phase:'read',read:400,total:1267});
   f.next();f.next();assert.equal(batches.length,2);
   f.next();assert.deepEqual(batches[2],[400]);assert.equal(f.writes.length,0);
+  f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],[]);
+  assert.deepEqual(copy(f.bindings[0].recipientSync.progress),{phase:'read',read:400,total:1267});
   limited=false;f.next();assert.deepEqual(batches[3],[400]);assert.equal(f.writes.length,0);
+  f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],[]);
+  assert.deepEqual(copy(f.bindings[0].recipientSync.progress),{phase:'read',read:600,total:1267});
   f.next();assert.deepEqual(batches[4],[600,800,1000,1200]);
   const rows=f.writes.flatMap(w=>w.rows);
   assert.equal(rows.length,1267);assert.equal(new Set(rows.map(r=>r.email)).size,1267);
   assert.deepEqual(rows.map(r=>r.id).sort((x,y)=>x-y),Array.from({length:1267},(_,i)=>i+1));
   f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],[]);
   assert.equal(f.bindings[0].recipientSync.state,'synced');
+  assert.equal(f.bindings[0].recipientSync.progress,null);
+});
+
+test('a busy sheet retains only its confirmed checked and matched counts, scoped to this target and revision',()=>{
+  const f=fixture();f.bindings.splice(1);const binding=f.bindings[0];
+  binding.includeLpr=true;f.state.counts={[a]:670};f.enable();
+  const write=f.r.coldyRecipientSheetWrite_,status=()=>{
+    const load=f.r.coldyLoad_;
+    try{
+      f.r.coldyLoad_=()=>assert.fail('Rendering status must not load the private recipient snapshot');
+      f.r.coldyIncomingDecorate_(f.r.authorize_(),[binding],[]);return binding.recipientSync;
+    }finally{f.r.coldyLoad_=load;}
+  };
+  const calls={companies:0,lpr:0};
+  f.r.coldyRecipientSheetWrite_=(...args)=>{
+    const kind=args[2];
+    if(++calls[kind]===2)f.r.fail_(kind==='companies'?'BUSY':'CONTACT_SYNC_JOB_ACTIVE');
+    const result=write(...args);
+    result.existing=Math.min(result.processed,kind==='companies'?123:17);return result;
+  };
+  f.tick();
+  assert.equal(status().issue,'busy');
+  assert.deepEqual(copy(status().progress),{phase:'write',kind:'companies',total:670,checked:300,matched:123});
+  f.next();
+  assert.equal(status().issue,'contact_job');
+  assert.deepEqual(copy(status().progress),{phase:'write',kind:'lpr',total:670,checked:300,matched:17});
+  binding.revision++;
+  assert.equal(status().progress,null,'A newly configured binding cannot publish the prior snapshot');
+  f.state.counts[a]=1;f.next();
+  assert.equal(status().state,'synced');assert.equal(status().progress,null);
 });
 
 test('a throttled first lead page retains the confirmed campaign detail and completes a short campaign on its retry',()=>{
@@ -249,4 +285,29 @@ test('legacy manual import enrolls only its recorded managed Email GID; an unrel
   assert.deepEqual(f.writes.map(write=>write.kind),['companies']);
   f.next();const before={saves:f.saves.length,writes:f.writes.length};
   f.next();assert.equal(f.saves.length,before.saves);assert.equal(f.writes.length,before.writes);
+});
+
+test('a shared Coldy cooldown leaves campaign attempts and checkpoints untouched until both cooldowns expire',()=>{
+  const f=fixture();f.enable();
+  const context=f.r.authorize_(),binding=f.bindings[0];
+  const markKey='COLDY_INCOMING_'+f.r.coldyIncomingOwner_(context,f.state.credential,'numshield',binding);
+  const previous=JSON.stringify({attempt:f.state.now-1000,state:'syncing'});
+  f.data.set(markKey,previous);
+  const marker=f.r.coldyIncomingTimer_(f.props),clockKey=f.r.coldyIncomingHeartbeatKey_(marker);
+  const localKey='COLDY_INCOMING_PAUSE_'+f.r.digest_(context.rootId+'|'+f.state.credential);
+  const sharedUntil=f.state.now+180000;
+  f.r.coldyGetPause_=(current,settings)=>{
+    assert.equal(current.rootId,context.rootId);assert.equal(settings.credentialHash,f.state.credential);
+    return sharedUntil>f.state.now?{retryAfterMs:sharedUntil-f.state.now}:null;
+  };
+  const registry=f.r.coldyCampaignRegistry_,read=f.r.coldyLoad_;
+  f.r.coldyCampaignRegistry_=()=>assert.fail('Do not open the binding registry during a shared cooldown');
+  f.r.coldyLoad_=()=>assert.fail('Do not open a campaign checkpoint during a shared cooldown');
+  f.tick();assert.equal(JSON.parse(f.data.get(clockKey)).retryAt,sharedUntil);
+  const localUntil=sharedUntil+60000;f.data.set(localKey,String(localUntil));
+  f.next();f.next();f.next();
+  const clock=JSON.parse(f.data.get(clockKey));
+  assert.deepEqual([clock.issue,clock.retryAt],['rate_limit',localUntil]);
+  assert.equal(f.data.get(markKey),previous);assert.deepEqual(f.paths,[]);assert.deepEqual(f.saves,[]);
+  f.r.coldyCampaignRegistry_=registry;f.r.coldyLoad_=read;f.next();assert.ok(f.paths.length);
 });

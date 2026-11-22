@@ -218,7 +218,6 @@ function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, g
   return contactSyncWithLease_(target.fileId, function (claim) {
     var state = claim.state;
     if (state.rootId !== context.rootId || state.segmentId !== binding.segmentId || state.role !== 'segment-' + kind || state.targets.emailSheetId !== target.sheetId) fail_('COLDY_TARGET_CHANGED', 'Не удалось подтвердить рабочую вкладку сегмента.');
-    if (state.job) fail_('BUSY', 'Дождитесь окончания текущего обновления контактов этой таблицы.');
     claim.importSegmentId = binding.segmentId;
     var sheet = gridSheet_(claim.book, target.sheetId), width = sheet.getLastColumn(), lastRow = sheet.getLastRow();
     if (!width || !lastRow || width > COLDY_CAMPAIGNS.maxColumns || lastRow > COLDY_CAMPAIGNS.maxRows) fail_('COLDY_SCHEMA', 'Проверьте размер и заголовки рабочей вкладки Email.');
@@ -243,9 +242,16 @@ function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, g
     if (hasTargets && (width + layout.additions.length > COLDY_CAMPAIGNS.maxColumns || plan.lastRow > COLDY_CAMPAIGNS.maxRows)) fail_('COLDY_SCHEMA', 'Недостаточно места для истории контактов рассылки.');
     var requests = hasTargets ? coldyRecipientSheetRequests_(sheet, width, lastRow, layout, plan) : [];
     var result = Object.assign({ fileId: target.fileId, sheetId: target.sheetId }, plan.counts);
-    locked_(function () {
+    function verifySnapshot() {
       guard(); contactSyncAssertLease_(claim);
       if (version !== currentVersion()) fail_('CONFLICT', 'Таблица изменилась во время чтения. Продолжите тот же импорт.');
+    }
+    if (existingOnly && !requests.length && !beforeApply) {
+      verifySnapshot();
+      return result;
+    }
+    locked_(function () {
+      verifySnapshot();
       if (beforeApply) beforeApply(result);
       if (requests.length) {
         if (version !== currentVersion()) fail_('CONFLICT', 'Таблица изменилась до сохранения страницы. Продолжите тот же импорт.');
@@ -258,5 +264,5 @@ function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, g
       if (known.length !== state.known.length) { state.known = known; contactSyncSaveState_(claim.context, state); }
     }
     return result;
-  }, false);
+  }, false, { activeJobError: existingOnly ? 'CONTACT_SYNC_JOB_ACTIVE' : 'BUSY' });
 }

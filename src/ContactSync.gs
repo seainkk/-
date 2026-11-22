@@ -358,6 +358,9 @@ function contactSyncWithLease_(fileId, callback, create, options) {
     var fresh = gridFile_(fileId, true, scope.context.rootId), book = SpreadsheetApp.openById(fileId), metadata = contactSyncMetadata_(fileId);
     var state = contactSyncReadState_(fresh.context, metadata, true);
     if (!state) { if (!create) fail_('CONTACT_SYNC_NOT_ENROLLED', 'Сначала запустите проверку новых контактов.'); state = contactSyncCreateState_(fresh, book, metadata, options); }
+    var activeJobError = options && options.activeJobError;
+    if (state.job && (activeJobError === 'BUSY' || activeJobError === 'CONTACT_SYNC_JOB_ACTIVE'))
+      fail_(activeJobError, 'Дождитесь окончания текущего обновления контактов этой таблицы.');
     if (state.lease && state.lease.until > Date.now()) fail_('BUSY', 'Контакты этой базы уже обновляются. Повторите через несколько секунд.');
     state.lease = { id: Utilities.getUuid(), until: Date.now() + CONTACT_SYNC.leaseMillis };
     contactSyncSaveState_(fresh.context, state, true);

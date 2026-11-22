@@ -19,9 +19,9 @@ function fixture() {
   }
   const rows = [['Статус', 'Email', 'Компания', 'Пользовательский расчёт', 'Валидация']];
   const formulas = new Map(), notes = new Map(), validations = [];
-  const state = { rootId, segmentId, targets: { emailSheetId: target.sheetId }, role: 'segment-companies', known: [] };
+  const state = { rootId, segmentId, fileId: target.fileId, targets: { emailSheetId: target.sheetId }, role: 'segment-companies', known: [] };
   let locked = false, version = 1;
-  const call = { committed: 0, dropAck: false, scope: true, sheetId: target.sheetId, rowRead: null, lease: true };
+  const call = { committed: 0, dropAck: false, scope: true, sheetId: target.sheetId, rowRead: null, lease: true, stateWrites:0, leaseChecks:[] };
   function rectangle(row, column, height, width, get) {
     return Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => get(row + y, column + x)));
   }
@@ -38,15 +38,17 @@ function fixture() {
   env.digest_=digest;
   env.segmentRecordsTargets_=()=>({tables:{companies:target.fileId,lpr:'lpr_book_123456'}});
   env.getContactWorkspace_=()=>({enrolled:true,canSync:true,role:state.role,segmentId,targets:{emailSheetId:call.sheetId}});
-  env.contactSyncWithLease_=(_id,cb)=>cb({state,book:{},context:{rootId},leaseId:'lease'});
-  env.contactSyncAssertLease_=()=>{ assert.ok(locked); if(!call.lease) throw Error('lease lost'); };
+  env.gridFile_=()=>({context:{rootId}});
+  env.SpreadsheetApp={openById:()=>({})};
+  env.Utilities={getUuid:()=>crypto.randomUUID()};
+  env.contactSyncAssertLease_=claim=>{ call.leaseChecks.push(locked); assert.equal(claim.leaseId,state.lease.id); if(!call.lease) throw Error('lease lost'); };
   env.contactSyncMetadata_=()=>({version,id:target.fileId,parents:[segmentId],mimeType:env.REGISTRY_CONFIG.spreadsheetMime,capabilities:{canEdit:true},appProperties:{
     registrySegmentMasterRoot:rootId,registrySegmentMasterSegment:segmentId,registrySegmentMasterKind:'companies',
     registryContactRoot:rootId,registryContactEmailSheetId:String(call.sheetId)
   }});
   env.contactSyncReadState_=()=>state;
   env.gridSheet_=()=>sheet;
-  env.contactSyncSaveState_=()=>{};
+  env.contactSyncSaveState_=()=>{call.stateWrites++;};
   env.locked_=cb=>{assert.equal(locked,false); locked=true; try{return cb();}finally{locked=false;}};
   env.sheetRawBatchWrite_=(fileId,requests)=>{
     assert.ok(locked); assert.equal(fileId,target.fileId);
@@ -134,6 +136,47 @@ test('verifies both the original physical route and a revision change while pers
   f.call.sheetId=target.sheetId;
   assert.throws(()=>f.run([lead('a@example.test')],{before:()=>f.change()}),/CONFLICT/);
   assert.equal(f.call.committed,0);
+});
+
+test('recipient reconciliation waits for an unfinished contact job without taking its lease or changing its checkpoint',()=>{
+  for(const existingOnly of [true,false]){
+    const f=fixture(), entry=lead('waiting@example.test');
+    f.rows.push(['новый',entry.email]);
+    f.state.job={requestId:'existing-contact-request',cursor:23,error:'PRIOR_FAILURE'};
+    for(const remaining of [-1000,60000]){
+      f.state.lease={id:'previous-lease',until:Date.now()+remaining};
+      const original=plain(f.state);
+      assert.throws(()=>f.run([entry],{existingOnly}),{registryCode:existingOnly?'CONTACT_SYNC_JOB_ACTIVE':'BUSY'});
+      assert.deepEqual(f.state,original);
+    }
+    assert.equal(f.call.stateWrites,0);
+    assert.equal(f.call.committed,0);
+    f.state.job=null;
+    assert.throws(()=>f.run([entry],{existingOnly}),{registryCode:'BUSY'});
+    assert.equal(f.call.stateWrites,0);
+    delete f.state.lease;
+    f.run([entry],{existingOnly});
+    assert.equal(f.call.committed,1);
+  }
+});
+
+test('an unchanged background batch validates access, lease and version outside the commit lock',()=>{
+  const f=fixture(), entry=lead('stable@example.test'), auto={existingOnly:true};
+  f.rows.push(['новый',entry.email]);
+  f.run([entry],auto);
+  assert.deepEqual(f.call.leaseChecks,[true]);
+  f.run([entry],auto);
+  assert.deepEqual(f.call.leaseChecks,[true,false]);
+  let journaled=false;
+  f.run([entry],{...auto,before:()=>{journaled=true;}});
+  assert.equal(journaled,true);assert.equal(f.call.leaseChecks.at(-1),true);
+  f.call.lease=false;
+  assert.throws(()=>f.run([entry],auto),/lease lost/);
+  f.call.lease=true;f.call.rowRead=f.change;
+  assert.throws(()=>f.run([entry],auto),/CONFLICT/);
+  f.call.rowRead=()=>{f.call.scope=false;};
+  assert.throws(()=>f.run([entry],auto),/scope changed/);
+  assert.equal(f.call.committed,1);
 });
 
 test('background sync only touches matching existing email rows and owned facts, preserving filters, names and formulas',()=>{
