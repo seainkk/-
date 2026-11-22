@@ -25,6 +25,13 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         page.set_content(integrated_html().replace('api.getColdySettings=',fixture+'api.getColdySettings=',1))
         source=page.locator('[data-source-id="source-companies"]')
         expect(source).to_be_visible()
+        header=page.locator('header.br-header')
+        bases=header.get_by_role('button',name='Базы',exact=True)
+        expect(bases).to_have_attribute('aria-pressed','true')
+        expect(bases).to_have_attribute('aria-controls','br-sources-view')
+        expect(header).not_to_contain_text('Реестр баз')
+        expect(page.get_by_role('region',name='Исходные базы и выборки')).to_be_visible()
+        expect(page.get_by_role('heading',name='Исходные базы и выборки',level=1)).to_be_visible()
         page.wait_for_function('backend.active===0')
 
         def calls(method):
@@ -53,6 +60,7 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         page.evaluate("backend.holdAfterMethods=[];releaseRpc('getSourceBasesRevision')")
         segment=page.locator('[data-segment="existing-segment"]')
         expect(segment).to_be_visible()
+        expect(bases).to_have_attribute('aria-pressed','false')
         page.wait_for_function('backend.dashboardFullGets>0&&backend.active===0')
         assert calls('getSourceBases')==4
         page.evaluate("backend.segments[0].name='Сегмент после изменения'")

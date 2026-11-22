@@ -47,3 +47,24 @@ test('app startup rejects a trashed registry rather than showing stale project m
   const { context } = setup({ trashed: true });
   assert.throws(() => context.getAppBootstrap(), /NOT_FOUND/);
 });
+
+test('startup reads the exact live Drive folder and its title in one metadata request', () => {
+  const { context, calls } = setup();
+  const metadata = {id:ROOT, name:'Общие базы', mimeType:'application/vnd.google-apps.folder', trashed:false};
+  let gets = 0;
+  context.Drive = {Files:{get(id, options) {
+    assert.equal(id, ROOT);
+    assert.equal(options.fields, 'id,name,mimeType,trashed');
+    assert.equal(options.supportsAllDrives, true);
+    gets++;
+    return metadata;
+  }}};
+  assert.deepEqual(JSON.parse(JSON.stringify(context.getAppBootstrap().registry)),{id:ROOT,name:'Общие базы'});
+  assert.equal(gets,1);
+  for(const [key,bad] of [['id','other_root_1234567890'], ['mimeType','application/json'], ['trashed',true]]){
+    const before=metadata[key]; metadata[key]=bad;
+    assert.throws(()=>context.getAppBootstrap(),/NOT_FOUND/);
+    metadata[key]=before;
+  }
+  assert.deepEqual(calls,[]);
+});

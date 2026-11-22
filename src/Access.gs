@@ -22,6 +22,7 @@ function callApp(request) {
       // Explicit optional handlers keep isolated legacy fixtures usable; the
       // release check requires every feature module in the deployed project.
       var contactMethods = {
+        getServiceLimits: typeof getServiceLimits_ === 'function' ? getServiceLimits_ : null,
         getSourceBasesRevision: typeof getSourceBasesRevision_ === 'function' ? getSourceBasesRevision_ : null,
         claimRegistrySegment: typeof claimRegistrySegment_ === 'function' ? claimRegistrySegment_ : null,
         getProjectAnalytics: typeof getProjectAnalytics_ === 'function' ? getProjectAnalytics_ : null,

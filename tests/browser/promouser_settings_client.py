@@ -39,6 +39,7 @@ def main():
         balance = page.locator('#br-provider-balance')
         message = page.locator('#br-provider-message')
 
+        page.locator('#br-settings-open').click()
         opener.click()
         expect(dialog).to_be_visible()
         expect(enabled).to_be_checked()
@@ -81,7 +82,7 @@ def main():
         assert page.evaluate("""
             backend.calls.every(call => [
               'getAppBootstrap', 'getSourceBases', 'listPreparedJobs',
-              'getPromouserSettings', 'configurePromouser', 'getPromouserBalance',
+              'getServiceLimits', 'getPromouserSettings', 'configurePromouser', 'getPromouserBalance',
               'getContactAutomationState', 'enableContactAutomation', 'disableContactAutomation'
             ].includes(call.name) && !(call.p && ('id' in call.p || 'fileId' in call.p))) &&
             backend.transport.every(call => call.name === 'callApp' && call.keyMatches)

@@ -12,8 +12,20 @@
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Центр <span>мультиканального аутрича</span></strong></div><label id="br-project-switch" class="br-project-switch" hidden>Проект<select id="br-project"><option value="numshield">Намшилд</option><option value="neosender">Нео Сендер</option></select></label><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-analytics" type="button" class="br-button" aria-pressed="false">Аналитика</button><button id="br-view-infrastructure" type="button" class="br-button" aria-pressed="false">Инфраструктура</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Coldy</button><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Центр <span>мультиканального аутрича</span></strong></div><label id="br-project-switch" class="br-project-switch" hidden>Проект<select id="br-project"><option value="numshield">Намшилд</option><option value="neosender">Нео Сендер</option></select></label><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-controls="br-sources-view" aria-pressed="true">Базы</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-analytics" type="button" class="br-button" aria-pressed="false">Аналитика</button><button id="br-view-infrastructure" type="button" class="br-button" aria-pressed="false">Инфраструктура</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-settings-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Настройки</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
   <div class="br-back-row" id="br-back-row" hidden><button id="br-action-back" class="br-button" type="button">← Назад</button></div>
+  <dialog id="br-settings-dialog" class="br-provider-dialog" aria-labelledby="br-settings-title">
+    <div class="br-import-heading"><h2 id="br-settings-title">Настройки</h2><button id="br-settings-close" type="button" class="br-button" autofocus>Закрыть</button></div>
+    <section class="br-integration" aria-labelledby="br-settings-coldy-title">
+      <div class="br-integration-heading"><h3 id="br-settings-coldy-title">Coldy</h3><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog">Настроить Coldy</button></div>
+      <p id="br-settings-coldy-status" role="status"></p><dl id="br-settings-coldy-limits" class="br-settings-limits"></dl><p id="br-settings-coldy-note" class="br-muted"></p>
+    </section>
+    <section class="br-integration" aria-labelledby="br-settings-promouser-title">
+      <div class="br-integration-heading"><h3 id="br-settings-promouser-title">Promouser</h3><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog">Настроить Promouser</button></div>
+      <p id="br-settings-promouser-status" role="status"></p><dl id="br-settings-promouser-limits" class="br-settings-limits"></dl><p id="br-settings-promouser-note" class="br-muted"></p>
+    </section>
+    <section class="br-integration" aria-labelledby="br-settings-access"><div class="br-integration-heading"><h3 id="br-settings-access">Доступ к сервису</h3><button id="br-share-copy" type="button" class="br-button">Скопировать закрытую ссылку</button></div><p id="br-settings-copy-status" role="status"></p></section>
+  </dialog>
   <dialog id="br-coldy-dialog" class="br-provider-dialog" aria-labelledby="br-coldy-title">
     <div class="br-import-heading"><h2 id="br-coldy-title">Подключение Coldy</h2><button id="br-coldy-close" type="button" class="br-button" autofocus>Закрыть</button></div>
     <p class="br-muted">Подключение общее для реестра, сегментов, аналитики и инфраструктуры проекта. Ключ хранится на сервере и не показывается повторно.</p>
@@ -101,7 +113,7 @@
   <main class="br-main" hidden inert>
       <section id="br-sources-view" class="br-sources-view" hidden aria-labelledby="br-sources-title">
         <div class="br-list-heading">
-          <div><h1 id="br-sources-title">Реестр баз</h1><p id="br-sources-count" class="br-muted"></p></div>
+          <div><h1 id="br-sources-title">Исходные базы и выборки</h1><p id="br-sources-count" class="br-muted"></p></div>
           <nav class="br-registry-sections" aria-label="Раздел реестра"><button id="br-section-companies" type="button" class="br-button" aria-pressed="true">Компании</button><button id="br-section-lpr" type="button" class="br-button" aria-pressed="false">ЛПР</button></nav>
           <div class="br-source-heading-actions"><button id="br-import-open" type="button" class="br-button br-primary" disabled>＋ Загрузить базу</button><a id="br-sources-folder" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть папку →</a></div>
         </div>

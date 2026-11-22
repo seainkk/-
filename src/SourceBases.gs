@@ -33,6 +33,7 @@ function getSourceBases_() {
       try {
         var storage = sourceBasesStorage_(current);
         storageDescriptor = storage.public;
+        storage.catalogRows = sourceBasesCatalogRows_(storage);
         var database = sourceBasesReadDatabase_(storage);
         var records = sourceBasesSync_(current, storage, database, discovered);
         var associations = sourceBasesAssociations_(database.relations, current);
@@ -317,15 +318,82 @@ function sourceBasesStorage_(context) {
   }
 }
 
-function sourceBasesReadRows_(sheet, headers, allowLegacyContents, migrationPending) {
-  var lastRow = sheet.getLastRow(), lastColumn = sheet.getLastColumn();
+// Read the four service tabs in one Sheets request on the card-list path.
+// Sizes come from the used ranges, so an unexpected column or excess rows
+// cannot be hidden by requesting only the expected schema.
+function sourceBasesCatalogRows_(storage) {
+  if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets || !Sheets.Spreadsheets.get) return null;
+  try {
+    var schema = SOURCE_BASES_SCHEMA, tabs = Object.create(null), ranges = [], cellCount = 0;
+    [schema.basesTab, schema.relationsTab, schema.originsTab, schema.projectsTab].forEach(function (name) {
+      var sheet = name === schema.basesTab ? storage.basesSheet :
+        name === schema.relationsTab ? storage.relationsSheet : storage.book.getSheetByName(name);
+      var lastRow = sheet ? sheet.getLastRow() : 0, lastColumn = lastRow ? sheet.getLastColumn() : 0;
+      tabs[name] = { sheet: sheet, lastRow: lastRow, lastColumn: lastColumn };
+      if (!lastRow || lastRow > REGISTRY_CONFIG.maxSourceBaseRows + 1 ||
+          (name === schema.basesTab ? (lastColumn < 11 || lastColumn > 13) : lastColumn !== 4)) return;
+      tabs[name].requested = true;
+      ranges.push("'" + name + "'!A1:" + String.fromCharCode(64 + lastColumn) + lastRow);
+      cellCount += lastRow * lastColumn;
+    });
+    // Large registries still use the per-tab reader to bound peak memory.
+    if (!ranges.length || cellCount > 30000) return tabs;
+    var result = Sheets.Spreadsheets.get(storage.public.id, { ranges: ranges,
+      fields: 'spreadsheetId,properties(defaultFormat(numberFormat(type))),sheets(properties(sheetId,title),data(startRow,startColumn,rowData(values(userEnteredValue,effectiveValue,effectiveFormat(numberFormat(type))))))' });
+    if (!result || result.spreadsheetId !== storage.public.id || !Array.isArray(result.sheets) || result.sheets.length !== ranges.length) return null;
+    var seen = Object.create(null);
+    for (var i = 0; i < result.sheets.length; i++) {
+      var item = result.sheets[i], name = item.properties.title, tab = tabs[name];
+      if (seen[name] || !tab || !tab.requested || tab.sheet.getSheetId() !== item.properties.sheetId) return null;
+      seen[name] = true;
+      if (!Array.isArray(item.data) || item.data.length !== 1) continue;
+      var grid = item.data[0];
+      if (!grid.startRow && !grid.startColumn && Array.isArray(grid.rowData) && grid.rowData.length === tab.lastRow) {
+        var defaultFormat = result.properties && result.properties.defaultFormat;
+        tab.cells = sourceBasesGridValues_(grid.rowData, tab.lastColumn, defaultFormat);
+      }
+    }
+    return tabs;
+  } catch (error) { return null; }
+}
+
+function sourceBasesGridValues_(rows, width, defaultFormat) {
+  var values = [];
+  for (var r = 0; r < rows.length; r++) {
+    var cells = rows[r].values || [], row = [];
+    if (cells.length > width) return null;
+    for (var c = 0; c < width; c++) {
+      var cell = cells[c] || {}, entered = cell.userEnteredValue, value = cell.effectiveValue;
+      if (entered && typeof entered.formulaValue === 'string') return { formula: true };
+      if (!entered && !value) row.push('');
+      else if (value && typeof value.stringValue === 'string') row.push(value.stringValue);
+      else if (value && typeof value.boolValue === 'boolean') row.push(value.boolValue);
+      else if (value && typeof value.numberValue === 'number') {
+        var format = (cell.effectiveFormat && cell.effectiveFormat.numberFormat) || (defaultFormat && defaultFormat.numberFormat);
+        // SpreadsheetApp converts dates and times to Date using the book's timezone.
+        if (format && ['DATE', 'TIME', 'DATE_TIME', 'DURATION'].indexOf(format.type) >= 0) return null;
+        row.push(value.numberValue);
+      } else return null;
+    }
+    values.push(row);
+  }
+  return { values: values };
+}
+
+function sourceBasesReadRows_(sheet, headers, allowLegacyContents, migrationPending, tab) {
+  var cells = tab && tab.cells;
+  var lastRow = cells ? tab.lastRow : sheet.getLastRow(), lastColumn = cells ? tab.lastColumn : sheet.getLastColumn();
   var legacy = !!allowLegacyContents && lastColumn >= 11 && lastColumn < headers.length;
   if (lastRow < 1 || (!legacy && lastColumn !== headers.length)) fail_('STORAGE_SCHEMA', 'Структура служебного реестра отличается от ожидаемой. Требуется проверка администратора.');
   if (lastRow > REGISTRY_CONFIG.maxSourceBaseRows + 1) fail_('STORAGE_LIMIT', 'Служебный реестр превышает лимит 5000 строк. Данные не были перезаписаны.');
-  var range = sheet.getRange(1, 1, lastRow, lastColumn);
-  var formulas = range.getFormulas();
-  if (formulas.some(function (row) { return row.some(function (formula) { return !!formula; }); })) fail_('STORAGE_SCHEMA', 'В служебном реестре обнаружены формулы. Требуется проверка администратора.');
-  var values = range.getValues();
+  var range, hasFormula;
+  if (cells) hasFormula = cells.formula;
+  else {
+    range = sheet.getRange(1, 1, lastRow, lastColumn);
+    hasFormula = range.getFormulas().some(function (row) { return row.some(function (formula) { return !!formula; }); });
+  }
+  if (hasFormula) fail_('STORAGE_SCHEMA', 'В служебном реестре обнаружены формулы. Требуется проверка администратора.');
+  var values = cells ? cells.values : range.getValues();
   var headerLength = lastColumn;
   // A durable marker is the only permission to resume a partially written
   // appended header. Existing A:K headers are never repaired automatically.
@@ -341,8 +409,9 @@ function sourceBasesReadDatabase_(storage) {
     var oldKey = 'SOURCE_BASES_TYPE_MIGRATION_' + storage.public.id;
     var migrationPending = properties.getProperty(migrationKey) === 'pending';
     var oldPending = properties.getProperty(oldKey) === 'pending';
-    var bases = sourceBasesReadRows_(storage.basesSheet, SOURCE_BASES_SCHEMA.basesHeaders, true, migrationPending || oldPending);
-    var links = sourceBasesReadRows_(storage.relationsSheet, SOURCE_BASES_SCHEMA.relationsHeaders);
+    var catalog = storage.catalogRows || {};
+    var bases = sourceBasesReadRows_(storage.basesSheet, SOURCE_BASES_SCHEMA.basesHeaders, true, migrationPending || oldPending, catalog[SOURCE_BASES_SCHEMA.basesTab]);
+    var links = sourceBasesReadRows_(storage.relationsSheet, SOURCE_BASES_SCHEMA.relationsHeaders, false, false, catalog[SOURCE_BASES_SCHEMA.relationsTab]);
     var records = Object.create(null), relations = [], seenLinks = Object.create(null), missingTypes = [], missingContents = [];
     bases.rows.forEach(function (row, index) {
       if (row.every(function (value) { return value === ''; })) return;
@@ -604,10 +673,11 @@ function sourceBaseOrigin_(selectionId, id, name, criteria) {
 
 function sourceBaseReadOrigins_(storage) {
   try {
-    var sheet = storage.book.getSheetByName(SOURCE_BASES_SCHEMA.originsTab);
+    var tab = storage.catalogRows && storage.catalogRows[SOURCE_BASES_SCHEMA.originsTab];
+    var sheet = tab ? tab.sheet : storage.book.getSheetByName(SOURCE_BASES_SCHEMA.originsTab);
     var result = { sheet: sheet, index: Object.create(null), lastRow: 0 };
-    if (!sheet || !sheet.getLastRow()) return result;
-    var data = sourceBasesReadRows_(sheet, SOURCE_BASES_SCHEMA.originsHeaders);
+    if (!sheet || !(tab ? tab.lastRow : sheet.getLastRow())) return result;
+    var data = sourceBasesReadRows_(sheet, SOURCE_BASES_SCHEMA.originsHeaders, false, false, tab);
     result.lastRow = data.lastRow;
     data.rows.forEach(function (row) {
       if (row.every(function (cell) { return cell === ''; })) return;
@@ -718,10 +788,11 @@ function sourceBaseProjectIds_(values) {
 
 function sourceBaseReadProjects_(storage) {
   try {
-    var sheet = storage.book.getSheetByName(SOURCE_BASES_SCHEMA.projectsTab);
+    var tab = storage.catalogRows && storage.catalogRows[SOURCE_BASES_SCHEMA.projectsTab];
+    var sheet = tab ? tab.sheet : storage.book.getSheetByName(SOURCE_BASES_SCHEMA.projectsTab);
     var table = { sheet: sheet, index: Object.create(null), lastRow: 0 };
-    if (!sheet || !sheet.getLastRow()) return table;
-    var data = sourceBasesReadRows_(sheet, SOURCE_BASES_SCHEMA.projectsHeaders);
+    if (!sheet || !(tab ? tab.lastRow : sheet.getLastRow())) return table;
+    var data = sourceBasesReadRows_(sheet, SOURCE_BASES_SCHEMA.projectsHeaders, false, false, tab);
     table.lastRow = data.lastRow;
     data.rows.forEach(function (row, index) {
       if (row.every(function (cell) { return cell === ''; })) return;

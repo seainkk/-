@@ -8,6 +8,7 @@ function makeSegment(id,name,status,category='clients'){return {id,name,category
 backend.segments=[makeSegment('existing-segment','Существующий сегмент','preparation'),makeSegment('empty-segment','Пустой сегмент','no_contacts')];
 const MOCK_KEY='A'.repeat(43);backend.location={hash:'access_key='+MOCK_KEY};backend.urlCalls=0;backend.bootstrapCalls=0;backend.transport=[];backend.revoked=false;
 const api={
+ getServiceLimits(p){return {provider:p.provider,configured:true,active:null,checkedAt:null,items:[],message:'',retryAfterMs:0};},
  getPromouserSettings(){return {configured:!!backend.providerKey,...backend.providerSettings};},
  configurePromouser(p){if(p.apiKey)backend.providerKey=p.apiKey;backend.providerSettings={enabled:p.enabled,autoPayLimitUsd:p.autoPayLimitUsd};return api.getPromouserSettings();},
  getPromouserBalance(){if(backend.providerBalanceError)throw new Error(backend.providerBalanceError);return {balance:'12.50'};},

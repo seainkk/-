@@ -14,12 +14,12 @@ test('the public entry and Apps Script shell identify the service and retain the
     assert.match(page, /<title>Центр мультиканального аутрича<\/title>/);
     assert.match(page, /Центр <(?:b|span)>мультиканального аутрича</);
   }
-  assert.match(app, /id="br-view-sources"[^>]*>Реестр баз<\/button>/);
-  assert.match(app, /id="br-sources-title">Реестр баз<\/h1>/);
+  assert.match(app, /id="br-view-sources"[^>]*>Базы<\/button>/);
+  assert.match(app, /id="br-sources-title">Исходные базы и выборки<\/h1>/);
 });
 
-function fixture({ hash = '#access_key=' + KEY, supported = true, clipboard = true, copyFallback = true, path = '/-/', active = true } = {}) {
-  const events = new Map(), timers = new Map(), sequence = [], created = [], copies = [];
+function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true } = {}) {
+  const events = new Map(), timers = new Map(), sequence = [], created = [];
   let timerId = 0;
   const location = new URL('https://seainkk.github.io' + path + hash);
   const window = { location, addEventListener(name, handler) { events.set(name, handler); } };
@@ -51,25 +51,24 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, clipboard = tr
     }
     return node;
   }
-  const ids = Object.fromEntries(['entry-copy-status', 'entry-copy', 'entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host'].map(id => [id, element()]));
+  const ids = Object.fromEntries(['entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host'].map(id => [id, element()]));
   const body = element('body');
   const document = {
     body, getElementById: id => ids[id],
     createElement(tag) { const node = element(tag); created.push(node); return node; },
-    execCommand(name) { assert.equal(name, 'copy'); const field = created.findLast(node => node.tag === 'textarea' && !node.removed); if (copyFallback) copies.push(field.value); return copyFallback; },
   };
   function Frame() {}
   if (supported) Frame.prototype.credentialless = false;
   const context = vm.createContext({
     window, document, URL, HTMLIFrameElement: Frame,
-    navigator: { userActivation: activation, ...(clipboard ? { clipboard: { async writeText(value) { copies.push(value); } } } : {}) },
+    navigator: { userActivation: activation },
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
   vm.runInContext(script, context, { filename: 'entry/index.html' });
   const currentFrame = () => ids['entry-frame-host'].children[0];
   const app = () => ({ parent: currentFrame()?.contentWindow, postMessage(data, origin) { sent.push({ type: data.type, origin }); } });
-  return { ids, window, body, timers, sequence, created, copies, currentFrame, activation, app, pushes, sent, get backs(){return backs;},
+  return { ids, window, body, timers, sequence, created, currentFrame, activation, app, pushes, sent, get backs(){return backs;},
     event(name, value) { return events.get(name)?.(value); },
     traverse(by) { assert.ok(position + by >= 0 && position + by < states.length); position += by; events.get('popstate')({ state: states[position] }); },
     nav(source, canBack, origin = GOOGLE_ORIGIN) { events.get('message')({ origin, source, data: { type:'bases-registry-navigation', canBack } }); },
@@ -82,7 +81,7 @@ test('missing, malformed and query-only credentials never create a Google iframe
     const f = fixture({ hash });
     assert.equal(f.created.filter(node => node.tag === 'iframe').length, 0);
     assert.equal(f.body.dataset.state, 'locked');
-    assert.equal(f.ids['entry-copy'].hidden, true);
+
     assert.equal(f.timers.size, 0);
   }
   const queryOnly = fixture({ path: '/-/?access_key=' + KEY, hash: '' });
@@ -110,7 +109,7 @@ test('isolation and no-referrer are applied before the fixed Google app navigate
   assert.deepEqual(f.sequence.slice(0, 3).map(event => event[0]), ['isolate', 'navigate', 'append']);
   assert.equal(f.body.dataset.state, 'loading');
   assert.equal(f.ids['entry-frame-host'].hidden, true, 'unconfirmed Google screens stay behind the loading card');
-  assert.equal(f.ids['entry-copy'].disabled, true);
+
 });
 
 test('only a Google-origin message from the current iframe subtree confirms readiness', () => {
@@ -123,7 +122,7 @@ test('only a Google-origin message from the current iframe subtree confirms read
   assert.equal(f.body.dataset.state, 'ready');
   assert.equal(f.ids['entry-card'].hidden, true);
   assert.equal(f.ids['entry-frame-host'].hidden, false);
-  assert.equal(f.ids['entry-copy'].disabled, false);
+
   assert.equal(f.timers.size, 0);
 });
 
@@ -134,20 +133,13 @@ test('a rejected key clears the iframe and never publishes the private credentia
   assert.equal(f.body.dataset.state, 'locked');
   assert.equal(frame.removed, true);
   assert.equal(f.currentFrame(), undefined);
-  assert.equal(f.ids['entry-copy'].hidden, true);
+
   assert.equal(Object.values(f.ids).some(node => node.textContent.includes(KEY)), false);
 });
 
-test('copy shares the entry address without a Google account index, query or visible credential', async () => {
-  for (const clipboard of [true, false]) {
-    const f = fixture({ clipboard, path: '/-/index.html?ignored=1' });
-    f.ready();
-    await f.ids['entry-copy'].listeners.get('click')();
-    assert.deepEqual(f.copies, ['https://seainkk.github.io/-/#access_key=' + KEY]);
-    assert.equal(f.ids['entry-copy-status'].textContent, 'Ссылка скопирована');
-    assert.equal(f.created.filter(node => node.tag === 'textarea' && !node.removed).length, 0);
-    assert.equal(Object.values(f.ids).some(node => node.textContent.includes(KEY)), false);
-  }
+test('copy belongs to service settings and the outer frame delegates clipboard access', () => {
+  assert.doesNotMatch(html, /id="entry-copy"/);
+  assert.equal(fixture().currentFrame().allow, 'clipboard-write');
 });
 
 test('hash changes destroy the old isolation context; a missing key does not navigate again', () => {
@@ -174,7 +166,7 @@ test('a timeout permits an explicit retry and never reports a loaded error page 
   [...f.timers.values()][0].callback();
   assert.equal(f.body.dataset.state, 'error');
   assert.equal(f.ids['entry-retry'].hidden, false);
-  assert.equal(f.ids['entry-copy'].disabled, true);
+
   f.ids['entry-retry'].listeners.get('click')();
   assert.equal(old.removed, true);
   assert.notEqual(f.currentFrame(), old);

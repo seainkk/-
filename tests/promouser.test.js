@@ -44,6 +44,8 @@ function fixture(options={}) {
   UrlFetchApp:{fetch:(url,request)=>{assert.equal(lock,false,'No provider HTTP under global lock');assert.equal(request.headers.key,KEY);assert.equal(request.followRedirects,false);calls.fetch.push({url,request});if(options.transport) return options.transport({url,request,response,calls,now});if(url.endsWith('/api/balance'))return response({balance:'100'});if(url.endsWith('/api/order'))return response({order_id:nextOrder++,type:Number(request.payload.type)});if(url.includes('/api/status?'))return response(options.status||{status:'not_ready_unpaid',order_id:Number(url.split('=').pop()),cost:'0.5'});if(url.endsWith('/api/pay')){const p=JSON.parse(request.payload);return response({status:'success',order_id:Number(p.order_id),charged:'0.5',balance:'99.5'});}if(url.includes('/results/'))return response(options.result||'email\tresult\tprovider\na@example.test\tvalid\tExample Mail');throw new Error('Unexpected endpoint');}},
  });
  vm.runInContext(readFileSync(new URL('../src/Promouser.gs',import.meta.url),'utf8'),c);
+ vm.runInContext(readFileSync(new URL('../src/ServiceSettings.gs',import.meta.url),'utf8'),c);
+ c.registryProjectId_=()=>'numshield';
  function coded(code,message){const e=new Error('['+code+'] '+message);e.registryCode=code;return e;}
  const configure=(extra={})=>c.configurePromouser_({apiKey:KEY,enabled:true,autoPayLimitUsd:0,...extra});
  const queue=(id=A)=>c.queueWorkbookValidation_(context,id,{emailSheetId:1,phoneSheetId:2});
@@ -65,6 +67,56 @@ test('settings keep the API key write-only and retain it on an empty password fi
 
 test('balance probes only the fixed endpoint with a header credential, never query or raw OAuth',()=>{
  const f=fixture();f.configure();assert.deepEqual(plain(f.c.getPromouserBalance_()),{balance:100,currency:'USD'});const call=f.calls.fetch[0];assert.equal(call.url,'https://promouser.com/api/balance');assert.equal(call.url.includes(KEY),false);assert.equal(call.request.method,'get');
+});
+
+test('service settings read the actual Promouser balance, preserve zero and observe the current order limit',()=>{
+ const f=fixture({transport:({response})=>response({balance:'0.00'})});
+ const read=()=>plain(f.c.getServiceLimits_({provider:'promouser'}));
+ assert.equal(read().configured,false);assert.equal(f.calls.fetch.length,0);
+ f.configure({autoPayLimitUsd:5});
+ const first=read();
+ assert.equal(first.active,true);assert.ok(Date.parse(first.checkedAt));
+ assert.deepEqual(first.items.map(i=>[i.value,i.unit]),[[0,'USD'],[5,'USD']]);
+ f.c.configurePromouser_({autoPayLimitUsd:2});
+ assert.equal(read().items[1].value,2);assert.equal(f.calls.fetch.length,1);
+ f.tick(60000);assert.equal(read().active,true);
+ assert.deepEqual(f.calls.fetch.map(call=>[call.request.method,call.url]),Array(2).fill(['get','https://promouser.com/api/balance']));
+ assert.throws(()=>f.c.getServiceLimits_({provider:'promouser',key:KEY}),/INVALID_REQUEST/);
+ assert.throws(()=>f.c.getServiceLimits_({provider:'other'}),/INVALID_REQUEST/);
+});
+
+test('service settings discard a revoked key, preserve a provider cooldown and reject stale credentials',()=>{
+ let mode='ok';
+ const f=fixture({transport:({response})=>{
+   if(mode==='limited')return {...response('busy',429),getAllHeaders:()=>({'Retry-After':'120'})};
+   if(mode==='denied')return response('Unauthorized',401);
+   if(mode==='rotate')f.properties.set('PROMOUSER_API_KEY','new-fake-key');
+   return response({balance:'17.5'});
+ }});
+ const cached=new Map();f.c.CacheService={getScriptCache:()=>({get:k=>cached.get(k),put:(k,v)=>cached.set(k,v)})};
+ f.configure();const read=()=>plain(f.c.getServiceLimits_({provider:'promouser'}));
+ assert.equal(read().items[0].value,17.5);f.tick(1000);
+ mode='denied';assert.throws(()=>f.c.pvApi_(f.c.pvSettings_(f.context),'status',{order_id:'123'}),/PV_AUTH/);
+ const denied=read();assert.equal(denied.active,false);assert.equal(denied.checkedAt,null);
+ assert.equal(denied.items.some(i=>i.label==='Баланс аккаунта'),false);
+ mode='limited';assert.equal(read().retryAfterMs,120000);
+ const attempts=f.calls.fetch.length;f.tick(10000);assert.equal(read().retryAfterMs,110000);assert.equal(f.calls.fetch.length,attempts);
+ f.tick(120000);mode='rotate';const receipt=f.properties.get('PROMOUSER_CONNECTION');
+ assert.throws(read,/PV_CREDENTIAL_CHANGED/);assert.equal(f.properties.get('PROMOUSER_CONNECTION'),receipt);
+});
+
+test('a late successful Promouser balance response cannot supersede a newer credential rejection',()=>{
+ let concurrent=true;
+ const f=fixture({transport:({url,response})=>{
+   if(url.includes('/status?'))return response('unauthorized',401);
+   if(concurrent)assert.throws(()=>f.c.pvApi_(f.c.pvSettings_(f.context),'status',{order_id:'123'}),/PV_AUTH/);
+   return response({balance:'13.50'});
+ }});
+ f.configure();
+ assert.throws(()=>f.c.getPromouserBalance_(),/PV_AUTH/);
+ assert.equal(f.c.pvConnection_(f.context).rejected,true);
+ concurrent=false;
+ assert.equal(f.c.getServiceLimits_({provider:'promouser'}).items[0].value,13.5);
 });
 
 test('a normal order is a quote-only multipart upload; no force or top-up exists',()=>{

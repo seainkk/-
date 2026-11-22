@@ -163,14 +163,18 @@ function coldyRequestOptions_(method, key) {
 function coldyGetBatch_(context, paths, guard) {
   if (!Array.isArray(paths) || !paths.length || paths.length > COLDY.readBatchSize || typeof guard !== 'function')
     fail_('INVALID_REQUEST', 'Некорректная группа запросов Coldy.');
-  var scope, seen = new Set();
+  var scope, summaryCampaign, seen = new Set();
   var addresses = paths.map(function (path) {
     var address = coldyPath_('GET',path), accounts = /^\/accounts\/[1-9]\d*$/.test(address);
-    var campaign = address.match(/^\/campaigns\/([\w-]+)$/) || address.match(/^\/leads\/campaign\/([\w-]+)\?limit=\d+&offset=\d+$/);
+    var summary = address.match(/^\/analytics\/campaigns\/([\w-]+)\/summary\?period=all&type=event$/);
+    if (summary) summaryCampaign = summary[1];
+    var campaign = summary || address.match(/^\/campaigns\/([\w-]+)$/) || address.match(/^\/leads\/campaign\/([\w-]+)\?limit=\d+&offset=\d+$/);
     var owner = accounts ? 'accounts' : campaign && campaign[1].toLowerCase();
     if (!owner || scope && owner !== scope || seen.has(address)) fail_('INVALID_REQUEST', 'Запросы Coldy относятся к разным областям или повторяются.');
     scope = owner; seen.add(address); return address;
   });
+  if (summaryCampaign && (addresses.length !== 2 || !seen.has('/campaigns/' + summaryCampaign)))
+    fail_('INVALID_REQUEST','Сводка должна запрашиваться вместе с данными той же рассылки.');
   function failure(error) {
     if (!error || ['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_RESPONSE','COLDY_NOT_FOUND','COLDY_FORBIDDEN','COLDY_CONFLICT','COLDY_PROVIDER'].indexOf(error.registryCode) < 0) throw error;
     return {error:error};

@@ -30,7 +30,7 @@ function fixture(options = {}) {
     Utilities: { getUuid: () => 'uuid-' + String(++uuid).padStart(24, '0') },
     SpreadsheetApp: { openById: id => { if (!books.has(id)) throw new Error('missing workbook'); return books.get(id); } },
   });
-  for (const filename of ['Config.gs', 'Code.gs', 'SegmentActions.gs', 'Promouser.gs', 'ColdyCampaigns.gs']) vm.runInContext(readFileSync(new URL('../src/' + filename, import.meta.url), 'utf8'), context, { filename });
+  for (const filename of ['Config.gs', 'Code.gs', 'SegmentActions.gs', 'Promouser.gs', 'Coldy.gs', 'ColdyCampaigns.gs']) vm.runInContext(readFileSync(new URL('../src/' + filename, import.meta.url), 'utf8'), context, { filename });
   const properties = new Map();
   context.authorize_ = () => { if (!state.access) context.fail_('LINK_ACCESS_REQUIRED', 'link revoked'); return { rootId: state.rootId, properties: {getProperty:key=>properties.get(key),setProperty:(key,value)=>properties.set(key,value)} }; };
   context.digest_ = digest;
@@ -339,6 +339,79 @@ test('provider failures do not turn analytics into fake zeroes or leak old succe
   const f = fixture({ api: ({ path, context }) => { if (failSummary && path.startsWith('/analytics/')) context.fail_('COLDY_UNAVAILABLE', 'provider unavailable'); } });
   f.bind(); f.context.refreshColdyMailings_({ segmentId: SEGMENT }); failSummary = true;
   const result = plain(f.context.refreshColdyMailings_({ segmentId: SEGMENT })); assert.equal(result.state, 'partial'); assert.equal(result.totals.leads, 2); assert.equal(result.totals.sent, 15); assert.equal(result.campaigns[0].stale, true); assert.equal(result.freshness, 'stale');
+});
+
+function nativeAnalytics(f, override) {
+  const groups = [];
+  const settings = f.context.coldySettings_;
+  f.context.coldySettings_ = scope => ({...settings(scope),key:'synthetic-analytics-key'});
+  f.context.Drive = {Files:{get(id) { assert.equal(id,ROOT); return {id,mimeType:'application/vnd.google-apps.folder',trashed:false}; }}};
+  f.context.UrlFetchApp = {
+    fetch() { assert.fail('The native path must use one fetchAll per campaign'); },
+    fetchAll(requests) {
+      const paths=Array.from(requests,request=>{
+        assert.equal(request.method,'get');assert.equal(request.payload,undefined);assert.equal(request.followRedirects,false);
+        assert.equal(request.headers.Authorization,'Bearer synthetic-analytics-key');
+        assert.ok(request.url.startsWith(f.context.COLDY.base));return request.url.slice(f.context.COLDY.base.length);
+      });
+      const id=paths[0].split('/').pop();
+      assert.deepEqual(paths,['/campaigns/'+id,'/analytics/campaigns/'+id+'/summary?period=all&type=event']);groups.push(id);
+      const reply=(body,status=200,headers={})=>({getResponseCode:()=>status,getContentText:()=>JSON.stringify(body),getAllHeaders:()=>headers});
+      return paths.map((path,index)=>override?.({id,path,index,reply})||reply(index ? {campaign_id:id,interested:2} : f.campaigns.get(id)));
+    }
+  };
+  return groups;
+}
+
+test('live metrics for two selected campaigns use two transport rounds instead of four single reads; cached opening uses zero', t=>{
+  const f=fixture();f.bind();f.bind({campaignId:CAMPAIGN2});
+  const initial=f.calls.api.length, sequential=f.context.refreshColdyMailings_({segmentId:SEGMENT});
+  assert.equal(f.calls.api.length-initial,4);
+  const groups=nativeAnalytics(f);
+  const cached=f.context.coldySegmentMailings_(f.context.authorize_(),SEGMENT);
+  assert.deepEqual(cached.totals,sequential.totals);assert.deepEqual(groups,[]);
+  const live=f.context.refreshColdyMailings_({segmentId:SEGMENT});
+  assert.deepEqual(live.totals,sequential.totals);assert.equal(live.state,'connected');
+  assert.deepEqual(groups.sort(),[CAMPAIGN,CAMPAIGN2]);assert.equal(f.calls.api.length-initial,4);
+  t.diagnostic('Two selected campaigns: 4 fallback GET rounds, 2 native fetchAll rounds, 0 provider reads on cached opening.');
+});
+
+test('a summary limit preserves new sent and reply counts and honours the provider cooldown; foreign summaries stay unknown',()=>{
+  const f=fixture();f.bind();let mode='foreign';
+  const groups=nativeAnalytics(f,({index,reply})=>index ? mode==='foreign' ? reply({campaign_id:CAMPAIGN2,interested:999}) :
+    mode==='limited' ? reply({},429,{'Retry-After':'240'}) : null : null);
+  assert.deepEqual(plain(f.context.refreshColdyMailings_({segmentId:SEGMENT}).totals),{sent:15,replies:4,leads:null});
+  mode='valid';f.context.refreshColdyMailings_({segmentId:SEGMENT});
+  mode='limited';f.campaigns.get(CAMPAIGN).total_sent=22;
+  const partial=f.context.refreshColdyMailings_({segmentId:SEGMENT});
+  assert.ok(partial.retryAfterMs>239000);assert.equal(partial.campaigns[0].stale,true);
+  assert.deepEqual(plain(partial.totals),{sent:22,replies:4,leads:2});
+  f.context.refreshColdyMailings_({segmentId:SEGMENT,monitor:true});assert.equal(groups.length,3);
+});
+
+test('a changed binding or revoked access inside native analytics reads rejects both returned responses before commit',()=>{
+  for(const mode of ['removed','changed','revoked','key']){
+    const f=fixture(), binding=f.bind();
+    nativeAnalytics(f,({index})=>{
+      if(index!==1)return;
+      if(mode==='revoked')f.state.access=false;
+      else if(mode==='key')f.state.credentialHash='different';
+      else{
+        const registry=[...f.storage.values()].find(value=>value.bindings);
+        if(mode==='removed')registry.bindings=[];else registry.bindings.find(item=>item.id===binding.id).revision++;
+      }
+    });
+    assert.throws(()=>f.context.refreshColdyMailings_({segmentId:SEGMENT}),/COLDY_BINDING_MISSING|COLDY_BINDING_CHANGED|LINK_ACCESS_REQUIRED|COLDY_CREDENTIAL_CHANGED/);
+    assert.equal(f.calls.saves.filter(info=>info.kind==='campaignanalytics').length,0);
+  }
+});
+
+test('the batch transport accepts an analytics summary only together with the details of that same campaign',()=>{
+  const f=fixture(),s='/analytics/campaigns/'+CAMPAIGN+'/summary?period=all&type=event',groups=nativeAnalytics(f);
+  for(const paths of [[s],['/campaigns/'+CAMPAIGN2,s],['/leads/campaign/'+CAMPAIGN+'?limit=200&offset=0',s],
+    ['/campaigns/'+CAMPAIGN,s.replace('period=all','period=7d')]])
+    assert.throws(()=>f.context.coldyGetBatch_(f.context.authorize_(),paths,()=>{}),/INVALID_REQUEST/);
+  assert.deepEqual(groups,[]);
 });
 
 test('two monitoring tabs reuse an active refresh and its recently saved metrics', () => {

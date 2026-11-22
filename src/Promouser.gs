@@ -635,22 +635,59 @@ function pvSettingsPublic_(settings) { return { configured: !!settings.key, enab
 function pvRequireKey_(settings) { if (!settings.key) fail_('PV_KEY_REQUIRED', 'Подключите API-ключ Promouser в настройках.'); }
 function pvConnection_(context) { try { return JSON.parse(context.properties.getProperty(PROMOUSER.connectionProperty) || 'null'); } catch (error) { return null; } }
 function pvProbe_(context, settings) {
-  var response = pvApi_(settings, 'balance', null), balance = response && pvMoney_(response.balance);
+  function currentScope() {
+    var current = authorize_();
+    if (current.rootId !== context.rootId) fail_('SOURCE_CHANGED','Область доступа изменилась.');
+    if (pvSettings_(current).key !== settings.key) fail_('PV_CREDENTIAL_CHANGED','Изменился ключ Promouser. Обновите настройки.');
+    return current;
+  }
+  var previous = currentScope().properties.getProperty(PROMOUSER.connectionProperty);
+  var response = pvApi_(settings, 'balance', null);
+  var balance = response && pvMoney_(response.balance);
   if (balance === null || balance === undefined) fail_('PV_RESPONSE', 'Promouser не подтвердил баланс аккаунта.');
-  authorize_(); context.properties.setProperty(PROMOUSER.connectionProperty, JSON.stringify({ keyHash: digest_(settings.key), at: pvNow_() }));
+  locked_(function () {
+    var current = currentScope(), latest = pvConnection_(current);
+    if (latest && latest.rejected && current.properties.getProperty(PROMOUSER.connectionProperty) !== previous)
+      fail_('PV_AUTH','Promouser отклонил ключ во время проверки баланса.');
+    current.properties.setProperty(PROMOUSER.connectionProperty, JSON.stringify({rootId:current.rootId,keyHash:digest_(settings.key),at:pvNow_(),balance:balance}));
+  });
   return { balance: balance, currency: 'USD' };
 }
 
 function pvApi_(settings, operation, payload) {
   pvRequireKey_(settings);
   if (['balance', 'order', 'status', 'pay'].indexOf(operation) === -1) fail_('INVALID_REQUEST', 'Неподдерживаемое действие Promouser.');
+  var context = authorize_(), receipt = context.properties.getProperty(PROMOUSER.connectionProperty);
+  if (pvSettings_(context).key !== settings.key) fail_('PV_CREDENTIAL_CHANGED','Ключ Promouser изменился перед запросом.');
   var address = PROMOUSER.base + '/api/' + operation, options = { method: operation === 'balance' || operation === 'status' ? 'get' : 'post', headers: { key: settings.key }, muteHttpExceptions: true, followRedirects: false };
   if (operation === 'status') { if (!payload || !pvOrderId_(payload.order_id)) fail_('INVALID_REQUEST', 'Некорректный номер проверки.'); address += '?order_id=' + encodeURIComponent(String(payload.order_id)); }
   if (operation === 'pay') { options.contentType = 'application/json'; options.payload = JSON.stringify({ order_id: String(payload.order_id) }); }
   if (operation === 'order') options.payload = payload;
   var response = pvFetch_(address, options), status = response.getResponseCode(), parsed;
-  try { parsed = JSON.parse(response.getContentText()); } catch (error) { fail_('PV_RESPONSE', 'Promouser вернул неподдерживаемый ответ.'); }
-  if (status < 200 || status >= 300 || !parsed || typeof parsed !== 'object' || parsed.error) pvProviderFailure_(status, parsed && parsed.error);
+  if (status === 429 && operation === 'balance') {
+    var headers = typeof response.getAllHeaders === 'function' ? response.getAllHeaders() : {};
+    var header = Object.keys(headers || {}).find(function (name) { return name.toLowerCase() === 'retry-after'; });
+    var retry = header && String(headers[header]), delay = retry && (/^\d+(?:\.\d+)?$/.test(retry) ? Number(retry)*1000 : Date.parse(retry)-Date.now());
+    var limited = registryError_('PV_RATE_LIMIT','Promouser просит снизить частоту запросов.');
+    limited.retryAfterMs = Number.isFinite(delay) && delay > 0 ? Math.min(86400000,Math.ceil(delay)) : 60000;
+    throw limited;
+  }
+  if (status !== 401) {
+    try { parsed = JSON.parse(response.getContentText()); } catch (error) { fail_('PV_RESPONSE', 'Promouser вернул неподдерживаемый ответ.'); }
+  }
+  if (status < 200 || status >= 300 || !parsed || typeof parsed !== 'object' || parsed.error) {
+    try { pvProviderFailure_(status, parsed && parsed.error); }
+    catch (error) {
+      if (error.registryCode === 'PV_AUTH') locked_(function () {
+        var current = authorize_();
+        if (current.rootId === context.rootId && pvSettings_(current).key === settings.key &&
+            current.properties.getProperty(PROMOUSER.connectionProperty) === receipt) {
+          current.properties.setProperty(PROMOUSER.connectionProperty, JSON.stringify({rejected:true,at:pvNow_(),revision:pvUuid_()}));
+        }
+      });
+      throw error;
+    }
+  }
   return parsed;
 }
 function pvCreateOrder_(settings, job) {
