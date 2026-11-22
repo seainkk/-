@@ -16,7 +16,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const iterator = values => { let index = 0; return { hasNext: () => index < values.length, next: () => values[index++] }; };
 
 function fixture(options = {}) {
-  const calls = { folders: [], files: [], opened: [], ranges: [], tracking: [], trackingSnapshots: 0, metadataScans: [], rootFileScans: 0 };
+  const calls = { folders: [], parents: [], files: [], opened: [], ranges: [], tracking: [], trackingSnapshots: 0, metadataScans: [], rootFileScans: 0 };
   const propertyValues = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, SEGMENTS_FOLDER_ID: SOURCE, SOURCE_BASES_STORAGE_ID: SERVICE, ALLOWED_EMAILS: MEMBER, ADMIN_EMAILS: MEMBER, ...options.properties }));
   const propertyStore = { getProperty: key => propertyValues.get(key) ?? null, getProperties: () => Object.fromEntries(propertyValues) };
   const folderRows = [
@@ -30,7 +30,7 @@ function fixture(options = {}) {
   const fileMap = new Map();
   for (const row of folderRows) folderMap.set(row.id, {
     getId: () => row.id, getName: () => row.name, isTrashed: () => !!row.trashed,
-    getParents: () => iterator((row.actualParents || row.parents).map(id => folderMap.get(id)).filter(Boolean)),
+    getParents: () => { calls.parents.push(row.id); return iterator((row.actualParents || row.parents).map(id => folderMap.get(id)).filter(Boolean)); },
     getFolders: () => iterator(folderRows.filter(child => child.parents.includes(row.id)).map(child => folderMap.get(child.id))),
     getFilesByType: () => {
       calls.metadataScans.push(row.id);
@@ -86,8 +86,69 @@ function fixture(options = {}) {
     return snapshot || context.segmentReadTrackingSnapshot_();
   };
   if (options.limits) context.REGISTRY_CONFIG = Object.freeze({ ...context.REGISTRY_CONFIG, ...options.limits });
-  return { context, calls, dashboard: request => plain(context.getSegmentsDashboard(request)), mailings: id => plain(context.getSegmentMailings({ segmentId: id ?? SEGMENT })) };
+  return { context, calls, folderRows, propertyValues, dashboard: request => plain(context.getSegmentsDashboard(request)), mailings: id => plain(context.getSegmentMailings({ segmentId: id ?? SEGMENT })) };
 }
+
+function cachedMailingsFixture(change) {
+  const f = fixture(), c = f.context;
+  for (const name of ['Coldy.gs','ColdyCampaigns.gs']) vm.runInContext(readFileSync(sourceDir+name,'utf8'),c);
+  const privateFolder = 'coldy_private_123456', registryId = 'binding_journal_123456';
+  const root = {id:ROOT,mimeType:'application/vnd.google-apps.folder',parents:[]};
+  const folder = {id:privateFolder,mimeType:root.mimeType,parents:[ROOT],appProperties:{registryPrivateRole:'coldy_folder',registryColdyRoot:ROOT}};
+  const metadata = new Map([[ROOT,root],[privateFolder,folder]]), files = new Map(), reads = [], gets = [];
+  const hash = c.digest_('fake'), bindings = [1,2].map(n => ({id:'binding-'+n,revision:1,segmentId:SEGMENT,
+    campaignId:'550e8400-e29b-41d4-a716-44665544000'+n,campaignName:'Test '+n}));
+  f.propertyValues.set(c.COLDY.keyProperty,'fake'); f.propertyValues.set(c.COLDY.folderProperty,privateFolder);
+  function file(kind,owner,id,data) {
+    const index = 'COLDY_JSON_'+c.digest_(JSON.stringify([ROOT,kind,owner]));
+    f.propertyValues.set(index,id);
+    metadata.set(id,{id,version:'1',mimeType:'application/json',parents:[privateFolder],appProperties:{registryPrivateRole:'coldy_state',
+      registryColdyRoot:ROOT,registryColdyKind:kind,registryColdyOwnerHash:c.digest_(owner)}});
+    files.set(id,{version:1,rootId:ROOT,kind,owner,data});
+  }
+  file('campaignbindings',hash,registryId,{credentialHash:hash,bindings,receipts:[]});
+  bindings.forEach((binding,index) => file('campaignanalytics',c.digest_(hash+'|'+binding.campaignId),'campaign_counts_000'+index,
+    {campaignId:binding.campaignId,credentialHash:hash,sent:10,replies:2,leads:1,updatedAt:new Date().toISOString()}));
+  c.Drive = {Files:{get:id=>{gets.push(id);return metadata.get(id);}}};
+  c.DriveApp.getFileById = id => ({getBlob:()=>({getDataAsString:()=>{
+    const text = JSON.stringify(files.get(id)); reads.push(id);
+    if (id === 'campaign_counts_0001' && change) change({f,metadata,files,registryId,privateFolder}); return text;
+  }})});
+  return {f,reads,gets,registryId};
+}
+
+test('the first two saved campaigns need two fresh folder checks, four parent reads and a single bindings blob',() => {
+  const {f,reads,gets,registryId} = cachedMailingsFixture();
+  const value = f.mailings();
+  assert.deepEqual(value.totals,{sent:20,replies:4,leads:2});
+  assert.deepEqual(f.calls.folders,[ROOT,SOURCE,SEGMENT,ROOT,SOURCE,SEGMENT]);
+  assert.deepEqual(f.calls.parents,[SOURCE,SEGMENT,SOURCE,SEGMENT]);
+  assert.deepEqual(reads,[registryId,'campaign_counts_0000','campaign_counts_0001']);
+  assert.equal(gets.filter(id=>id===registryId).length,2);
+});
+
+test('the cached mailings response rejects an unbound campaign, moved folders, or a revoked key before publication',() => {
+  for (const [change,expected] of [
+    [({files,metadata,registryId})=>{files.get(registryId).data.bindings.pop();metadata.get(registryId).version='2';},/COLDY_BINDING_CHANGED/],
+    [({f})=>{f.folderRows.find(row=>row.id===SEGMENT).parents=[ROOT];},/OUTSIDE_SEGMENTS/],
+    [({f})=>{f.folderRows.find(row=>row.id===SOURCE).trashed=true;},/SEGMENTS_UNAVAILABLE/],
+    [({metadata,privateFolder})=>{metadata.get(privateFolder).parents=['other_root_123456'];},/OUTSIDE_REGISTRY/],
+    [({f})=>f.propertyValues.set('COLDY_API_KEY','changed'),/COLDY_CREDENTIAL_CHANGED/],
+    [({f})=>f.propertyValues.set('SHARED_ACCESS_KEY_SHA256','rotated'),/LINK_ACCESS_REQUIRED|LINK_SETUP_REQUIRED/]
+  ]) {
+    const {f}=cachedMailingsFixture(change);
+    assert.throws(f.mailings,expected);
+  }
+});
+
+test('a concurrent change to another segment rechecks the binding journal and preserves the same selected totals',() => {
+  const {f,reads,registryId}=cachedMailingsFixture(({files,metadata,registryId})=>{
+    files.get(registryId).data.bindings.push({id:'other',segmentId:'other_segment_123456',campaignId:'550e8400-e29b-41d4-a716-446655440009'});
+    metadata.get(registryId).version='2';
+  });
+  assert.deepEqual(f.mailings().totals,{sent:20,replies:4,leads:2});
+  assert.equal(reads.filter(id=>id===registryId).length,2);
+});
 
 function sourceFile(id = 'business_sheet_1234567890', sheets = [], extra = {}) {
   return { id, name: id, parents: [SEGMENT], sheets, ...extra };

@@ -321,7 +321,7 @@ function coldyInput_(value, allowed) { object_(value); if (Object.keys(value).so
 function coldyPropertyJson_(properties, key) { try { return JSON.parse(properties.getProperty(key) || 'null'); } catch (error) { return null; } }
 
 /** Callers hold their operation lock/lease. These helpers deliberately do not nest locked_. */
-function coldyLoad_(context, kind, owner) {
+function coldyLoad_(context, kind, owner, observation) {
   // The final state check reads fresh root, folder and file metadata immediately before the blob.
   var scope = coldyStoreScope_(context, kind, owner, false), properties = scope.context.properties;
   var folderId = properties.getProperty(COLDY.folderProperty), fileId = properties.getProperty(scope.indexKey);
@@ -332,6 +332,14 @@ function coldyLoad_(context, kind, owner) {
     return null;
   }
   var file = fileId != null ? coldyStateCheck_(scope, folder, fileId) : coldyStoreFind_(scope, folder);
+  if (observation && fileId && folderId && file && /^\d+$/.test(String(file.version))) {
+    // A strong Drive version covers the JSON and metadata. The ordinary read verifies its envelope.
+    var version = String(file.version);
+    observation.unchanged = function () {
+      if (properties.getProperty(COLDY.folderProperty) !== folderId || properties.getProperty(scope.indexKey) !== fileId) return false;
+      return String(coldyStateCheck_(scope,folder,fileId).version) === version;
+    };
+  }
   return file ? coldyReadEnvelope_(scope, file).data : null;
 }
 

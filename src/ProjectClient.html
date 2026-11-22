@@ -115,7 +115,7 @@
   function segmentReadFailed(context,error,metricsOnly){
     const parsed=failure(error);
     context[metricsOnly?'metricsError':'error']=parsed.message;context.previewNames=null;
-    if(/^(LINK_|OUTSIDE_|COLDY_(AUTH|FORBIDDEN|CREDENTIAL_CHANGED|SCOPE_CHANGED)$|SOURCE_CHANGED$|SEGMENT_NOT_FOUND$)/.test(parsed.code)){
+    if(/^(LINK_|OUTSIDE_|COLDY_(AUTH|FORBIDDEN|CREDENTIAL_CHANGED|SCOPE_CHANGED|BINDING_CHANGED|BINDING_MISSING)$|SOURCE_CHANGED$|SEGMENT_NOT_FOUND$)/.test(parsed.code)){
       discardCampaignHints();context.sequence++;context.loading=false;context.metricsLoading=false;
       context.data=null;context.draft=null;context.mailings=null;context.loadedAt=0;render();notify();
     }
