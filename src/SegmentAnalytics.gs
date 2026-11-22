@@ -13,6 +13,7 @@ function getSegmentsDashboard_(request) {
         (input.includeAnalysis !== undefined && typeof input.includeAnalysis !== 'boolean')) fail_('INVALID_REQUEST', 'Некорректный режим загрузки сегментов.');
     var projection = getSegmentsMetadata_(context, true);
     if (projection.state !== 'ready') return projection;
+    segmentDashboardMailings_(context, projection.items);
     if (input.includeAnalysis === false) return segmentDashboardOverview_(context, projection);
     var budget = segmentAnalysisBudget_(), trackingRequest = { loaded: false, snapshot: null };
     projection.items = projection.items.map(function (item) {
@@ -21,6 +22,29 @@ function getSegmentsDashboard_(request) {
     projection.generatedAt = new Date().toISOString();
     return projection;
   });
+}
+
+/** Read one team-wide binding journal. Each card receives only its counts. */
+function segmentDashboardMailings_(context, items) {
+  if (!items.length || typeof coldyCampaignRegistry_ !== 'function') return;
+  var counts = new Map(), registry;
+  items.forEach(function (item) { counts.set(item.id, { linked: 0, activeAtBinding: 0 }); });
+  try {
+    registry = coldyCampaignRegistry_(context);
+    registry.bindings.forEach(function (binding) {
+      var summary = counts.get(binding.segmentId);
+      if (!summary) return;
+      summary.linked++;
+      if (['Active', 'Draft', 'Paused', 'Completed'].indexOf(binding.campaignStatus) < 0) summary.activeAtBinding = null;
+      else if (summary.activeAtBinding !== null && binding.campaignStatus === 'Active') summary.activeAtBinding++;
+    });
+    if (registry.credentialHash !== coldyCredentialHash_(context)) return;
+  } catch (error) {
+    // A disconnected provider or unreadable journal leaves counts unknown.
+    if (['SOURCE_CHANGED', 'COLDY_SCOPE_CHANGED', 'OUTSIDE_REGISTRY'].indexOf(error.registryCode) >= 0 || /^LINK_/.test(error.registryCode || '')) throw error;
+    return;
+  }
+  items.forEach(function (item) { item.coldyMailings = counts.get(item.id); });
 }
 
 /** Render the usable catalog before reading contact-presence data from books. */

@@ -68,14 +68,14 @@ function saveProjectInfrastructureSelection_(request) {
     var context = authorize_(), settings = coldySettings_(context);
     if (!settings.configured) fail_('COLDY_KEY_REQUIRED', 'Сначала подключите Coldy.');
     var requestHash = digest_(JSON.stringify(['monitoring-save:v1', input.scopeToken, input.expectedRevision, accountIds]));
-    return locked_(function () {
+    var confirmation = locked_(function () {
       var fresh = projectInfraCurrent_(context, settings.credentialHash), currentSettings = coldySettings_(fresh);
       var state = projectMonitoringRead_(fresh, currentSettings), publicState = projectMonitoringPublic_(fresh, state);
       if (input.scopeToken !== publicState.scopeToken) fail_('COLDY_MONITORING_SCOPE_CHANGED', 'Подключение или реестр изменились. Обновите выбор ящиков.');
       var receipt = state.receipts.filter(function (item) { return item.requestId === input.requestId; })[0];
       if (receipt) {
         if (receipt.requestHash !== requestHash) fail_('COLDY_MONITORING_REQUEST_MISMATCH', 'Этот запрос уже использован для другого выбора. Продолжите прежний запрос.');
-        return projectMonitoringResult_(fresh, currentSettings, state, true, receipt.revision);
+        return { replayed: true, savedRevision: receipt.revision };
       }
       if (input.expectedRevision !== state.revision) fail_('COLDY_MONITORING_STALE', 'Выбор ящиков уже изменён коллегой. Обновите список и проверьте отметки.');
       if (state.revision >= Number.MAX_SAFE_INTEGER - 1) fail_('COLDY_STORAGE', 'Версия выбора ящиков требует проверки.');
@@ -87,17 +87,15 @@ function saveProjectInfrastructureSelection_(request) {
         receipts: state.receipts.concat([{ requestId: input.requestId, requestHash: requestHash, revision: state.revision + 1 }]).slice(-PROJECT_MONITORING.maxReceipts) };
       projectInfraCurrent_(fresh, currentSettings.credentialHash);
       coldySave_(fresh, 'monitoring', projectMonitoringOwner_(currentSettings.credentialHash), next);
-      return projectMonitoringResult_(fresh, currentSettings, next, false, next.revision);
+      return { replayed: false, savedRevision: next.revision };
     });
+    var current = projectInfraCurrent_(context, settings.credentialHash);
+    var data = projectInfraPublic_(current, projectInfraRead_(current, settings));
+    if (data.monitoring.scopeToken !== input.scopeToken) fail_('COLDY_MONITORING_SCOPE_CHANGED', 'Проект или подключение изменились. Обновите выбор ящиков.');
+    var selection = { revision: data.monitoring.revision, accountIds: data.monitoring.accountIds,
+      configured: data.monitoring.configured, scopeToken: data.monitoring.scopeToken };
+    return { selection: selection, infrastructure: data, replayed: confirmation.replayed, savedRevision: confirmation.savedRevision };
   });
-}
-
-function projectMonitoringResult_(context, settings, state, replayed, savedRevision) {
-  var fresh = projectInfraCurrent_(context, settings.credentialHash), inventory = projectInfraRead_(fresh, settings);
-  var result = { selection: projectMonitoringPublic_(fresh, state), infrastructure: projectInfraPublic_(fresh, inventory),
-    replayed: replayed, savedRevision: savedRevision };
-  projectInfraCurrent_(fresh, settings.credentialHash);
-  return result;
 }
 
 function projectMonitoringIds_(input, code) {
