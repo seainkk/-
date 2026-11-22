@@ -138,7 +138,8 @@ function refreshProjectInfrastructure_(request) {
 }
 
 function projectInfraDetails_(context, settings, state) {
-  var parallel = typeof UrlFetchApp.fetchAll === 'function', groupSize = parallel ? 5 : 1, firstIndex = state.cursorIndex;
+  var parallel = typeof UrlFetchApp !== 'undefined' && typeof UrlFetchApp.fetchAll === 'function';
+  var groupSize = parallel ? COLDY.readBatchSize : 1, firstIndex = state.cursorIndex;
   var deadline = Date.now() + (parallel ? 45000 : PROJECT_INFRASTRUCTURE.detailBudgetMillis);
   var indexes = Object.create(null);
   state.accounts.forEach(function (item, index) { indexes[item.id] = index; });

@@ -4,7 +4,7 @@ var COLDY = Object.freeze({
   keyProperty: 'COLDY_API_KEY', connectionProperty: 'COLDY_CONNECTION',
   autoProperty: 'COLDY_AUTO_VALIDATE_EMAILS', providerProperty: 'EMAIL_VALIDATION_PROVIDER',
   folderProperty: 'COLDY_STATE_FOLDER_ID', cacheMillis: 300000,
-  maxJsonCharacters: 15000000, maxResponseCharacters: 12000000,
+  maxJsonCharacters: 15000000, maxResponseCharacters: 12000000, readBatchSize: 5,
   fields: 'id,mimeType,parents,trashed,appProperties,version'
 });
 
@@ -161,7 +161,7 @@ function coldyRequestOptions_(method, key) {
 
 /** A bounded read of verified mailbox IDs or pages of one verified campaign. No writes, redirects or directory queries. */
 function coldyGetBatch_(context, paths, guard) {
-  if (!Array.isArray(paths) || !paths.length || paths.length > 5 || typeof guard !== 'function')
+  if (!Array.isArray(paths) || !paths.length || paths.length > COLDY.readBatchSize || typeof guard !== 'function')
     fail_('INVALID_REQUEST', 'Некорректная группа запросов Coldy.');
   var scope, seen = new Set();
   var addresses = paths.map(function (path) {
@@ -175,7 +175,7 @@ function coldyGetBatch_(context, paths, guard) {
     if (!error || ['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_RESPONSE','COLDY_NOT_FOUND','COLDY_FORBIDDEN','COLDY_CONFLICT','COLDY_PROVIDER'].indexOf(error.registryCode) < 0) throw error;
     return {error:error};
   }
-  if (addresses.length === 1 || typeof UrlFetchApp.fetchAll !== 'function') {
+  if (addresses.length === 1 || typeof UrlFetchApp === 'undefined' || typeof UrlFetchApp.fetchAll !== 'function') {
     var pause = null;
     return addresses.map(function (address) {
       if (pause) return pause;

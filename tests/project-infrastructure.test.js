@@ -228,6 +228,26 @@ test('a failed fetchAll never reissues its URLs synchronously or includes a prov
   assert.equal(JSON.stringify([r,f.state()]).includes('internal sender'),false);
 });
 
+test('a later unauthorized batch response revokes connection even when an earlier result was throttled',()=>{
+  const accounts=[account(1),account(2),account(3)];
+  let invalid=false;
+  const f=fixture({accounts,transport:({path,response,defaultResponse})=>invalid&&path==='/accounts/3'?response({},401):
+    invalid&&path==='/accounts/2'?response({},429,{'Retry-After':'20'}):defaultResponse()});
+  f.configure();parallelReads(f);f.refresh();assert.ok(f.properties.get(f.c.COLDY.connectionProperty));
+  invalid=true;
+  const r=f.refresh();assert.equal(r.error.code,'COLDY_AUTH');assert.equal(r.connected,false);
+  assert.equal(f.properties.has(f.c.COLDY.connectionProperty),false);
+});
+
+test('batch transport rejects mixed campaigns, directory reads and unrelated endpoints before calling the provider',()=>{
+  const f=fixture();f.configure();const groups=parallelReads(f);
+  for (const paths of [[],['/accounts'],['/accounts/1','/campaigns/'+ACTIVE_ONE],['/email-verifications/5'],
+    ['/campaigns/'+ACTIVE_ONE,'/leads/campaign/'+ACTIVE_TWO+'?limit=200&offset=0'],['/accounts/1','/accounts/1']]) {
+    assert.throws(()=>f.c.coldyGetBatch_(f.c.authorize_(),paths,()=>{}),/INVALID_REQUEST/);
+  }
+  assert.equal(groups.length,0);assert.equal(f.calls.http.length,0);
+});
+
 test('after a long mailbox pass the same generation rechecks membership once without restarting its sender details',()=>{
   const f=capacityFixture([[1,[ACTIVE_ONE]],[2,[ACTIVE_ONE]],[3,[]]]);parallelReads(f);
   let r=f.refresh({includeCapacity:true});const generation=f.state().generation;
