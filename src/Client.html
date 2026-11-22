@@ -1380,7 +1380,7 @@
   try{if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;lockAccess(null);accessMessage='Ссылка изменилась. Проверяем доступ…';renderAccess();pendingAccessChange=true;flushPendingView();});}catch(ignored){}
   function peekProjectSegments(){
     if(!accessReady||dashboard?.state!=='ready'||!lastDashboardLoaded||pendingSyncViews.has('segments')||Date.now()-lastDashboardLoaded>60000)return null;
-    return {state:dashboard.state,source:dashboard.source,segments:dashboard.items.map(({id,name,category,url})=>({id,name,category,url}))};
+    return {state:dashboard.state,source:dashboard.source,loadedAt:lastDashboardLoaded,segments:dashboard.items.map(({id,name,category,url,coldyMailings})=>({id,name,category,url,previewNames:coldyMailings?.previewNames}))};
   }
   window.RegistryProject?.configure?.({transport:workspaceRpc,peekSegments:peekProjectSegments,openConnection:openColdySettings,onStateChange:()=>updateControls(),onMutation:()=>{mailings=null;lastMailingsLoaded=0;if(coldyMailings)coldyMailings.loaded=false;}});
   render();startSharedAccess();
