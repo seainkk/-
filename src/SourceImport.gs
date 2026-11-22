@@ -190,7 +190,7 @@ function importScopedOriginal_(preparation, link, mode) {
   importProtectOriginal_(link.id, preparation);
   var original = importNativeSheet_(importGetFile_(link.id, link.resourceKey));
   if (original.id !== link.id || !Array.isArray(original.parents) || !original.parents.length) fail_('SOURCE_SCOPE_REQUIRED', 'По ссылке можно добавить только таблицу, уже находящуюся в папке реестра. Внешнюю таблицу сначала добавьте в реестр через Google Диск или загрузите файлом.');
-  var insideRoot = false, allInsideSource = true;
+  var insideRoot = false, allInsideSource = true, stagingId = preparation.context.properties.getProperty('PREPARED_STAGING_FOLDER_ID');
   original.parents.forEach(function (parentId) {
     var parent, inRoot = false, inSource = false;
     try {
@@ -200,6 +200,10 @@ function importScopedOriginal_(preparation, link, mode) {
         inSource = inRoot && insideRegistry_(parent, preparation.binding.source.id);
       }
     } catch (error) { /* An inaccessible or malformed ancestry is not permission. */ }
+    if (inRoot) {
+      if (stagingId && insideRegistry_(parent, id_(stagingId))) fail_('PROTECTED_FILE', 'Служебный черновик можно использовать после завершения подготовки.');
+      if (!inSource && typeof registryGuardItem_ === 'function') registryGuardItem_(preparation.context, parent);
+    }
     insideRoot = insideRoot || inRoot;
     allInsideSource = allInsideSource && inSource;
   });
@@ -212,9 +216,12 @@ function importScopedOriginal_(preparation, link, mode) {
   }
 }
 
+function sourceImportProjectId_() { return typeof registryProjectId_ === 'function' ? registryProjectId_() : 'numshield'; }
+function sourceImportProjectKey_(value) { return sourceImportProjectId_() === 'numshield' ? value : value + '|neosender'; }
+
 function importExecute_(preparation, common, action) {
   var context = preparation.context, destination = preparation.binding.source.id;
-  var key = 'IMPORT_' + digest_(context.email + '|' + common.kind + '|' + common.requestId).slice(0, 32);
+  var key = 'IMPORT_' + digest_(sourceImportProjectKey_(context.email + '|' + common.kind + '|' + common.requestId)).slice(0, 32);
   var fingerprint = digest_(JSON.stringify([context.rootId, destination, common.kind, common.mode, common.name, common.baseType, common.status, common.fingerprintParts]));
   var receipt = importReadReceipt_(context, key);
   if (receipt && receipt.fingerprint !== fingerprint) fail_('REQUEST_REUSED', 'Этот запрос импорта уже использован с другими параметрами. Откройте форму заново.');
@@ -337,7 +344,7 @@ function importFinalize_(preparation, common, key, receipt, recovered) {
   }
   receipt.status = 'done'; receipt.metadataCommitted = true;
   importSaveReceipt_(context, key, receipt, false);
-  return { item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(database.relations, context), origins), file: { id: metadata.id, name: metadata.name, url: metadata.url, mimeType: metadata.mimeType }, mode: common.mode, recovered: !!recovered };
+  return { item: sourceBaseItem_(metadata, record, sourceBasesAssociations_(database.relations, context), origins, sourceBaseReadProjects_(storage)), file: { id: metadata.id, name: metadata.name, url: metadata.url, mimeType: metadata.mimeType }, mode: common.mode, recovered: !!recovered };
 }
 
 function importReadReceipt_(context, key) {
@@ -351,8 +358,8 @@ function importReadReceipt_(context, key) {
 }
 
 function importAllocateReceipt_(context, key, receipt) {
-  var index;
-  try { index = JSON.parse(context.properties.getProperty('IMPORT_RECEIPT_INDEX') || '[]'); } catch (error) { fail_('IMPORT_STORAGE', 'Журнал импорта требует проверки администратора.'); }
+  var index, indexKey = sourceImportProjectKey_('IMPORT_RECEIPT_INDEX');
+  try { index = JSON.parse(context.properties.getProperty(indexKey) || '[]'); } catch (error) { fail_('IMPORT_STORAGE', 'Журнал импорта требует проверки администратора.'); }
   if (!Array.isArray(index)) fail_('IMPORT_STORAGE', 'Журнал импорта требует проверки администратора.');
   index = index.filter(function (entry) { return entry !== key; });
   while (index.length >= SOURCE_IMPORT_CONFIG.receiptLimit) {
@@ -366,7 +373,7 @@ function importAllocateReceipt_(context, key, receipt) {
   }
   index.push(key);
   importSaveReceipt_(context, key, receipt, true);
-  context.properties.setProperty('IMPORT_RECEIPT_INDEX', JSON.stringify(index));
+  context.properties.setProperty(indexKey, JSON.stringify(index));
 }
 
 function importSaveReceipt_(context, key, receipt, required) {

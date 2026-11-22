@@ -135,7 +135,7 @@ function gridFile_(fileId, writable, expectedRoot) {
   if (!allowed) {
     var outreach;
     try { outreach = segmentSourceFolder_(context); } catch (error) { if (error.registryCode === 'LINK_ACCESS_REQUIRED' || error.registryCode === 'LINK_SETUP_REQUIRED') throw error; }
-    allowed = !!outreach && gridInsideSegment_(file, outreach.getId());
+    allowed = !!outreach && gridInsideSegment_(file, outreach.getId(), context);
   }
   if (!allowed) fail_('OUTSIDE_REGISTRY', 'Редактор работает только с исходными базами и таблицами внутри сегментов.');
   var metadata;
@@ -149,7 +149,7 @@ function gridFile_(fileId, writable, expectedRoot) {
   return { context: context, file: file, canEdit: canEdit, tags: tags };
 }
 
-function gridInsideSegment_(file, outreachId) {
+function gridInsideSegment_(file, outreachId, context) {
   var queue = [file], visited = Object.create(null), examined = 0;
   while (queue.length) {
     var item = queue.shift(); if (visited[item.getId()]) continue; visited[item.getId()] = true;
@@ -157,7 +157,10 @@ function gridInsideSegment_(file, outreachId) {
     var parents = item.getParents();
     while (parents.hasNext()) {
       var parent = parents.next(); if (parent.isTrashed()) continue;
-      if (parent.getId() === outreachId && item.getId() !== file.getId()) return true;
+      if (parent.getId() === outreachId && item.getId() !== file.getId()) {
+        if (context && typeof registryRequireSegment_ === 'function') registryRequireSegment_(context, item.getId());
+        return true;
+      }
       if (parent.getId() !== outreachId) queue.push(parent);
     }
   }

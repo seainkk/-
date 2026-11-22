@@ -241,6 +241,33 @@ function fixture(options = {}) {
 }
 
 function itemOf(result) { return result.item || result; }
+
+test('uploads into the common catalog scope their retry receipts by project', () => {
+  const f = fixture();
+  let project = 'numshield';
+  f.context.registryProjectId_ = () => project;
+  const first = f.upload();
+  project = 'neosender';
+  const second = f.upload();
+  assert.notEqual(first.file.id, second.file.id);
+  assert.equal(f.upload().file.id, second.file.id);
+  project = 'numshield';
+  assert.equal(f.upload().file.id, first.file.id);
+  assert.equal(f.imported().length, 2);
+});
+
+test('link imports reject staging originals and project-inaccessible ancestry before a copy', () => {
+  const f = fixture({ originalParent: REGISTERED });
+  f.properties.set('PREPARED_STAGING_FOLDER_ID', REGISTERED);
+  assert.throws(() => f.link(), /PROTECTED_FILE/);
+  f.properties.delete('PREPARED_STAGING_FOLDER_ID');
+  f.context.registryGuardItem_ = (_scope, folder) => {
+    assert.equal(folder.getId(), REGISTERED);
+    f.context.fail_('OUTSIDE_PROJECT', 'Другой проект');
+  };
+  assert.throws(() => f.link(), /OUTSIDE_PROJECT/);
+  assert.equal(f.imported().length, 0);
+});
 function capture(callback) { try { return { value: callback() }; } catch (error) { return { error }; } }
 function driveRejection(reason, status = 403) { return Object.assign(new Error('Provider detail must not be returned: private-file-name'), { details: { error: { code: status, errors: [{ reason }] } } }); }
 

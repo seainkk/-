@@ -60,8 +60,8 @@ function coldyCredentialHash_(context) {
 function testColdyConnection_(request) {
   return api_(function () {
     coldyInput_(request || {}, []);
-    var context = authorize_(), result = coldyCampaignsFetch_(context);
-    return { connected: true, campaignCount: result.campaigns.length, checkedAt: result.generatedAt };
+    var context = authorize_(), hash = coldyCredentialHash_(context), result = coldyCampaignsFetch_(context);
+    return { connected: true, campaignCount: coldyProjectCampaigns_(context, hash, result.campaigns).length, checkedAt: result.generatedAt };
   });
 }
 
@@ -71,13 +71,24 @@ function listColdyCampaigns_(request) {
     if (input.refresh !== undefined && typeof input.refresh !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный режим обновления Coldy.');
     var context = authorize_(), settings = coldySettings_(context);
     if (!settings.configured) return { state: 'not_configured', campaigns: [], generatedAt: '', cached: false };
-    if (!input.refresh) {
-      var saved = coldyCachedCampaigns_(context);
-      if (saved && Date.parse(saved.generatedAt) > Date.now() - COLDY.cacheMillis && Date.parse(saved.generatedAt) <= Date.now()) return { state: 'ready', campaigns: saved.campaigns, generatedAt: saved.generatedAt, cached: true };
-    }
-    var fresh = coldyCampaignsFetch_(context);
-    return { state: 'ready', campaigns: fresh.campaigns, generatedAt: fresh.generatedAt, cached: false };
+    var saved = !input.refresh && coldyCachedCampaigns_(context);
+    var cached = !!saved && Date.parse(saved.generatedAt) > Date.now() - COLDY.cacheMillis && Date.parse(saved.generatedAt) <= Date.now();
+    var list = cached ? saved : coldyCampaignsFetch_(context);
+    return { state: 'ready', campaigns: coldyProjectCampaigns_(context, settings.credentialHash, list.campaigns), generatedAt: list.generatedAt, cached: cached };
   });
+}
+
+/** The provider catalog is shared. Apply today's ownership before a list leaves the project. */
+function coldyProjectCampaigns_(context, credentialHash, campaigns, registry) {
+  if (typeof registryProjectScoped_ !== 'function' || !registryProjectScoped_()) return campaigns;
+  var current = coldyCurrent_(context, true), projectId = registryProjectId_();
+  registry = registry || coldyCampaignRegistry_(current);
+  if (registry.credentialHash !== credentialHash || coldyCredentialHash_(current) !== credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите список рассылок.');
+  var properties = current.properties.getProperties(), hidden = new Set();
+  registry.bindings.forEach(function (binding) {
+    if (registrySegmentProject_(current, binding.segmentId, properties) !== projectId) hidden.add(coldyCampaignId_(binding.campaignId));
+  });
+  return campaigns.filter(function (campaign) { return !hidden.has(campaign.id.toLowerCase()); });
 }
 
 /** Read only, with no HTTP and no internal lock. It may be used by a caller holding its lock. */
@@ -189,7 +200,7 @@ function coldyPath_(method, path) {
     if (route !== '/accounts' && !Number.isSafeInteger(Number(route.slice('/accounts/'.length)))) fail_('INVALID_REQUEST', 'Некорректный идентификатор ящика Coldy.');
     allowed = [];
   }
-  else if (route === '/campaigns' || new RegExp('^/campaigns/' + uuid + '$').test(route) || new RegExp('^/email-verifications/' + identifier + '(?:/results)?$').test(route)) allowed = [];
+  else if (route === '/account-campaign-mappings' || route === '/campaigns' || new RegExp('^/campaigns/' + uuid + '$').test(route) || new RegExp('^/email-verifications/' + identifier + '(?:/results)?$').test(route)) allowed = [];
   else if (new RegExp('^/leads/campaign/' + uuid + '$').test(route)) allowed = ['after_id', 'offset', 'limit', 'search'];
   else if (new RegExp('^/analytics/campaigns/' + uuid + '/(?:summary|events|by-account|by-sequence)$').test(route)) allowed = ['period', 'start_date', 'end_date', 'type', 'event_types'].concat(/\/by-account$/.test(route) ? ['search', 'limit', 'offset', 'sort_by', 'sort_order'] : []);
   if (!allowed) fail_('INVALID_REQUEST', 'Неподдерживаемое действие Coldy.');

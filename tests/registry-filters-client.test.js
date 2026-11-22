@@ -76,12 +76,21 @@ test('unavailable association count respects the other active filters', () => {
   assert.equal(selected({ onlyUnassigned: false }).unknownAssociations, 0);
 });
 
+test('project filters include both checked projects, leaving unmarked and unknown bases in the shared catalog', () => {
+  const shared={items:[{id:'both',projectIds:['numshield','neosender']},{id:'one',projectIds:['numshield']},{id:'empty',projectIds:[]},{id:'unknown',projectIds:null}]};
+  const select=project=>ids(context.sourceFilterSelection(shared,{project}));
+  assert.deepEqual(select(''),['both','one','empty','unknown']);
+  assert.deepEqual(select('numshield'),['both','one']);
+  assert.deepEqual(select('neosender'),['both']);
+  assert.deepEqual(select('none'),['empty']);
+});
+
 test('reset clears only the filters and reveals retained edits', () => {
-  const elements = Object.fromEntries(['br-source-search', 'br-source-contents-filter', 'br-source-unassigned-filter'].map(id => [id, { value: 'previous', checked: true, focus() { this.focused = true; } }]));
-  const filters = { query: 'список', contents: 'lpr', onlyUnassigned: true }, drafts = new Map([['draft', { expectedRevision: 2 }]]);
+  const elements = Object.fromEntries(['br-source-search', 'br-source-contents-filter', 'br-source-project-filter', 'br-source-unassigned-filter'].map(id => [id, { value: 'previous', checked: true, focus() { this.focused = true; } }]));
+  const filters = { query: 'список', contents: 'lpr', project:'neosender', onlyUnassigned: true }, drafts = new Map([['draft', { expectedRevision: 2 }]]);
   const resetContext = vm.createContext({ sourceFilters: filters, sourceDrafts: drafts, $: id => elements[id], renderSources() {}, updateControls() {} });
   vm.runInContext(source('resetSourceFilters') + ';resetSourceFilters();', resetContext);
-  assert.deepEqual(filters, { query: '', contents: '', onlyUnassigned: false });
+  assert.deepEqual(filters, { query: '', contents: '', project:'', onlyUnassigned: false });
   assert.equal(elements['br-source-search'].value, '');
   assert.equal(elements['br-source-unassigned-filter'].checked, false);
   assert.equal(elements['br-source-search'].focused, true);

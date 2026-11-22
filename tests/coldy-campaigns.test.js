@@ -104,6 +104,29 @@ function fixture(options = {}) {
 const posts = f => f.calls.api.filter(call => call.method === 'POST');
 
 // Credentials, real scope and binding identity are checked on all paths.
+test('foreign project analytics, upload previews and known job IDs are rejected before reading or writing the provider', () => {
+  const f=fixture({companies:Array.from({length:103},(_,i)=>valid('u'+i+'@example.test'))});
+  const binding=f.bind(), job=f.start(binding,f.preview(binding));
+  assert.equal(job.state,'processing');
+  const projectOf=(_,id)=>id===SEGMENT?'numshield':'neosender';
+  f.context.registrySegmentProject_=projectOf;
+  let project='numshield';
+  f.context.registryRequireSegment_=(scope,id)=>{if(projectOf(scope,id)!==project) f.context.fail_('OUTSIDE_PROJECT','Чужой сегмент');};
+  const recorded=plain(f.context.refreshColdyMailings_({segmentId:SEGMENT}));
+  assert.equal(recorded.totals.sent,15);
+  const originalOwner=f.context.coldyCampaignAnalyticsOwner_(f.context.authorize_(),binding);
+  assert.notEqual(originalOwner,f.context.coldyCampaignAnalyticsOwner_(f.context.authorize_(),{...binding,segmentId:SECOND}));
+  project='neosender';
+  const calls=f.calls.api.length, writes=f.calls.saves.length;
+  for(const action of [
+    ()=>f.context.coldySegmentMailings_(f.context.authorize_(),SEGMENT), ()=>f.context.refreshColdyMailings_({segmentId:SEGMENT}),
+    ()=>f.context.getColdyBindings_({segmentId:SEGMENT}),()=>f.preview(binding),
+    ()=>f.context.getColdyUploadState_({segmentId:SEGMENT,bindingId:binding.id}),()=>f.advance(binding,job)
+  ]) assert.throws(action,/OUTSIDE_PROJECT/);
+  assert.throws(()=>f.advance({...binding, segmentId:SECOND},job),/COLDY_BINDING_MISSING/);
+  assert.equal(f.calls.api.length,calls);assert.equal(f.calls.saves.length,writes);
+});
+
 test('all campaign RPCs reject a revoked application link before API/storage/workbook access', () => {
   const f = fixture(); f.state.access = false;
   const rpc = [() => f.context.getColdyBindings_({ segmentId: SEGMENT }), () => f.bind(), () => f.context.previewColdyUpload_({ segmentId: SEGMENT, bindingId: 'a'.repeat(43) }), () => f.context.refreshColdyMailings_({ segmentId: SEGMENT }), () => f.context.processColdyCampaignUploads_({ rootId: ROOT }, { id: COMPANIES })];

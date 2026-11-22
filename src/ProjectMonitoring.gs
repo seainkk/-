@@ -1,8 +1,15 @@
 /** Shared sender selection. No provider request or business-sheet write is performed here. */
 var PROJECT_MONITORING = Object.freeze({ version: 1, maxAccounts: 5000, maxReceipts: 200 });
 
+// Keep the original journal address and request fingerprints for the first project.
+function projectMonitoringOwner_(credentialHash) {
+  var project = typeof registryProjectId_ === 'function' ? registryProjectId_() : 'numshield';
+  return project === 'numshield' ? credentialHash : credentialHash + ':' + project;
+}
+
 function projectMonitoringRead_(context, settings) {
-  var state = settings.configured ? coldyLoad_(context, 'monitoring', settings.credentialHash) : null;
+  var owner = projectMonitoringOwner_(settings.credentialHash), state = settings.configured ? coldyLoad_(context, 'monitoring', owner) : null;
+  if (owner !== projectMonitoringOwner_(settings.credentialHash)) fail_('COLDY_MONITORING_CHANGED', 'Проект изменился. Обновите выбор почт.');
   if (!state) return { version: PROJECT_MONITORING.version, rootId: context.rootId,
     credentialHash: settings.credentialHash, revision: 0, accountIds: [], configured: false, receipts: [] };
   if (state.version !== PROJECT_MONITORING.version || state.rootId !== context.rootId || state.credentialHash !== settings.credentialHash ||
@@ -26,12 +33,12 @@ function projectMonitoringRead_(context, settings) {
 function projectMonitoringPublic_(context, state) {
   if (!state || state.rootId !== context.rootId) fail_('COLDY_STORAGE', 'Выбор ящиков относится к другому реестру.');
   return { revision: state.revision, accountIds: state.accountIds.slice(), configured: state.configured,
-    scopeToken: digest_(JSON.stringify(['monitoring-scope:v1', context.rootId, state.credentialHash])) };
+    scopeToken: digest_(JSON.stringify(['monitoring-scope:v1', context.rootId, projectMonitoringOwner_(state.credentialHash)])) };
 }
 
 function projectMonitoringSignature_(context, state) {
   if (!state || state.rootId !== context.rootId) fail_('COLDY_STORAGE', 'Выбор ящиков относится к другому реестру.');
-  return digest_(JSON.stringify(['monitoring-selection:v1', context.rootId, state.credentialHash,
+  return digest_(JSON.stringify(['monitoring-selection:v1', context.rootId, projectMonitoringOwner_(state.credentialHash),
     state.revision, state.configured, state.accountIds]));
 }
 
@@ -79,7 +86,7 @@ function saveProjectInfrastructureSelection_(request) {
         revision: state.revision + 1, accountIds: accountIds, configured: true,
         receipts: state.receipts.concat([{ requestId: input.requestId, requestHash: requestHash, revision: state.revision + 1 }]).slice(-PROJECT_MONITORING.maxReceipts) };
       projectInfraCurrent_(fresh, currentSettings.credentialHash);
-      coldySave_(fresh, 'monitoring', currentSettings.credentialHash, next);
+      coldySave_(fresh, 'monitoring', projectMonitoringOwner_(currentSettings.credentialHash), next);
       return projectMonitoringResult_(fresh, currentSettings, next, false, next.revision);
     });
   });

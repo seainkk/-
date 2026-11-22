@@ -13,7 +13,9 @@ function getColdyBindings_(request) {
       coldyCampaignScope_(context, segmentId);
       if (settings.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите список рассылок.');
       var registry = coldyCampaignRegistry_(context);
-      return { bindings: registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; }).map(coldyCampaignPublicBinding_), campaigns: campaigns.campaigns || [], configured: true, connected: coldySettings_(context).connected === true };
+      var choices = campaigns.campaigns || [];
+      if (typeof registryProjectScoped_ === 'function' && registryProjectScoped_()) choices = coldyProjectCampaigns_(context, settings.credentialHash, choices, registry);
+      return { bindings: registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; }).map(coldyCampaignPublicBinding_), campaigns: choices, configured: true, connected: coldySettings_(context).connected === true };
     });
   });
 }
@@ -30,7 +32,14 @@ function saveColdyBinding_(request) {
     // Keep the classic absent/false fingerprint unchanged for pending request IDs.
     if (input.preserveExisting === true) fingerprint.push('preserveExisting:v1');
     var requestHash = digest_(JSON.stringify(fingerprint));
-    var oldReceipt = locked_(function () { return coldyCampaignReceipt_(coldyCampaignRegistry_(context), requestId, requestHash); });
+    var oldReceipt = locked_(function () {
+      coldyCampaignScope_(context, segmentId);
+      var registry = coldyCampaignRegistry_(context);
+      if (typeof registryProjectScoped_ === 'function' && registryProjectScoped_() &&
+          !coldyProjectCampaigns_(context, registry.credentialHash, [{id:campaignId}], registry).length)
+        fail_('COLDY_CAMPAIGN_BOUND', 'Рассылка недоступна для привязки в этом проекте.');
+      return coldyCampaignReceipt_(registry, requestId, requestHash);
+    });
     if (oldReceipt) return { binding: oldReceipt.binding };
     var credentialHash = coldyCredentialHash_(context), campaign = coldyCampaignRead_(context, campaignId);
     return locked_(function () {
@@ -146,7 +155,7 @@ function coldySegmentMailings_(context, segmentId) {
   if (!settings.configured) return { id: 'coldy', key: 'coldy', name: 'Coldy', channel: 'email', state: 'not_connected', campaigns: [], totals: unknown, message: 'Подключите API Coldy в настройках.', generatedAt: null, cached: true, freshness: 'unknown' };
   var registry = coldyCampaignRegistry_(context), bindings = registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; });
   bindings.forEach(function (binding) {
-    var cache = coldyLoad_(context, 'campaignanalytics', coldyCampaignOwner_(context, binding.campaignId));
+    var cache = coldyLoad_(context, 'campaignanalytics', coldyCampaignAnalyticsOwner_(context, binding));
     var current = cache && cache.campaignId === binding.campaignId && cache.credentialHash === coldyCredentialHash_(context) ? cache : null;
     campaigns.push({ id: binding.campaignId, name: current ? current.name : binding.campaignName, status: current ? current.status : binding.campaignStatus, sent: current ? coldyCampaignMetric_(current.sent) : null,
       replies: current ? coldyCampaignMetric_(current.replies) : null, leads: current ? coldyCampaignMetric_(current.leads) : null, updatedAt: current ? current.updatedAt || null : null,
@@ -154,6 +163,7 @@ function coldySegmentMailings_(context, segmentId) {
   });
   var complete = campaigns.length > 0 && campaigns.every(function (campaign) { return campaign.sent !== null && campaign.replies !== null && campaign.leads !== null && !campaign.stale; });
   var timestamps = campaigns.map(function (campaign) { return Date.parse(campaign.updatedAt || ''); }).filter(function (time) { return isFinite(time); });
+  coldyCampaignScope_(context, segmentId);
   return { id: 'coldy', key: 'coldy', name: 'Coldy', channel: 'email', state: complete ? 'connected' : 'partial', campaigns: campaigns,
     totals: { sent: coldyCampaignSum_(campaigns, 'sent'), replies: coldyCampaignSum_(campaigns, 'replies'), leads: coldyCampaignSum_(campaigns, 'leads') },
     message: !bindings.length ? 'Привяжите существующую рассылку Coldy к сегменту.' : complete ? 'Добавление контакта не означает отправку письма.' : 'Показаны последние сохранённые данные. Часть показателей отсутствует или устарела; обновите Coldy.',
@@ -172,7 +182,7 @@ function refreshColdyMailings_(request) {
       return { bindings: selected, total: all.length, credentialHash: registry.credentialHash };
     });
     snapshot.bindings.forEach(function (binding) {
-      var old = locked_(function () { return coldyLoad_(context, 'campaignanalytics', coldyCampaignOwner_(context, binding.campaignId)); });
+      var old = locked_(function () { coldyCampaignScope_(context, segmentId); return coldyLoad_(context, 'campaignanalytics', coldyCampaignAnalyticsOwner_(context, binding)); });
       var campaign = null, summary = null, campaignError = '', summaryError = '';
       // Provider requests deliberately run outside the global script lock.
       try { campaign = coldyCampaignRead_(context, binding.campaignId); }
@@ -185,13 +195,13 @@ function refreshColdyMailings_(request) {
         var registry = coldyCampaignRegistry_(context), current = coldyCampaignBinding_(registry, segmentId, binding.id);
         if (snapshot.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Повторите обновление показателей.');
         if (current.revision !== binding.revision) fail_('COLDY_BINDING_CHANGED', 'Связь рассылки изменилась. Обновите показатели.');
-        var latest = coldyLoad_(context, 'campaignanalytics', coldyCampaignOwner_(context, binding.campaignId));
+        var owner = coldyCampaignAnalyticsOwner_(context, binding), latest = coldyLoad_(context, 'campaignanalytics', owner);
         if (latest && latest.lastAttemptAt && latest.lastAttemptAt >= startedAt && JSON.stringify(latest) !== JSON.stringify(old)) return;
         var before = old && old.credentialHash === snapshot.credentialHash ? old : {}, now = new Date().toISOString();
         var sent = campaign ? coldyCampaignMetric_(campaign.total_sent) : null, replies = campaign ? coldyCampaignMetric_(campaign.replies_emails) : null, leads = summary ? coldyCampaignMetric_(summary.interested) : null;
         var sentAt = sent !== null ? now : before.sentUpdatedAt || null, repliesAt = replies !== null ? now : before.repliesUpdatedAt || null, leadsAt = leads !== null ? now : before.leadsUpdatedAt || null;
         var known = [sentAt, repliesAt, leadsAt].filter(Boolean).map(Date.parse), stale = sent === null || replies === null || leads === null;
-        coldySave_(context, 'campaignanalytics', coldyCampaignOwner_(context, binding.campaignId), { campaignId: binding.campaignId, credentialHash: snapshot.credentialHash,
+        coldySave_(context, 'campaignanalytics', owner, { campaignId: binding.campaignId, credentialHash: snapshot.credentialHash,
           name: campaign ? campaign.name : before.name || binding.campaignName, status: campaign ? campaign.status : before.status || binding.campaignStatus,
           sent: sent !== null ? sent : coldyCampaignMetric_(before.sent), replies: replies !== null ? replies : coldyCampaignMetric_(before.replies), leads: leads !== null ? leads : coldyCampaignMetric_(before.leads),
           sentUpdatedAt: sentAt, repliesUpdatedAt: repliesAt, leadsUpdatedAt: leadsAt, updatedAt: known.length ? new Date(Math.min.apply(null, known)).toISOString() : null,
@@ -232,9 +242,14 @@ function processColdyCampaignUploads_(context, item) {
 function coldyCampaignScope_(context, segmentId) {
   var current = authorize_();
   if (!context || current.rootId !== context.rootId) fail_('COLDY_SCOPE_CHANGED', 'Привязка реестра изменилась.');
+  if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(current, segmentId);
   return segmentFolder_(current, segmentSourceFolder_(current), id_(segmentId));
 }
 function coldyCampaignOwner_(context, value) { return digest_(coldyCredentialHash_(context) + '|' + value); }
+function coldyCampaignAnalyticsOwner_(context, binding) {
+  var projectId = typeof registrySegmentProject_ === 'function' ? registrySegmentProject_(context, binding.segmentId) : null;
+  return coldyCampaignOwner_(context, projectId && projectId !== 'numshield' ? projectId + '|' + binding.campaignId : binding.campaignId);
+}
 function coldyCampaignRegistry_(context) {
   var hash = coldyCredentialHash_(context), value = coldyLoad_(context, 'campaignbindings', hash);
   if (!value) return { version: 1, credentialHash: hash, bindings: [], receipts: [] };

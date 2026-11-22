@@ -50,7 +50,7 @@ def check_lineage(page):
     panel = page.locator('#br-source-lineage')
     panel.locator('summary').click()
     rows = page.locator('#br-lineage-rows tr')
-    assert rows.count() == 5
+    expect(rows).to_have_count(5)
     target = rows.filter(has_text='Готовая база компаний')
     expect(target.locator('td').first).to_have_text('Не указан')
     expect(target.get_by_role('link',name='Существующий сегмент')).to_be_visible()
@@ -127,7 +127,8 @@ def main():
   assert page.locator('#br-upload-submit').is_disabled()
   assert page.locator('#br-import-file-form').evaluate('form=>form.inert')
   page.evaluate('backend.holdMethods=[]');release('uploadSourceBase');page.wait_for_selector('#br-prepared-preview:not([hidden])');idle()
-  assert sorted(dispatch['keys'])==['accessKey','file','flow','name','requestId','section','status']
+  assert sorted(dispatch['keys'])==['accessKey','file','flow','name','projectId','requestId','section','status']
+  assert dispatch['projectId']=='numshield'
   assert page.evaluate("backend.preparedDrafts[Object.keys(backend.preparedDrafts)[0]].stage.section")=='lpr'
   assert page.evaluate('backend.importCount')==0
   draft=page.evaluate('Object.keys(backend.preparedDrafts)[0]');page.locator('#br-import-cancel').click();page.wait_for_selector('#br-import-panel',state='hidden');assert page.evaluate('(id)=>backend.preparedDrafts[id].cancelled',draft)

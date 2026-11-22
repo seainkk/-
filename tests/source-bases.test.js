@@ -138,7 +138,7 @@ function fixture(options = {}) {
       return result;
     };
     return {
-      state, getName: () => name, getSheetId: () => name === 'SourceBases' ? 0 : 1,
+      state, getName: () => name, getSheetId: () => name === 'SourceBaseProjects' ? 2 : name === 'SourceBaseOrigins' ? 1 : 0,
       getLastRow: () => lastRowOverride ?? state.rows.length,
       getLastColumn: maximumColumns, getMaxRows: () => state.maxRows, getMaxColumns: () => 26,
       insertRowsAfter: (after, count) => {
@@ -155,12 +155,16 @@ function fixture(options = {}) {
   const sourceSheet = sheet('SourceBases', options.sourceRows || [HEADERS], options.sourceLastRow);
   const relationSheet = sheet('SourceBaseSegments', options.relationRows || [RELATION_HEADERS], options.relationLastRow);
   let originSheet = options.originRows ? sheet('SourceBaseOrigins', options.originRows) : null;
+  let projectSheet = options.projectRows ? sheet('SourceBaseProjects', options.projectRows) : null;
   const book = {
     getId: () => STORAGE,
     getUrl: () => `https://docs.google.com/spreadsheets/d/${STORAGE}/edit`,
     getName: () => 'Служебный реестр',
-    getSheetByName: name => name === 'SourceBases' ? sourceSheet : name === 'SourceBaseSegments' ? relationSheet : name === 'SourceBaseOrigins' ? originSheet : null,
-    insertSheet(name) { assert.equal(name, 'SourceBaseOrigins'); assert.equal(originSheet, null); return originSheet = sheet(name, []); },
+    getSheetByName: name => name === 'SourceBases' ? sourceSheet : name === 'SourceBaseSegments' ? relationSheet : name === 'SourceBaseOrigins' ? originSheet : name === 'SourceBaseProjects' ? projectSheet : null,
+    insertSheet(name) {
+      if (name === 'SourceBaseProjects') { assert.equal(projectSheet, null); return projectSheet = sheet(name, []); }
+      assert.equal(name, 'SourceBaseOrigins'); assert.equal(originSheet, null); return originSheet = sheet(name, []);
+    },
     getSheets: () => [sourceSheet, relationSheet],
   };
   const lock = {
@@ -201,9 +205,11 @@ function fixture(options = {}) {
   vm.runInContext(source, context, { filename: 'source-bases-backend.gs' });
   installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
   context.sheetWriteRawStrings_ = (fileId, sheetId, firstRow, column, rows) => {
-    assert.ok(calls.lockDepth > 0); assert.equal(fileId, STORAGE); assert.equal(sheetId, originSheet.getSheetId()); assert.equal(column, 1);
-    rows.forEach((row, index) => { assert.ok(row.every(cell => typeof cell === 'string')); originSheet.state.rows[firstRow - 1 + index] = Array.from(row); });
-    if (options.loseOriginReply) { options.loseOriginReply = false; throw Error('Lost write acknowledgement'); }
+    const target = [originSheet, projectSheet].find(sheet => sheet?.getSheetId() === sheetId);
+    assert.ok(calls.lockDepth > 0); assert.equal(fileId, STORAGE); assert.ok(target); assert.equal(column, 1);
+    rows.forEach((row, index) => { assert.ok(row.every(cell => typeof cell === 'string')); target.state.rows[firstRow - 1 + index] = Array.from(row); });
+    const lossFlag = target === projectSheet ? 'loseProjectReply' : 'loseOriginReply';
+    if (options[lossFlag]) { options[lossFlag] = false; throw Error('Lost write acknowledgement'); }
   };
   const list = () => plain(context.getSourceBases());
   const patch = payload => plain(context.updateSourceBase(payload));
@@ -313,6 +319,23 @@ test('duplicate stored source IDs fail closed without rewriting either service t
   assert.equal(f.calls.writes.length, 0);
 });
 
+test('a common source lists only its real segments in the current project without marking other assignments broken', () => {
+  const a = 'segment_a_1234567890', b = 'segment_b_1234567890';
+  const f = fixture({ relationRows: [RELATION_HEADERS, [CSV, a, '2026-11-15T10:00:00Z', MEMBER], [CSV, b, '2026-11-15T10:00:00Z', MEMBER]] });
+  f.makeFolder(OUTREACH, 'Аутричи', ROOT);
+  f.makeFolder(a, 'Сегмент А', OUTREACH); f.makeFolder(b, 'Сегмент Б', OUTREACH);
+  let project = 'numshield';
+  f.context.registryProjectScoped_ = () => true;
+  f.context.registryProjectId_ = () => project;
+  f.context.registrySegmentProject_ = (_scope, id) => id === a ? 'numshield' : 'neosender';
+  const card = () => f.list().items.find(item => item.id === CSV);
+  assert.deepEqual(card().segments.map(entry => entry.id), [a]);
+  assert.equal(card().associationsAvailable, true);
+  project = 'neosender';
+  assert.deepEqual(card().segments.map(entry => entry.id), [b]);
+  assert.deepEqual(card().projectIds, []);
+});
+
 test('status and format checks persist by file ID when Drive renames the file', () => {
   const relation = [CSV, 'segment_a_1234567890', '2026-11-15T10:00:00Z', MEMBER];
   const f = fixture({ relationRows: [RELATION_HEADERS, relation] });
@@ -365,6 +388,65 @@ test('stale patches conflict under a lock and do not overwrite the newer status'
   assert.ok(recordReads.length > 0);
   assert.ok(recordReads.every(read => read.locked));
   assert.equal(f.calls.lockDepth, 0);
+});
+
+test('shared source membership allows both projects or neither, with separate revisions and durable replay', () => {
+  const f = fixture({ loseProjectReply: true });
+  const card = () => f.list().items.find(item => item.id === CSV);
+  const original = card();
+  assert.deepEqual(original.projectIds, []);
+  assert.equal(original.projectsRevision, 0);
+  const first = { id: CSV, projectIds: ['neosender', 'numshield'], expectedRevision: original.revision, expectedProjectsRevision: 0, requestId: 'select_projects_001' };
+  assert.throws(() => f.patch(first), /GOOGLE_ERROR/);
+  assert.deepEqual(f.patch(first).item.projectIds, ['numshield', 'neosender']);
+  assert.equal(card().projectsRevision, 1);
+  assert.equal(card().revision, original.revision);
+  assert.throws(() => f.patch({ ...first, projectIds: [] }), /REQUEST_REUSED/);
+  assert.throws(() => f.patch({ ...first, requestId: 'old_projects_0001', projectIds: [] }), /CONFLICT/);
+  const detached = f.patch({ ...first, requestId: 'clear_projects_001', expectedProjectsRevision: 1, projectIds: [] }).item;
+  assert.deepEqual(detached.projectIds, []);
+  assert.equal(detached.projectsRevision, 2);
+  assert.deepEqual(f.patch(first).item.projectIds, []);
+  assert.deepEqual(card().projectIds, []);
+  assert.equal(f.list().items.length, 4);
+});
+
+test('source membership validates project IDs, real Drive location, metadata revisions and storage schema', () => {
+  const f = fixture();
+  const card = f.list().items.find(item => item.id === NATIVE);
+  const change = { id: NATIVE, projectIds: ['numshield'], expectedRevision: card.revision, expectedProjectsRevision: 0, requestId: 'project_scope_001' };
+  for (const ids of [['numshield', 'numshield'], ['other'], 'numshield', null]) assert.throws(() => f.patch({ ...change, projectIds: ids }), /INVALID_REQUEST/);
+  f.patch({ id: NATIVE, status: 'ready', expectedRevision: card.revision });
+  assert.throws(() => f.patch(change), /CONFLICT/);
+  f.files.get(NATIVE).parent = OTHER;
+  assert.throws(() => f.patch({ ...change, expectedRevision: card.revision + 1 }), /OUTSIDE_REGISTRY/);
+
+  const damaged = fixture({ projectRows: [['wrong', 'columns']] });
+  const visible = damaged.list().items.find(item => item.id === NATIVE);
+  assert.equal(visible.projectsRevision, null);
+  assert.equal(visible.projectIds, null);
+  assert.ok(visible.status);
+  assert.throws(() => damaged.patch({ ...change, expectedRevision: visible.revision }), /STORAGE_SCHEMA/);
+  assert.equal(damaged.patch({ id: NATIVE, status: 'ready', expectedRevision: visible.revision }).item.status, 'ready');
+});
+
+test('adding a source to another project preserves the first project and never reapplies a completed addition', () => {
+  const f = fixture();
+  const original = f.list().items.find(item => item.id === NATIVE);
+  f.patch({ id: NATIVE, projectIds: ['neosender'], expectedRevision: original.revision, expectedProjectsRevision: 0, requestId: 'mark_source_001' });
+  const add = () => runShared(f.context, () => f.context.locked_(() => {
+    const context = f.context.authorize_();
+    f.context.sourceBaseAddProject_(context, f.context.sourceBasesStorage_(context), NATIVE, 'numshield', 'segment:synthetic:confirmed-operation');
+  }));
+  const card = () => f.list().items.find(item => item.id === NATIVE);
+  add();
+  assert.deepEqual(card().projectIds, ['numshield', 'neosender']);
+  assert.equal(card().projectsRevision, 2);
+  f.patch({ id: NATIVE, projectIds: ['neosender'], expectedRevision: original.revision, expectedProjectsRevision: 2, requestId: 'remove_project_002' });
+  for (let i = 0; i < 64; i++) f.patch({ id: NATIVE, projectIds: ['neosender'], expectedRevision: original.revision, expectedProjectsRevision: 3, requestId: 'reaffirm_projects_' + i });
+  add();
+  assert.deepEqual(card().projectIds, ['neosender']);
+  assert.equal(card().projectsRevision, 3);
 });
 
 test('invalid enums and attempts to assign segments are rejected without service writes', () => {

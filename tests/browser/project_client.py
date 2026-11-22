@@ -1,6 +1,7 @@
 """Analytics/infrastructure UI with held requests and local API fakes only."""
 from pathlib import Path
 import json
+import sys
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -9,15 +10,28 @@ const A='11111111-1111-4111-8111-111111111111',B='22222222-2222-4222-8222-222222
 window.backend={configured:true,connected:true,calls:[],active:0,activeWrites:0,maxWrites:0,pending:[],holdMethods:[],receipts:{},failAfterSave:false,saveMutations:0,connectionOpens:0,infraSynced:false,infraContinued:false,failInfra:false,accountMarker:'sender',monitoringIds:[],monitoringRevision:0,monitoringConfigured:false,monitoringScope:'project-key-scope',monitoringReceipts:{},inventoryLoaded:true,detailIds:[],lastSyncAt:'2026-11-22T09:00:00Z'};
 backend.bindings=[{id:'binding-existing-00000001',segmentId:'segment-a',campaignId:A,campaignName:'Existing campaign',includeCompanies:false,includeLpr:true,autoUpload:true,allowActive:true,revision:4},{id:'binding-other-0000000002',segmentId:'segment-b',campaignId:C,campaignName:'Other campaign',includeCompanies:true,includeLpr:false,autoUpload:false,allowActive:false,revision:1},{id:'binding-missing-00000003',segmentId:'segment-a',campaignId:D,campaignName:'Removed at provider',includeCompanies:true,includeLpr:true,autoUpload:false,allowActive:false,revision:1}];
 const clone=x=>JSON.parse(JSON.stringify(x));
-function campaigns(id){const rows=[{id:A,name:'Existing campaign',status:'Active'},{id:B,name:'New campaign',status:'Draft'},{id:C,name:'Other campaign',status:'Paused'}];for(const binding of backend.bindings.filter(x=>x.segmentId===id&&x.campaignId===D))rows.push({id:D,name:binding.campaignName,status:'Unknown',missing:true});return rows.map(item=>{const owner=backend.bindings.find(x=>x.campaignId===item.id),own=owner?.segmentId===id;return {...item,selected:own,bindingId:own?owner.id:null,ownerSegmentId:owner?.segmentId||null,ownerSegmentName:owner?.segmentId==='segment-b'?'Segment B':null,selectable:!item.missing&&(!owner||own),available:!item.missing,removable:own,blockedReason:item.missing?'Рассылка удалена в Coldy':owner&&!own?'Уже связана с другим сегментом':''};});}
+function campaigns(id){const rows=[{id:A,name:'Existing campaign',status:'Active'},{id:B,name:'New campaign',status:'Draft'},{id:C,name:'Other campaign',status:'Paused'},...(backend.extraCampaigns||[])];for(const binding of backend.bindings.filter(x=>x.segmentId===id&&x.campaignId===D))rows.push({id:D,name:binding.campaignName,status:'Unknown',missing:true});return rows.map(item=>{const owner=backend.bindings.find(x=>x.campaignId===item.id),own=owner?.segmentId===id;return {...item,selected:own,bindingId:own?owner.id:null,ownerSegmentId:owner?.segmentId||null,ownerSegmentName:owner?.segmentId==='segment-b'?'Segment B':null,selectable:!item.missing&&(!owner||own),available:!item.missing,removable:own,blockedReason:item.missing?'Рассылка удалена в Coldy':owner&&!own?'Уже связана с другим сегментом':''};});}
 function service(id){return {id:'coldy',state:'partial',totals:{sent:100,replies:5,leads:null},campaigns:backend.bindings.filter(x=>x.segmentId===id).map(x=>({id:x.campaignId,name:x.campaignName,status:'Active',sent:x.campaignId===A?100:null,replies:5,leads:null})),generatedAt:'2026-11-22T09:00:00Z'};}
 function monitoring(){return {configured:backend.monitoringConfigured,revision:backend.monitoringRevision,accountIds:[...backend.monitoringIds],scopeToken:backend.monitoringScope};}
-function inventory(){return backend.inventoryLoaded?Array.from({length:backend.largeInventory||6},(_,i)=>({id:'account-'+i,email:(backend.largeInventory?'large-sender-':backend.accountMarker)+i+'@example.test',name:'Sender '+i,provider:'SMTP'})):[];}
+function inventory(){return backend.inventoryLoaded?Array.from({length:backend.largeInventory||6},(_,i)=>({id:'account-'+i,email:(backend.largeInventory?'large-sender-':backend.accountMarker)+i+'@example.test',name:(backend.senderName||'Sender ')+i,provider:'SMTP'})):[];}
 function selectionDto(){return {configured:backend.configured,selection:monitoring(),accounts:inventory(),availableCount:backend.inventoryLoaded?(backend.largeInventory||6):null,inventoryAt:backend.inventoryLoaded?backend.lastSyncAt:null};}
+function poolData(accounts){
+ if(!backend.infraSynced||!backend.configured)return {state:'unknown',updatedAt:null,campaigns:[],stale:true};
+ const schedule={days:['monday','tuesday','wednesday','thursday','friday'],from:'09:00',to:'18:30',timezone:'Europe/Moscow',gapStartSeconds:60,gapEndSeconds:90};
+ const campaignList=[{id:A,name:'Намшилд / Кухни',status:'Active',segmentName:'Кухни',segmentProjectName:'Проект 2',bindingState:'linked',schedule,waitSchedule:true,endAt:null},
+  {id:B,name:'Веб-студии',status:'Active',bindingState:'unlinked',schedule:null,endAt:null},
+  {id:C,name:'Только в другом пуле',status:'Active',bindingState:'linked',schedule:null,endAt:null}];
+ for(const item of accounts){
+  const busy=item.id==='account-0',unknown=item.id==='account-2'||backend.uncertainCapacity;
+  item.capacity={state:unknown?'unknown':busy?'busy':'free',campaignIds:busy?[A,B]:[],availableAt:null,
+   idleFrom:busy&&!unknown?'2026-11-23T15:30:00.000Z':null,idleUntil:busy&&!unknown?'2026-11-24T06:00:00.000Z':null};
+ }
+ return {state:backend.uncertainCapacity?'partial':'ready',stale:!!backend.uncertainCapacity,updatedAt:backend.lastSyncAt,campaigns:campaignList};
+}
 function infra(){
  const total=backend.monitoringIds.length,completed=backend.infraSynced?(backend.largeInventory?backend.largeCompleted||0:backend.infraContinued?total:Math.min(5,total)):0;
  const accounts=inventory().filter(item=>backend.monitoringIds.includes(item.id)).map((item,i)=>({...item,status:i<completed?(item.id==='account-1'?'error':'connected'):null,sentTotal:i<completed&&item.id==='account-0'?100:null,sentToday:null,dailyLimit:i<completed?40:null,errorCount:null,errors:i<completed&&item.id==='account-1'?[{code:'SMTP',message:'<img src=x onerror=alert(1)> disconnected'}]:[],tags:[],warmup:{status:null,sentToday:null,repliesToday:null},updatedAt:i<completed?backend.lastSyncAt:null,stale:i>=completed}));
- return {state:!backend.configured?'not_configured':!total?'no_selection':!backend.infraSynced?'not_synced':completed<total?'partial':'ready',configured:backend.configured,connected:backend.connected,accounts,monitoring:{...monitoring(),selectedCount:total,missingAccountIds:[]},availableCount:backend.inventoryLoaded?(backend.largeInventory||6):null,totals:{accounts:backend.configured?total:null,sentTotal:accounts.length&&accounts.every(item=>item.sentTotal!==null)?accounts.reduce((sum,item)=>sum+item.sentTotal,0):null,sentToday:null,dailyLimit:null,errorCount:null,accountsWithErrors:accounts.filter(item=>item.errors.length).length},lastSyncAt:backend.infraSynced?backend.lastSyncAt:null,warnings:[],nextCursor:backend.infraSynced&&completed<total?(backend.largeInventory?'large-cursor-'+completed:'continue-token-opaque'):null,detailProgress:{completed,total},syncPaused:false,retryAfterMs:0,error:null,countersScope:'selected_accounts',stale:!total};
+ return {state:!backend.configured?'not_configured':!total?'no_selection':!backend.infraSynced?'not_synced':completed<total?'partial':'ready',configured:backend.configured,connected:backend.connected,accounts,capacity:poolData(accounts),monitoring:{...monitoring(),selectedCount:total,missingAccountIds:[]},availableCount:backend.inventoryLoaded?(backend.largeInventory||6):null,totals:{accounts:backend.configured?total:null,sentTotal:accounts.length&&accounts.every(item=>item.sentTotal!==null)?accounts.reduce((sum,item)=>sum+item.sentTotal,0):null,sentToday:null,dailyLimit:null,errorCount:null,accountsWithErrors:accounts.filter(item=>item.errors.length).length},lastSyncAt:backend.infraSynced?backend.lastSyncAt:null,warnings:[],nextCursor:backend.infraSynced&&completed<total?(backend.largeInventory?'large-cursor-'+completed:'continue-token-opaque'):null,detailProgress:{completed,total},syncPaused:false,retryAfterMs:0,error:null,countersScope:'selected_accounts',stale:!total};
 }
 function api(name,p){
  if(name==='getProjectAnalytics')return {state:backend.catalogState||'ready',segments:backend.catalogState?[]:[{id:'segment-a',name:'Segment A'},{id:'segment-b',name:'Segment B'}],coldy:{configured:backend.configured,connected:backend.connected,checkedAt:null}};
@@ -81,7 +95,8 @@ def integrated_html():
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+        launch = {'channel':'chrome'} if sys.platform=='win32' else {'executable_path':'/usr/bin/chromium'}
+        browser = p.chromium.launch(**launch,headless=True,args=['--no-sandbox'])
         page = browser.new_page(viewport={'width':1440,'height':1000})
         errors=[]
         page.on('pageerror',lambda error:errors.append(str(error)))
@@ -142,6 +157,32 @@ def main():
         assert page.evaluate('backend.bindings.find(x=>x.campaignId===B)')==teammate
         assert page.evaluate('backend.saveMutations')==0,'Concurrent same-segment binding retains every setting'
 
+        # A large account shows one local page; links and hidden edits survive searching.
+        reset(setup="""backend.extraCampaigns=Array.from({length:1200},(_,i)=>({id:'bulk-'+i,name:'Архив '+i,status:'Draft'}));
+backend.extraCampaigns.push({id:'kitchen',name:'Намшилд / Кухни ЛПР',status:'Active'},{id:'pinned',name:'Привязана в конце',status:'Active'});
+backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pinned',campaignName:'Привязана в конце',revision:1});""")
+        page.locator('#pj-segment').select_option('segment-a');idle()
+        campaign_rows=page.locator('#pj-campaign-rows tr')
+        search=page.locator('#pj-campaign-search')
+        expect(campaign_rows).to_have_count(40)
+        expect(page.locator('[data-project-campaign="pinned"]')).to_be_checked()
+        page.locator('#pj-campaign-more').click();expect(campaign_rows).to_have_count(80)
+        reads=count('getProjectAnalyticsCampaigns')
+        search.fill('КУХНИ лпр');expect(campaign_rows).to_have_count(1)
+        page.locator('[data-project-campaign="kitchen"]').check()
+        search.fill('Архив 1199')
+        page.locator('[data-project-campaign="bulk-1199"]').check()
+        search.fill('Совсем другой запрос')
+        expect(campaign_rows).to_contain_text('По этому запросу рассылок нет')
+        expect(page.locator('#pj-selection-count')).to_have_text('Выбрано: 5')
+        assert count('getProjectAnalyticsCampaigns')==reads
+        page.locator('#pj-selection-save').click();idle()
+        assert {x['campaignId'] for x in page.evaluate("backend.bindings.filter(b=>b.segmentId==='segment-a')")}=={
+            '11111111-1111-4111-8111-111111111111','44444444-4444-4444-8444-444444444444','kitchen','bulk-1199','pinned'}
+        assert count('removeColdyBinding')==0
+        page.locator('#pj-segment').select_option('segment-b');idle();expect(search).to_have_value('')
+        search.fill('чужой поиск');page.evaluate('RegistryProject.lock()');expect(search).to_have_value('')
+
         # Refresh rebases explicit user changes instead of deleting a teammate's binding.
         for clean in [False,True]:
             reset();page.locator('#pj-segment').select_option('segment-a');idle()
@@ -183,14 +224,46 @@ def main():
         expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
         assert page.locator('#pj-account-rows tr').count()==6
         assert page.locator('#pj-account-rows img').count()==0
-        assert '<img' in page.locator('#pj-account-rows').inner_text()
-        assert page.locator('#pj-account-rows tr').first.locator('td').nth(3).inner_text()=='—'
+        expect(page.locator('#pj-infrastructure-totals dd')).to_have_text(['6','4','1','1'])
+        sender=page.locator('#pj-account-rows tr[data-account="account-0"]')
+        expect(sender).to_contain_text('Проект 2 / Кухни')
+        expect(sender).to_contain_text('Без сегмента')
+        expect(sender).to_contain_text('23.11.2026')
+        expect(sender).to_contain_text('Дата неизвестна')
+        expect(page.locator('#pj-schedule-rows tr')).to_have_count(2)
+        expect(page.locator('#pj-schedule-rows')).not_to_contain_text('Только в другом пуле')
+        expect(page.locator('#pj-schedule-rows')).to_contain_text('Пн–Пт · 09:00–18:30')
+        expect(page.locator('#pj-schedule-rows')).to_contain_text('Ожидает расписания')
+        expect(page.locator('#pj-schedule-rows')).to_contain_text('График неизвестен')
+        sender.get_by_role('button',name='Показать расписание · Намшилд / Кухни').click()
+        assert page.evaluate("document.activeElement.id.startsWith('pj-schedule-')")
+        page.locator('#pj-capacity-filter').select_option('free')
+        expect(page.locator('#pj-account-rows tr')).to_have_count(4)
+        expect(page.locator('#pj-account-rows [data-account="account-1"]')).to_contain_text('Проверьте подключение')
+        page.locator('#pj-capacity-filter').select_option('unknown')
+        expect(page.locator('#pj-account-rows tr')).to_have_count(1)
+        expect(page.locator('#pj-account-rows')).to_contain_text('Нет подтверждённых данных')
+        page.locator('#pj-capacity-filter').select_option('')
+        assert not page.locator('#pj-infrastructure-diagnostics').evaluate('el=>el.open')
+        page.locator('#pj-infrastructure-diagnostics summary').click()
+        expect(page.locator('#pj-diagnostic-rows')).to_contain_text('<img')
+        assert page.locator('#pj-diagnostic-rows img').count()==0
+        assert page.locator('#pj-diagnostic-rows tr').first.locator('td').nth(3).inner_text()=='—'
         page.wait_for_timeout(350)
         assert count('refreshProjectInfrastructure')==2,'No provider polling loop after completion'
         calls=page.evaluate("backend.calls.filter(x=>x.name==='refreshProjectInfrastructure')")
+        assert calls[0]['payload']=={'includeCapacity':True}
         assert calls[-1]['payload']=={'cursor':'continue-token-opaque'}
         assert page.locator('#pj-account-rows tr').count()==6
         expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
+        page.evaluate("backend.senderName='Обновлённое имя '")
+        page.locator('#pj-infrastructure-refresh').click();idle()
+        expect(sender).to_contain_text('Обновлённое имя 0')
+        assert page.evaluate('backend.monitoringIds.length')==6
+        page.evaluate('backend.uncertainCapacity=true')
+        page.locator('#pj-infrastructure-refresh').click();idle()
+        expect(page.locator('#pj-infrastructure-totals dd')).to_have_text(['6','0','0','6'])
+        expect(page.locator('#pj-infrastructure-note')).to_contain_text('последние сохранённые')
         page.evaluate('backend.failInfra=true')
         page.locator('#pj-infrastructure-refresh').click();idle()
         assert page.locator('#pj-account-rows tr').count()==6,'Old safe values survive refresh failure'
@@ -221,11 +294,11 @@ def main():
         assert count('saveProjectInfrastructureSelection')==1
         assert count('refreshProjectInfrastructure')==0,'Selection save is metadata-only'
         assert page.locator('#pj-account-rows tr').count()==2
-        assert page.locator('#pj-infrastructure-totals dd').all_text_contents()==['2','—','—','0']
+        assert page.locator('#pj-infrastructure-totals dd').all_text_contents()==['2','0','0','2']
         page.locator('#pj-infrastructure-refresh').click();idle()
         assert page.evaluate('backend.detailIds')==['account-1','account-1158']
         assert count('refreshProjectInfrastructure')==1,'Only selected details need one finite batch'
-        assert page.locator('#pj-infrastructure-totals dd').all_text_contents()==['2','—','—','1']
+        assert page.locator('#pj-infrastructure-totals dd').all_text_contents()==['2','2','0','0']
         assert 'large-sender-0@example.test' not in page.locator('#pj-account-rows').inner_text()
         assert page.locator('#pj-account-rows img').count()==0
         page.wait_for_timeout(350)
@@ -439,6 +512,76 @@ def main():
         assert page.locator('#pj-segment').input_value()==''
         assert not page.evaluate('RegistryProject.isEditing()')
         assert page.locator('#pj-account-rows').inner_text()==''
+        # A real origin gives this local fixture the same project preference storage as the app.
+        scoped = integrated_html().replace('const MOCK_KEY=', """
+backend.sources.forEach((item,i)=>{item.projectIds=i===0?['numshield']:[];item.projectsRevision=3;});
+const MOCK_KEY=""").replace("function runner(){","""
+const originalDashboard=api.getSegmentsDashboard;
+const legacy=makeSegment('legacy','Сегмент без проекта','no_contacts');
+api.getSegmentsDashboard=(p,project)=>{
+ const result=originalDashboard(p);result.analysisPending=false;
+ result.items=[makeSegment(project,project==='neosender'?'Сегмент Нео':'Сегмент Намшилд','no_contacts'),
+ makeSegment(project+'-partner',project==='numshield'?'Веб-студии':'Партнеры Нео','no_contacts','partners')];
+ if(backend.legacyProject===project)result.items.push(legacy);
+ result.unassigned=backend.legacyProject?[]:[{id:legacy.id,name:legacy.name}];return result;
+};
+api.claimRegistrySegment=(p,project)=>{backend.legacyProject=project;return {segmentId:p.segmentId,projectId:project};};
+api.updateSourceBase=p=>{
+ const item=backend.sources.find(x=>x.id===p.id);
+ if(backend.receipts[p.requestId])return backend.receipts[p.requestId];
+ if(p.expectedRevision!==item.revision||p.expectedProjectsRevision!==item.projectsRevision)throw new Error('[CONFLICT] Changed');
+ item.projectIds=p.projectIds;item.projectsRevision++;const result={item:clone(item)};backend.receipts[p.requestId]=result;
+ if(backend.loseResponse){backend.loseResponse=false;throw new Error('Ответ потерян');}return result;
+};
+function runner(){""")
+        page.route('https://registry.test/**',lambda route:route.fulfill(body=scoped,content_type='text/html; charset=utf-8'))
+        page.goto('https://registry.test/')
+        project=page.locator('#br-project')
+        expect(project).to_have_value('numshield')
+        row=page.locator('[data-source-id="source-companies"]')
+        row.locator('.br-source-settings summary').click()
+        expect(row.locator('[data-source-project="numshield"]')).to_be_checked()
+        row.locator('[data-source-project="neosender"]').check()
+        page.evaluate('backend.loseResponse=true')
+        row.locator('[data-project-save]').click()
+        expect(row.locator('[data-project-save]')).to_have_text('Повторить сохранение')
+        row.locator('[data-project-save]').click()
+        expect(row.locator('[data-project-save]')).to_have_count(0)
+        requests=page.evaluate("backend.calls.filter(x=>x.name==='updateSourceBase').map(x=>x.p)")
+        assert requests[0]==requests[1] and requests[0]['projectIds']==['numshield','neosender']
+        page.locator('#br-source-project-filter').select_option('neosender')
+        expect(page.locator('.br-source-item')).to_have_count(1)
+        page.locator('#br-view-segments').click()
+        expect(page.locator('#br-segments-rows')).to_contain_text('Сегмент Намшилд')
+        page.locator('#br-segment-category-partners').click()
+        expect(page.locator('#br-segments-rows')).to_contain_text('Веб-студии')
+        expect(page.locator('#br-segments-rows')).not_to_contain_text('Сегмент Намшилд')
+        # Capture a late read of the first project, then move into the second.
+        page.evaluate("backend.holdAfterMethods=['getSegmentsDashboard']")
+        page.locator('#br-refresh').click()
+        page.wait_for_function("backend.pending.some(x=>x.method==='getSegmentsDashboard')")
+        page.evaluate("backend.holdAfterMethods=[]")
+        project.select_option('neosender')
+        expect(page.locator('#br-segments-rows')).to_contain_text('Сегмент Нео')
+        page.evaluate("backend.pending.shift().resolve()")
+        page.wait_for_function('backend.active===0')
+        expect(page.locator('#br-segments-rows')).not_to_contain_text('Сегмент Намшилд')
+        page.locator('#br-segment-category-partners').click()
+        expect(page.locator('#br-segments-rows')).to_contain_text('Партнеры Нео')
+        expect(page.locator('#br-segments-rows')).not_to_contain_text('Веб-студии')
+        page.locator('#br-segment-category-clients').click()
+        expect(page.locator('[data-claim-segment="legacy"]')).to_contain_text('Нео Сендер')
+        page.locator('[data-claim-segment="legacy"]').click()
+        expect(page.locator('#br-segments-rows')).to_contain_text('Сегмент без проекта')
+        expect(page.locator('#br-unassigned')).to_be_hidden()
+        assert page.evaluate("backend.calls.find(x=>x.name==='claimRegistrySegment').projectId")=='neosender'
+        assert set(page.evaluate("backend.transport.filter(x=>x.name==='callApp').map(x=>x.projectId)"))=={'neosender','numshield'}
+        page.locator('#br-view-sources').click()
+        expect(page.locator('#br-source-project-filter')).to_have_value('')
+        assert page.locator('.br-source-item').count()>1
+        page.reload()
+        expect(project).to_have_value('neosender')
+        assert page.evaluate("Object.keys(localStorage).map(key=>localStorage.getItem(key))")==['neosender']
         assert not errors,errors
         browser.close()
         print('PASS: segment campaigns, delta-only stable retries, flags preserved, sender sync chunks, unknown metrics, stale responses and access scrubbing.')

@@ -10,6 +10,8 @@ var SOURCE_BASES_SCHEMA = Object.freeze({
   relationsHeaders: ['fileId', 'segmentId', 'createdAt', 'createdBy'],
   originsTab: 'SourceBaseOrigins',
   originsHeaders: ['selectionFileId', 'sourceId', 'sourceName', 'criteria'],
+  projectsTab: 'SourceBaseProjects',
+  projectsHeaders: ['fileId', 'projectIds', 'revision', 'receipts'],
   statuses: ['collection', 'ready', 'rework'],
   checks: ['unchecked', 'valid', 'invalid'],
   baseTypes: ['general', 'lpr', 'mixed'],
@@ -35,7 +37,8 @@ function getSourceBases_() {
         var records = sourceBasesSync_(current, storage, database, discovered);
         var associations = sourceBasesAssociations_(database.relations, current);
         var origins = sourceBaseReadOrigins_(storage);
-        var items = discovered.map(function (file) { return sourceBaseItem_(file, records[file.id], associations, origins); });
+        var projects = sourceBaseReadProjects_(storage);
+        var items = discovered.map(function (file) { return sourceBaseItem_(file, records[file.id], associations, origins, projects); });
         return sourceBasesResponse_(binding, storage.public, items, true, true);
       } catch (error) {
         if (error.registryCode && ['AUTH_REQUIRED', 'ACCESS_DENIED', 'SETUP_REQUIRED', 'OUTSIDE_REGISTRY', 'BUSY'].indexOf(error.registryCode) !== -1) throw error;
@@ -58,9 +61,13 @@ function updateSourceBase_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request);
     var bindOrigin = Object.prototype.hasOwnProperty.call(input, 'origin');
-    var allowedKeys = bindOrigin ? ['id', 'expectedRevision', 'requestId', 'origin'] : ['id', 'status', 'formatCheck', 'baseType', 'contents', 'expectedRevision'];
+    var bindProjects = Object.prototype.hasOwnProperty.call(input, 'projectIds');
+    var allowedKeys = bindProjects ? ['id', 'expectedRevision', 'expectedProjectsRevision', 'requestId', 'projectIds'] : bindOrigin ? ['id', 'expectedRevision', 'requestId', 'origin'] : ['id', 'status', 'formatCheck', 'baseType', 'contents', 'expectedRevision'];
     if (Object.keys(input).some(function (key) { return allowedKeys.indexOf(key) === -1; })) fail_('INVALID_REQUEST', 'Можно изменить только наполнение базы, статус сбора и ручную проверку формата.');
     var fileId = id_(input.id);
+    if (bindProjects && (!Number.isSafeInteger(input.expectedProjectsRevision) || input.expectedProjectsRevision < 0 ||
+        typeof input.requestId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(input.requestId))) fail_('INVALID_REQUEST', 'Обновите карточку и повторите сохранение проектов с тем же запросом.');
+    var projectIds = bindProjects ? sourceBaseProjectIds_(input.projectIds) : null;
     var origin;
     if (bindOrigin) {
       if (input.requestId !== fileId) fail_('INVALID_REQUEST', 'Повторите привязку с идентификатором этой выборки.');
@@ -76,7 +83,7 @@ function updateSourceBase_(request) {
     if (hasContents && !Array.isArray(input.contents)) fail_('INVALID_CONTENTS', 'Наполнение базы должно содержать компании и/или ЛПР.');
     var contents = hasContents ? sourceBaseContents_(input.contents) : (hasType ? sourceBaseContents_(input.baseType) : null);
     if (hasType && hasContents && sourceBaseLegacyType_(contents) !== input.baseType) fail_('INVALID_CONTENTS', 'Наполнение базы не соответствует указанному типу.');
-    if (!bindOrigin && !hasStatus && !hasCheck && !hasType && !hasContents) fail_('INVALID_REQUEST', 'Не выбрано изменение базы.');
+    if (!bindProjects && !bindOrigin && !hasStatus && !hasCheck && !hasType && !hasContents) fail_('INVALID_REQUEST', 'Не выбрано изменение базы.');
     if (hasStatus && SOURCE_BASES_SCHEMA.statuses.indexOf(input.status) === -1) fail_('INVALID_STATUS', 'Неизвестный статус сбора.');
     if (hasCheck && SOURCE_BASES_SCHEMA.checks.indexOf(input.formatCheck) === -1) fail_('INVALID_FORMAT_CHECK', 'Неизвестный результат ручной проверки формата.');
     if (hasType && SOURCE_BASES_SCHEMA.baseTypes.indexOf(input.baseType) === -1) fail_('INVALID_BASE_TYPE', 'Неизвестный тип базы.');
@@ -90,12 +97,18 @@ function updateSourceBase_(request) {
       var stored = database.records[fileId];
       if (!stored || !stored.present) fail_('CONFLICT', 'Состав исходных баз изменился. Обновите список перед сохранением.');
       var origins = sourceBaseReadOrigins_(storage);
+      var projects = sourceBaseReadProjects_(storage);
+      if (bindProjects) {
+        sourceBaseCheckProjectScope_(current, storage, fileId);
+        sourceBaseChangeProjects_(storage, projects, fileId, projectIds, input.requestId, input.expectedProjectsRevision, input.expectedRevision, stored.revision);
+        return { item: sourceBaseItem_(file, stored, sourceBasesAssociations_(database.relations, current), origins, projects) };
+      }
       if (bindOrigin) {
         if (file.mimeType !== REGISTRY_CONFIG.spreadsheetMime) fail_('INVALID_FILE_TYPE', 'Выборка должна быть таблицей Google в реестре.');
         if ([current.rootId, storage.public.id, current.properties.getProperty('CONTACT_CENTER_ID') || REGISTRY_CONFIG.defaultContactCenterId].indexOf(origin.id) !== -1) fail_('PROTECTED_FILE', 'Служебный файл нельзя привязать как исходник.');
         if (stored.revision !== input.expectedRevision && !(origins && origins.index[fileId])) fail_('CONFLICT', 'Выборка изменилась. Обновите список перед привязкой.');
         sourceBaseSaveOrigin_(storage, origins, fileId, origin);
-        return { item: sourceBaseItem_(file, stored, sourceBasesAssociations_(database.relations, current), origins) };
+        return { item: sourceBaseItem_(file, stored, sourceBasesAssociations_(database.relations, current), origins, projects) };
       }
       if (stored.revision !== input.expectedRevision) fail_('CONFLICT', 'Эту базу уже изменили. Обновите список перед повторным сохранением.');
       var record = sourceBaseCopyRecord_(stored);
@@ -111,7 +124,7 @@ function updateSourceBase_(request) {
         sourceBaseBump_(record, current.email);
         sourceBaseWriteRecords_(storage.basesSheet, [record]);
       }
-      return { item: sourceBaseItem_(file, record, sourceBasesAssociations_(database.relations, current), origins) };
+      return { item: sourceBaseItem_(file, record, sourceBasesAssociations_(database.relations, current), origins, projects) };
     });
   });
 }
@@ -476,8 +489,17 @@ function sourceBasesAssociations_(relations, context) {
   var index = Object.create(null);
   if (!relations.length) return { relations: relations, index: index };
   try {
-    var segments = getSegmentNames_(context || authorize_());
-    if (segments.state === 'ready') segments.items.forEach(function (segment) { index[segment.id] = { id: segment.id, name: segment.name, url: segment.url }; });
+    context = context || authorize_();
+    var segments = getSegmentNames_(context);
+    if (segments.state === 'ready') {
+      var scoped = typeof registryProjectScoped_ === 'function' && registryProjectScoped_();
+      var properties = scoped ? context.properties.getProperties() : null, hidden = Object.create(null);
+      segments.items.forEach(function (segment) {
+        if (scoped && registrySegmentProject_(context, segment.id, properties) !== registryProjectId_()) hidden[segment.id] = true;
+        else index[segment.id] = { id: segment.id, name: segment.name, url: segment.url };
+      });
+      if (scoped) relations = relations.filter(function (relation) { return !hidden[relation.segmentId]; });
+    }
   } catch (error) { /* Existing links remain stored; their unavailable targets are not guessed. */ }
   return { relations: relations, index: index };
 }
@@ -595,10 +617,99 @@ function sourceBaseSaveOrigin_(storage, origins, selectionId, origin) {
   origins.sheet = sheet; origins.lastRow = end; origins.index[selectionId] = origin;
 }
 
-function sourceBaseItem_(file, record, associations, origins) {
+// A source is shared by default. Each optional row records project choices and
+// the receipts for both manual changes and additions from confirmed imports.
+function sourceBaseProjectIds_(values) {
+  var known = ['numshield', 'neosender'];
+  if (!Array.isArray(values) || values.length > known.length || values.some(function (value, i) {
+    return known.indexOf(value) < 0 || values.indexOf(value) !== i;
+  })) fail_('INVALID_REQUEST', 'Выберите доступные проекты без повторов.');
+  return known.filter(function (id) { return values.indexOf(id) >= 0; });
+}
+
+function sourceBaseReadProjects_(storage) {
+  try {
+    var sheet = storage.book.getSheetByName(SOURCE_BASES_SCHEMA.projectsTab);
+    var table = { sheet: sheet, index: Object.create(null), lastRow: 0 };
+    if (!sheet || !sheet.getLastRow()) return table;
+    var data = sourceBasesReadRows_(sheet, SOURCE_BASES_SCHEMA.projectsHeaders);
+    table.lastRow = data.lastRow;
+    data.rows.forEach(function (row, index) {
+      if (row.every(function (cell) { return cell === ''; })) return;
+      var fileId = id_(row[0]), ids = sourceBaseProjectIds_(JSON.parse(row[1])), revision = Number(row[2]), receipts = JSON.parse(row[3]);
+      var previous = table.index[fileId];
+      if (!String(row[2]).match(/^\d+$/) || !Number.isSafeInteger(revision) || revision < 0 ||
+          !Array.isArray(receipts) || !receipts.length || receipts.length > 64 ||
+          (previous && (previous.receipts.length !== 64 || revision < previous.revision || revision > previous.revision + receipts.length)) ||
+          receipts.some(function (receipt) {
+            return !Array.isArray(receipt) || receipt.length !== 2 || receipt.some(function (value) { return typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value); });
+          })) fail_('STORAGE_SCHEMA', 'Повреждены сохранённые проекты базы.');
+      var byRequest = previous ? previous.byRequest : Object.create(null);
+      receipts.forEach(function (receipt) {
+        if (byRequest[receipt[0]]) fail_('STORAGE_SCHEMA', 'Повторяющаяся операция в журнале проектов.');
+        byRequest[receipt[0]] = receipt[1];
+      });
+      table.index[fileId] = { ids: ids, revision: revision, receipts: receipts, byRequest: byRequest, row: index + 2 };
+    });
+    return table;
+  } catch (error) {
+    // The shared catalog and its other metadata stay readable. An unavailable
+    // membership is explicitly unknown and cannot be edited until repaired.
+    return null;
+  }
+}
+
+function sourceBaseChangeProjects_(storage, table, fileId, ids, requestId, expectedRevision, expectedBaseRevision, currentBaseRevision) {
+  if (!table) fail_('STORAGE_SCHEMA', 'Проекты баз недоступны. Проверьте вкладку SourceBaseProjects.');
+  var saved = table.index[fileId] || { ids: [], revision: 0, receipts: [], byRequest: Object.create(null), row: table.lastRow ? table.lastRow + 1 : 2 };
+  var add = expectedRevision === undefined, requestKey = digest_(JSON.stringify([add ? 'add' : 'set', requestId]));
+  var fingerprint = digest_(JSON.stringify([ids, expectedRevision, expectedBaseRevision]));
+  var receipt = saved.byRequest[requestKey];
+  if (receipt) {
+    if (receipt !== fingerprint) fail_('REQUEST_REUSED', 'Этот запрос уже использован для другого выбора проектов.');
+    return;
+  }
+  if (!add && (expectedRevision !== saved.revision || expectedBaseRevision !== currentBaseRevision)) fail_('CONFLICT', 'Карточка или проекты базы изменились. Обновите её перед сохранением.');
+  var nextIds = add ? sourceBaseProjectIds_(saved.ids.concat(ids.filter(function (id) { return saved.ids.indexOf(id) < 0; }))) : ids;
+  var revision = saved.revision + (saved.ids.join() !== nextIds.join() ? 1 : 0);
+  // Start a new row when the current group of receipts is full. Replays of old
+  // imports can still recognize their original request after later removals.
+  var full = saved.receipts.length === 64, dataRow = full ? table.lastRow + 1 : saved.row;
+  if (!Number.isSafeInteger(revision) || dataRow > REGISTRY_CONFIG.maxSourceBaseRows + 1) fail_('STORAGE_LIMIT', 'Достигнут предел журнала проектов баз.');
+  var receipts = (full ? [] : saved.receipts).concat([[requestKey, fingerprint]]);
+  var sheet = table.sheet || storage.book.insertSheet(SOURCE_BASES_SCHEMA.projectsTab);
+  var start = dataRow, rows = [[id_(fileId), JSON.stringify(nextIds), String(revision), JSON.stringify(receipts)]];
+  if (!table.lastRow) { start = 1; rows.unshift(SOURCE_BASES_SCHEMA.projectsHeaders); }
+  var end = start + rows.length - 1, capacity = sheet.getMaxRows();
+  if (end > capacity) sheet.insertRowsAfter(capacity, end - capacity);
+  SpreadsheetApp.flush();
+  sheetWriteRawStrings_(storage.public.id, sheet.getSheetId(), start, 1, rows);
+  table.sheet = sheet; table.lastRow = Math.max(table.lastRow, end);
+  saved.byRequest[requestKey] = fingerprint;
+  table.index[fileId] = { ids: nextIds, revision: revision, receipts: receipts, byRequest: saved.byRequest, row: dataRow };
+}
+
+function sourceBaseCheckProjectScope_(context, storage, fileId) {
+  var current = authorize_(), binding = sourceBasesSource_(current);
+  if (current.rootId !== context.rootId || binding.state !== 'ready') fail_('SOURCE_CHANGED', 'Изменилось расположение исходных баз.');
+  sourceBasesFile_(current, binding.folder, fileId);
+  var checked = sourceBasesStorage_(current);
+  if (checked.public.id !== storage.public.id) fail_('SOURCE_CHANGED', 'Служебный реестр изменился.');
+  return checked;
+}
+
+function sourceBaseAddProject_(context, storage, fileId, projectId, requestId) {
+  var checked = sourceBaseCheckProjectScope_(context, storage, fileId);
+  sourceBaseChangeProjects_(checked, sourceBaseReadProjects_(checked), fileId, sourceBaseProjectIds_([projectId]), requestId);
+}
+
+function sourceBaseItem_(file, record, associations, origins, projects) {
   var item = { id: file.id, name: file.name, fileName: file.fileName, mimeType: file.mimeType, url: file.url, format: file.format, status: record ? record.status : null, formatCheck: record ? record.formatCheck : null, baseType: record ? record.baseType : null, contents: record ? sourceBaseContents_(record.contents || record.baseType) : null, canAddToSegment: !!(record && record.present && record.status === 'ready' && file.mimeType === REGISTRY_CONFIG.spreadsheetMime), revision: record ? record.revision : null, present: true, segments: associations ? [] : null, associationsAvailable: !!associations };
   item.origin = origins && origins.index[file.id] || null;
   item.originAvailable = !!origins;
+  var membership = projects && projects.index[file.id];
+  item.projectIds = projects ? (membership ? membership.ids.slice() : []) : null;
+  item.projectsRevision = projects ? (membership ? membership.revision : 0) : null;
   if (record) { item.updatedAt = record.updatedAt; item.updatedBy = record.updatedBy; }
   if (associations) associations.relations.forEach(function (relation) {
     if (relation.fileId !== file.id) return;

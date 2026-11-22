@@ -418,6 +418,64 @@ test('a direct upload pins its ready section and destination through confirmatio
   assert.throws(() => unready.confirm(other, unready.preview(other), {destination}), /INVALID_REQUEST/);
 });
 
+test('a direct import belongs to its confirmed project on reload and publishes a source with the same membership', () => {
+  const f = fixture();
+  let project = 'neosender';
+  f.context.registryProjectId_ = () => project;
+  const draft = f.stage({ status: 'ready' }), shown = f.preview(draft);
+  const destination = { name: 'Сегмент', category: 'clients', kind: 'companies' };
+  let result = f.confirm(draft, shown, { destination });
+  assert.equal(result.state, 'processing');
+  project = 'numshield';
+  assert.deepEqual(f.invoke('listPreparedJobs_', {}).items, []);
+  assert.throws(() => f.next(draft), /OUTSIDE_PROJECT/);
+  project = 'neosender';
+  assert.equal(f.invoke('listPreparedJobs_', {}).items.length, 1);
+  for (let i = 0; result.state === 'processing' && i < 30; i++) result = f.next(draft);
+  assert.equal(result.state, 'complete');
+  assert.deepEqual(result.item.projectIds, ['neosender']);
+  assert.equal(f.confirm(draft, shown, { destination }).item.projectsRevision, 1);
+  const base = f.stage({ requestId: 'shared_base_upload_001' });
+  assert.deepEqual(f.finish(base).item.projectIds, []);
+});
+
+test('a real folder owned by a different project is rejected before confirming the direct import', () => {
+  const f = fixture();
+  f.context.registryProjectId_ = () => 'neosender';
+  const draft = f.stage({ status: 'ready' }), shown = f.preview(draft);
+  f.context.registrySegmentProject_ = () => 'numshield';
+  f.context.segmentSourceFolder_ = () => ({});
+  f.context.segmentFolder_ = () => ({});
+  assert.throws(() => f.confirm(draft, shown, { destination: { segmentId: 'other_project_segment', name: 'Сегмент', kind: 'companies' } }), /OUTSIDE_PROJECT/);
+  assert.equal(f.drafts()[0].state, 'staged');
+});
+
+test('shared catalog uploads isolate all draft actions and legacy Numshield jobs, including matching upload request IDs', () => {
+  const f = fixture();
+  let project = 'numshield';
+  f.context.registryProjectId_ = () => project;
+  const first = f.stage(), shown = f.preview(first);
+  const key = 'PREPARED_DRAFT_' + first.draftId, legacy = JSON.parse(f.properties.get(key));
+  delete legacy.projectId;
+  f.properties.set(key, JSON.stringify(legacy));
+  project = 'neosender';
+  const other = f.stage();
+  assert.notEqual(first.draftId, other.draftId);
+  const writes = f.calls.writes.length;
+  for (const action of [() => f.preview(first), () => f.confirm(first, shown), () => f.next(first), () => f.invoke('cancelPreparedBase_', { draftId: first.draftId })]) assert.throws(action, /OUTSIDE_PROJECT/);
+  assert.equal(f.calls.writes.length, writes);
+  project = 'numshield';
+  assert.equal(f.confirm(first, shown).state, 'processing');
+  assert.equal(f.invoke('listPreparedJobs_', {}).items.length, 1);
+  project = 'neosender';
+  assert.deepEqual(f.invoke('listPreparedJobs_', {}).items, []);
+  assert.deepEqual(f.finish(other).item.projectIds, []);
+  project = 'numshield';
+  let result;
+  for (let i = 0; result?.state !== 'complete' && i < 30; i++) result = f.next(first);
+  assert.deepEqual(result.item.projectIds, []);
+});
+
 test('an existing direct destination must belong to the segments folder before any output is created', () => {
   const f = fixture(), draft = f.stage({status: 'ready'}), shown = f.preview(draft);
   const destination = {segmentId: 'existing_segment_0001', name: 'Сегмент', kind: 'companies'};

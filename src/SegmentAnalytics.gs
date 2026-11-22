@@ -54,6 +54,7 @@ function segmentDashboardOverview_(context, projection) {
 function getSegmentMailings_(request) {
   return api_(function () {
     var context = authorize_(), input = object_(request), segmentId = id_(input.segmentId);
+    if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(context, segmentId);
     var parent = segmentSourceFolder_(context), folder;
     try { folder = segmentFolder_(context, parent, segmentId); }
     catch (error) {

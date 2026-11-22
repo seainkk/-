@@ -77,6 +77,7 @@ function fixture(options = {}) {
   };
   vm.runInContext(readFileSync(new URL('../src/ProjectInfrastructure.gs', import.meta.url), 'utf8'), c);
   vm.runInContext(readFileSync(new URL('../src/ProjectMonitoring.gs', import.meta.url), 'utf8'), c);
+  vm.runInContext(readFileSync(new URL('../src/ProjectCapacity.gs', import.meta.url), 'utf8'), c);
   // Small boundary/race scenarios explicitly retain five-detail batches. Large
   // inventory tests below exercise the unchanged production configuration.
   if (options.detailBatch !== undefined) c.PROJECT_INFRASTRUCTURE = Object.freeze({ ...c.PROJECT_INFRASTRUCTURE, batch: options.detailBatch });
@@ -107,6 +108,212 @@ function fixture(options = {}) {
   };
   return f;
 }
+
+const ACTIVE_ONE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const ACTIVE_TWO = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const FINISHED = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const UNSELECTED = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const PAUSED = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const schedule = (days, from, to, timezone) => ({days, from, to, timezone});
+
+function capacityFixture(mappings, detail = {}, other = {}) {
+  const references = {
+    [ACTIVE_ONE]: {id: ACTIVE_ONE, name: 'Справочники', status: 'Active'},
+    [ACTIVE_TWO]: {id: ACTIVE_TWO, name: 'Независимая рассылка', status: 'Active'},
+    [FINISHED]: {id: FINISHED, name: 'Старая рассылка', status: 'Completed'},
+    [UNSELECTED]: {id: UNSELECTED, name: 'unselected-only-name', status: 'Active'},
+    [PAUSED]: {id: PAUSED, name: 'На паузе', status: 'Paused'},
+  };
+  const f = fixture({
+    accounts: [account(1), account(2), account(3), account(4)], monitoringIds: ['1','2','3'],
+    transport(args) {
+      const {path,response,defaultResponse} = args;
+      if (path === '/account-campaign-mappings') {
+        if (typeof mappings === 'function') return mappings(args);
+        return response({items: mappings.map(([id, campaigns]) => ({
+          account_id: id, campaigns: campaigns.map(key => references[key])
+        }))});
+      }
+      if (path.startsWith('/campaigns/')) {
+        const id = path.slice('/campaigns/'.length);
+        return response({...references[id], wait_schedule: true,
+          updated_at: '2026-11-21T10:00:00Z',
+          schedule: {...schedule(['monday','tuesday'],'09:00','18:00','Europe/Moscow'),
+            campaign_id: id, gap_start: 60, gap_end: 120, is_campaign_ready:'2026-10-01T08:00:00Z'},
+          sequences: [{subject:'private template subject',body:'private template body'}], ...detail[id]});
+      }
+      return defaultResponse();
+    },
+    ...other
+  });
+  f.configure();
+  f.resolveOwners = f.c.projectCapacityOwners_;
+  f.c.projectCapacityOwners_ = (context, ids) => Object.fromEntries(ids.map(id => [id, id === ACTIVE_ONE ?
+    {segmentId:'segment_directory_1',segmentName:'Справочник',bindingState:'linked'} :
+    {segmentId:null,segmentName:null,bindingState:'unlinked'}]));
+  return f;
+}
+
+function readCapacity(f) {
+  let result = f.refresh({includeCapacity:true});
+  for(let step=0; result.nextCursor && !result.syncPaused && step<30; step++) result=f.refresh({cursor:result.nextCursor});
+  return result;
+}
+
+test('project selection, cached senders and old cursors stay separate under the same Coldy key', () => {
+  let project='numshield';
+  const f=capacityFixture([[1,[ACTIVE_ONE]]],{}, {detailBatch:1});
+  f.c.registryProjectId_=()=>project;
+  const original=f.refresh({includeCapacity:true});
+  assert.ok(original.nextCursor);
+  const oldScope=original.monitoring.scopeToken;
+  project='neosender';
+  assert.equal(f.get().monitoring.selectedCount,0);
+  assert.deepEqual(f.get().accounts,[]);
+  assert.throws(()=>f.refresh({cursor:original.nextCursor}),/COLDY_INFRA_CURSOR_STALE/);
+  f.refresh({inventoryOnly:true});
+  const picker=f.c.getProjectInfrastructureSelection_({});
+  assert.equal(picker.accounts.length,4);
+  assert.notEqual(picker.selection.scopeToken,oldScope);
+  const payload={accountIds:['3'],expectedRevision:0,scopeToken:oldScope,requestId:'save-neosender-123'};
+  assert.throws(()=>f.c.saveProjectInfrastructureSelection_(payload),/COLDY_MONITORING_SCOPE_CHANGED/);
+  f.c.saveProjectInfrastructureSelection_({...payload,scopeToken:picker.selection.scopeToken});
+  const second=readCapacity(f);
+  assert.deepEqual(second.accounts.map(item=>item.id),['3']);
+  assert.equal(second.accounts[0].capacity.state,'free');
+  project='numshield';
+  const first=f.get();
+  assert.deepEqual(first.accounts.map(item=>item.id),['1','2','3']);
+  assert.equal(first.nextCursor,original.nextCursor);
+  assert.equal(first.accounts[0].capacity.state,'busy');
+});
+
+test('sender pool uses active assignments including unbound campaigns, never old sends or completed assignments', () => {
+  const f = capacityFixture([[1,[ACTIVE_ONE, ACTIVE_TWO, FINISHED]], [2,[ACTIVE_ONE]], [3,[FINISHED,PAUSED]], [4,[UNSELECTED]]]);
+  const result = readCapacity(f), [one,two,three]=result.accounts;
+  assert.equal(result.capacity.state, 'ready');
+  assert.equal(one.capacity.state,'busy');
+  assert.deepEqual(one.capacity.campaignIds.slice().sort(), [ACTIVE_ONE,ACTIVE_TWO]);
+  assert.deepEqual(two.capacity.campaignIds,[ACTIVE_ONE]);
+  assert.equal(three.capacity.state,'free');
+  assert.deepEqual(three.capacity.campaignIds,[]);
+  assert.equal(one.capacity.availableAt,null,'The weekly sending window cannot predict campaign completion');
+  const selected = result.capacity.campaigns.find(c => c.id===ACTIVE_ONE);
+  assert.equal(selected.segmentName,'Справочник');
+  assert.equal(selected.waitSchedule,true);
+  assert.equal(selected.endAt,null,'updated_at and is_campaign_ready are not campaign end dates');
+  assert.equal(selected.schedule.timezone,'Europe/Moscow');
+  assert.deepEqual(selected.schedule.days,['monday','tuesday']);
+  assert.equal(selected.schedule.gapEndSeconds,120);
+  assert.equal(result.capacity.campaigns.find(c=>c.id===ACTIVE_TWO).bindingState,'unlinked');
+  assert.deepEqual(f.calls.http.filter(path=>path.startsWith('/campaigns/')).sort(), [ACTIVE_ONE,ACTIVE_TWO].map(id=>'/campaigns/'+id));
+  assert.equal(f.calls.http.filter(path=>path==='/account-campaign-mappings').length,1);
+  assert.doesNotMatch(JSON.stringify([result,...f.cache.values()]),/private template|unselected-only-name|smtp_secret_never_public/);
+  const count=f.calls.http.length;
+  assert.deepEqual(f.get().accounts.map(a=>a.capacity.state),['busy','busy','free']);
+  assert.equal(f.calls.http.length,count);
+});
+
+test('shared senders expose the actual owner of a foreign active campaign and lose obsolete segment names', () => {
+  const f=capacityFixture([[1,[ACTIVE_ONE,ACTIVE_TWO]]]);
+  f.c.projectCapacityOwners_=f.resolveOwners;
+  f.c.coldyCampaignRegistry_=()=>({bindings:[{segmentId:'segment_kitchens',campaignId:ACTIVE_ONE}]});
+  f.c.segmentSourceFolder_=()=>({getId:()=> 'segments_1234'});
+  f.c.segmentFolder_=(context,parent,id)=>{
+    assert.equal(parent.getId(),'segments_1234');
+    assert.equal(id,'segment_kitchens');
+    return {getId:()=>id,getName:()=>'Кухни'};
+  };
+  f.c.registrySegmentProject_=()=> 'neosender';
+  f.c.registryProjectName_=id=>id==='neosender'?'Нео Сендер':'Намшилд';
+  const result=readCapacity(f), foreign=result.capacity.campaigns.find(c=>c.id===ACTIVE_ONE);
+  assert.equal(foreign.segmentName,'Кухни');assert.equal(foreign.segmentProjectName,'Нео Сендер');
+  assert.equal(result.accounts[0].capacity.state,'busy');
+  f.c.segmentFolder_=()=>{throw f.coded('OUTSIDE_SEGMENTS','Moved');};
+  const moved=f.get().capacity.campaigns.find(c=>c.id===ACTIVE_ONE);
+  assert.equal(moved.bindingState,'unknown');assert.equal(moved.segmentProjectName,null);assert.equal(moved.segmentName,null);
+});
+
+test('switching project while reading sender assignments or cached inventory denies a mixed snapshot', () => {
+  let project='numshield', flipAfterRead=false;
+  const f=capacityFixture(({response})=>{project='neosender';return response({items:[]});},{},
+    {afterLoad:()=>{if(flipAfterRead) project='neosender';}});
+  f.c.registryProjectId_=()=>project;
+  assert.throws(()=>f.refresh({includeCapacity:true}),/COLDY_MONITORING_CHANGED/);
+  assert.deepEqual(f.calls.saves,[]);
+  project='numshield';flipAfterRead=true;
+  assert.throws(()=>f.get(),/COLDY_MONITORING_CHANGED/);
+});
+
+test('only a complete mappings response proves a monitored and listed sender has no active campaign', () => {
+  const empty = capacityFixture([]), valid = readCapacity(empty);
+  assert.ok(valid.accounts.every(a=>a.capacity.state==='free'));
+  for (const malformed of [{items: [], has_more:true}, {items:[], total:4}, {data:[]},
+    {items:[{account_id:1,campaigns:[{id:ACTIVE_ONE,name:'Test',status:'Active'}]},{account_id:2,campaigns:[{id:ACTIVE_ONE.toUpperCase(),name:'Test',status:'Completed'}]}]},
+    {items:[{account_id:1,campaigns:[{id:ACTIVE_ONE,name:'Test',status:'New provider state'}]}]}]) {
+    const f=capacityFixture(({response})=>response(malformed)), result=readCapacity(f);
+    assert.notEqual(result.capacity.state,'ready');
+    assert.notEqual(result.accounts[0].capacity.state,'free');
+  }
+  const missing=capacityFixture([]);missing.setAccounts([account(2),account(3),account(4)]);
+  const loaded=readCapacity(missing);
+  assert.ok(!loaded.accounts.some(a=>a.id==='1' && a.capacity.state==='free'));
+});
+
+test('a cached legacy list and a failed refresh cannot present an unverified mailbox as free', () => {
+  let failing=false;
+  const f=capacityFixture(({response})=>failing?response({},503):response({items:[]}));
+  f.refresh();
+  assert.ok(f.get().accounts.every(a=>a.capacity.state==='unknown'));
+  assert.ok(readCapacity(f).accounts.every(a=>a.capacity.state==='free'));
+  failing=true;f.tick(1000);
+  const result=readCapacity(f);
+  assert.notEqual(result.capacity.state,'ready');assert.ok(result.accounts.every(a=>a.capacity.state!=='free'));
+  assert.equal(f.calls.http.filter(path=>path==='/account-campaign-mappings').length,2);
+});
+
+test('missing campaign schedules do not release assigned senders, and provider names follow the fresh inventory', () => {
+  const f = capacityFixture([[1,[ACTIVE_ONE]]], {[ACTIVE_ONE]:{schedule:null}});
+  f.setAccounts([account(1,{first_name:'Новое',last_name:'Имя',detail:{first_name:'Старое',last_name:'Имя'}}),
+    account(2),account(3)]);
+  const result=readCapacity(f), sender=result.accounts[0];
+  assert.equal(sender.name,'Новое Имя');
+  assert.equal(sender.capacity.state,'busy');
+  assert.equal(sender.capacity.idleFrom,null);
+  assert.equal(sender.capacity.availableAt,null);
+  assert.equal(result.capacity.campaigns.find(c=>c.id===ACTIVE_ONE).schedule,null);
+  f.setAccounts([account(1,{first_name:'',last_name:'',detail:{first_name:'Старое',last_name:'Имя'}})]);
+  assert.equal(readCapacity(f).accounts[0].name,'');
+});
+
+test('access revocation and a changed pool during an assignment read cannot publish the result', () => {
+  for(const [change,code] of [[f=>f.revoke(),/LINK_ACCESS_REQUIRED/],
+    [f=>f.select(['3']),/COLDY_MONITORING_CHANGED/],[f=>f.properties.set('COLDY_API_KEY','replaced'),/COLDY_CREDENTIAL_CHANGED/]]){
+    const f=capacityFixture(({f,response})=>{ change(f);return response({items:[]}); });
+    assert.throws(()=>readCapacity(f),code);
+    assert.ok(!f.calls.saves.some(call=>call.value.capacity?.state==='ready'));
+  }
+});
+
+test('idle time is computed after the union of overlapping and adjacent campaign windows in their own timezones', () => {
+  const f=fixture(), idle=f.c.projectCapacityIdle_;
+  const windows=[schedule(['monday'],'09:00','13:00','UTC'),schedule(['monday'],'12:00','15:00','UTC'),
+    schedule(['monday'],'16:00','18:00','Europe/Berlin')];
+  const result=idle(windows,Date.parse('2026-11-23T09:15:00Z'));
+  assert.equal(result.idleFrom,'2026-11-23T17:00:00.000Z');
+  assert.equal(result.idleUntil,'2026-11-30T09:00:00.000Z');
+  const pause=idle(windows,Date.parse('2026-11-23T17:00:00Z'));
+  assert.equal(pause.idleFrom,'2026-11-23T17:00:00.000Z');assert.equal(pause.idleUntil,result.idleUntil);
+});
+
+test('weekly idle windows project future local time across the daylight saving transition', () => {
+  const f=fixture(), idle=f.c.projectCapacityIdle_;
+  const ny=schedule(['sunday'],'09:00','17:00','America/New_York');
+  const spring=idle([ny],Date.parse('2027-03-07T17:00:00Z'));
+  assert.equal(spring.idleFrom,'2027-03-07T22:00:00.000Z');assert.equal(spring.idleUntil,'2027-03-14T13:00:00.000Z');
+  const fall=idle([ny],Date.parse('2027-10-31T17:00:00Z'));
+  assert.equal(fall.idleFrom,'2027-10-31T21:00:00.000Z');assert.equal(fall.idleUntil,'2027-11-07T14:00:00.000Z');
+});
 
 test('unconfigured infrastructure is honest and performs no HTTP, cache creation or sender mutation', () => {
   const f = fixture();

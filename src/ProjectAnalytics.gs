@@ -47,6 +47,7 @@ function getProjectAnalyticsCampaigns_(request) {
         var id = coldyCampaignId_(campaign.id);
         if (seen[id]) fail_('COLDY_RESPONSE', 'Coldy вернул повторяющуюся рассылку.');
         seen[id] = true;
+        if (byCampaign[id] && !bySegment[byCampaign[id].segmentId] && typeof registryProjectScoped_ === 'function' && registryProjectScoped_()) return;
         campaigns.push(projectAnalyticsCampaign_(campaign, byCampaign[id] || null, current, bySegment, true));
       });
       // A missing provider campaign must not silently disappear from saved choices.
@@ -77,7 +78,9 @@ function projectAnalyticsConnection_(settings) {
 /** Only immediate Outreach folders are needed; no business spreadsheet is opened. */
 function projectAnalyticsCatalog_(context) {
   var names = getSegmentNames_(context), properties = context.properties.getProperties(), result = { state: names.state, source: names.source || null, segments: [] };
-  if (names.state === 'ready') result.segments = (names.items || []).map(function (segment) {
+  if (names.state === 'ready') result.segments = (names.items || []).filter(function (segment) {
+    return typeof registryProjectScoped_ !== 'function' || !registryProjectScoped_() || registrySegmentProject_(context, segment.id, properties) === registryProjectId_();
+  }).map(function (segment) {
     return { id: segment.id, name: segment.name, url: segment.url,
       category: segmentCategory_(properties[segmentCategoryKey_(segment.id)], segment.name) };
   });

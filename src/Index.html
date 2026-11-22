@@ -12,7 +12,7 @@
 </head>
 <body>
 <div id="bases-registry-app">
-  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-analytics" type="button" class="br-button" aria-pressed="false">Аналитика</button><button id="br-view-infrastructure" type="button" class="br-button" aria-pressed="false">Инфраструктура</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Coldy</button><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
+  <header class="br-header"><div class="br-brand"><span class="br-brand-mark" aria-hidden="true"></span><strong>Реестр <span>баз</span></strong></div><label id="br-project-switch" class="br-project-switch" hidden>Проект<select id="br-project"><option value="numshield">Намшилд</option><option value="neosender">Нео Сендер</option></select></label><nav class="br-view-nav" aria-label="Разделы приложения"><button id="br-view-sources" type="button" class="br-button" aria-pressed="true">Реестр баз</button><button id="br-view-segments" type="button" class="br-button" aria-pressed="false">Сегменты</button><button id="br-view-analytics" type="button" class="br-button" aria-pressed="false">Аналитика</button><button id="br-view-infrastructure" type="button" class="br-button" aria-pressed="false">Инфраструктура</button><button id="br-view-retarget" type="button" class="br-button" aria-pressed="false">Ретаргетинг</button></nav><span id="br-user" class="br-user"></span><div class="br-header-actions"><button id="br-coldy-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Coldy</button><button id="br-provider-open" type="button" class="br-button" aria-haspopup="dialog" hidden>Подключение Promouser</button><button id="br-share-copy" type="button" class="br-button" hidden>Скопировать ссылку</button><button id="br-refresh" type="button" class="br-button" disabled>↻ Обновить</button></div></header>
   <div class="br-back-row" id="br-back-row" hidden><button id="br-action-back" class="br-button" type="button">← Назад</button></div>
   <dialog id="br-coldy-dialog" class="br-provider-dialog" aria-labelledby="br-coldy-title">
     <div class="br-import-heading"><h2 id="br-coldy-title">Подключение Coldy</h2><button id="br-coldy-close" type="button" class="br-button" autofocus>Закрыть</button></div>
@@ -131,6 +131,7 @@
             <p class="br-muted">CSV, TSV, XLS, XLSX или ODS до 10 МиБ. Порядок столбцов может быть любым.</p>
             <input id="br-upload-request" name="requestId" type="hidden">
             <input id="br-upload-access" name="accessKey" type="hidden">
+            <input id="br-upload-project" name="projectId" type="hidden">
             <button id="br-upload-submit" type="submit" class="br-button br-primary">Показать предпросмотр</button>
           </form>
           <form id="br-import-link-form" class="br-import-form" hidden>
@@ -181,8 +182,9 @@
         </section>
         <div class="br-source-filters" role="group" aria-label="Поиск и фильтры реестра">
           <label class="br-source-search-label" for="br-source-search">Поиск по названию<input id="br-source-search" type="search" placeholder="Название базы" autocomplete="off"></label>
+          <label for="br-source-project-filter">Проект базы<select id="br-source-project-filter"><option value="">Все проекты</option><option value="numshield">Намшилд</option><option value="neosender">Нео Сендер</option><option value="none">Без отметки проекта</option></select></label>
           <label for="br-source-contents-filter" hidden>Наполнение<select id="br-source-contents-filter"><option value="">Любое</option><option value="companies">Компании</option><option value="lpr">ЛПР</option></select></label>
-          <label class="br-source-unassigned-choice" for="br-source-unassigned-filter"><input id="br-source-unassigned-filter" type="checkbox">Без сегмента</label>
+          <label class="br-source-unassigned-choice" for="br-source-unassigned-filter"><input id="br-source-unassigned-filter" type="checkbox">Без сегмента в этом проекте</label>
           <button id="br-source-filters-reset" type="button" class="br-button" disabled>Сбросить</button>
         </div>
         <p id="br-source-filters-note" class="br-source-filters-note" role="status" aria-live="polite" hidden></p>
@@ -199,6 +201,7 @@
       <p id="br-segments-health" class="br-segments-health" role="status" aria-live="polite"></p>
       <div id="br-segments-empty" class="br-segments-empty" role="status" hidden><h2 id="br-segments-empty-title"></h2><p id="br-segments-empty-description"></p></div>
       <div id="br-segments-rows" class="br-segments-rows"></div>
+      <section id="br-unassigned" hidden><h2>Сегменты без проекта</h2><div id="br-unassigned-rows" class="br-segments-rows"></div></section>
     </section>
     <section id="br-mailings-view" class="br-mailings-view" hidden aria-labelledby="br-mailings-title">
       <button id="br-mailings-back" type="button" class="br-button br-back">← К сегментам</button>
