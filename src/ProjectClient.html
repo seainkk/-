@@ -370,12 +370,21 @@
     const states={off:'Сверка с листом Email выключена',waiting:sync.lastTickAt?'Сверка Email ожидает очереди':'Ожидаем первый подтверждённый запуск таймера сверки Email',
       syncing:'Сверка с листом Email выполняется',synced:'Сверка с листом Email включена',retrying:'Сверка Email ожидает продолжения',
       no_target:'Для этой рассылки не выбрана таблица Email',
-      error:'Ошибка сверки с листом Email'};
+      error:['rate_limit','busy','contact_job'].includes(sync.issue)?'Сверка с листом Email отложена':'Ошибка сверки с листом Email'};
     const details=[states[sync.state]];
     const issues={rate_limit:'Coldy временно ограничил запросы',connection:'Coldy отклонил запрос доступа',provider:'данные Coldy недоступны',
       target:'не удалось подтвердить таблицу Email',storage:'ошибка чтения или записи журнала',scope:'изменилась область доступа',
-      busy:'другая операция заняла очередь',timeout:'истекло время попытки',unknown:'ошибка фоновой обработки'};
+      busy:'другая операция заняла очередь',contact_job:'ожидаем окончания обновления контактов этой таблицы',
+      timeout:'истекло время попытки',unknown:'ошибка фоновой обработки'};
     if(issues[sync.issue])details.push(issues[sync.issue]);
+    const progress=sync.progress;
+    if(sync.enabled&&progress?.phase==='read'){
+      details.push('прочитано адресатов Coldy '+number(progress.read)+' из '+number(progress.total));
+    }else if(sync.enabled&&progress?.phase==='write'&&['companies','lpr'].includes(progress.kind)){
+      const kind=progress.kind==='companies'?'Компании':'ЛПР';
+      details.push('лист Email таблицы «'+kind+'» — проверено адресов '+number(progress.checked)+' из '+number(progress.total)+
+        (Number.isSafeInteger(progress.matched)?', совпадений '+number(progress.matched):''));
+    }
     if(sync.state==='waiting'&&timestamp(sync.lastTickAt))details.push('таймер сработал '+timestamp(sync.lastTickAt)+' МСК');
     if(['syncing','retrying','error'].includes(sync.state)&&timestamp(sync.lastAttemptAt))details.push('попытка '+timestamp(sync.lastAttemptAt)+' МСК');
     const last=timestamp(sync.lastSyncedAt),retry=timestamp(sync.nextRetryAt);

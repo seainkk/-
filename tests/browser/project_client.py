@@ -197,6 +197,17 @@ lastSyncedAt:null,nextRetryAt:null}""")
         expect(page.locator('#pj-campaign-rows .pj-recipient-sync').first).to_contain_text('первый подтверждённый запуск таймера')
         assert count('enableColdyRecipientSync')==1
 
+        reset(setup="""backend.bindings[0].recipientSync={enabled:true,state:'error',issue:'rate_limit',
+progress:{phase:'read',read:400,total:1267}}""")
+        page.locator('#pj-segment').select_option('segment-a')
+        read_progress=page.locator('#pj-campaign-rows .pj-recipient-sync').first
+        expect(read_progress).to_contain_text('Сверка с листом Email отложена')
+        expect(read_progress).to_contain_text('Coldy временно ограничил запросы')
+        expect(read_progress).to_contain_text('прочитано адресатов Coldy 400 из 1 267')
+        for issue in ('connection','storage'):
+            message=page.evaluate("issue=>RegistryProject.recipientSyncText({enabled:true,state:'error',issue})",issue)
+            assert 'Ошибка сверки с листом Email' in message
+
         monitored_setup="backend.monitoringIds=Array.from({length:6},(_,i)=>'account-'+i);backend.monitoringConfigured=true;"
 
         def reset_monitored(setup=''):
@@ -642,11 +653,15 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.evaluate("backend.segments[0].id='segment-a';backend.segments[0].coldyMailings={linked:1,activeAtBinding:1,previewNames:['Название из обзора сегментов']}")
         page.locator('#br-view-segments').click()
         expect(page.locator('[data-segment="segment-a"]')).to_be_visible()
-        page.evaluate("""backend.bindings[0].recipientSync={enabled:true,state:'error',lastSyncedAt:'2026-11-23T09:00:00Z',nextRetryAt:'2026-11-23T09:15:00Z',suppressionPending:true,lastSuppressionAt:'2026-11-22T09:00:00Z'}""")
+        page.evaluate("""backend.bindings[0].recipientSync={enabled:true,state:'error',issue:'contact_job',
+progress:{phase:'write',kind:'lpr',checked:300,matched:17,total:670},lastSyncedAt:'2026-11-23T09:00:00Z',
+nextRetryAt:'2026-11-23T09:15:00Z',suppressionPending:true,lastSuppressionAt:'2026-11-22T09:00:00Z'}""")
         page.locator('[data-segment-focus="segment-a/mailings"]').click()
         check_completion('#br-mailings-services')
         sync=page.locator('#br-coldy-bindings-list .pj-recipient-sync').first
-        expect(sync).to_contain_text('Ошибка сверки')
+        expect(sync).to_contain_text('Сверка с листом Email отложена')
+        expect(sync).to_contain_text('ожидаем окончания обновления контактов этой таблицы')
+        expect(sync).to_contain_text('лист Email таблицы «ЛПР» — проверено адресов 300 из 670, совпадений 17')
         expect(sync).to_contain_text('23.11.2026')
         expect(sync).to_contain_text('следующая попытка')
         expect(sync).to_contain_text('сверка списка «Не отправляем» не завершена')
