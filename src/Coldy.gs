@@ -71,11 +71,18 @@ function listColdyCampaigns_(request) {
     if (input.refresh !== undefined && typeof input.refresh !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный режим обновления Coldy.');
     var context = authorize_(), settings = coldySettings_(context);
     if (!settings.configured) return { state: 'not_configured', campaigns: [], generatedAt: '', cached: false };
-    var saved = !input.refresh && coldyCachedCampaigns_(context);
-    var cached = !!saved && Date.parse(saved.generatedAt) > Date.now() - COLDY.cacheMillis && Date.parse(saved.generatedAt) <= Date.now();
-    var list = cached ? saved : coldyCampaignsFetch_(context);
-    return { state: 'ready', campaigns: coldyProjectCampaigns_(context, settings.credentialHash, list.campaigns), generatedAt: list.generatedAt, cached: cached };
+    var list = coldyReadCampaignCatalog_(context, input.refresh === true, settings);
+    list.campaigns = coldyProjectCampaigns_(context, settings.credentialHash, list.campaigns);
+    return list;
   });
+}
+
+/** Internal catalog only. Each public caller applies live project ownership before returning it. */
+function coldyReadCampaignCatalog_(context, refresh, settings) {
+  var saved = !refresh && coldyCachedCampaigns_(context, settings);
+  var cached = !!saved && Date.parse(saved.generatedAt) > Date.now() - COLDY.cacheMillis && Date.parse(saved.generatedAt) <= Date.now();
+  var list = cached ? saved : coldyCampaignsFetch_(context);
+  return { state: 'ready', campaigns: list.campaigns, generatedAt: list.generatedAt, cached: cached };
 }
 
 /** The provider catalog is shared. Apply today's ownership before a list leaves the project. */
@@ -92,8 +99,8 @@ function coldyProjectCampaigns_(context, credentialHash, campaigns, registry) {
 }
 
 /** Read only, with no HTTP and no internal lock. It may be used by a caller holding its lock. */
-function coldyCachedCampaigns_(context) {
-  var settings = coldySettings_(context);
+function coldyCachedCampaigns_(context, settings) {
+  settings = settings || coldySettings_(context);
   if (!settings.configured || !settings.connected) return null;
   var saved = coldyLoad_(context, 'campaigns', settings.credentialHash);
   if (!saved || saved.credentialHash !== settings.credentialHash || saved.rootId !== context.rootId || !Array.isArray(saved.campaigns)) return null;

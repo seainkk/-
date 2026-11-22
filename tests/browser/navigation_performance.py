@@ -162,8 +162,18 @@ def main():
         assert page.evaluate('backend.maxActiveReads') == 2
         concurrency()
         page.locator('#br-provider-close').click()
+        page.locator('#br-view-segments').click()
+        expect(page.locator('[data-segment="existing-segment"]')).to_be_visible()
+        page.evaluate("backend.segments[0].name='Сегмент второго проекта'")
+        page.locator('#br-project').select_option('neosender')
+        expect(page.locator('[data-segment="existing-segment"] .br-segment-row-name')).to_have_text('Сегмент второго проекта')
+        assert not any(call['projectId']=='neosender' for call in calls('getSourceBases'))
+        assert not any(call['projectId']=='neosender' for call in calls('listPreparedJobs'))
         page.evaluate('backend.holdMethods=[]')
         release('getSourceBases')
+        page.locator('#br-view-sources').click()
+        expect(page.locator('[data-source-id="source-companies"]')).to_be_visible()
+        assert len([call for call in calls('getSourceBases') if call['projectId']=='neosender'])==1
         idle()
 
         # The lightweight segment projection provides real destinations and

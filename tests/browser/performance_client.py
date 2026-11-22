@@ -5,17 +5,19 @@ Requires Playwright Python and Chromium (no production/npm dependency).
 All RPCs are local fakes; no Google or GitHub data is changed.
 """
 from pathlib import Path
+import sys
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = Path(__file__).with_name('performance-fixture.js').read_text()
-INDEX = (ROOT / 'src/Index.html').read_text()
-HTML = INDEX.replace("<?!= include_('Styles'); ?>", (ROOT / 'src/Styles.html').read_text()).replace("<?!= include_('Client'); ?>", '<script>' + FIXTURE + '</script>' + (ROOT / 'src/Client.html').read_text())
+FIXTURE = Path(__file__).with_name('performance-fixture.js').read_text(encoding='utf-8')
+INDEX = (ROOT / 'src/Index.html').read_text(encoding='utf-8')
+HTML = INDEX.replace("<?!= include_('Styles'); ?>", (ROOT / 'src/Styles.html').read_text(encoding='utf-8')).replace("<?!= include_('Client'); ?>", '<script>' + FIXTURE + '</script>' + (ROOT / 'src/Client.html').read_text(encoding='utf-8'))
 
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+        launch = {'channel':'chrome'} if sys.platform == 'win32' else {'executable_path':'/usr/bin/chromium'}
+        browser = p.chromium.launch(**launch, headless=True, args=['--no-sandbox'])
         page = browser.new_page(viewport={'width': 1440, 'height': 1100})
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))

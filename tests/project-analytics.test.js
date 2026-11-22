@@ -13,14 +13,14 @@ const binding = (campaignId, segmentId = A, extra = {}) => ({ id: 'binding_' + c
 
 function fixture(options = {}) {
   let locked = false;
-  const calls = { folders: [], list: [], metadata: 0, books: 0, provider: 0, saves: 0 }, props = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SEGMENTS_FOLDER_ID: SOURCE, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ...options.properties }));
+  const calls = { folders: [], list: [], metadata: 0, books: 0, provider: 0, saves: 0, journals: 0, traversalsWhileLocked: 0 }, props = new Map(Object.entries({ ROOT_FOLDER_ID: ROOT, SEGMENTS_FOLDER_ID: SOURCE, SHARED_ACCESS_KEY_SHA256: TEST_ACCESS_HASH, ...options.properties }));
   const state = { credentialHash: 'credential-A', configured: true, connected: true, ...options.state };
   const rows = [{ id: ROOT, name: 'Реестр баз', parents: [] }, { id: SOURCE, name: 'Аутричи', parents: [ROOT] }, { id: A, name: 'Кухни', parents: [SOURCE] }, { id: B, name: 'Веб-студии', parents: [SOURCE] }, ...(options.folders || [])];
   const folders = new Map();
   for (const row of rows) folders.set(row.id, {
     getId: () => row.id, getName: () => row.name, isTrashed: () => row.trashed === true,
     getParents: () => iterator(row.parents.map(id => folders.get(id)).filter(Boolean)),
-    getFolders: () => { calls.metadata++; return iterator(rows.filter(child => child.parents.includes(row.id)).map(child => folders.get(child.id))); },
+    getFolders: () => { calls.metadata++; if (locked) calls.traversalsWhileLocked++; return iterator(rows.filter(child => child.parents.includes(row.id)).map(child => folders.get(child.id))); },
     getFilesByType: () => { throw new Error('Analytics must not enumerate spreadsheets'); },
   });
   const propertyStore = { getProperty: key => props.get(key) ?? null, getProperties: () => Object.fromEntries(props) };
@@ -35,13 +35,13 @@ function fixture(options = {}) {
   context.coldySettings_ = scope => { const current = context.authorize_(); if (scope.rootId !== current.rootId) context.fail_('SOURCE_CHANGED', 'Root changed'); return { configured: state.configured, connected: state.connected, checkedAt: '2026-11-20T09:00:00.000Z', credentialHash: state.credentialHash, key: 'secret-that-must-never-be-returned' }; };
   context.coldyCredentialHash_ = scope => { const settings = context.coldySettings_(scope); if (!settings.configured) context.fail_('COLDY_KEY_REQUIRED', 'Missing key'); return settings.credentialHash; };
   const registries = new Map([[ROOT + '|credential-A', { version: 1, credentialHash: 'credential-A', bindings: options.bindings || [], receipts: [] }]]);
-  context.coldyLoad_ = (scope, kind, owner) => { options.onRegistry?.({ rows, props, state }); assert.equal(kind, 'campaignbindings'); return plain(registries.get(scope.rootId + '|' + owner) || null); };
+  context.coldyLoad_ = (scope, kind, owner) => { calls.journals++; options.onRegistry?.({ rows, props, state }); assert.equal(kind, 'campaignbindings'); return plain(registries.get(scope.rootId + '|' + owner) || null); };
   context.coldySave_ = () => { calls.saves++; throw new Error('Analytics must not mutate bindings'); };
   context.coldyApi_ = () => { calls.provider++; throw new Error('Use existing listing API only'); };
-  context.listColdyCampaigns_ = input => {
-    assert.equal(locked, false, 'Provider listing must run outside global lock'); calls.list.push(plain(input));
+  context.coldyReadCampaignCatalog_ = (_scope, refresh) => {
+    assert.equal(locked, false, 'Provider listing must run outside global lock'); calls.list.push({ refresh });
     options.onList?.({ state, props, rows, context });
-    return { state: 'ready', campaigns: options.campaigns || [{ id: CAMPAIGN_A, name: 'Кухни email', status: 'Paused' }, { id: CAMPAIGN_B, name: 'Кухни тест', status: 'Active' }, { id: CAMPAIGN_C, name: 'Общая рассылка', status: 'Draft' }], generatedAt: '2026-11-20T09:01:00.000Z', cached: input.refresh !== true };
+    return { state: 'ready', campaigns: options.campaigns || [{ id: CAMPAIGN_A, name: 'Кухни email', status: 'Paused' }, { id: CAMPAIGN_B, name: 'Кухни тест', status: 'Active' }, { id: CAMPAIGN_C, name: 'Общая рассылка', status: 'Draft' }], generatedAt: '2026-11-20T09:01:00.000Z', cached: !refresh };
   };
   if (options.onNames) {
     const original = context.getSegmentNames_;
@@ -100,6 +100,20 @@ test('chooser shows current/foreign ownership and leaves existing upload/active 
 test('manual campaign refresh delegates the exact existing safe listing path outside script lock', () => {
   const f = fixture(), result = f.campaigns({ segmentId: A, refresh: true });
   assert.deepEqual(f.calls.list, [{ refresh: true }]); assert.equal(result.cached, false); assert.equal(f.calls.provider, 0); assert.equal(f.calls.saves, 0);
+});
+
+test('a large catalog takes a single Drive enumeration outside the lock and reads bindings once', () => {
+  const campaigns = Array.from({length: 1200}, (_, n) => ({
+    id: '550e8400-e29b-41d4-a716-' + String(n).padStart(12, '0'), name: 'Кампания ' + n, status: 'Active'
+  }));
+  const f = fixture({ campaigns, bindings: campaigns.map(campaign => binding(campaign.id, B)) });
+  assert.equal(f.campaigns().campaigns.length, 1200);
+  assert.equal(f.calls.list.length, 1);
+  assert.equal(f.calls.journals, 1);
+  assert.equal(f.calls.metadata, 1);
+  assert.equal(f.calls.traversalsWhileLocked, 0);
+  assert.equal(f.calls.folders.filter(id => id === B).length, 0);
+  assert.equal(f.calls.books, 0);
 });
 
 test('the detailed chooser exposes unassigned campaigns and only bindings belonging to the selected project', () => {

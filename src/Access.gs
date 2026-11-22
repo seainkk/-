@@ -49,6 +49,7 @@ function callApp(request) {
         testColdyConnection: typeof testColdyConnection_ === 'function' ? testColdyConnection_ : null,
         listColdyCampaigns: typeof listColdyCampaigns_ === 'function' ? listColdyCampaigns_ : null,
         getColdyBindings: typeof getColdyBindings_ === 'function' ? getColdyBindings_ : null,
+        syncColdyRecipients: typeof syncColdyRecipients_ === 'function' ? syncColdyRecipients_ : null,
         saveColdyBinding: typeof saveColdyBinding_ === 'function' ? saveColdyBinding_ : null,
         removeColdyBinding: typeof removeColdyBinding_ === 'function' ? removeColdyBinding_ : null,
         previewColdyUpload: typeof previewColdyUpload_ === 'function' ? previewColdyUpload_ : null,

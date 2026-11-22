@@ -40,6 +40,14 @@
     </details>
   </div>
 </section>
+<dialog id="pj-recipient-dialog" class="pj-mailbox-dialog" aria-labelledby="pj-recipient-title">
+  <h2 id="pj-recipient-title">Перенести адресатов в Email</h2>
+  <p id="pj-recipient-campaign"></p>
+  <div class="pj-filter"><label for="pj-recipient-target">Таблица сегмента</label><select id="pj-recipient-target"><option value="">Выберите таблицу</option><option value="companies">Компании</option><option value="lpr">ЛПР</option></select></div>
+  <p>Во вкладку Email попадут адреса этой рассылки и доступные в Coldy сведения по каждому получателю.</p>
+  <p id="pj-recipient-health" class="pj-health" role="status" aria-live="polite"></p>
+  <div class="pj-toolbar"><button id="pj-recipient-close" class="br-button" type="button">← Назад</button><button id="pj-recipient-confirm" class="br-button br-primary" type="button" disabled>Заполнить вкладку Email</button><a id="pj-recipient-sheet" class="br-button" target="_blank" rel="noopener noreferrer" hidden>Открыть вкладку Email</a></div>
+</dialog>
 <dialog id="pj-mailbox-dialog" class="pj-mailbox-dialog" aria-labelledby="pj-mailbox-title">
   <div class="pj-heading"><div><h2 id="pj-mailbox-title">Выбрать почты</h2><p class="br-muted">Отметьте ящики для мониторинга в этом проекте. Выбор виден всей команде.</p></div><button id="pj-mailbox-cancel" class="br-button" type="button">Отмена</button></div>
   <p id="pj-mailbox-health" class="pj-health" role="status" aria-live="polite"></p>
