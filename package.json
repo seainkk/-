@@ -12,5 +12,9 @@
     "deploy": "node scripts/deploy.mjs",
     "configure": "node scripts/configure.mjs"
   },
-  "devDependencies": { "@google/clasp": "3.4.1" }
+  "devDependencies": { "@google/clasp": "3.4.1" },
+  "overrides": {
+    "gcp-metadata@8.1.4": { "gaxios": "7.3.1" },
+    "googleapis-common@8.0.3": { "gaxios": "7.3.1" }
+  }
 }
