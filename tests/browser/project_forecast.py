@@ -127,6 +127,10 @@ def main():
         expect(view.locator('#pj-forecast-context')).to_contain_text('выбранных ящиков 9')
         expect(view.locator('#pj-forecast-context')).not_to_contain_text('выбранных ящиков 2')
         expect(view.get_by_role('button',name='Завтра')).to_have_attribute('aria-pressed','true')
+        # A panel left open overnight also preloads the newly aligned calendar range.
+        preview_calls=page.evaluate("backend.calls.filter(c=>c.name==='getProjectForecastPreview').length")
+        page.evaluate("tick(86400000)")
+        page.wait_for_function("n=>backend.calls.filter(c=>c.name==='getProjectForecastPreview').length>n",arg=preview_calls)
         assert not errors, errors
         browser.close()
         print('PASS: project forecast ranges, incomplete values, retries, hidden panels and scope changes.')

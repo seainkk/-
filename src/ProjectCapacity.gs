@@ -33,8 +33,8 @@ function projectCapacityValidate_(saved) {
 }
 
 /** Keep only current project bindings. A flag preserves occupancy without storing other campaign names or IDs. */
-function projectCapacitySelected_(context, capacity) {
-  var owners = projectCapacityOwners_(context, capacity.campaigns.map(function (item) { return item.id; }));
+function projectCapacitySelected_(context, capacity, observation) {
+  var owners = projectCapacityOwners_(context, capacity.campaigns.map(function (item) { return item.id; }), observation);
   var project = typeof registryProjectId_ === 'function' ? registryProjectId_() : 'numshield';
   var visible = new Set(capacity.campaigns.filter(function (item) {
     var owner = owners[item.id];
@@ -214,16 +214,27 @@ function projectCapacityAdvance_(context, settings, state) {
 }
 
 /** Resolve ownership against today's segment folders even when provider data is cached. */
-function projectCapacityOwners_(context, ids) {
+function projectCapacityOwners_(context, ids, observation) {
   var owners = Object.create(null), folders = Object.create(null), wanted = new Set(ids);
   if (!ids.length) return owners;
-  var projectId = registryProjectId_(), properties = context.properties.getProperties();
-  coldyCampaignRegistry_(context).bindings.forEach(function (binding) {
+  var projectId = registryProjectId_(), properties = context.properties.getProperties(), parent;
+  // A forecast can check the same journal before and after several bounded provider reads.
+  // Retain its parsed data only within this execution and only at the same live Drive version.
+  var registry;
+  if (observation && observation.registry && observation.unchanged && observation.unchanged()) {
+    registry = observation.registry;
+  } else {
+    if (observation) delete observation.unchanged;
+    registry = coldyCampaignRegistry_(context,observation);
+    if (observation) observation.registry = registry;
+  }
+  registry.bindings.forEach(function (binding) {
     if (!wanted.has(binding.campaignId) || registrySegmentProject_(context,binding.segmentId,properties) !== projectId) return;
     if (owners[binding.campaignId]) fail_('COLDY_STORAGE', 'У рассылки несколько сегментов.');
     if (!folders[binding.segmentId]) {
       try {
-        var folder = segmentFolder_(context, segmentSourceFolder_(context), id_(binding.segmentId));
+        if (!parent) parent = segmentSourceFolder_(context);
+        var folder = segmentFolder_(context, parent, id_(binding.segmentId), true);
         folders[binding.segmentId] = { bindingState: 'linked', segmentId: folder.getId(), segmentName: folder.getName(),
           segmentProjectId: projectId, segmentProjectName: registryProjectName_(projectId) };
       } catch (error) {

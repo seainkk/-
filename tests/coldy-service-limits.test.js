@@ -8,7 +8,7 @@ const coded = (code,retryAfterMs = 0) => Object.assign(new Error(code),{registry
 function fixture(count,options = {}) {
   let now = Date.UTC(2026,10,22,12), project = 'numshield', revision = 1, key = 'synthetic', serial = 0;
   const selected = Array.from({length:count},(_,index) => String(index + 1));
-  const store = new Map(), calls = [], settings = {configured:true,credentialHash:key,connected:false};
+  const store = new Map(), calls = [], settings = {configured:true,credentialHash:key,connected:false,proofSlot:'COLDY_CONNECTION'};
   const context = {rootId:'synthetic-root',properties:{getProperty:id => store.get(id),setProperty:(id,data) => store.set(id,data),deleteProperty:id => store.delete(id)}};
   let isLocked = false;
   const signature = () => [context.rootId,key,project,revision,selected].join('|');
@@ -25,6 +25,7 @@ function fixture(count,options = {}) {
     }});
   for (const file of ['Coldy.gs','ProjectInfrastructure.gs','ColdyServiceLimits.gs']) vm.runInContext(source(file),c);
   c.coldyCurrent_=()=>context;c.coldyCredentialHash_=()=>key;
+  c.coldySettings_=()=>{const proof=JSON.parse(store.get(settings.proofSlot)||'null');return {...settings,connected:!!proof,checkedAt:proof?.checkedAt};};
   let journalRechecks=0;
   c.projectInfraMonitoringCurrent_ = (_ctx,hash,sig) => {
     journalRechecks++;

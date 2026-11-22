@@ -199,8 +199,11 @@
       if(!data)data=await workspaceRpc('getServiceLimits',{provider},valid);
       if(!data||!valid())return;
       if(provider==='coldy'&&data.configured)window.RegistryProject?.confirmConnection?.(data.active);
-      check.continuing=data.pending===true;
-      check.next=Math.max(check.continuing?Date.now()+2500:started+60000,Date.now()+(Number(data.retryAfterMs)||0));
+      check.busyAttempts=data.busy?(check.busyAttempts||0)+1:0;
+      check.continuing=data.pending===true&&check.busyAttempts<=3;
+      const delay=data.busy?Math.min(60000,5000*Math.pow(2,check.busyAttempts-1)):2500;
+      check.next=Math.max(check.continuing?Date.now()+delay:started+60000,Date.now()+(Number(data.retryAfterMs)||0));
+      if(!check.continuing)check.busyAttempts=0;
       renderLimit(provider,data,check.continuing&&data.active!==true?'Проверяем данные сервиса…':'');
       if(check.continuing)check.timer=setTimeout(()=>readServiceLimit(provider),check.next-Date.now());
     }catch(error){if(valid()){check.continuing=false;check.next=Date.now()+60000;renderLimit(provider,null,'Подключение не подтверждено. '+failure(error).message);}}

@@ -19,6 +19,7 @@ api.getServiceLimits=async({provider,connectionOnly})=>{
   if(connectionOnly)return {provider,configured:true,active:true,checkedAt:'2026-11-22T06:30:00Z',items:[],message:''};
   if(provider==='coldy'&&window.waitColdy)await new Promise(done=>window.resumeColdy=done);
   if(provider==='coldy'&&window.coldyState==='failing')throw Error('Ошибка чтения');
+  if(provider==='coldy'&&window.coldyState==='busy')return {provider,configured:true,active:true,checkedAt:'2026-11-22T06:30:00Z',busy:true,pending:true,items:[],message:'Обновляем дневные лимиты. Другая операция ещё выполняется.',retryAfterMs:5000};
   if(provider==='coldy'&&window.coldyState==='waiting')return {provider,configured:true,active:null,pending:true,items:[],message:'Проверено 20 из 38',retryAfterMs:0};
   if(provider==='coldy'&&window.coldyState==='limited')return {provider,configured:true,active:null,pending:true,items:[],message:'Ограничение запросов',retryAfterMs:120000};
   return {provider,configured:true,active:provider==='promouser'?null:true,checkedAt:'2026-11-22T06:30:00Z',
@@ -64,6 +65,12 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         modal.locator('#br-share-copy').click()
         assert page.evaluate("copies.length===2&&copies[0]===copies[1]&&!document.body.innerText.includes(MOCK_KEY)")
         assert not modal.locator('textarea').count()
+        page.evaluate("coldyState='busy';tick(61000)")
+        expect(modal.locator('#br-settings-coldy-note')).to_contain_text('Другая операция')
+        expect(modal.locator('#br-settings-coldy-note')).to_contain_text('МСК')
+        expect(modal.locator('#br-settings-coldy-status')).to_have_text('Подключение активно')
+        page.evaluate("coldyState='ready'")
+        expect(modal.locator('#br-settings-coldy-limits')).to_contain_text('0 кредитов',timeout=7000)
         page.evaluate("coldyState='waiting';tick(61000)")
         expect(modal.locator('#br-settings-coldy-note')).to_contain_text('20 из 38')
         before=calls('promouser')

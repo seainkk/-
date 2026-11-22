@@ -21,7 +21,7 @@ function getServiceLimits_(request) {
       try {
         if (connectionOnly) {
           var verifiedAt = Date.parse(settings.checkedAt), age = Date.now() - verifiedAt;
-          result.checkedAt = settings.connected && age >= 0 && age < 45000 ? settings.checkedAt : coldyProbeConnection_(context,settings.credentialHash).checkedAt;
+          result.checkedAt = settings.connected && age >= 0 && age < 45000 ? settings.checkedAt : coldyProbeConnection_(context,settings).checkedAt;
           result.active = true;
         } else {
           result = promo ? pvServiceLimits_(context, settings) : coldyServiceLimits_(context, settings);
@@ -40,12 +40,14 @@ function getServiceLimits_(request) {
           COLDY_CONFLICT:'Сведения в Coldy изменились во время проверки лимитов.',
           COLDY_OWNER_AUTH_REQUIRED:'Google требует разрешение владельца для обращения к Coldy.'
         };
-        if (!Object.prototype.hasOwnProperty.call(messages,code)) throw error;
+        var deferred = !promo && !connectionOnly && code === 'BUSY';
+        if (!deferred && !Object.prototype.hasOwnProperty.call(messages,code)) throw error;
         result.active = code === 'PV_AUTH' || code === 'COLDY_AUTH' ? false : null;
-        result.message = messages[code];
+        result.message = deferred ? 'Обновляем дневные лимиты выбранных почт. Другая операция ещё выполняется.' : messages[code];
+        if (deferred) { result.pending = true; result.busy = true; result.retryAfterMs = 5000; }
         if (code === 'PV_RATE_LIMIT' || code === 'COLDY_RATE_LIMIT') result.retryAfterMs = Math.max(60000,Number(error.retryAfterMs) || 0);
       }
-      if (cache && result.retryAfterMs > 0) {
+      if (cache && result.retryAfterMs > 0 && !result.pending) {
         try { cache.put(slot,String(Date.now()+result.retryAfterMs),Math.min(21600,Math.ceil(result.retryAfterMs/1000))); } catch (unavailable) {}
       }
     }
@@ -53,7 +55,7 @@ function getServiceLimits_(request) {
     if (current.rootId !== context.rootId || registryProjectId_() !== project)
       fail_('SOURCE_CHANGED','Область доступа изменилась. Откройте настройки заново.');
     var latest = promo ? pvSettings_(current) : coldySettings_(current);
-    if (latest.key !== settings.key)
+    if (latest.key !== settings.key || !promo && latest.revision !== settings.revision)
       fail_(promo ? 'PV_CREDENTIAL_CHANGED' : 'COLDY_CREDENTIAL_CHANGED','Ключ сервиса изменился. Обновите настройки.');
     if (promo) {
       var proof = pvConnection_(current);
@@ -62,13 +64,13 @@ function getServiceLimits_(request) {
         result.items = []; result.checkedAt = null; result.message = 'Обновите подключение Promouser.';
       }
       result.items.push({label:'Лимит автооплаты за заказ',value:latest.autoPayLimitUsd,unit:'USD'});
-    } else if (result.active && !latest.connected) {
-      result.active = null; result.checkedAt = null; result.items = [];
-      result.message = 'Подключение Coldy требует повторной проверки.';
-    } else if (!connectionOnly && result.active === null && latest.connected) {
+    } else if (latest.rejected || result.active && (!latest.connected || latest.proofSlot !== settings.proofSlot)) {
+      result.active = latest.rejected ? false : null; result.checkedAt = null; result.items = []; result.pending=false;
+      result.message = latest.rejected ? 'Coldy отклонил API-ключ.' : 'Подключение Coldy требует повторной проверки.';
+    } else if (result.active === null && latest.connected) {
       // A delayed quota or unavailable mailbox does not undo a just-confirmed credential.
       var proofAge = Date.now() - Date.parse(latest.checkedAt);
-      if (proofAge >= 0 && proofAge < 60000) { result.active = true; result.checkedAt = latest.checkedAt; }
+      if (proofAge >= 0 && (proofAge < 60000 || result.busy)) { result.active = true; result.checkedAt = latest.checkedAt; }
     }
     return result;
   });

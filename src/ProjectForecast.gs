@@ -28,29 +28,133 @@ function projectForecastPreviewRange_(archive,day) {
     reasons:(report.reasons || []).concat('previous_horizon')});
 }
 
+// Cache only a finished numerical report. Recipient cohorts, provider records,
+// per-mailbox metrics and intermediate calculations never enter the cache.
+function projectForecastCachedArchive_(archive) {
+  var f = archive.forecast, counts = ['initial','followups','expected','capacity','modeled'];
+  function count(n) { return Number.isSafeInteger(n) && n >= 0; }
+  function date(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s); }
+  function totals(row, output) { counts.forEach(function (field) { output[field] = row[field]; }); return output; }
+  if (!f || f.timezone !== 'Europe/Moscow' || !date(archive.day) || !Number.isFinite(Date.parse(archive.generatedAt)) ||
+      !date(f.startDate) || !count(f.selectedAccounts) || !count(f.activeCampaigns) ||
+      !Array.isArray(f.days) || f.days.length !== 7 || !Array.isArray(f.periods) || f.periods.length !== 3 ||
+      !Array.isArray(f.reasons) || f.reasons.length ||
+      !f.days.every(function (r) { return r && date(r.date) && counts.every(function (k) { return count(r[k]); }); }) ||
+      !f.periods.every(function (r,i) { return r && r.days === [1,3,7][i] && date(r.from) && date(r.to) && counts.every(function (k) { return count(r[k]); }); })) return null;
+  var queue = {}, fields = ['pendingInitial','pendingFollowups','unresolved','unreadCampaigns'];
+  if (!f.queue || !fields.every(function (k) { return count(f.queue[k]); })) return null;
+  fields.forEach(function (k) { queue[k] = f.queue[k]; });
+  return {day:archive.day, generatedAt:archive.generatedAt, demandScope:archive.demandScope,
+    forecast:{timezone:'Europe/Moscow', startDate:f.startDate, selectedAccounts:f.selectedAccounts, activeCampaigns:f.activeCampaigns, reasons:[], queue:queue,
+      days:f.days.map(function (r) { return totals(r,{date:r.date}); }),periods:f.periods.map(function (r) { return totals(r,{days:r.days,from:r.from,to:r.to}); })}};
+}
+
+// One root lookup and one bounded membership listing cover the four journals,
+// the private store, the outreach folder and every segment in this aggregate.
+function projectForecastPreviewProof_(context,settings,owner,files,segments) {
+  if (!Array.isArray(segments) || segments.length > 100 || typeof Drive === 'undefined' || !Drive.Files || typeof Drive.Files.list !== 'function') return false;
+  var kinds = ['monitoring','campaignbindings','infrastructure','sendingforecast'];
+  if (!kinds.every(function (kind) { return files[kind] && /^\d+$/.test(files[kind].version); })) return false;
+  var folder = files.monitoring.folderId, root = context.rootId, project = registryProjectId_(), mime = 'application/vnd.google-apps.folder';
+  var props = context.properties.getProperties(), outreach = (props.SEGMENTS_FOLDER_ID || '').trim() || REGISTRY_CONFIG.defaultSegmentsFolderId;
+  if (!/^[\w-]{10,200}$/.test(folder) || !/^[\w-]{10,200}$/.test(outreach)) return false;
+  var scopes = kinds.map(function (kind) { return coldyStoreScope_(context,kind,kind === 'campaignbindings' ? settings.credentialHash : owner,false); });
+  function current(properties) {
+    return properties[COLDY.folderProperty] === folder && ((properties.SEGMENTS_FOLDER_ID || '').trim() || REGISTRY_CONFIG.defaultSegmentsFolderId) === outreach &&
+      scopes.every(function (scope) { return files[scope.kind].folderId === folder && properties[scope.indexKey] === files[scope.kind].id; }) &&
+      segments.every(function (id) { return registrySegmentProject_(context,id,properties) === project; });
+  }
+  if (!current(props)) return false;
+  var folderQuery = "mimeType = '" + mime + "' and ('" + root + "' in parents or '" + outreach + "' in parents)";
+  var journalQuery = "'" + folder + "' in parents and (" + kinds.map(function (kind) {
+    return "appProperties has { key='registryColdyKind' and value='" + kind + "' }";
+  }).join(' or ') + ')';
+  var page;
+  try {
+    var rootFile = Drive.Files.get(root,{fields:'id,trashed,mimeType,driveId',supportsAllDrives:true});
+    if (!rootFile || rootFile.id !== root || rootFile.trashed !== false || rootFile.mimeType !== mime) return false;
+    var query = {q:'trashed = false and ((' + folderQuery + ') or (' + journalQuery + '))', pageSize:300,
+      fields:'nextPageToken,incompleteSearch,files(' + COLDY.fields + ')',supportsAllDrives:true, includeItemsFromAllDrives:true, corpora:rootFile.driveId ? 'drive' : 'user'};
+    if (rootFile.driveId) query.driveId = rootFile.driveId;
+    page = Drive.Files.list(query);
+  } catch (unavailable) { return false; }
+  if (!page || page.incompleteSearch || page.nextPageToken || !Array.isArray(page.files)) return false;
+  var byId = new Map(page.files.filter(Boolean).map(function (file) { return [file.id,file]; }));
+  function child(id,parent,type) {
+    var file = byId.get(id);
+    return file && file.trashed === false && file.mimeType === type && Array.isArray(file.parents) && file.parents.length === 1 && file.parents[0] === parent;
+  }
+  if (!child(folder,root,mime) || !child(outreach,root,mime) || !segments.every(function (id) { return child(id,outreach,mime); })) return false;
+  var tags = byId.get(folder).appProperties || {};
+  if (tags.registryPrivateRole !== 'coldy_folder' || tags.registryColdyRoot !== root) return false;
+  if (!scopes.every(function (scope) {
+    var stamp = files[scope.kind], meta = byId.get(stamp.id);
+    if (!child(stamp.id,folder,'application/json') || String(meta.version) !== stamp.version) return false;
+    var expected = coldyStoreTags_(scope), actual = meta.appProperties || {};
+    return Object.keys(expected).every(function (key) { return actual[key] === expected[key]; });
+  })) return false;
+  var fresh = coldyCurrent_(context,false);
+  return projectMonitoringOwner_(coldyCredentialHash_(fresh)) === owner && registryProjectId_() === project && current(fresh.properties.getProperties());
+}
+
 function getProjectForecastPreview_(request) {
   return api_(function () {
     projectAnalyticsInput_(request, []);
     var context = authorize_(), settings = coldySettings_(context);
     if (!settings.configured) return null;
     var owner = projectMonitoringOwner_(settings.credentialHash);
-    var saved = projectForecastArchive_(coldyLoad_(context,'sendingforecast',owner));
     var day = new Date(Date.now() + 10800000).toISOString().slice(0,10);
+    var key = 'forecast-preview-v1-' + digest_(JSON.stringify([context.rootId,owner])), cache, cached;
+    try { cache = CacheService.getScriptCache(); cached = JSON.parse(cache.get(key)); } catch (unavailable) {}
+    function result(archive,report) { return {forecast:report,generatedAt:archive.generatedAt,previewScope:archive.demandScope,day:day}; }
+    if (cached && cached.archive && cached.files && cached.cachedAt <= Date.now() && Date.now()-cached.cachedAt < 21600000) {
+      var prior = projectForecastPreviewRange_(cached.archive,day);
+      if (prior && projectForecastPreviewProof_(context,settings,owner,cached.files,cached.segments) &&
+          new Date(Date.now()+10800000).toISOString().slice(0,10) === day) return result(cached.archive,prior);
+    }
+    var reportRead = {}, monitoringRead = {}, inventoryRead = {}, bindingsRead = {};
+    var saved = projectForecastArchive_(coldyLoad_(context,'sendingforecast',owner,reportRead));
     var forecast = projectForecastPreviewRange_(saved,day);
     if (!forecast || !saved.demandScope) return null;
-    var observed = {}, monitoring = projectMonitoringRead_(context,settings,observed), signature = projectMonitoringSignature_(context,monitoring);
+    var monitoring = projectMonitoringRead_(context,settings,monitoringRead), signature = projectMonitoringSignature_(context,monitoring);
     if (!monitoring.accountIds.length || saved.selection !== signature) return null;
-    var inventory = projectInfraRead_(context,settings);
+    var inventory = projectInfraRead_(context,settings,inventoryRead);
     if (!projectInfraMonitoringMatches_(inventory,signature) || !inventory.capacity) return null;
-    // Check each campaign against today's actual segment ownership. Never fetch recipient pages for a preview.
-    var guard = projectInfraMonitoringGuard_(context,settings.credentialHash,signature,observed);
-    return locked_(function () {
-      var fresh = guard(), visible = projectCapacitySelected_(fresh,inventory.capacity);
-      var membership = visible.capacity.campaigns.map(function (c) { return {id:c.id,segmentId:visible.owners[c.id].segmentId}; });
-      var scope = projectForecastDemandScope_(signature,{capacity:{campaigns:membership}});
-      if (scope !== saved.demandScope || new Date(Date.now()+10800000).toISOString().slice(0,10) !== day) return null;
-      return {forecast:forecast, generatedAt:saved.generatedAt, previewScope:scope, day:day};
-    });
+    function membershipOf(fresh,inventory) {
+      var visible = projectCapacitySelected_(fresh,inventory.capacity,bindingsRead);
+      return visible.capacity.campaigns.map(function (c) { return {id:c.id,segmentId:visible.owners[c.id].segmentId}; });
+    }
+    var membership = membershipOf(context,inventory);
+    function matches(items) { return projectForecastDemandScope_(signature,{capacity:{campaigns:items}}) === saved.demandScope; }
+    if (!matches(membership)) return null;
+    var files = {monitoring:monitoringRead.file,campaignbindings:bindingsRead.file,infrastructure:inventoryRead.file,sendingforecast:reportRead.file};
+    var segments = Array.from(new Set(membership.map(function (c) { return c.segmentId; })));
+    if (membership.length === inventory.capacity.campaigns.length && projectForecastPreviewProof_(context,settings,owner,files,segments)) {
+      var compact = cache && projectForecastCachedArchive_(saved);
+      if (compact) try {
+        var stored = JSON.parse(cache.get(key));
+        if (!stored || !(Date.parse(stored.archive.generatedAt)>Date.parse(compact.generatedAt))) {
+          cache.put(key,JSON.stringify({archive:compact,files:files,segments:segments,cachedAt:Date.now()}),21600);
+        }
+      } catch (unavailable) {}
+    } else {
+      // Nested/custom Drive folders and changed versions use optimistic verification
+      // of their actual journals and scope. Reading a prior report never waits on a writer lock.
+      var guard = projectInfraMonitoringGuard_(context,settings.credentialHash,signature,monitoringRead), fresh = guard();
+      if (!reportRead.unchanged || !reportRead.unchanged()) {
+        var latest = projectForecastArchive_(coldyLoad_(fresh,'sendingforecast',owner));
+        if (!latest || latest.selection !== signature || latest.demandScope !== saved.demandScope ||
+            latest.day !== saved.day || latest.generatedAt !== saved.generatedAt) return null;
+        forecast = projectForecastPreviewRange_(latest,day);
+        if (!forecast) return null;
+      }
+      if (!inventoryRead.unchanged || !inventoryRead.unchanged()) inventory = projectInfraRead_(fresh,settings);
+      if (!projectInfraMonitoringMatches_(inventory,signature) || !inventory.capacity || !matches(membershipOf(fresh,inventory))) return null;
+      guard();
+      if (bindingsRead.unchanged && !bindingsRead.unchanged()) return null;
+    }
+    if (new Date(Date.now()+10800000).toISOString().slice(0,10) !== day) return null;
+    return result(saved,forecast);
   });
 }
 
@@ -110,7 +214,7 @@ function getProjectSendingForecast_(request) {
       paused.day = day;
       paused.retryAfterMs = Math.max(0,saved.retryAt - Date.now());
       if (sameDemand) paused.progress = saved.progress;
-      if (matching && infra.capacity.updatedAt) paused.previewScope = projectForecastDemandScope_(signature,infra);
+      if (infra.poolOnly && infra.capacity.updatedAt) paused.previewScope = projectForecastDemandScope_(signature,infra);
       return paused;
     }
     if (!ready && !continueRecipients) {
@@ -121,7 +225,7 @@ function getProjectSendingForecast_(request) {
       waiting.day = day;
       waiting.pending = !waiting.retryAfterMs;
       if (sameDemand) waiting.progress = saved.progress;
-      if (matching && infra.capacity.updatedAt) waiting.previewScope = projectForecastDemandScope_(signature,infra);
+      if (infra.poolOnly && infra.capacity.updatedAt) waiting.previewScope = projectForecastDemandScope_(signature,infra);
       var reportAge = saved && checked - Date.parse(saved.generatedAt);
       // A pending diagnostics cursor can coexist with a verified map and still-fresh mailbox observations.
       if (saved && saved.forecast && saved.generatedAt && saved.selection === signature && saved.day === day &&
@@ -156,12 +260,12 @@ function getProjectSendingForecast_(request) {
     state.demandScope = demandScope; state.scope = scope;
     state.inputs = inputs;
     state.retryAt = 0; state.message = '';
-    var project = registryProjectId_();
+    var project = registryProjectId_(), bindingsObservation = {};
     function guard(id) {
       if (registryProjectId_() !== project || !segments.has(id))
         fail_('COLDY_MONITORING_CHANGED', 'Изменился проект рассылки. Обновите прогноз.');
       var fresh = checkSelection();
-      var ownerNow = projectCapacityOwners_(fresh, [id])[id];
+      var ownerNow = projectCapacityOwners_(fresh, [id], bindingsObservation)[id];
       if (!ownerNow || ownerNow.bindingState !== 'linked' || ownerNow.segmentId !== segments.get(id) || ownerNow.segmentProjectId !== project)
         fail_('COLDY_MONITORING_CHANGED', 'Изменилась привязка рассылки. Обновите прогноз.');
     }

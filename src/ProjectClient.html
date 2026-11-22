@@ -96,8 +96,10 @@
     render();notify();
   }
   function show(next,options={}){
+    const previousView=view;
     if(options.epoch!==undefined&&options.epoch!==accessEpoch){clear();accessEpoch=options.epoch;}
     ready=options.ready===true;view=views.has(next)?next:null;
+    if(view==='analytics'&&previousView!==view&&ready)void preloadForecast();
     if((view!=='analytics'||!ready)&&$('pj-forecast')?.open){$('pj-forecast').open=false;pauseForecast();}
     if(view!=='infrastructure'||!ready)closeMailboxPicker();
     if(view!=='analytics'||!ready)closeRecipientImport();
@@ -208,6 +210,9 @@
   }
   async function readForecast(explicit=false){
     if(!forecastVisible()||forecastBusy)return;
+    if(forecastPreviewAttempt&&new Date(forecastPreviewAttempt+10800000).toISOString().slice(0,10)!==currentForecastDay()){
+      forecastPreviewAttempt=0;void preloadForecast();
+    }
     if(Date.now()<forecastRetryAt){
       if(forecastData?.pending&&forecastTimer===null)scheduleForecast(forecastRetryAt-Date.now());
       return;
@@ -261,8 +266,9 @@
     if(!$('pj-forecast'))return;
     const today=currentForecastDay(),response=forecastData?.day&&forecastData.day!==today?null:forecastData;
     const archive=forecastArchive?.day===today?forecastArchive:null;
-    const historical=!!archive&&!response?.generatedAt;
-    const report=historical?archive.forecast:response?.forecast,generatedAt=historical?archive.generatedAt:response?.generatedAt;
+    const fromArchive=!!archive&&!response?.generatedAt;
+    const report=fromArchive?archive.forecast:response?.forecast,generatedAt=fromArchive?archive.generatedAt:response?.generatedAt;
+    const historical=fromArchive||!!generatedAt&&(response?.pending||response?.retryAfterMs>0);
     const period=report?.periods?.find(item=>item.days===forecastDays);
     const body=$('pj-forecast-report'),rows=$('pj-forecast-rows'),reasons=$('pj-forecast-reasons'),queue=$('pj-forecast-queue');
     body.hidden=!period;rows.replaceChildren();reasons.replaceChildren();reasons.hidden=true;queue.textContent='';queue.hidden=true;
