@@ -28,6 +28,7 @@ function fixture(options = {}) {
   const response = (body, status = 200, headers = {}) => ({ getResponseCode: () => status,
     getContentText: () => typeof body === 'string' ? body : JSON.stringify(body), getAllHeaders: () => headers });
   const c = vm.createContext({ Date: Clock, console, JSON, Math, Number, String, Array, Object,
+    LockService: { getUserLock: () => ({tryLock: () => true, releaseLock: () => {}}) },
     api_: callback => callback(),
     object_: value => { if (!value || typeof value !== 'object' || Array.isArray(value)) throw coded('INVALID_REQUEST', 'Object required'); return value; },
     id_: value => { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{10,200}$/.test(value)) throw coded('INVALID_ID', 'Invalid ID'); return value; },

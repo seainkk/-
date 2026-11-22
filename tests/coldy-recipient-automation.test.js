@@ -19,6 +19,10 @@ function fixture(){
   class Clock extends Date {constructor(...args){super(...(args.length?args:[state.now]));}static now(){return state.now;}}
   let serial=0;
   const r=vm.createContext({Date:Clock,Utilities:{getUuid:()=>String(++serial)},PropertiesService:{getScriptProperties:()=>props},
+    LockService:{getUserLock:()=>({
+      tryLock(){if(state.ownerLocked)return false;state.ownerLocked=true;state.onOwnerLock?.();return true;},
+      releaseLock(){state.ownerLocked=false;}
+    })},
     REGISTRY_CONFIG:{defaultRootFolderId:'root'},SHARED_REQUEST_SCOPE_:{keyHash:state.key,projectId:'numshield'},
     ScriptApp:{getProjectTriggers:()=>state.triggers,newTrigger:name=>{
       assert.equal(name,'coldyRecipientTick_');return {timeBased:()=>({everyMinutes:minutes=>{
@@ -103,6 +107,39 @@ test('a timed-out worker exposes its real start and yields the next turn to the 
   assert.ok(interrupted.lastTickAt);assert.equal(interrupted.lastSyncedAt,null);
   const prior=f.paths.length;f.next();
   assert.ok(!f.paths[prior].includes(first.campaignId),'the unattempted binding receives the next slot');
+});
+
+test('a busy registry write does not block timer admission; private checkpoints still take the script lock',()=>{
+  const f=fixture();f.enable();
+  let occupied=true,checkedWrites=0;
+  f.r.locked_=fn=>{
+    assert.equal(occupied,false,'no script lock while claiming the timer or reading Coldy');
+    assert.equal(f.state.ownerLocked,false,'the owner lock is released before any registry operation');
+    checkedWrites++;return fn();
+  };
+  f.state.afterRead=()=>{assert.equal(f.state.ownerLocked,false);occupied=false;};
+  f.tick();
+  assert.ok(checkedWrites>0);assert.ok(f.saves.length>0);
+  assert.deepEqual(f.writes.map(w=>w.kind).sort(),['companies','lpr']);
+  assert.equal(f.data.has('COLDY_RECIPIENT_TICK_LEASE'),false);
+});
+
+test('a stale timer cannot claim a lease after waiting for the owner lock',()=>{
+  const f=fixture();f.enable();
+  f.state.onOwnerLock=()=>{
+    const marker=JSON.parse(f.data.get('COLDY_RECIPIENT_TIMER_V1'));marker.uid='replacement';
+    f.data.set('COLDY_RECIPIENT_TIMER_V1',JSON.stringify(marker));
+  };
+  assert.throws(()=>f.tick(),e=>e.registryCode==='COLDY_SCOPE_CHANGED');
+  assert.equal(f.data.has('COLDY_RECIPIENT_TICK_LEASE'),false);assert.equal(f.paths.length,0);
+  assert.equal(f.state.ownerLocked,false);
+});
+
+test('a slow discovery still leaves time for the first working cycle',()=>{
+  const f=fixture();f.enable();const read=f.r.coldyCampaignRegistry_;
+  let first=true;
+  f.r.coldyCampaignRegistry_=(...args)=>{if(first){first=false;f.state.now+=46000;}return read(...args);};
+  f.tick();assert.deepEqual(f.writes.map(w=>w.kind).sort(),['companies','lpr']);
 });
 
 test('an unassigned destination and a provider cooldown have distinct public diagnostics',()=>{
