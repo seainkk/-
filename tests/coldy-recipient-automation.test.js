@@ -161,11 +161,77 @@ test('large campaign resumes, a failing campaign cannot block the other project,
   f.next();f.next();assert.equal(f.paths.length,before);delete f.state.failure;f.next();assert.ok(f.paths.length>before);
 });
 
+test('after mixed replies a 1267-recipient campaign keeps the contiguous prefix, waits for the longest 429 and probes only the missing page',()=>{
+  const f=fixture();f.bindings.splice(1);f.enable();f.state.counts={[a]:1267};
+  const read=f.r.coldyGetBatch_,batches=[];
+  let limited=true;
+  f.r.coldyGetBatch_=(context,paths,guard)=>{
+    const result=read(context,paths,guard);
+    const offsets=Array.from(paths,path=>path.startsWith('/campaigns/')?'detail':Number(path.match(/offset=(\d+)/)[1]));
+    batches.push(offsets);
+    return result.map((entry,i)=>{
+      if(limited && [400,800].includes(offsets[i])) return {error:{registryCode:'COLDY_RATE_LIMIT',retryAfterMs:offsets[i]===800?180000:60000}};
+      return entry;
+    });
+  };
+  f.tick();
+  assert.deepEqual(batches,[['detail',0],[200,400,600,800]]);
+  assert.equal(f.writes.length,0);assert.equal(f.saves.length,1);
+  f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],[]);
+  assert.equal(Date.parse(f.bindings[0].recipientSync.nextRetryAt),f.state.now+180000);
+  f.next();f.next();assert.equal(batches.length,2);
+  f.next();assert.deepEqual(batches[2],[400]);assert.equal(f.writes.length,0);
+  limited=false;f.next();assert.deepEqual(batches[3],[400]);assert.equal(f.writes.length,0);
+  f.next();assert.deepEqual(batches[4],[600,800,1000,1200]);
+  const rows=f.writes.flatMap(w=>w.rows);
+  assert.equal(rows.length,1267);assert.equal(new Set(rows.map(r=>r.email)).size,1267);
+  assert.deepEqual(rows.map(r=>r.id).sort((x,y)=>x-y),Array.from({length:1267},(_,i)=>i+1));
+  f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],[]);
+  assert.equal(f.bindings[0].recipientSync.state,'synced');
+});
+
+test('a throttled first lead page retains the confirmed campaign detail and completes a short campaign on its retry',()=>{
+  const f=fixture();f.bindings.splice(1);f.enable();
+  const read=f.r.coldyGetBatch_;
+  f.r.coldyGetBatch_=(...args)=>{const [detail]=read(...args);return [detail,{error:{registryCode:'COLDY_RATE_LIMIT',retryAfterMs:60000}}];};
+  f.tick();assert.equal(f.writes.length,0);assert.equal(f.saves.length,1);
+  f.r.coldyGetBatch_=read;const before=f.paths.length;f.next();
+  assert.deepEqual(f.paths.slice(before),['/leads/campaign/'+a+'?limit=200&offset=0']);
+  assert.equal(f.writes.length,1);assert.equal(f.writes[0].rows.length,1);
+});
+
+test('contradictory membership beyond a gap discards the entire prefix and never writes recipient rows',()=>{
+  const f=fixture();f.bindings.splice(1);f.enable();f.state.counts={[a]:1201};
+  const read=f.r.coldyGetBatch_;
+  f.r.coldyGetBatch_=(...args)=>{
+    const result=read(...args);
+    if(args[1][0].endsWith('offset=200')){
+      result[1]={error:{registryCode:'COLDY_RATE_LIMIT',retryAfterMs:180000}};
+      result[2].value.items[0].id=1;
+    }
+    return result;
+  };
+  f.tick();assert.equal(f.saves.length,0);assert.equal(f.writes.length,0);
+  f.r.coldyGetBatch_=read;const before=f.paths.length;f.next();f.next();assert.equal(f.paths.length,before);f.next();
+  assert.equal(f.paths[before],'/campaigns/'+a);
+});
+
 test('binding or key revocation during provider reading prevents sheet writes',()=>{
   const f=fixture();f.enable();f.state.afterRead=()=>{f.state.key='different';};
   assert.throws(()=>f.tick(),e=>e.registryCode==='LINK_ACCESS_REQUIRED');assert.equal(f.writes.length,0);
   const g=fixture();g.enable();g.state.afterRead=()=>{g.bindings.length=0;};
   g.tick();assert.equal(g.writes.length,0);assert.equal(g.saves.length,0);
+  const h=fixture();h.bindings.splice(1);h.enable();h.state.counts={[a]:1201};
+  const read=h.r.coldyGetBatch_;
+  h.r.coldyGetBatch_=(...args)=>{
+    const results=read(...args);
+    if(args[1][0].endsWith('offset=200')){
+      results[1]={error:{registryCode:'COLDY_RATE_LIMIT',retryAfterMs:60000}};
+      h.bindings[0].revision++;
+    }
+    return results;
+  };
+  h.tick();assert.equal(h.writes.length,0);assert.equal(h.saves.length,0);
 });
 
 test('legacy manual import enrolls only its recorded managed Email GID; an unrelated replacement is never claimed',()=>{
