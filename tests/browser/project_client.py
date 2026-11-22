@@ -523,6 +523,10 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         expect(page.locator('#pj-infrastructure-view')).to_be_visible()
         assert page.locator('#pj-account-rows tr').count()==0
         assert count('refreshProjectInfrastructure')==0
+        infra_reads=count('getProjectInfrastructure')
+        page.locator('#br-view-analytics').click()
+        page.locator('#br-view-infrastructure').click();idle()
+        assert count('getProjectInfrastructure')==infra_reads,'Fresh project infrastructure is reused on a quick return'
         open_mailboxes();page.locator('[data-monitoring-account="account-0"]').check()
         page.locator('#pj-mailbox-save').click();idle()
         assert page.locator('#pj-account-rows tr').count()==1

@@ -37,7 +37,10 @@
   function sharedUrl(key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return 'https://seainkk.github.io/-/#access_key='+key;}
   function notifyEntry(state){try{if(window.top!==window)window.top.postMessage({type:state==='ready'?'bases-registry-ready':'bases-registry-locked'},'https://seainkk.github.io');}catch(ignored){}}
   function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
-  function isReadRpc(method){return ['getProjectAnalytics','getProjectInfrastructure','getProjectInfrastructureSelection','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);}
+  function isReadRpc(method,payload){
+    if(method==='getProjectAnalyticsCampaigns')return payload?.refresh!==true;
+    return ['getProjectAnalytics','getColdyBindings','getProjectInfrastructure','getProjectInfrastructureSelection','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);
+  }
   async function readRpc(method,payload,canDispatch){
     const epoch=accessEpoch;
     while(networkPending>=2){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');if(canDispatch&&!canDispatch())return null;await new Promise(resolve=>setTimeout(resolve,25));}
@@ -52,7 +55,7 @@
   }
   function rpc(name,payload){
     if(!accessKey)return Promise.reject(new Error('Для входа нужна полная закрытая ссылка.'));
-    const rpcEpoch=typeof accessEpoch==='number'?accessEpoch:0,rpcKey=accessKey;if(typeof mutationGeneration==='number'&&typeof isReadRpc==='function'&&!isReadRpc(name))mutationGeneration++;networkPending++;
+    const rpcEpoch=typeof accessEpoch==='number'?accessEpoch:0,rpcKey=accessKey;if(typeof mutationGeneration==='number'&&typeof isReadRpc==='function'&&!isReadRpc(name,payload))mutationGeneration++;networkPending++;
     return new Promise((resolve,reject)=>{
       if(!globalThis.google?.script?.run){reject(new Error('Нет соединения с сервером Google. Откройте опубликованное веб-приложение Apps Script.'));return;}
       const runner=google.script.run.withSuccessHandler(value=>{if((typeof accessEpoch==='number'?accessEpoch:0)!==rpcEpoch||accessKey!==rpcKey){reject(new Error('Доступ закрыт.'));return;}resolve(value);}).withFailureHandler((error)=>{const parsed=failure(error);if((typeof accessEpoch==='number'?accessEpoch:0)===rpcEpoch&&accessKey===rpcKey&&accessFailure(parsed.code))lockAccess(parsed.code==='LINK_SETUP_REQUIRED'?parsed.message:'Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.');reject(error);});
@@ -82,7 +85,7 @@
     accessEpoch++;dashboardRequest++;if(dashboardAnalysisTimer!==null){clearTimeout(dashboardAnalysisTimer);dashboardAnalysisTimer=null;}dashboardAnalysisLoading=false;dashboardLoading=false;mailingsLoading=false;sourceLoading=false;accessReady=false;accessKey='';window.RegistryProject?.lock?.();closeProviderSettings();closeColdySettings();coldyMailings=null;preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
     viewTrail.length=0;pendingImportExit=null;suspendedSegment=null;uploadSegmentOptions=null;uploadEntryView='sources';$('br-import-destination').replaceChildren();$('br-import-segment-name').value='';recoveringOrigins=false;$('br-origin-recovery-status').textContent='';closeSourceOrigin();$('br-lineage-rows').replaceChildren();$('br-source-lineage').open=false;$('br-source-lineage').hidden=true;
     contactPreview=null;contactPreviewEpoch++;segmentImportDestination=null;segmentReturnPending=null;renderContactPreview();
-    pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;
+    pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;lastSourceAttempt=0;lastDashboardAttempt=0;lastMailingsAttempt=0;
     if(message)notifyEntry('locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
   }
   function switchProject(){
@@ -99,14 +102,20 @@
   function projectSwitchBlocked(){return busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||recoveringOrigins||window.RegistryProject?.hasPending?.()||formIsOpen();}
   async function startSharedAccess(switching){
     if(switching!==true&&requesting())return;lockAccess(null);const startupEpoch=accessEpoch;busy=true;renderAccess();updateControls();
-    try{const key=await readSharedKey();if(startupEpoch!==accessEpoch)return;if(!key)throw new Error('В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const epoch=accessEpoch;sourceLoading=true;lastSourceAttempt=Date.now();
-      // Both calls verify the key independently. Catalog discovery is a write
-      // barrier; its result is accepted only after this bootstrap succeeds.
-      const catalog=rpc('getSourceBases').then(result=>({result}),error=>({error}));const result=await rpc('getAppBootstrap');if(epoch!==accessEpoch||accessKey!==key)return;
+    try{const key=await readSharedKey();if(startupEpoch!==accessEpoch)return;if(!key)throw new Error('В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const epoch=accessEpoch;
+      // Discovery can write service metadata. Only prefetch a visible catalog
+      // with a free transport, and accept it after the key is confirmed.
+      let catalog=null;
+      if(activeView==='sources'&&networkPending===0){
+        sourceLoading=true;lastSourceAttempt=Date.now();
+        catalog=rpc('getSourceBases').then(result=>({result}),error=>({error}));
+      }
+      while(networkPending>=2){await new Promise(resolve=>setTimeout(resolve,25));if(epoch!==accessEpoch)return;}
+      const result=await rpc('getAppBootstrap');if(epoch!==accessEpoch||accessKey!==key)return;
       if(result?.user?.accessMode!=='link')throw new Error('Не удалось подтвердить режим доступа сервиса. Обновите страницу и повторите попытку.');bootstrap=result;accessReady=true;accessMessage=null;preparedJobsQueued=true;notifyEntry('ready');
-      catalog.then(outcome=>{if(!accessReady||epoch!==accessEpoch||accessKey!==key)return;if(outcome.error)sourceRefreshError=failure(outcome.error).message;else{sourceData=outcome.result;sourceRefreshError=null;lastSourceLoaded=Date.now();}sourceLoading=false;renderSources();renderSourcesHealth();updateControls();flushPendingView();});
+      catalog?.then(outcome=>{if(!accessReady||epoch!==accessEpoch||accessKey!==key)return;if(outcome.error)sourceRefreshError=failure(outcome.error).message;else{sourceData=outcome.result;sourceRefreshError=null;lastSourceLoaded=Date.now();}sourceLoading=false;renderSources();renderSourcesHealth();updateControls();flushPendingView();});
     }catch(error){if(startupEpoch!==accessEpoch)return;const parsed=failure(error);lockAccess(parsed.code==='LINK_ACCESS_REQUIRED'?'Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.':parsed.message);sourceLoading=false;}
-    finally{busy=false;$('br-loading').hidden=true;render();if(accessReady){armViewTimer();if(activeView!=='sources')pendingView=activeView;}flushPendingView();}
+    finally{busy=false;$('br-loading').hidden=true;render();if(accessReady&&startupEpoch===accessEpoch){armViewTimer();if(!sourceLoading)refreshActiveView({opening:true});}flushPendingView();}
   }
   async function copySharedLink(){
     if(!accessReady||!accessKey)return;
@@ -367,7 +376,7 @@
   function gridIsOpen(){return window.RegistryGrid?.isOpen?.()===true;}
   function workspaceRpc(method,payload,canDispatch){
     const epoch=accessEpoch;
-    if(isReadRpc(method)&&!(method==='getContactWorkspace'&&payload?.prepareMailingStatus===true))return readRpc(method,payload,canDispatch);
+    if(isReadRpc(method,payload)&&!(method==='getContactWorkspace'&&payload?.prepareMailingStatus===true))return readRpc(method,payload,canDispatch);
     const run=async()=>{while(workspaceMutationBlocked()){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');await new Promise(resolve=>setTimeout(resolve,25));}if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');if(canDispatch&&!canDispatch())return null;return rpc(method,payload);};
     const task=workspaceRpcQueue.catch(()=>{}).then(run);workspaceRpcQueue=task.catch(()=>{});return task;
   }
@@ -758,9 +767,10 @@
   async function refreshMailings(options={}){
     if(viewMutationBlocked()||!mailingSegmentId)return;if(mailingsLoading){if(options.opening)pendingView='mailings';return;}if(options.automatic&&(activeView!=='mailings'||document.hidden||formIsOpen()||Date.now()-lastMailingsAttempt<15000))return;
     mailingsLoading=true;lastMailingsAttempt=Date.now();updateControls();renderMailings();const id=mailingSegmentId,epoch=accessEpoch,mutation=mutationGeneration;
+    const bindings=loadColdyBindings(id);
     try{const result=await readRpc('getSegmentMailings',{segmentId:id});if(accessReady&&epoch===accessEpoch&&mutation===mutationGeneration&&mailingSegmentId===id){mailings=result;mailingsError=null;lastMailingsLoaded=Date.now();}}
     catch(error){if(accessReady&&epoch===accessEpoch&&mailingSegmentId===id)mailingsError=failure(error).message;}
-    finally{if(epoch!==accessEpoch)return;mailingsLoading=false;updateControls();if(activeView==='mailings')renderMailings();flushPendingView();}if(activeView==='mailings'&&mailingSegmentId===id)await loadColdyBindings(id);
+    finally{if(epoch===accessEpoch){mailingsLoading=false;updateControls();if(activeView==='mailings')renderMailings();flushPendingView();}}await bindings;
   }
   function segmentRecoveryLocked(){return segmentError?.code==='SEGMENT_RECOVERY_REQUIRED';}
   function renderSegmentError(){const node=$('br-segment-error');node.hidden=!segmentError;node.replaceChildren();if(!segmentError)return;node.append(document.createTextNode(segmentError.message));const folderId=folderRecoveryId(segmentError.message),sheetId=importRecoveryId(segmentError.message);if(folderId||sheetId){const link=document.createElement('a');link.href=folderId?folderUrl(folderId):nativeUrl(sheetId);link.target='_blank';link.rel='noopener noreferrer';link.textContent=' Открыть результат в Google Диске';node.append(link);}$('br-segment-reread').hidden=!segmentError;}
@@ -1188,7 +1198,7 @@
   function armViewTimer(){clearViewTimer();if(accessReady&&!document.hidden&&['sources','segments','mailings'].includes(activeView))viewTimer=setInterval(()=>refreshActiveView({automatic:true}),60000);}
   async function refreshActiveView(options={}){
     if(!accessReady)return;
-    if(viewMutationBlocked()||requesting()&&!['segments','mailings'].includes(activeView)){if(options.opening)pendingView=activeView;return;}
+    if(viewMutationBlocked()||requesting()&&activeView==='sources'){if(options.opening)pendingView=activeView;return;}
     if(options.automatic&&(document.hidden||formIsOpen()))return;
     if(['analytics','infrastructure'].includes(activeView))return window.RegistryProject?.refresh?.(options);
     const loadedAt=activeView==='sources'?sourceData&&lastSourceLoaded:activeView==='segments'?dashboard&&lastDashboardLoaded:mailings?.segment?.id===mailingSegmentId&&lastMailingsLoaded;
@@ -1215,13 +1225,13 @@
       }
       render();return;
     }
-    if(pendingAccessChange){if(networkPending>0||busy)return;pendingAccessChange=false;startSharedAccess();return;}if(requesting())return;if(!accessReady)return;
+    if(pendingAccessChange){if(networkPending>0||busy)return;pendingAccessChange=false;startSharedAccess();return;}if(requesting())return;if(!accessReady){renderAccess();return;}
     if(preparedImport?.continueQueued){advancePreparedBase(true);return;}
     if(preparedImport?.previewQueued&&importOpen&&activeView==='sources'){runPreparedPreview();return;}
     if(segmentEditor){renderSegmentSources();updateControls();if(segmentEditor.readingLists)return;if(segmentEditor.loadingLists){loadSegmentEditorLists();return;}if(segmentEditor.pendingSourceId){const id=segmentEditor.pendingSourceId;segmentEditor.pendingSourceId=null;chooseSegmentSource(id,true);return;}}
     if(contactPreview?.queued&&activeView==='sources'&&syncTimer===null&&!formIsOpen()&&!sourceFocused()){runContactPreview();return;}
     updateControls();if(activeView==='segments'&&dashboard?.analysisPending===true&&!dashboardAnalysisLoading&&!dashboardLoading&&!formIsOpen())scheduleSegmentAnalysis();if(pendingView){const view=pendingView;pendingView=null;if(view===activeView){refreshActiveView({opening:true,preserveNotice:true});return;}}
-    if(preparedJobsQueued&&!preparedJobsLoaded&&!preparedJobsLoading&&(sourceData||lastSourceAttempt)&&!formIsOpen()&&!sourceFocused()){runPreparedJobList();return;}
+    if(activeView==='sources'&&preparedJobsQueued&&!preparedJobsLoaded&&!preparedJobsLoading&&(sourceData||lastSourceAttempt)&&!formIsOpen()&&!sourceFocused()){runPreparedJobList();return;}
     if(syncTimer===null&&pendingSyncViews.has(activeView)&&!formIsOpen()&&!sourceFocused())refreshActiveView({sync:true,preserveNotice:true});
   }
   function closeSegmentEditor(){
@@ -1248,7 +1258,7 @@
   }
   function setView(view,options={}){
     if(view!==activeView&&!options.back){viewTrail.push({view:activeView,scroll:window.scrollY,mailingSegmentId});if(viewTrail.length>32)viewTrail.shift();}
-    activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});if(view==='segments'&&dashboard?.analysisPending===true&&!formIsOpen())scheduleSegmentAnalysis();
+    activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});if(view==='segments'&&dashboard?.analysisPending===true&&!formIsOpen())scheduleSegmentAnalysis();if(view==='sources'&&preparedJobsQueued)flushPendingView();
   }
   function previousView(){
     const previous=viewTrail.pop();if(!previous)return false;
@@ -1368,7 +1378,11 @@
   $('br-contact-preview-prev').addEventListener('click',()=>{if(contactPreview){contactPreview.page--;renderContactConflicts();}});$('br-contact-preview-next').addEventListener('click',()=>{if(contactPreview){contactPreview.page++;renderContactConflicts();}});
   window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving||preparedImport?.confirmationRequested||window.RegistryGrid?.hasPending?.()||window.RegistryProject?.hasPending?.()){event.preventDefault();event.returnValue='';}});
   try{if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;lockAccess(null);accessMessage='Ссылка изменилась. Проверяем доступ…';renderAccess();pendingAccessChange=true;flushPendingView();});}catch(ignored){}
-  window.RegistryProject?.configure?.({transport:workspaceRpc,openConnection:openColdySettings,onStateChange:()=>updateControls(),onMutation:()=>{mailings=null;lastMailingsLoaded=0;if(coldyMailings)coldyMailings.loaded=false;}});
+  function peekProjectSegments(){
+    if(!accessReady||dashboard?.state!=='ready'||!lastDashboardLoaded||pendingSyncViews.has('segments')||Date.now()-lastDashboardLoaded>60000)return null;
+    return {state:dashboard.state,source:dashboard.source,segments:dashboard.items.map(({id,name,category,url})=>({id,name,category,url}))};
+  }
+  window.RegistryProject?.configure?.({transport:workspaceRpc,peekSegments:peekProjectSegments,openConnection:openColdySettings,onStateChange:()=>updateControls(),onMutation:()=>{mailings=null;lastMailingsLoaded=0;if(coldyMailings)coldyMailings.loaded=false;}});
   render();startSharedAccess();
 })();
 </script>

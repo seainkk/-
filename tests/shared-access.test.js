@@ -114,12 +114,12 @@ test('RPC and form dispatch carry only supported projects and restore their encl
 });
 
 test('Coldy and manual validation RPCs use the shared gate; private processors stay private', () => {
-  for (const method of ['getColdySettings','configureColdy','testColdyConnection','listColdyCampaigns','getColdyBindings','saveColdyBinding','removeColdyBinding','previewColdyUpload','startColdyUpload','continueColdyUpload','getColdyUploadState','refreshColdyMailings','previewColdyValidation','startColdyValidation','getColdyValidationState','advanceColdyValidation','previewPromouserValidation','startPromouserValidation','previewPhoneValidation','startPhoneValidation']) {
+  for (const method of ['getColdySettings','configureColdy','testColdyConnection','listColdyCampaigns','getColdyBindings','saveColdyBinding','removeColdyBinding','previewColdyUpload','startColdyUpload','continueColdyUpload','getColdyUploadState','refreshColdyMailings','syncColdyRecipients','previewColdyValidation','startColdyValidation','getColdyValidationState','advanceColdyValidation','previewPromouserValidation','startPromouserValidation','previewPhoneValidation','startPhoneValidation']) {
     const f=fixture();let calls=0;f.context[method+'_']=payload=>{calls++;assert.equal(f.context.authorize_().rootId,ROOT);return {id:payload.id}};
     assert.throws(()=>f.call(method,'Z'.repeat(43),{id:'source_file_1234567890'}),/LINK_ACCESS_REQUIRED/);
     assert.equal(calls,0);assert.equal(f.call(method,TEST_ACCESS_KEY,{id:'source_file_1234567890'}).id,'source_file_1234567890');assert.equal(calls,1);assert.equal(f.context.SHARED_REQUEST_SCOPE_,null);
   }
-  const f=fixture();for(const method of ['coldyApi_','coldySave_','coldySettings_','processColdyCampaignUploads_','processColdyWorkbookValidation_','emailValidationProvider_'])assert.throws(()=>f.call(method),/INVALID_REQUEST/);
+  const f=fixture();for(const method of ['coldyApi_','coldySave_','coldyRecipientSnapshot_','coldyRecipientSheetWrite_','coldySettings_','processColdyCampaignUploads_','processColdyWorkbookValidation_','emailValidationProvider_'])assert.throws(()=>f.call(method),/INVALID_REQUEST/);
 });
 
 test('the sole-form upload verifies the key before reading a Blob and strips it before importing', () => {

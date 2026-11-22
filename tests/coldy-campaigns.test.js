@@ -103,6 +103,21 @@ function fixture(options = {}) {
 }
 const posts = f => f.calls.api.filter(call => call.method === 'POST');
 
+test('recipient import membership blocks an upload after the manual status changes back to new', () => {
+  const f=fixture({companies:[valid('in@example.test',{manual:'новый'}),valid('out@example.test',{manual:'новый'})]});
+  const binding=f.bind(), sheet=f.companySheet;
+  sheet.data[0].push('Coldy: рассылки');
+  sheet.data[1].push('Предыдущее название ['+CAMPAIGN+']');
+  sheet.data[2].push('Чужая кампания ['+CAMPAIGN2+']');
+  const preview=f.preview(binding);
+  assert.equal(preview.counts.alreadyLoaded,1);
+  assert.equal(preview.counts.eligible,1);
+  const contact=f.context.coldyCampaignCollect_(f.context.authorize_(),binding,{emails:{}}).contacts[0];
+  sheet.data[2][sheet.data[0].length-1]+='\nКухни ['+CAMPAIGN+']';
+  assert.throws(()=>f.context.coldyCampaignDispatchRows_(f.context.authorize_(),binding,[contact]),/COLDY_SOURCE_CHANGED/);
+  assert.equal(posts(f).length,0);
+});
+
 // Credentials, real scope and binding identity are checked on all paths.
 test('foreign project analytics, upload previews and known job IDs are rejected before reading or writing the provider', () => {
   const f=fixture({companies:Array.from({length:103},(_,i)=>valid('u'+i+'@example.test'))});

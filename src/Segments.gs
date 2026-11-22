@@ -176,7 +176,7 @@ function segmentMetadataBinding_(context) {
 }
 
 /** Source cards need only direct segment names, not every Outreach spreadsheet. */
-function getSegmentNames_(context) {
+function getSegmentNames_(context, folderRefs) {
   context = context || authorize_();
   var binding = segmentMetadataBinding_(context);
   if (binding.state !== 'ready') return binding;
@@ -193,7 +193,10 @@ function getSegmentNames_(context) {
       var parent = parents.next();
       if (parent.getId() === sourceId && !parent.isTrashed()) { direct = true; break; }
     }
-    if (direct && !child.isTrashed()) items.push({ id: childId, name: name, url: segmentFolderUrl_(childId) });
+    if (direct && !child.isTrashed()) {
+      items.push({ id: childId, name: name, url: segmentFolderUrl_(childId) });
+      if (folderRefs) folderRefs[childId] = child;
+    }
   }
   var descriptor = { id: sourceId, name: source.getName(), url: segmentFolderUrl_(sourceId) };
   // A stale child iterator cannot keep associations alive after its source moves.

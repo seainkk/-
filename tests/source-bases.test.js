@@ -234,6 +234,21 @@ test('source-base APIs authorize before Drive or service storage access', () => 
   }
 });
 
+test('each refresh reads file types once and independently checks current Drive membership', () => {
+  const f = fixture(), file = f.files.get(CSV);
+  let reads = 0;
+  file.getMimeType = () => { reads++; return file.mime; };
+  assert.equal(f.list().items.find(item => item.id === CSV).format, 'CSV');
+  assert.equal(reads, 1);
+  file.mime = SHEET_MIME;
+  assert.equal(f.list().items.find(item => item.id === CSV).mimeType, SHEET_MIME);
+  assert.equal(reads, 2);
+  const source = f.folders.get(SOURCE), listFiles = source.getFiles;
+  source.getFiles = () => { const stale = listFiles(); file.parent = OTHER; return stale; };
+  assert.equal(f.list().items.some(item => item.id === CSV), false);
+  assert.equal(reads, 2);
+});
+
 test('immutable origins link multiple selections to one original without opening it, and recover a lost write', () => {
   const f = fixture({ loseOriginReply: true });
   const another = 'native_selection_1234567890', original = 'external_original_9876543210';

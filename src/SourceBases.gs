@@ -155,19 +155,23 @@ function sourceBasesSource_(context) {
 
 function sourceBasesDiscover_(context, source) {
   var files = [], seenFiles = Object.create(null), seenFolders = Object.create(null), folderCount = 0;
+  var sourceId = source.getId();
   var storageId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
   function visit(folder, depth) {
-    if (seenFolders[folder.getId()]) return;
+    var folderId = folder.getId();
+    if (seenFolders[folderId]) return;
     if (++folderCount > REGISTRY_CONFIG.maxSourceFolders || depth > REGISTRY_CONFIG.maxTreeDepth) fail_('SOURCE_LIMIT', 'Слишком много папок исходных баз. Список не был сохранён частично.');
-    if (!insideRegistry_(folder, source.getId())) fail_('SOURCE_CHANGED', 'Папки исходных баз изменились во время обновления. Повторите обновление.');
-    seenFolders[folder.getId()] = true;
+    if (!insideRegistry_(folder, sourceId)) fail_('SOURCE_CHANGED', 'Папки исходных баз изменились во время обновления. Повторите обновление.');
+    seenFolders[folderId] = true;
     var iterator = folder.getFiles();
     while (iterator.hasNext()) {
-      var file = iterator.next();
-      if (file.isTrashed() || file.getId() === storageId || file.getMimeType() === 'application/vnd.google-apps.folder' || seenFiles[file.getId()]) continue;
-      if (!insideRegistry_(file, source.getId())) continue;
-      seenFiles[file.getId()] = true;
-      files.push(sourceBaseMetadata_(file));
+      var file = iterator.next(), fileId = file.getId();
+      if (file.isTrashed() || fileId === storageId || seenFiles[fileId]) continue;
+      if (!insideRegistry_(file, sourceId)) continue;
+      var mimeType = file.getMimeType();
+      if (mimeType === 'application/vnd.google-apps.folder') continue;
+      seenFiles[fileId] = true;
+      files.push(sourceBaseMetadata_(file, fileId, mimeType));
       if (files.length > REGISTRY_CONFIG.maxSourceBaseRows) fail_('SOURCE_LIMIT', 'Исходных баз больше 5000. Список не был сохранён частично.');
     }
     var children = folder.getFolders();
@@ -188,8 +192,10 @@ function sourceBasesFile_(context, source, fileId) {
   return file;
 }
 
-function sourceBaseMetadata_(file) {
-  var fileId = id_(file.getId()), name = String(file.getName()), mimeType = String(file.getMimeType());
+function sourceBaseMetadata_(file, fileId, mimeType) {
+  fileId = id_(fileId === undefined ? file.getId() : fileId);
+  mimeType = String(mimeType === undefined ? file.getMimeType() : mimeType);
+  var name = String(file.getName());
   var url = String(file.getUrl());
   if (!/^https:\/\/(?:docs|drive|script)\.google\.com\//.test(url)) url = 'https://drive.google.com/file/d/' + fileId + '/view';
   var formats = {
@@ -486,8 +492,8 @@ function sourceBaseChanged_(before, after) { return ['fileName', 'mimeType', 'ur
 function sourceBaseBump_(record, email) { if (record.revision >= Number.MAX_SAFE_INTEGER) fail_('STORAGE_LIMIT', 'Достигнут предел версии записи. Требуется проверка администратора.'); record.revision++; record.updatedAt = new Date().toISOString(); record.updatedBy = email; }
 
 function sourceBasesAssociations_(relations, context) {
-  var index = Object.create(null);
-  if (!relations.length) return { relations: relations, index: index };
+  var index = Object.create(null), byFile = Object.create(null);
+  if (!relations.length) return { byFile: byFile, index: index };
   try {
     context = context || authorize_();
     var segments = getSegmentNames_(context);
@@ -501,7 +507,11 @@ function sourceBasesAssociations_(relations, context) {
       if (scoped) relations = relations.filter(function (relation) { return !hidden[relation.segmentId]; });
     }
   } catch (error) { /* Existing links remain stored; their unavailable targets are not guessed. */ }
-  return { relations: relations, index: index };
+  relations.forEach(function (relation) {
+    if (!byFile[relation.fileId]) byFile[relation.fileId] = [];
+    byFile[relation.fileId].push(relation.segmentId);
+  });
+  return { byFile: byFile, index: index };
 }
 
 // The service book stores references only. Never fetch external files to render lineage.
@@ -711,9 +721,8 @@ function sourceBaseItem_(file, record, associations, origins, projects) {
   item.projectIds = projects ? (membership ? membership.ids.slice() : []) : null;
   item.projectsRevision = projects ? (membership ? membership.revision : 0) : null;
   if (record) { item.updatedAt = record.updatedAt; item.updatedBy = record.updatedBy; }
-  if (associations) associations.relations.forEach(function (relation) {
-    if (relation.fileId !== file.id) return;
-    if (associations.index[relation.segmentId]) item.segments.push(associations.index[relation.segmentId]);
+  if (associations && associations.byFile[file.id]) associations.byFile[file.id].forEach(function (segmentId) {
+    if (associations.index[segmentId]) item.segments.push(associations.index[segmentId]);
     else { item.associationsAvailable = false; item.associationWarning = 'Часть связей с сегментами недоступна. Требуется проверка.'; }
   });
   return item;
