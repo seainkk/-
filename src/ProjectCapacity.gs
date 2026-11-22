@@ -86,6 +86,8 @@ function projectCapacityAdvance_(context, settings, state) {
     if (!work.mapped) {
       state.capacity = projectCapacityMappings_(read('/account-campaign-mappings'), state.detailIds, settings.key);
       work.mapped = true;
+      // Publish assignments before waiting for any individual campaign schedule.
+      if (state.poolOnly && state.capacity.campaigns.length) return;
     }
     var campaigns = state.capacity.campaigns, deadline = Date.now() + PROJECT_INFRASTRUCTURE.detailBudgetMillis;
     var first = work.cursor, stop = Math.min(first + PROJECT_INFRASTRUCTURE.batch, campaigns.length);
@@ -169,8 +171,8 @@ function projectCapacityPublic_(context, settings, saved, result) {
   });
   if (saved && saved.capacityRequested) {
     var mapped = (work ? work.mapped : !!cap) ? 1 : 0;
-    result.syncProgress = { completed: result.detailProgress.completed + mapped + (work ? work.cursor : campaigns.length),
-      total: result.detailProgress.total + 1 + (mapped ? campaigns.length : 0) };
+    result.syncProgress = { completed: (saved.poolOnly ? 0 : result.detailProgress.completed) + mapped + (work ? work.cursor : campaigns.length),
+      total: (saved.poolOnly ? 0 : result.detailProgress.total) + 1 + (mapped ? campaigns.length : 0) };
   }
 }
 

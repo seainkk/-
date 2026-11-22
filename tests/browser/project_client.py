@@ -29,9 +29,10 @@ function poolData(accounts){
  return {state:backend.uncertainCapacity?'partial':'ready',stale:!!backend.uncertainCapacity,updatedAt:backend.lastSyncAt,campaigns:campaignList};
 }
 function infra(){
- const total=backend.monitoringIds.length,completed=backend.infraSynced?(backend.largeInventory?backend.largeCompleted||0:backend.infraContinued?total:Math.min(5,total)):0;
+ const total=backend.monitoringIds.length,completed=backend.detailIds.length,poolOnly=backend.syncMode==='pool';
+ const nextCursor=poolOnly&&backend.poolPending?'pool-schedule-cursor':backend.syncMode==='diagnostics'&&completed<total?'details-'+completed:null;
  const accounts=inventory().filter(item=>backend.monitoringIds.includes(item.id)).map((item,i)=>({...item,status:i<completed?(item.id==='account-1'?'error':'connected'):null,sentTotal:i<completed&&item.id==='account-0'?100:null,sentToday:null,dailyLimit:i<completed?40:null,errorCount:null,errors:i<completed&&item.id==='account-1'?[{code:'SMTP',message:'<img src=x onerror=alert(1)> disconnected'}]:[],tags:[],warmup:{status:null,sentToday:null,repliesToday:null},updatedAt:i<completed?backend.lastSyncAt:null,stale:i>=completed}));
- return {state:!backend.configured?'not_configured':!total?'no_selection':!backend.infraSynced?'not_synced':completed<total?'partial':'ready',configured:backend.configured,connected:backend.connected,accounts,capacity:poolData(accounts),monitoring:{...monitoring(),selectedCount:total,missingAccountIds:[]},availableCount:backend.inventoryLoaded?(backend.largeInventory||6):null,totals:{accounts:backend.configured?total:null,sentTotal:accounts.length&&accounts.every(item=>item.sentTotal!==null)?accounts.reduce((sum,item)=>sum+item.sentTotal,0):null,sentToday:null,dailyLimit:null,errorCount:null,accountsWithErrors:accounts.filter(item=>item.errors.length).length},lastSyncAt:backend.infraSynced?backend.lastSyncAt:null,warnings:[],nextCursor:backend.infraSynced&&completed<total?(backend.largeInventory?'large-cursor-'+completed:'continue-token-opaque'):null,detailProgress:{completed,total},syncPaused:false,retryAfterMs:0,error:null,countersScope:'selected_accounts',stale:!total};
+ return {state:!backend.configured?'not_configured':!total?'no_selection':!backend.infraSynced?'not_synced':completed<total?'partial':'ready',configured:backend.configured,connected:backend.connected,accounts,capacity:poolData(accounts),monitoring:{...monitoring(),selectedCount:total,missingAccountIds:[]},availableCount:backend.inventoryLoaded?(backend.largeInventory||6):null,totals:{accounts:backend.configured?total:null,sentTotal:accounts.length&&accounts.every(item=>item.sentTotal!==null)?accounts.reduce((sum,item)=>sum+item.sentTotal,0):null,sentToday:null,dailyLimit:null,errorCount:null,accountsWithErrors:accounts.filter(item=>item.errors.length).length},lastSyncAt:backend.infraSynced?backend.lastSyncAt:null,warnings:[],nextCursor,poolOnly,syncProgress:poolOnly?{completed:backend.poolPending?1:2,total:2}:{completed,total},detailProgress:{completed:poolOnly?0:completed,total},syncPaused:false,retryAfterMs:0,error:null,countersScope:'selected_accounts',stale:!total};
 }
 function api(name,p){
  if(name==='getProjectAnalytics')return {state:backend.catalogState||'ready',segments:backend.catalogState?[]:[{id:'segment-a',name:'Segment A'},{id:'segment-b',name:'Segment B'}],coldy:{configured:backend.configured,connected:backend.connected,checkedAt:null}};
@@ -51,7 +52,20 @@ function api(name,p){
   return {selection:monitoring(),infrastructure:infra()};
  }
  if(name==='getProjectInfrastructure'){if(backend.infraErrorDto)return {state:'error',configured:true,connected:true,accounts:[],totals:{accounts:null,sentTotal:null,sentToday:null,errorCount:null,accountsWithErrors:null},lastSyncAt:null,nextCursor:null,error:{code:'COLDY_HTTP',message:'Inventory unavailable'},syncPaused:true};const value=infra();if(backend.cacheStale)value.stale=true;return value;}
- if(name==='refreshProjectInfrastructure'){if(backend.failInfra)throw new Error('[COLDY_HTTP] API temporarily unavailable');if(p.inventoryOnly){backend.inventoryLoaded=true;return infra();}if(backend.largeInventory){const expected=backend.largeCompleted?'large-cursor-'+backend.largeCompleted:null;if((p.cursor||null)!==expected)throw new Error('Incorrect inventory cursor');const before=backend.largeCompleted||0;backend.largeCompleted=Math.min(backend.monitoringIds.length,before+20);backend.detailIds.push(...backend.monitoringIds.slice(before,backend.largeCompleted));backend.infraSynced=true;return infra();}backend.infraSynced=true;if(p.cursor&&!backend.sameCursor)backend.infraContinued=true;const value=infra();if(backend.pauseFirst)Object.assign(value,{syncPaused:true,retryAfterMs:15000,error:{code:'COLDY_RATE_LIMIT',message:'Rate limited'}});return value;}
+ if(name==='refreshProjectInfrastructure'){
+  if(backend.failInfra)throw new Error('[COLDY_HTTP] API temporarily unavailable');
+  if(p.inventoryOnly){backend.inventoryLoaded=true;return infra();}
+  if(p.cursor&&p.cursor!==infra().nextCursor)throw new Error('Incorrect cursor');
+  if(!p.cursor)backend.syncMode=p.includeCapacity?'pool':'diagnostics';
+  if(backend.syncMode==='pool'){
+   backend.infraSynced=true;backend.cacheStale=false;
+   backend.poolPending=backend.monitoringIds.includes('account-0')&&(!p.cursor||!!backend.sameCursor);
+  }else{
+   if(!p.cursor)backend.detailIds=[];
+   const start=backend.detailIds.length;backend.detailIds.push(...backend.monitoringIds.slice(start,start+5));
+  }
+  const value=infra();if(backend.pauseFirst&&value.nextCursor)Object.assign(value,{syncPaused:true,retryAfterMs:15000,error:{code:'COLDY_RATE_LIMIT',message:'Rate limited'}});return value;
+ }
  throw new Error('Unexpected RPC '+name);
 }
 window.transport=(name,p,guard)=>{
@@ -246,14 +260,20 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.locator('#pj-capacity-filter').select_option('')
         assert not page.locator('#pj-infrastructure-diagnostics').evaluate('el=>el.open')
         page.locator('#pj-infrastructure-diagnostics summary').click()
+        assert page.evaluate('backend.detailIds')==[]
+        expect(page.locator('#pj-diagnostics-health')).to_contain_text('ещё не загружена')
+        expect(page.locator('#pj-diagnostic-rows')).not_to_contain_text('<img')
+        page.locator('#pj-diagnostics-refresh').click();idle()
         expect(page.locator('#pj-diagnostic-rows')).to_contain_text('<img')
+        expect(page.locator('#pj-diagnostic-rows')).to_contain_text('Проверено')
+        assert page.evaluate('backend.detailIds.length')==6
         assert page.locator('#pj-diagnostic-rows img').count()==0
         assert page.locator('#pj-diagnostic-rows tr').first.locator('td').nth(3).inner_text()=='—'
         page.wait_for_timeout(350)
-        assert count('refreshProjectInfrastructure')==2,'No provider polling loop after completion'
+        assert count('refreshProjectInfrastructure')==4,'Two schedule and two explicit diagnostics batches'
         calls=page.evaluate("backend.calls.filter(x=>x.name==='refreshProjectInfrastructure')")
         assert calls[0]['payload']=={'includeCapacity':True}
-        assert calls[-1]['payload']=={'cursor':'continue-token-opaque'}
+        assert [call['payload'] for call in calls[1:]]==[{'cursor':'pool-schedule-cursor'},{},{'cursor':'details-5'}]
         assert page.locator('#pj-account-rows tr').count()==6
         expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
         page.evaluate("backend.senderName='Обновлённое имя '")
@@ -296,8 +316,8 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         assert page.locator('#pj-account-rows tr').count()==2
         assert page.locator('#pj-infrastructure-totals dd').all_text_contents()==['2','0','0','2']
         page.locator('#pj-infrastructure-refresh').click();idle()
-        assert page.evaluate('backend.detailIds')==['account-1','account-1158']
-        assert count('refreshProjectInfrastructure')==1,'Only selected details need one finite batch'
+        assert page.evaluate('backend.detailIds')==[]
+        assert count('refreshProjectInfrastructure')==1,'Free mailboxes need no schedule or detail request'
         assert page.locator('#pj-infrastructure-totals dd').all_text_contents()==['2','2','0','0']
         assert 'large-sender-0@example.test' not in page.locator('#pj-account-rows').inner_text()
         assert page.locator('#pj-account-rows img').count()==0
@@ -422,6 +442,22 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
             page.wait_for_timeout(350)
             assert count('refreshProjectInfrastructure')==expected_calls,'Pause/cursor failure cannot spin'
             expect(page.locator('#pj-infrastructure-continue')).to_be_visible()
+
+        # Only the diagnostic control resumes a paused detail run; reopening cannot start pool work over it.
+        reset_monitored()
+        page.evaluate('backend.pauseFirst=true')
+        page.locator('#pj-infrastructure-diagnostics summary').click()
+        page.locator('#pj-diagnostics-refresh').click();idle()
+        expect(page.locator('#pj-diagnostics-refresh')).to_have_text('Продолжить диагностику')
+        expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
+        writes=count('refreshProjectInfrastructure')
+        page.evaluate("RegistryProject.show('analytics',{ready:true,epoch:1});RegistryProject.show('infrastructure',{ready:true,epoch:1});void RegistryProject.refresh({opening:true})")
+        idle()
+        assert count('refreshProjectInfrastructure')==writes
+        page.evaluate('backend.pauseFirst=false')
+        page.locator('#pj-diagnostics-refresh').click();idle()
+        assert page.evaluate("backend.calls.filter(x=>x.name==='refreshProjectInfrastructure').at(-1).payload")=={'cursor':'details-5'}
+        expect(page.locator('#pj-diagnostics-refresh')).to_have_text('Обновить диагностику')
 
         # Leaving the view pauses the finite run; Continue resumes its exact cursor.
         page.goto('about:blank');page.set_content(HTML)

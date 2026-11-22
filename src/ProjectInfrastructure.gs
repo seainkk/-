@@ -57,6 +57,10 @@ function refreshProjectInfrastructure_(request) {
           if (old && old.email === item.email) {
             item.status = old.status;
             item.updatedAt = old.updatedAt;
+            if (input.includeCapacity && old.updatedAt) {
+              item.stale = !!old.stale || Date.parse(old.updatedAt) < started - PROJECT_INFRASTRUCTURE.cacheMillis;
+              item.syncError = old.syncError || null;
+            }
           }
         });
         state = { version: PROJECT_INFRASTRUCTURE.version, rootId: context.rootId, credentialHash: settings.credentialHash,
@@ -65,41 +69,43 @@ function refreshProjectInfrastructure_(request) {
           cursorIndex: 0, processedCursors: [], nextCursor: null, inventoryAt: now,
           updatedAt: now, lastAttemptAt: now, retryAt: 0, warnings: [], lastError: null };
         if (before && before.capacity && projectInfraMonitoringMatches_(before, monitoringSignature)) state.capacity = before.capacity;
-        if (input.includeCapacity && state.detailIds.length) { state.capacityRequested = true; state.capacityWork = { mapped: false, cursor: 0 }; }
+        if (input.includeCapacity) {
+          state.poolOnly = true;
+          if (state.detailIds.length) { state.capacityRequested = true; state.capacityWork = { mapped: false, cursor: 0 }; }
+        }
       } else state = JSON.parse(JSON.stringify(before));
-      if (input.inventoryOnly !== true) projectInfraDetails_(context, settings, state);
+      state.lastError = null; state.retryAt = 0; state.warnings = [];
+      if (!state.poolOnly && input.inventoryOnly !== true) projectInfraDetails_(context, settings, state);
       if (state.capacityWork && !state.lastError) projectCapacityAdvance_(context, settings, state);
     } catch (error) {
       if (projectInfraScopeError_(error)) throw error;
-      return projectInfraFailure_(context, settings, started, before, error, monitoringSignature);
+      return projectInfraFailure_(context, settings, started, before, error, monitoringSignature, input.includeCapacity === true);
     }
-    return locked_(function () {
+    var committed = locked_(function () {
       var fresh = projectInfraMonitoringCurrent_(context, settings.credentialHash, monitoringSignature), latest = projectInfraRead_(fresh, coldySettings_(fresh));
       if (input.cursor !== undefined) {
         if (!latest || latest.generation !== before.generation) fail_('COLDY_INFRA_CURSOR_STALE', 'Список почт изменился. Обновите его перед продолжением.');
-        if (latest.processedCursors.indexOf(input.cursor) !== -1) return projectInfraPublic_(fresh, latest);
+        if (latest.processedCursors.indexOf(input.cursor) !== -1) return latest;
         if (latest.cursorIndex !== before.cursorIndex || latest.nextCursor !== input.cursor) fail_('COLDY_INFRA_CURSOR_STALE', 'Продолжение уже обработано. Обновите список почт.');
         if (state.cursorIndex > before.cursorIndex || (before.capacityWork && JSON.stringify(state.capacityWork) !== JSON.stringify(before.capacityWork))) state.processedCursors.push(input.cursor);
       } else if (latest && latest.generation !== (before && before.generation) && latest.startedAt >= started) {
-        return projectInfraPublic_(fresh, latest);
+        return latest;
       }
       state.processedCursors = state.processedCursors.slice(-PROJECT_INFRASTRUCTURE.maxReceipts);
-      state.nextCursor = state.cursorIndex < state.detailIds.length || state.capacityWork ? projectInfraCursor_(state) : null;
+      state.nextCursor = !state.poolOnly && state.cursorIndex < state.detailIds.length || state.capacityWork ? projectInfraCursor_(state) : null;
       state.updatedAt = new Date().toISOString();
       state.lastAttemptAt = state.updatedAt;
       coldySave_(fresh, 'infrastructure', projectMonitoringOwner_(settings.credentialHash), state);
       // A successful authenticated account read also verifies this connection.
       if (!state.lastError) fresh.properties.setProperty(COLDY.connectionProperty, JSON.stringify({ version: COLDY.version,
         rootId: fresh.rootId, credentialHash: settings.credentialHash, checkedAt: state.updatedAt }));
-      return projectInfraPublic_(fresh, state);
+      return state;
     });
+    return projectInfraPublic_(context, committed, monitoringSignature);
   });
 }
 
 function projectInfraDetails_(context, settings, state) {
-  state.lastError = null;
-  state.retryAt = 0;
-  state.warnings = [];
   var firstIndex = state.cursorIndex, deadline = Date.now() + PROJECT_INFRASTRUCTURE.detailBudgetMillis;
   var indexes = Object.create(null);
   state.accounts.forEach(function (item, index) { indexes[item.id] = index; });
@@ -130,11 +136,11 @@ function projectInfraDetails_(context, settings, state) {
   if (state.detailIds.some(function (id) { return !!state.accounts[indexes[id]].syncError; })) state.warnings.push('Часть сведений о выбранных ящиках не обновлена. Сохранённые значения отмечены как устаревшие.');
 }
 
-function projectInfraFailure_(context, settings, started, before, error, monitoringSignature) {
-  return locked_(function () {
+function projectInfraFailure_(context, settings, started, before, error, monitoringSignature, poolOnly) {
+  var committed = locked_(function () {
     var fresh = projectInfraMonitoringCurrent_(context, settings.credentialHash, monitoringSignature), latest = projectInfraRead_(fresh, coldySettings_(fresh));
     if (latest && (latest.generation !== (before && before.generation) && latest.startedAt >= started ||
-        before && latest.generation === before.generation && (latest.cursorIndex > before.cursorIndex || latest.nextCursor !== before.nextCursor))) return projectInfraPublic_(fresh, latest);
+        before && latest.generation === before.generation && (latest.cursorIndex > before.cursorIndex || latest.nextCursor !== before.nextCursor))) return latest;
     var now = new Date().toISOString(), saved = latest || { version: PROJECT_INFRASTRUCTURE.version, rootId: fresh.rootId,
       credentialHash: settings.credentialHash, generation: digest_('infrastructure-error|' + Utilities.getUuid()), startedAt: started,
       accounts: [], cursorIndex: 0, processedCursors: [], nextCursor: null, inventoryAt: null };
@@ -143,10 +149,15 @@ function projectInfraFailure_(context, settings, started, before, error, monitor
       saved.generation = digest_('infrastructure-error|' + Utilities.getUuid() + '|' + started);
       saved.startedAt = started;
       saved.detailIds = projectInfraSelectedIds_(saved.accounts, monitoring.accountIds);
-      delete saved.capacity; delete saved.capacityWork; delete saved.capacityRequested;
+      delete saved.capacity; delete saved.capacityWork; delete saved.capacityRequested; delete saved.poolOnly;
       saved.monitoringSignature = monitoringSignature;
       saved.cursorIndex = 0; saved.processedCursors = [];
       saved.nextCursor = saved.detailIds.length ? projectInfraCursor_(saved) : null;
+    }
+    if (poolOnly) {
+      // The catalog read failed. A new pool refresh must start with /accounts again.
+      saved.poolOnly = true; saved.cursorIndex = 0; saved.nextCursor = null;
+      saved.processedCursors = []; delete saved.capacityWork;
     }
     saved.lastError = projectInfraError_(error);
     if (saved.capacity) saved.capacity.stale = true;
@@ -156,8 +167,9 @@ function projectInfraFailure_(context, settings, started, before, error, monitor
     saved.accounts.forEach(function (item) { item.stale = true; });
     if (error.registryCode === 'COLDY_RATE_LIMIT' || error.registryCode === 'COLDY_UNAVAILABLE') saved.retryAt = Date.now() + Math.max(15000, Math.min(86400000, error.retryAfterMs || 0));
     coldySave_(fresh, 'infrastructure', projectMonitoringOwner_(settings.credentialHash), saved);
-    return projectInfraPublic_(fresh, saved);
+    return saved;
   });
+  return projectInfraPublic_(context, committed, monitoringSignature);
 }
 
 function projectInfraCurrent_(context, hash) {
@@ -184,6 +196,7 @@ function projectInfraRead_(context, settings) {
   if (owner !== projectMonitoringOwner_(settings.credentialHash)) fail_('COLDY_MONITORING_CHANGED', 'Проект изменился. Обновите список почт.');
   if (!saved) return null;
   if (saved.version !== PROJECT_INFRASTRUCTURE.version || saved.rootId !== context.rootId || saved.credentialHash !== settings.credentialHash ||
+      saved.poolOnly !== undefined && (saved.poolOnly !== true || saved.cursorIndex !== 0) ||
       typeof saved.generation !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(saved.generation) || !Number.isFinite(saved.startedAt) ||
       !Array.isArray(saved.accounts) || saved.accounts.length > PROJECT_INFRASTRUCTURE.maxAccounts ||
       !Number.isSafeInteger(saved.cursorIndex) || saved.cursorIndex < 0 || saved.cursorIndex > saved.accounts.length ||
@@ -243,10 +256,13 @@ function projectInfraDetail_(listed, response, key) {
     updatedAt: new Date().toISOString(), stale: false, syncError: null };
 }
 
-function projectInfraPublic_(context, saved) {
+function projectInfraPublic_(context, saved, expectedSignature) {
   var settings = coldySettings_(context), monitoring = projectMonitoringRead_(context, settings), signature = projectMonitoringSignature_(context, monitoring);
+  if (saved && saved.credentialHash !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите данные.');
+  if (expectedSignature && expectedSignature !== signature) fail_('COLDY_MONITORING_CHANGED', 'Выбор почт изменился. Обновите данные.');
   var known = !!saved && !!saved.inventoryAt, inventoryStale = !known || Date.parse(saved.inventoryAt) < Date.now() - PROJECT_INFRASTRUCTURE.cacheMillis;
   var selected = Object.create(null), available = Object.create(null), jobMatches = projectInfraMonitoringMatches_(saved, signature);
+  var poolOnly = !!(jobMatches && saved.poolOnly);
   monitoring.accountIds.forEach(function (id) { selected[id] = true; });
   if (known) saved.accounts.forEach(function (item) { available[item.id] = true; });
   var missing = known ? monitoring.accountIds.filter(function (id) { return !available[id]; }) : [];
@@ -255,7 +271,8 @@ function projectInfraPublic_(context, saved) {
     return { id: item.id, email: item.email, name: projectInfraText_(item.name, settings.key, 500), provider: projectInfraNullableText_(item.provider, settings.key, 200),
       status: projectInfraNullableText_(item.status, settings.key, 200), sentTotal: projectInfraCount_(item.sentTotal), sentToday: projectInfraCount_(item.sentToday), dailyLimit: projectInfraCount_(item.dailyLimit),
       errorCount: null, errors: projectInfraErrorsPublic_(item.errors, settings.key), tags: projectInfraTags_(item.tags, settings.key),
-      warmup: projectInfraWarmupPublic_(item.warmup, settings.key), updatedAt: item.updatedAt || null, stale: inventoryStale || item.stale === true,
+      warmup: projectInfraWarmupPublic_(item.warmup, settings.key), updatedAt: item.updatedAt || null, stale: inventoryStale || item.stale === true ||
+        poolOnly && (!item.updatedAt || Date.parse(item.updatedAt) < Date.now() - PROJECT_INFRASTRUCTURE.cacheMillis),
       syncError: item.syncError ? { code: projectInfraText_(item.syncError.code, settings.key, 100), message: projectInfraText_(item.syncError.message, settings.key) } : null };
   });
   var activeError = jobMatches && saved.lastError, nextCursor = jobMatches ? saved.nextCursor : null;
@@ -266,14 +283,14 @@ function projectInfraPublic_(context, saved) {
   var totals = projectInfraTotals_(accounts, emptySelection || known && !missing.length);
   if (known && monitoring.accountIds.length) totals.accounts = monitoring.accountIds.length;
   var state = !settings.configured ? 'not_configured' : emptySelection ? 'no_selection' : !known ? (activeError ? 'error' : 'not_synced') :
-    inventoryStale || activeError || nextCursor || missing.length || accounts.some(function (item) { return item.stale || item.syncError; }) ? 'partial' : 'ready';
+    inventoryStale || activeError || nextCursor || missing.length || !poolOnly && accounts.some(function (item) { return item.stale || item.syncError; }) ? 'partial' : 'ready';
   var publicMonitoring = projectMonitoringPublic_(context, monitoring);
   publicMonitoring.selectedCount = monitoring.accountIds.length; publicMonitoring.missingAccountIds = missing;
   var result = { state: state, configured: settings.configured, connected: settings.connected, accounts: accounts,
     totals: totals, availableCount: known ? saved.accounts.length : null, monitoring: publicMonitoring,
     lastSyncAt: saved && saved.inventoryAt || null, updatedAt: saved && saved.updatedAt || null,
     lastAttemptAt: saved && saved.lastAttemptAt || null, warnings: warnings,
-    nextCursor: nextCursor, detailProgress: { completed: known && jobMatches ? saved.cursorIndex : 0,
+    poolOnly: poolOnly, nextCursor: nextCursor, detailProgress: { completed: known && jobMatches ? saved.cursorIndex : 0,
       total: known ? (jobMatches ? saved.detailIds.length : selectedAccounts.length) : monitoring.accountIds.length },
     retryAfterMs: retryAfterMs, syncPaused: !!activeError || retryAfterMs > 0,
     error: activeError ? { code: projectInfraText_(activeError.code, settings.key, 100), message: projectInfraText_(activeError.message, settings.key) } : null,

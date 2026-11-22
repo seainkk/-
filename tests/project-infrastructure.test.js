@@ -81,7 +81,7 @@ function fixture(options = {}) {
   // Small boundary/race scenarios explicitly retain five-detail batches. Large
   // inventory tests below exercise the unchanged production configuration.
   if (options.detailBatch !== undefined) c.PROJECT_INFRASTRUCTURE = Object.freeze({ ...c.PROJECT_INFRASTRUCTURE, batch: options.detailBatch });
-  const f = { c, calls, properties, cache, root, response, coded,
+  const f = { c, calls, properties, cache, root, response, coded, isLocked: () => locked,
     configure: key => {
       const apiKey = key || KEY, result = c.configureColdy_({ apiKey });
       // Pre-existing small scenarios explicitly model a saved selection of
@@ -159,6 +159,50 @@ function readCapacity(f) {
   for(let step=0; result.nextCursor && !result.syncPaused && step<30; step++) result=f.refresh({cursor:result.nextCursor});
   return result;
 }
+
+test('pool refresh confirms 20 senders before schedules, without detailed account reads in a 1159-account catalog', () => {
+  const ids=Array.from({length:20},(_,i)=>String(i+1));
+  const f=capacityFixture(ids.map(id=>[Number(id),[ACTIVE_ONE,ACTIVE_TWO,UNSELECTED]]),{},
+    {accounts:Array.from({length:1159},(_,i)=>account(i+1)),monitoringIds:ids,detailBatch:2});
+  const owners=f.c.projectCapacityOwners_;
+  f.c.projectCapacityOwners_=(ctx,list)=>{assert.equal(f.isLocked(),false,'DTO reads cannot hold the global lock');return owners(ctx,list);};
+  const first=f.refresh({includeCapacity:true});
+  assert.equal(first.poolOnly,true);assert.equal(first.capacity.stale,false);assert.equal(first.availableCount,1159);
+  assert.deepEqual(first.accounts.map(a=>a.capacity.state),ids.map(()=>'busy'));assert.deepEqual(f.calls.http,['/accounts','/account-campaign-mappings']);
+  assert.deepEqual(first.syncProgress,{completed:1,total:4});assert.deepEqual(first.detailProgress,{completed:0,total:20});
+  assert.ok(first.accounts.every(a=>a.updatedAt===null&&a.status===null&&a.stale));
+  const partial=f.refresh({cursor:first.nextCursor}), last=f.refresh({cursor:partial.nextCursor});
+  assert.equal(last.nextCursor,null);assert.equal(last.state,'ready');assert.equal(last.capacity.state,'ready');
+  assert.deepEqual(last.syncProgress,{completed:4,total:4});
+  assert.equal(f.calls.http.length,5);assert.equal(f.calls.http.some(p=>p.startsWith('/accounts/')),false);
+  assert.deepEqual(f.refresh({cursor:first.nextCursor}),last);assert.equal(f.calls.http.length,5);
+  const diagnostic=f.refresh({});
+  assert.equal(diagnostic.poolOnly,false);assert.equal(diagnostic.detailProgress.completed,2);assert.equal(diagnostic.accounts[0].status,'Connected');
+  const again=f.refresh({includeCapacity:true});
+  assert.equal(again.accounts[0].status,'Connected');assert.equal(again.accounts[0].updatedAt,diagnostic.accounts[0].updatedAt);
+  assert.equal(again.accounts[0].stale,false);assert.equal(again.accounts[4].stale,true);
+});
+
+test('retrying a transient map error resumes pool work without starting diagnostics', () => {
+  let failing=true;
+  const f=capacityFixture(({response})=>failing?response({},503):response({items:[]}));
+  const first=f.refresh({includeCapacity:true});assert.ok(first.nextCursor);assert.equal(first.syncPaused,true);
+  failing=false;f.tick(first.retryAfterMs+1);
+  const final=f.refresh({cursor:first.nextCursor});
+  assert.equal(final.nextCursor,null);assert.equal(final.capacity.state,'ready');assert.equal(final.syncPaused,false);
+  assert.deepEqual(final.accounts.map(a=>a.capacity.state),['free','free','free']);
+  assert.deepEqual(f.calls.http,['/accounts','/account-campaign-mappings','/account-campaign-mappings']);
+});
+
+test('pre-existing combined capacity cursors still continue detailed mailbox diagnostics and schedules', () => {
+  const f=capacityFixture([[1,[ACTIVE_ONE]]],{},{detailBatch:1});
+  f.refresh({includeCapacity:true});
+  const legacy=f.state();delete legacy.poolOnly;legacy.cursorIndex=1;legacy.nextCursor=f.c.projectInfraCursor_(legacy);
+  const cursor=legacy.nextCursor, result=f.refresh({cursor});
+  assert.ok(f.calls.http.includes('/accounts/2'));assert.ok(f.calls.http.includes('/campaigns/'+ACTIVE_ONE));
+  assert.equal(result.poolOnly,false);assert.equal(result.detailProgress.completed,2);assert.ok(result.nextCursor);
+  const final=f.refresh({cursor:result.nextCursor});assert.equal(final.nextCursor,null);assert.equal(final.detailProgress.completed,3);
+});
 
 test('project selection, cached senders and old cursors stay separate under the same Coldy key', () => {
   let project='numshield';

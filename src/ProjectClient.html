@@ -5,7 +5,7 @@
   let config=null, view=null, ready=false, accessEpoch=null, generation=0;
   let catalog=null,catalogLoading=false,catalogError='',catalogSequence=0,catalogLoadedAt=0,segmentId='';
   let infrastructure=null,infraLoading=false,infraError='',infraNotice='',infraSequence=0,initialSyncAttempted=false;
-  let mailboxPicker=null;
+  let mailboxPicker=null,infraSyncMode='';
   const campaignPageSize=40;
   let campaignLimit=campaignPageSize;
   function resetCampaignSearch(){campaignLimit=campaignPageSize;$('pj-campaign-search').value='';}
@@ -37,7 +37,7 @@
   function clear(){
     closeMailboxPicker(true);
     generation++;catalog=null;catalogLoading=false;catalogError='';catalogSequence++;catalogLoadedAt=0;segmentId='';contexts.clear();
-    infrastructure=null;infraLoading=false;infraError='';infraNotice='';infraSequence++;initialSyncAttempted=false;
+    infrastructure=null;infraLoading=false;infraError='';infraNotice='';infraSequence++;initialSyncAttempted=false;infraSyncMode='';
     scrub();
   }
   function lock(){ready=false;clear();view=null;render();}
@@ -169,24 +169,24 @@
     const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';infraNotice='';render();notify();
     let initial=false;
     try{const data=await invoke('getProjectInfrastructure',{},mark);if(!alive(mark)||sequence!==infraSequence||!data)return;infrastructure=data;
-      initial=data.configured===true&&data.monitoring?.accountIds?.length>0&&!initialSyncAttempted&&!data.syncPaused&&!data.error&&!(data.retryAfterMs>0)&&(data.state==='not_synced'||data.stale===true||!data.capacity?.updatedAt||data.capacity.stale===true);
+      initial=data.configured===true&&data.monitoring?.accountIds?.length>0&&!initialSyncAttempted&&!data.nextCursor&&!data.syncPaused&&!data.error&&!(data.retryAfterMs>0)&&(data.state==='not_synced'||data.stale===true||!data.capacity?.updatedAt||data.capacity.stale===true);
       if(initial)initialSyncAttempted=true;
     }catch(error){if(alive(mark)&&sequence===infraSequence)infraError=failure(error).message;}
     finally{if(alive(mark)&&sequence===infraSequence){infraLoading=false;render();notify();}}
     if(initial&&alive(mark)&&view==='infrastructure')await syncInfrastructure();
   }
-  async function syncInfrastructure(continuation=false){
+  async function syncInfrastructure(continuation=false,diagnostics=false){
     if(!ready||infraLoading||mailboxPicker?.open||!infrastructure?.monitoring?.accountIds?.length)return;
     let cursor=continuation?infrastructure?.nextCursor:null;
     if(continuation&&!cursor)return;
-    const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';infraNotice='';initialSyncAttempted=true;render();notify();
+    const mark=token(),sequence=++infraSequence;infraLoading=true;infraSyncMode=diagnostics?'diagnostics':'pool';infraError='';infraNotice='';initialSyncAttempted=true;render();notify();
     const seen=new Set();let previous=continuation?((infrastructure?.syncProgress||infrastructure?.detailProgress)?.completed??-1):-1;
     try{
       for(let batch=0;batch<1001;batch++){
         if(!alive(mark)||sequence!==infraSequence||view!=='infrastructure')break;
         if(cursor&&seen.has(cursor)){infraError='Синхронизация приостановлена: Coldy не подтвердил переход к следующей порции.';break;}
         if(cursor)seen.add(cursor);
-        const data=await invoke('refreshProjectInfrastructure',cursor?{cursor}:{includeCapacity:true},mark,()=>sequence===infraSequence&&view==='infrastructure');
+        const data=await invoke('refreshProjectInfrastructure',cursor?{cursor}:diagnostics?{}:{includeCapacity:true},mark,()=>sequence===infraSequence&&view==='infrastructure');
         if(!alive(mark)||sequence!==infraSequence||!data)return;
         infrastructure=data;render();
         const next=data.nextCursor,completed=(data.syncProgress||data.detailProgress)?.completed;
@@ -347,11 +347,18 @@
     $('pj-infrastructure-connect').textContent=data?.configured?'Настройки Coldy':'Подключить Coldy';$('pj-infrastructure-connect').disabled=hasPending();
     $('pj-infrastructure-select').disabled=infraLoading||hasPending();
     $('pj-infrastructure-refresh').disabled=infraLoading||!data?.monitoring?.accountIds?.length;
-    $('pj-infrastructure-continue').hidden=!data?.nextCursor;$('pj-infrastructure-continue').disabled=infraLoading;
+    const diagnosticCursor=!!data?.nextCursor&&data.poolOnly!==true;
+    $('pj-infrastructure-continue').hidden=!data?.nextCursor||diagnosticCursor;$('pj-infrastructure-continue').disabled=infraLoading;
+    $('pj-diagnostics-refresh').disabled=infraLoading||!data?.monitoring?.accountIds?.length;
+    $('pj-diagnostics-refresh').textContent=diagnosticCursor?'Продолжить диагностику':'Обновить диагностику';
     connectionBox('pj-infrastructure-connection',data?.configured===true,data?.connected===true);
-    const progress=data?.syncProgress||data?.detailProgress;const progressText=data?.nextCursor&&progress?'Синхронизация выполнена частично. Обработано '+number(progress.completed)+' из '+number(progress.total)+'.':'';
+    const progress=data?.syncProgress||data?.detailProgress,steps=data?.nextCursor&&progress?number(progress.completed)+' из '+number(progress.total):'';
+    const progressText=steps?(diagnosticCursor?'Диагностика ящиков':'Карта назначений и расписания')+' · '+steps:'';
     const syncError=infraError||data?.error?.message;
-    health('pj-infrastructure-health',syncError||(infraLoading?'Обновляем данные из Coldy…':infraNotice||progressText||(data?.warnings||[]).join(' ')),!!syncError);
+    const activity=infraSyncMode==='diagnostics'?'Получаем состояния ящиков из Coldy…':'Получаем назначения и графики отправок из Coldy…';
+    health('pj-infrastructure-health',syncError||(infraLoading?progressText||activity:infraNotice||progressText||(data?.warnings||[]).join(' ')),!!syncError);
+    const dated=accounts.filter(account=>account.updatedAt).length;
+    $('pj-diagnostics-health').textContent=diagnosticCursor?progressText:infraLoading&&infraSyncMode==='diagnostics'?activity:dated?'Сохранённые данные по ящикам: '+number(dated)+' из '+number(accounts.length):'Диагностика ящиков ещё не загружена.';
     const selectedCount=data?.configured&&Array.isArray(data.monitoring?.accountIds)?data.monitoring.accountIds.length:null;
     const capacity=data?.capacity,all=[...accounts];
     for(const id of data?.monitoring?.missingAccountIds||[])all.push({id,name:'Ящик отсутствует в Coldy',missing:true});
@@ -364,7 +371,7 @@
     renderMailboxCapacity(all,capacity);
     if($('pj-infrastructure-diagnostics').open)renderMailboxDiagnostics(accounts);
     else $('pj-diagnostic-rows').replaceChildren();
-    if(data?.nextCursor&&progress)$('pj-infrastructure-continue').textContent='Продолжить синхронизацию · '+number(progress.completed)+' из '+number(progress.total);
+    if(data?.nextCursor&&!diagnosticCursor)$('pj-infrastructure-continue').textContent='Продолжить обновление расписаний'+(steps?' · '+steps:'');
   }
   function poolState(account){
     const state=account.capacity?.state;
@@ -457,7 +464,7 @@
       const row=node('tr');row.dataset.account=text(account.id);const identity=node('td');identity.append(node('span','pj-name',account.email||account.name||'Ящик без адреса'));
       const detail=[account.name&&account.name!==account.email?account.name:'',account.provider||''].filter(Boolean).join(' · ');if(detail)identity.append(node('span','pj-cell-note',detail));
       if(account.tags?.length)identity.append(node('span','pj-cell-note',account.tags.join(', ')));
-      if(account.stale)identity.append(node('span','pj-cell-note','Сохранённые сведения; обновление ещё не подтверждено.'));
+      if(account.updatedAt)identity.append(node('span','pj-cell-note',(account.stale?'Сохранено ранее · ':'Проверено · ')+poolDate(account.updatedAt)));
       row.append(identity);const status=node('td');status.append(badge(account.status));
       if(typeof account.warmup?.enabled==='boolean')status.append(node('span','pj-cell-note','Прогрев: '+(account.warmup.enabled?'включён':'выключен')));
       else if(account.warmup?.status)status.append(node('span','pj-cell-note','Прогрев: '+text(account.warmup.status)));
@@ -479,7 +486,7 @@
     $('pj-infrastructure-diagnostics').open=false;$('pj-capacity-filter').value='';$('pj-capacity-empty').textContent='';
     resetCampaignSearch();$('pj-campaign-shown').textContent='';$('pj-campaign-more').hidden=true;
     $('pj-segment').replaceChildren(new Option('Выберите сегмент',''));
-    for(const id of ['pj-analytics-health','pj-selection-health','pj-infrastructure-health','pj-analytics-updated','pj-infrastructure-updated','pj-analytics-connection','pj-infrastructure-connection','pj-selection-count','pj-analytics-note','pj-infrastructure-note'])$(id).textContent='';
+    for(const id of ['pj-analytics-health','pj-selection-health','pj-infrastructure-health','pj-analytics-updated','pj-infrastructure-updated','pj-diagnostics-health','pj-analytics-connection','pj-infrastructure-connection','pj-selection-count','pj-analytics-note','pj-infrastructure-note'])$(id).textContent='';
     $('pj-infrastructure-continue').hidden=true;
   }
   function hasPending(){return !!mailboxPicker?.operation?.running||[...contexts.values()].some(context=>context.operation?.running);}
@@ -493,6 +500,7 @@
     for(const id of ['pj-analytics-connect','pj-infrastructure-connect'])$(id).addEventListener('click',()=>config?.openConnection?.());
     $('pj-analytics-refresh').addEventListener('click',()=>refresh({manual:true}));
     $('pj-infrastructure-refresh').addEventListener('click',()=>syncInfrastructure());
+    $('pj-diagnostics-refresh').addEventListener('click',()=>syncInfrastructure(!!infrastructure?.nextCursor&&infrastructure.poolOnly!==true,true));
     $('pj-capacity-filter').addEventListener('change',renderInfrastructure);
     $('pj-infrastructure-diagnostics').addEventListener('toggle',()=>{
       const details=$('pj-infrastructure-diagnostics');if(details.open&&ready&&view==='infrastructure')renderMailboxDiagnostics(infrastructure?.accounts||[]);
