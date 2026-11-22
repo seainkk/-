@@ -371,6 +371,9 @@
     const details=[states[sync.state]];
     const last=timestamp(sync.lastSyncedAt),retry=timestamp(sync.nextRetryAt);
     if(last)details.push('последняя полная сверка '+last+' МСК');
+    const suppression=timestamp(sync.lastSuppressionAt);
+    if(sync.suppressionPending)details.push('сверка списка «Не отправляем» не завершена'+(suppression?' (последняя проверка '+suppression+' МСК)':''));
+    else if(suppression)details.push('список «Не отправляем» проверен '+suppression+' МСК');
     if(retry)details.push('следующая попытка '+retry+' МСК');
     return details.filter(Boolean).join(' · ');
   }

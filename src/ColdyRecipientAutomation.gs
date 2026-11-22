@@ -59,7 +59,8 @@ function coldyIncomingDecorate_(context,bindings,rows){
   bindings.forEach(function(b){
     var mark=coldyIncomingMark_(context.properties,coldyIncomingOwner_(context,credential,project,b));
     var status={enabled:timer.enabled,needsOwnerSetup:timer.needsOwnerSetup,state:timer.enabled?(mark.state||'waiting'):'off',
-      lastSyncedAt:mark.lastSyncedAt||null,nextRetryAt:mark.retryAt>Date.now()?new Date(mark.retryAt).toISOString():null};
+      lastSyncedAt:mark.lastSyncedAt||null,lastSuppressionAt:mark.lastSuppressionAt||null,suppressionPending:mark.suppressionPending===true,
+      nextRetryAt:mark.retryAt>Date.now()?new Date(mark.retryAt).toISOString():null};
     b.recipientSync=status;
     if(byId.has(b.campaignId)) byId.get(b.campaignId).recipientSync=status;
   });
@@ -115,7 +116,9 @@ function coldyIncomingStep_(context,job,guard,deadline){
       if(!state.policy||state.policy.identity!==identity){
         var allowed=new Set(emails);
         state.policy={identity:identity,emails:emails,known:(state.policy&&state.policy.known||[]).filter(function(e){return allowed.has(e);}),hits:[],cursor:null};
+        mark.lastSuppressionAt=null;
       }
+      mark.suppressionPending=!!emails.length && (!state.policy.checkedAt || Date.now()-state.policy.checkedAt>=300000);
       scan.kinds=coldyIncomingKinds_(context,job.project,b);
       scan.targets={};scan.unavailable=false;
       scan.kinds.forEach(function(kind){
@@ -179,6 +182,7 @@ function coldyIncomingStep_(context,job,guard,deadline){
   policy.cursor=result.nextCursor;policy.retryAt=result.retryAfterMs?Date.now()+result.retryAfterMs:0;
   if(!policy.cursor && !result.unavailable && !policy.retryAt){
     policy.known=policy.hits;policy.hits=[];policy.checkedAt=Date.now();
+    mark.lastSuppressionAt=new Date(policy.checkedAt).toISOString();mark.suppressionPending=false;
   } else if(result.unavailable) policy.retryAt=Date.now()+300000;
   save();
   if(result.retryAfterMs){
