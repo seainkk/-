@@ -53,6 +53,7 @@ def main():
         tick(120000)
         assert count('refreshColdyMailings') == 3
         page.locator('#br-coldy-close').click()
+        page.locator('#br-settings-close').click()
 
         page.locator('#br-view-infrastructure').click()
         idle()
@@ -72,6 +73,36 @@ def main():
         assert not any(call.get('p',{}).get('inventoryOnly') for call in page.evaluate(
             "backend.calls.filter(call=>call.name==='refreshProjectInfrastructure')"))
         assert not page.evaluate("backend.calls.some(call=>call.name==='getProjectInfrastructureSelection')")
+
+        # A binding removed while metrics are being read must clear the displayed totals until a fresh read.
+        page.locator('#br-view-analytics').click()
+        idle()
+        page.locator('#pj-segment').select_option('segment-a')
+        idle()
+        totals = page.locator('#pj-analytics-totals')
+        expect(totals).to_contain_text('100')
+        page.evaluate("""() => {
+          const original = api.refreshColdyMailings, cached = api.getSegmentMailings;
+          api.refreshColdyMailings = request => {
+            function updated(service) { service.totals.sent = 17; return service; }
+            api.refreshColdyMailings = input => updated(original(input));
+            api.getSegmentMailings = input => {
+              const result = cached(input);
+              updated(result.services[0]);
+              return result;
+            };
+            backend.bindings = backend.bindings.filter(binding => binding.campaignName !== 'Existing campaign');
+            throw new Error('[COLDY_BINDING_CHANGED] Выбор рассылок изменился');
+          };
+        }""")
+        tick()
+        expect(totals).not_to_contain_text('100')
+        expect(page.locator('#pj-campaign-rows')).not_to_contain_text('Existing campaign')
+        reads_before = count('getProjectAnalyticsCampaigns')
+        tick()
+        assert count('getProjectAnalyticsCampaigns') > reads_before
+        expect(totals).to_contain_text('17')
+        expect(page.locator('#pj-campaign-rows')).not_to_contain_text('Existing campaign')
         assert not errors, errors
         browser.close()
         print('Selected project monitoring, visibility, cooldown and transport checks passed.')

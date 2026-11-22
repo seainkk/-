@@ -88,14 +88,14 @@ function getSegmentMailings_(request) {
     if (input.live !== undefined && typeof input.live !== 'boolean') fail_('INVALID_REQUEST', 'Неизвестный режим обновления рассылок.');
     if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(context, segmentId);
     var parent = segmentSourceFolder_(context), folder;
-    try { folder = segmentFolder_(context, parent, segmentId); }
+    try { folder = segmentFolder_(context, parent, segmentId, true); }
     catch (error) {
       if (error.registryCode === 'OUTSIDE_SEGMENTS') throw error;
       fail_('SEGMENT_NOT_FOUND', 'Сегмент недоступен. Обновите список сегментов.');
     }
     var coldy = input.live === true && typeof refreshColdyMailings_ === 'function'
       ? refreshColdyMailings_({ segmentId: segmentId, monitor: true })
-      : typeof coldySegmentMailings_ === 'function' ? coldySegmentMailings_(context, segmentId) : segmentDisconnectedMailings_('coldy', 'Coldy', 'email');
+      : typeof coldySegmentMailings_ === 'function' ? coldySegmentMailings_(context, segmentId, folder) : segmentDisconnectedMailings_('coldy', 'Coldy', 'email');
     coldy.id = 'coldy';
     var connected = coldy.state !== 'not_connected', services = [coldy, segmentDisconnectedMailings_('nsa', 'NSA', 'telegram')];
     return {

@@ -149,11 +149,15 @@ function getColdyUploadState_(request) {
 }
 
 /** Read cached metrics only. Opening the application never fans out to Coldy. */
-function coldySegmentMailings_(context, segmentId) {
-  coldyCampaignScope_(context, id_(segmentId));
+function coldySegmentMailings_(context, segmentId, checkedFolder) {
+  id_(segmentId);
+  if (!checkedFolder || checkedFolder.getId() !== segmentId) coldyCampaignScope_(context, segmentId,true);
   var settings = coldySettings_(context), campaigns = [], unknown = { sent: null, replies: null, leads: null };
   if (!settings.configured) return { id: 'coldy', key: 'coldy', name: 'Coldy', channel: 'email', state: 'not_connected', campaigns: [], totals: unknown, message: 'Подключите API Coldy в настройках.', generatedAt: null, cached: true, freshness: 'unknown' };
-  var registry = coldyCampaignRegistry_(context), bindings = registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; });
+  var observation = {}, registry = coldyCampaignRegistry_(context,observation);
+  if (registry.credentialHash !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Подключение Coldy изменилось во время чтения показателей.');
+  function selected(value) { return value.bindings.filter(function (binding) { return binding.segmentId === segmentId; }); }
+  var bindings = selected(registry);
   bindings.forEach(function (binding) {
     var cache = coldyLoad_(context, 'campaignanalytics', coldyCampaignAnalyticsOwner_(context, binding));
     var current = cache && cache.campaignId === binding.campaignId && cache.credentialHash === coldyCredentialHash_(context) ? cache : null;
@@ -163,7 +167,11 @@ function coldySegmentMailings_(context, segmentId) {
   });
   var complete = campaigns.length > 0 && campaigns.every(function (campaign) { return campaign.sent !== null && campaign.replies !== null && campaign.leads !== null && !campaign.stale; });
   var timestamps = campaigns.map(function (campaign) { return Date.parse(campaign.updatedAt || ''); }).filter(function (time) { return isFinite(time); });
-  coldyCampaignScope_(context, segmentId);
+  if (bindings.length && (!observation.unchanged || !observation.unchanged()) &&
+      JSON.stringify(selected(coldyCampaignRegistry_(context))) !== JSON.stringify(bindings))
+    fail_('COLDY_BINDING_CHANGED','Выбор рассылок изменился во время чтения. Обновите показатели.');
+  coldyCampaignScope_(context, segmentId,true);
+  if (coldySettings_(context).credentialHash !== registry.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Подключение Coldy изменилось во время чтения показателей.');
   return { id: 'coldy', key: 'coldy', name: 'Coldy', channel: 'email', state: complete ? 'connected' : 'partial', campaigns: campaigns,
     totals: { sent: coldyCampaignSum_(campaigns, 'sent'), replies: coldyCampaignSum_(campaigns, 'replies'), leads: coldyCampaignSum_(campaigns, 'leads') },
     message: !bindings.length ? 'Привяжите существующую рассылку Coldy к сегменту.' : complete ? 'Добавление контакта не означает отправку письма.' : 'Показаны последние сохранённые данные. Часть показателей отсутствует или устарела; обновите Coldy.',
@@ -300,19 +308,19 @@ function processColdyCampaignUploads_(context, item) {
   return { processed: 0 };
 }
 
-function coldyCampaignScope_(context, segmentId) {
+function coldyCampaignScope_(context, segmentId, verifiedParent) {
   var current = authorize_();
   if (!context || current.rootId !== context.rootId) fail_('COLDY_SCOPE_CHANGED', 'Привязка реестра изменилась.');
   if (typeof registryRequireSegment_ === 'function') registryRequireSegment_(current, segmentId);
-  return segmentFolder_(current, segmentSourceFolder_(current), id_(segmentId));
+  return segmentFolder_(current, segmentSourceFolder_(current), id_(segmentId),verifiedParent);
 }
 function coldyCampaignOwner_(context, value) { return digest_(coldyCredentialHash_(context) + '|' + value); }
 function coldyCampaignAnalyticsOwner_(context, binding) {
   var projectId = typeof registrySegmentProject_ === 'function' ? registrySegmentProject_(context, binding.segmentId) : null;
   return coldyCampaignOwner_(context, projectId && projectId !== 'numshield' ? projectId + '|' + binding.campaignId : binding.campaignId);
 }
-function coldyCampaignRegistry_(context) {
-  var hash = coldyCredentialHash_(context), value = coldyLoad_(context, 'campaignbindings', hash);
+function coldyCampaignRegistry_(context,observation) {
+  var hash = coldyCredentialHash_(context), value = coldyLoad_(context, 'campaignbindings', hash,observation);
   if (!value) return { version: 1, credentialHash: hash, bindings: [], receipts: [] };
   if (value.credentialHash !== hash || !Array.isArray(value.bindings) || !Array.isArray(value.receipts)) fail_('COLDY_STORAGE', 'Журнал связей Coldy требует проверки.');
   return value;

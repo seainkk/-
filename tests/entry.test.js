@@ -8,6 +8,21 @@ const script = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map(m
 const KEY = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG';
 const GOOGLE_ORIGIN = 'https://n-example-script.googleusercontent.com';
 
+test('Pages deploy retries consume the completed build artifact without uploading another one', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/entry-pages.yml', import.meta.url), 'utf8');
+  const [build, deploy] = workflow.split(/^  deploy:\s*$/m);
+  assert.match(build, /artifact_name=github-pages-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/);
+  assert.match(build, /artifact_name: \$\{\{ steps\.name\.outputs\.artifact_name \}\}/);
+  assert.match(build, /artifact_id: \$\{\{ steps\.upload\.outputs\.artifact_id \}\}/);
+  assert.match(build, /uses: actions\/upload-pages-artifact@v3\s+with:\s+name: \$\{\{ steps\.name\.outputs\.artifact_name \}\}\s+path: entry/);
+  assert.match(deploy, /needs: build/);
+  assert.doesNotMatch(deploy, /upload-pages-artifact|run_attempt|GITHUB_RUN_ATTEMPT/i);
+  assert.match(deploy, /ARTIFACT_ID: \$\{\{ needs\.build\.outputs\.artifact_id \}\}/);
+  assert.match(deploy, /actions\/runs\/\$GITHUB_RUN_ID\/artifacts\?name=\$ARTIFACT_NAME/);
+  assert.match(deploy, /artifact_name: \$\{\{ needs\.build\.outputs\.artifact_name \}\}/);
+  assert.doesNotMatch(build, /pages: write|id-token: write|github-pages\s*\n\s*url:/);
+});
+
 test('the public entry and Apps Script shell identify the service and retain the base registry section', () => {
   const app = readFileSync(new URL('../src/Index.html', import.meta.url), 'utf8');
   for (const page of [html, app]) {

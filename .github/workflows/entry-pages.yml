@@ -8,24 +8,43 @@ on:
       - '.github/workflows/entry-pages.yml'
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
 concurrency:
   group: registry-entry-pages
   cancel-in-progress: false
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.name.outputs.artifact_name }}
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Name this build artifact
+        id: name
+        shell: bash
+        run: echo "artifact_name=github-pages-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - name: Upload entry page only
+        id: upload
+        uses: actions/upload-pages-artifact@v3
+        with:
+          name: ${{ steps.name.outputs.artifact_name }}
+          path: entry
+
   deploy:
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      actions: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
       - name: Configure GitHub Pages
         id: pages
         uses: actions/configure-pages@v5
@@ -39,10 +58,25 @@ jobs:
         shell: bash
         run: |
           echo '::error::Open https://github.com/seainkk/-/settings/pages and select Build and deployment > Source > GitHub Actions, then rerun this workflow. The repository workflow token cannot initially enable GitHub Pages by itself.'
-      - name: Upload entry page only
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: entry
+      - name: Wait for the uploaded artifact to appear in this run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+        run: |
+          for delay in 0 2 4 8 16 30; do
+            sleep "$delay"
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=$ARTIFACT_NAME" |
+              jq -e --arg name "$ARTIFACT_NAME" --arg id "$ARTIFACT_ID" '
+                .artifacts | length == 1 and
+                (.[0] | .name == $name and (.id | tostring) == $id and .expired == false)
+              ' >/dev/null; then exit 0; fi
+          done
+          echo "::error::The uploaded Pages artifact is not visible for this run. Re-run the failed deploy job."
+          exit 1
       - name: Publish registry entry
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: ${{ needs.build.outputs.artifact_name }}

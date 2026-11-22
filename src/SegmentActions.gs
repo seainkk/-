@@ -239,9 +239,10 @@ function segmentDirectParent_(item, parentId) {
   return false;
 }
 
-function segmentFolder_(context, parent, segmentId) {
-  var folder = registryFolder_(context, segmentId);
-  if (!segmentDirectParent_(folder, parent.getId())) fail_('OUTSIDE_SEGMENTS', 'Эта папка не является отдельным сегментом папки «Аутричи».');
+function segmentFolder_(context, parent, segmentId, verifiedParent) {
+  // A fresh segmentSourceFolder_ already verified the parent's full ancestry.
+  var folder = verifiedParent === true ? folderById_(id_(segmentId)) : registryFolder_(context, segmentId);
+  if (verifiedParent === true && folder.isTrashed() || !segmentDirectParent_(folder, parent.getId())) fail_('OUTSIDE_SEGMENTS', 'Эта папка не является отдельным сегментом папки «Аутричи».');
   return folder;
 }
 
