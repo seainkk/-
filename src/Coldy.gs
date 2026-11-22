@@ -181,6 +181,10 @@ function coldyApi_(context, method, path, payload, options) {
   // Check scope and credential again immediately before the external action.
   current = coldyCurrent_(context, true);
   if (coldyCredentialHash_(current) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Повторите действие.');
+  if (method === 'GET') {
+    var pause = coldyGetPause_(current,settings);
+    if (pause) throw pause;
+  }
   var response;
   try {
     response = UrlFetchApp.fetch(COLDY.base + address, request);
@@ -232,6 +236,8 @@ function coldyGetBatch_(context, paths, guard, campaignDetailsOnly) {
   var requests = addresses.map(function (address) { return Object.assign({url:COLDY.base + address},coldyRequestOptions_('GET',settings.key)); });
   guard();
   if (coldyCredentialHash_(coldyCurrent_(context,false)) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите действие.');
+  var pause = coldyGetPause_(current,settings);
+  if (pause) return addresses.map(function () { return {error:pause}; });
   var responses;
   try { responses = UrlFetchApp.fetchAll(requests); }
   catch (error) { coldyTransportFailure_(error,'GET'); }
@@ -252,7 +258,12 @@ function coldyResponse_(context, settings, method, response, address) {
     status = response.getResponseCode(); body = response.getContentText();
   } catch (error) { coldyTransportFailure_(error, method); }
   if (status < 200 || status >= 300) {
-    if (status === 401) {
+    // Coldy's leads endpoint also documents a credential rejection in a 400 response.
+    var rejectedKey = false;
+    if (status === 400 && typeof body === 'string' && body.length <= 8192) {
+      try { rejectedKey = JSON.parse(body).error === 'Invalid API key'; } catch (ignored) {}
+    }
+    if (status === 401 || rejectedKey) {
       var fresh = coldyCurrent_(context, false);
       var active = coldySettings_(fresh);
       if (active.credentialHash === settings.credentialHash && active.proofSlot === settings.proofSlot) {
@@ -264,7 +275,18 @@ function coldyResponse_(context, settings, method, response, address) {
     if (status === 403) coldyHttpFailure_('COLDY_FORBIDDEN', 'Coldy отклонил доступ к действию. Проверьте права организации.', status, response);
     if (status === 404) coldyHttpFailure_('COLDY_NOT_FOUND', 'Объект Coldy не найден в подключённой организации.', status, response);
     if (status === 409) coldyHttpFailure_('COLDY_CONFLICT', method === 'GET' ? 'Coldy пока не подтвердил чтение данных. Повторите обновление позже.' : 'Coldy пока не подтвердил действие: проверьте состояние прежней операции.', status, response);
-    if (status === 429) coldyHttpFailure_('COLDY_RATE_LIMIT', 'Coldy просит снизить частоту запросов. Повторите обновление позже.', status, response);
+    if (status === 429) {
+      var delay = coldyRetryAfter_(response);
+      if (method === 'GET') {
+        var until = Date.now() + (delay || 60000);
+        throw locked_(function () {
+          var current = coldyCurrent_(context,false);
+          if (coldyCredentialHash_(current) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите действие.');
+          return coldyGetPause_(current,settings,until);
+        });
+      }
+      throw coldyRateLimitError_(delay);
+    }
     if (status >= 500) coldyHttpFailure_('COLDY_UNAVAILABLE', method === 'GET' ? 'Coldy временно недоступен. Повторите проверку подключения или обновление позже.' : 'Coldy временно не подтвердил действие. Сначала проверьте состояние операции.', status, response);
     coldyHttpFailure_('COLDY_PROVIDER', 'Coldy отклонил запрос. Проверьте параметры операции.', status, response);
   }
@@ -295,11 +317,34 @@ function coldyTransportFailure_(error, method) {
   fail_('COLDY_NETWORK', 'Не удалось получить ответ Coldy. ' + reason + action);
 }
 
-function coldyHttpFailure_(code, message, status, response) {
-  var error = registryError_(code, message), headers = typeof response.getAllHeaders === 'function' ? response.getAllHeaders() : {}, retry = '';
+function coldyRateLimitError_(delay) {
+  var error = registryError_('COLDY_RATE_LIMIT','Coldy просит снизить частоту запросов. Повторите обновление позже.');
+  error.httpStatus = 429; error.retryAfterMs = delay;
+  return error;
+}
+
+/** Share an absolute deadline across project views and the timer. Only a genuine GET 429 extends it under lock. */
+function coldyGetPause_(context,settings,extendUntil) {
+  var slot = 'COLDY_GET_PAUSE_' + context.rootId + '_' + settings.credentialHash;
+  var until = Number(context.properties.getProperty(slot)) || 0;
+  if (extendUntil > until) {
+    until = extendUntil;
+    context.properties.setProperty(slot,String(until));
+  }
+  var remaining = Math.max(0,until-Date.now());
+  return remaining || extendUntil ? coldyRateLimitError_(remaining) : null;
+}
+
+function coldyRetryAfter_(response) {
+  var headers = typeof response.getAllHeaders === 'function' ? response.getAllHeaders() : {}, retry = '';
   Object.keys(headers || {}).forEach(function (key) { if (key.toLowerCase() === 'retry-after') retry = String(headers[key]); });
   var delay = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
-  error.httpStatus = status; error.retryAfterMs = Number.isFinite(delay) && delay > 0 ? Math.min(86400000, Math.ceil(delay)) : 0;
+  return Number.isFinite(delay) && delay > 0 ? Math.min(86400000, Math.ceil(delay)) : 0;
+}
+
+function coldyHttpFailure_(code, message, status, response) {
+  var error = registryError_(code,message);
+  error.httpStatus = status; error.retryAfterMs = coldyRetryAfter_(response);
   throw error;
 }
 

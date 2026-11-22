@@ -271,6 +271,8 @@
   const completionReasons={
     incomplete:'Очередь отправок получена частично.',
     unavailable:'Coldy не подтвердил данные этой рассылки.',
+    forbidden:'У текущего API-ключа нет доступа к этой рассылке (HTTP 403).',
+    bad_request:'Coldy отклонил запрос данных этой рассылки.',
     verification:'Coldy не подтвердил валидность всех нужных контактов.',
     sequence:'Недостаточно сведений о шагах или паузах цепочки.',
     status:'Неизвестно состояние части отправок.',
@@ -365,10 +367,17 @@
   }
   function recipientSyncText(sync){
     if(!sync||typeof sync.enabled!=='boolean')return '';
-    const states={off:'Сверка с листом Email выключена',waiting:'Сверка с листом Email ожидает запуска',
-      syncing:'Сверка с листом Email выполняется',synced:'Сверка с листом Email включена',
+    const states={off:'Сверка с листом Email выключена',waiting:sync.lastTickAt?'Сверка Email ожидает очереди':'Ожидаем первый подтверждённый запуск таймера сверки Email',
+      syncing:'Сверка с листом Email выполняется',synced:'Сверка с листом Email включена',retrying:'Сверка Email ожидает продолжения',
+      no_target:'Для этой рассылки не выбрана таблица Email',
       error:'Ошибка сверки с листом Email'};
     const details=[states[sync.state]];
+    const issues={rate_limit:'Coldy временно ограничил запросы',connection:'Coldy отклонил запрос доступа',provider:'данные Coldy недоступны',
+      target:'не удалось подтвердить таблицу Email',storage:'ошибка чтения или записи журнала',scope:'изменилась область доступа',
+      busy:'другая операция заняла очередь',timeout:'истекло время попытки',unknown:'ошибка фоновой обработки'};
+    if(issues[sync.issue])details.push(issues[sync.issue]);
+    if(sync.state==='waiting'&&timestamp(sync.lastTickAt))details.push('таймер сработал '+timestamp(sync.lastTickAt)+' МСК');
+    if(['syncing','retrying','error'].includes(sync.state)&&timestamp(sync.lastAttemptAt))details.push('попытка '+timestamp(sync.lastAttemptAt)+' МСК');
     const last=timestamp(sync.lastSyncedAt),retry=timestamp(sync.nextRetryAt);
     if(last)details.push('последняя полная сверка '+last+' МСК');
     const suppression=timestamp(sync.lastSuppressionAt);

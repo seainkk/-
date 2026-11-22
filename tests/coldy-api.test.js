@@ -337,8 +337,64 @@ test('provider failures expose sanitized status and bounded Retry-After, never r
   const f=fixture({transport:()=>{throw new Error('Required permissions external_request '+KEY);}});f.configure();assert.throws(()=>f.c.coldyApi_(f.context,'GET','/campaigns'),/COLDY_OWNER_AUTH_REQUIRED/);
 });
 
+test('campaign polling, sender monitoring and the recipient timer share the same GET Retry-After across projects',()=>{
+  let limit=true;
+  const f=fixture({transport:({request,response})=>request.method==='get' && limit
+    ? response('private response '+KEY,429,{'retry-after':'7.5'}) : response({ok:true})});
+  f.configure();
+  const read=path=>f.c.coldyApi_(f.context,'GET',path);
+  const leads='/leads/campaign/'+CAMPAIGN+'?limit=200&offset=0';
+  assert.throws(()=>read(leads),error=>error.registryCode==='COLDY_RATE_LIMIT'&&error.retryAfterMs===7500);
+  const markers=[...f.properties.entries()].filter(([key])=>key.startsWith('COLDY_GET_PAUSE_'));
+  assert.equal(markers.length,1);assert.equal(markers[0][1],String(f.now()+7500));
+  assert.ok(!JSON.stringify(markers).includes(KEY));
+  limit=false;f.tick(1000);
+  f.c.registryProjectId_=()=>'neosender';
+  let groups=0,guards=0;
+  f.c.UrlFetchApp.fetchAll=requests=>{groups++;return requests.map(()=>f.response({ok:true}));};
+  const batch=paths=>f.c.coldyGetBatch_(f.context,paths,()=>{guards++;});
+  for(const paths of [['/accounts/1','/accounts/2'],['/campaigns/'+CAMPAIGN,leads],[leads]]){
+    assert.ok(batch(paths).every(result=>result.error?.httpStatus===429&&result.error.retryAfterMs===6500));
+  }
+  assert.ok(guards>=3);assert.equal(groups,0);assert.equal(f.calls.fetch.length,1);
+  assert.throws(()=>read('/accounts'),error=>error.retryAfterMs===6500);
+  f.c.coldyApi_(f.context,'POST','/leads/bulk',{campaign:CAMPAIGN,items:[{email:'synthetic@example.test'}]});
+  assert.equal(f.calls.fetch[1].request.method,'post');
+  f.tick(6499);assert.throws(()=>read(leads),error=>error.retryAfterMs===1);
+  f.tick(1);assert.equal(read(leads).ok,true);assert.ok(batch(['/accounts/1','/accounts/2']).every(result=>result.value.ok));
+  assert.equal(groups,1);assert.equal(f.calls.fetch.length,3);
+});
+
+test('parallel responses keep the longest absolute deadline, and unrelated roots and credentials may still read',()=>{
+  const f=fixture({transport:({response})=>response({ok:true})});f.configure();
+  const current=()=>f.c.authorize_();
+  f.c.UrlFetchApp.fetchAll=()=>[
+    f.response({},429,{'Retry-After':new Date(f.now()+17000).toUTCString()}),
+    f.response({},429,{'Retry-After':'2'})];
+  const first=f.c.coldyGetBatch_(current(),['/accounts/1','/accounts/2'],()=>{});
+  assert.deepEqual(Array.from(first,result=>result.error.retryAfterMs),[17000,17000]);
+  const root2='different_registry_root_123456';
+  f.files.set(root2,{...f.files.get(ROOT),id:root2});f.switchRoot(root2);
+  assert.equal(f.c.coldyApi_(current(),'GET','/campaigns').ok,true);
+  f.switchRoot(ROOT);
+  assert.throws(()=>f.c.coldyApi_(current(),'GET','/campaigns'),error=>error.retryAfterMs===17000);
+  f.c.configureColdy_({apiKey:'second_synthetic_credential'});
+  assert.equal(f.c.coldyApi_(current(),'GET','/campaigns').ok,true);
+  assert.equal(f.calls.fetch.length,2);
+});
+
 test('invalid success response cannot leak arbitrary provider data',()=>{
   for(const body of ['private '+KEY,'null','[]']){const f=fixture({transport:({response})=>response(body)});f.configure();assert.throws(()=>f.c.coldyApi_(f.context,'GET','/campaigns'),e=>e.registryCode==='COLDY_RESPONSE'&&!e.message.includes(KEY));}
+});
+
+test('documented 400 Invalid API key is an authentication failure, ordinary 400 remains a request error',()=>{
+  let kind='Invalid API key';
+  const f=fixture({transport:({response})=>response({error:kind,message:[KEY]},400)});
+  f.configure();
+  const fetch=()=>f.c.coldyApi_(f.context,'GET','/campaigns');
+  assert.throws(fetch,e=>e.registryCode==='COLDY_AUTH'&&e.httpStatus===400&&!e.message.includes(KEY));
+  assert.equal(f.c.getColdySettings_({}).connected,false);
+  kind='Bad Request';assert.throws(fetch,e=>e.registryCode==='COLDY_PROVIDER'&&e.httpStatus===400&&!e.message.includes(KEY));
 });
 
 test('private JSON state is bound to exact registry, kind, owner and role without nested locks',()=>{

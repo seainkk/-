@@ -194,7 +194,7 @@ lastSyncedAt:null,nextRetryAt:null}""")
         expect(setup_box).to_contain_text('authorizeGoogleAccess')
         setup_box.get_by_role('button').click()
         expect(setup_box).to_be_hidden()
-        expect(page.locator('#pj-campaign-rows .pj-recipient-sync').first).to_contain_text('ожидает запуска')
+        expect(page.locator('#pj-campaign-rows .pj-recipient-sync').first).to_contain_text('первый подтверждённый запуск таймера')
         assert count('enableColdyRecipientSync')==1
 
         monitored_setup="backend.monitoringIds=Array.from({length:6},(_,i)=>'account-'+i);backend.monitoringConfigured=true;"

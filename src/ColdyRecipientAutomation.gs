@@ -51,16 +51,41 @@ function coldyIncomingMark_(properties,owner){
   return JSON.parse(properties.getProperty('COLDY_INCOMING_'+owner)||'{}');
 }
 
+function coldyIncomingHeartbeatKey_(marker){
+  return 'COLDY_INCOMING_CLOCK_'+digest_(JSON.stringify([marker.uid,marker.rootId,marker.verifier]));
+}
+
+// Expose a fixed reason only. Provider messages can contain addresses or credentials.
+function coldyIncomingIssue_(error){
+  var code=error && error.registryCode;
+  if(code==='COLDY_RATE_LIMIT')return 'rate_limit';
+  if(['COLDY_AUTH','COLDY_FORBIDDEN','COLDY_KEY_REQUIRED'].includes(code))return 'connection';
+  if(['COLDY_NETWORK','COLDY_PROVIDER','COLDY_UNAVAILABLE','COLDY_RESPONSE','COLDY_NOT_FOUND'].includes(code))return 'provider';
+  if(['COLDY_TARGET_CHANGED','COLDY_TARGETS_REQUIRED','SEGMENT_TARGETS_REQUIRED','NOT_FOUND'].includes(code))return 'target';
+  if(['COLDY_STORAGE','COLDY_STORAGE_UNCERTAIN','COLDY_STORAGE_LIMIT','PROJECT_STORAGE'].includes(code))return 'storage';
+  if(['OUTSIDE_REGISTRY','OUTSIDE_PROJECT','COLDY_SCOPE_CHANGED','COLDY_BINDING_CHANGED','COLDY_CREDENTIAL_CHANGED'].includes(code))return 'scope';
+  if(code==='BUSY')return 'busy';
+  if(code==='COLDY_RECIPIENT_LEASE_EXPIRED')return 'timeout';
+  return 'unknown';
+}
+
 /** Attach status to already selected bindings only. Catalogue and grid opens do not enumerate campaigns. */
 function coldyIncomingDecorate_(context,bindings,rows){
   if(!bindings.length) return;
   var timer=coldyIncomingEnsure_(context,false), credential=coldyCredentialHash_(context), project=registryProjectId_();
+  var marker=coldyIncomingTimer_(context.properties),clock={};
+  if(timer.enabled&&marker&&marker.uid){
+    clock=JSON.parse(context.properties.getProperty(coldyIncomingHeartbeatKey_(marker))||'{}');
+  }
   var byId=new Map((rows||[]).map(function(row){return [row.id,row];}));
   bindings.forEach(function(b){
     var mark=coldyIncomingMark_(context.properties,coldyIncomingOwner_(context,credential,project,b));
-    var status={enabled:timer.enabled,needsOwnerSetup:timer.needsOwnerSetup,state:timer.enabled?(mark.state||'waiting'):'off',
+    var state=mark.state||'waiting',retryAt=Math.max(mark.retryAt||0,clock.retryAt||0);
+    if(state==='syncing' && mark.attempt+COLDY_INCOMING.leaseMillis<Date.now())state='retrying';
+    var status={enabled:timer.enabled,needsOwnerSetup:timer.needsOwnerSetup,state:timer.enabled?state:'off',
       lastSyncedAt:mark.lastSyncedAt||null,lastSuppressionAt:mark.lastSuppressionAt||null,suppressionPending:mark.suppressionPending===true,
-      nextRetryAt:mark.retryAt>Date.now()?new Date(mark.retryAt).toISOString():null};
+      lastTickAt:clock.at||null,lastAttemptAt:mark.attempt?new Date(mark.attempt).toISOString():null,
+      issue:mark.issue||clock.issue||null,nextRetryAt:retryAt>Date.now()?new Date(retryAt).toISOString():null};
     b.recipientSync=status;
     if(byId.has(b.campaignId)) byId.get(b.campaignId).recipientSync=status;
   });
@@ -167,8 +192,8 @@ function coldyIncomingStep_(context,job,guard,deadline){
     }
     if(scan.targetIndex===scan.kinds.length){
       delete state.scan;
-      if(!scan.kinds.length) mark.state='waiting';
-      else if(scan.unavailable) mark.state='error';
+      if(!scan.kinds.length) mark.state='no_target';
+      else if(scan.unavailable){mark.state='error';mark.issue='target';}
       else {mark.lastSyncedAt=new Date().toISOString();mark.state='synced';}
       // On an unchanged cycle neither the private snapshot nor any sheet needs to be rewritten.
       if(staged || hadCheckpoint || state.lastIdentity!==fingerprint){state.lastIdentity=fingerprint;save();}
@@ -225,14 +250,18 @@ function coldyRecipientTick_(event){
   if(!timer||!timer.uid||!event||event.triggerUid!==timer.uid||timer.verifier!==sharedConfiguredHash_(props)||
     timer.rootId!==(props.getProperty('ROOT_FOLDER_ID')||REGISTRY_CONFIG.defaultRootFolderId)) return;
   var previous=SHARED_REQUEST_SCOPE_, claim=Utilities.getUuid(), started=Date.now(), acquired=false;
+  var heartbeatKey=coldyIncomingHeartbeatKey_(timer), at=new Date(started).toISOString();
+  function heartbeat(issue,retryAt){props.setProperty(heartbeatKey,JSON.stringify({at:at,issue:issue||null,retryAt:retryAt||0}));}
   SHARED_REQUEST_SCOPE_={keyHash:timer.verifier,automation:true};
   function timerGuard(){
     var current=authorize_(), marker=coldyIncomingTimer_(props), lease=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
-    if(current.rootId!==timer.rootId||!marker||marker.uid!==timer.uid||marker.verifier!==timer.verifier||
-       !lease||lease.id!==claim||lease.until<=Date.now()) fail_('COLDY_SCOPE_CHANGED','Изменились параметры фоновой сверки.');
+    if(current.rootId!==timer.rootId||!marker||marker.uid!==timer.uid||marker.verifier!==timer.verifier)
+      fail_('COLDY_SCOPE_CHANGED','Изменились параметры фоновой сверки.');
+    if(!lease||lease.id!==claim||lease.until<=Date.now())fail_('COLDY_RECIPIENT_LEASE_EXPIRED','Истекло время текущей попытки сверки.');
     return current;
   }
   try {
+    heartbeat();
     acquired=locked_(function(){
       var old=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
       if(old && old.until>started) return false;
@@ -242,7 +271,8 @@ function coldyRecipientTick_(event){
     var context=timerGuard(), settings=coldySettings_(context);
     if(!settings.configured) return;
     var credential=settings.credentialHash, pauseKey='COLDY_INCOMING_PAUSE_'+digest_(context.rootId+'|'+credential);
-    if(Number(props.getProperty(pauseKey))>Date.now()) return;
+    var pausedUntil=Number(props.getProperty(pauseKey));
+    if(pausedUntil>Date.now()){heartbeat('rate_limit',pausedUntil);return;}
     var bindings=coldyCampaignRegistry_(context).bindings, snapshot=props.getProperties(), jobs=[];
     bindings.forEach(function(b){
       var project=registrySegmentProject_(context,b.segmentId,snapshot); if(!registryProjectName_(project)) return;
@@ -267,17 +297,23 @@ function coldyRecipientTick_(event){
         return fresh;
       }
       try {
-        guard(); mark.retryAt=0; mark.attempt=Date.now();
+        timerGuard();
+        mark.retryAt=0;mark.issue=null;mark.state='syncing';mark.attempt=Date.now();
+        // A hard Apps Script timeout cannot run finally. Persist the fair-queue position before remote calls.
+        props.setProperty('COLDY_INCOMING_'+job.owner,JSON.stringify(mark));
+        guard();
         coldyIncomingStep_(context,job,guard,started+COLDY_INCOMING.budget);
       } catch(error) {
         if(error.registryCode==='LINK_ACCESS_REQUIRED'||error.registryCode==='LINK_SETUP_REQUIRED') throw error;
         var retry=Number(error.retryAfterMs)||0;
-        mark.state='error';mark.retryAt=Date.now()+Math.max(60000,retry,error.registryCode==='COLDY_NOT_FOUND'?900000:0);
-        if(error.registryCode==='COLDY_RATE_LIMIT') props.setProperty(pauseKey,String(mark.retryAt));
+        mark.state='error';mark.issue=coldyIncomingIssue_(error);mark.retryAt=Date.now()+Math.max(60000,retry,error.registryCode==='COLDY_NOT_FOUND'?900000:0);
+        if(error.registryCode==='COLDY_RATE_LIMIT'){props.setProperty(pauseKey,String(mark.retryAt));heartbeat('rate_limit',mark.retryAt);}
       }
       timerGuard();props.setProperty('COLDY_INCOMING_'+job.owner,JSON.stringify(mark));
       if(Number(props.getProperty(pauseKey))>Date.now()) break;
     }
+  } catch(error) {
+    heartbeat(coldyIncomingIssue_(error));throw error;
   } finally {
     try {if(acquired) locked_(function(){
       var current=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');

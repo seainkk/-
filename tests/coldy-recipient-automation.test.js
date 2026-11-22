@@ -84,6 +84,36 @@ test('both project bindings update enrolled Email rows offline, and manual sheet
   assert.equal(rows[0].recipientSync.state,'synced');assert.ok(rows[0].recipientSync.lastSyncedAt);
 });
 
+test('a timed-out worker exposes its real start and yields the next turn to the other binding',()=>{
+  const f=fixture();f.enable();
+  function status(binding){
+    f.r.SHARED_REQUEST_SCOPE_.projectId=f.projects[binding.segmentId];
+    f.r.coldyIncomingDecorate_(f.r.authorize_(),[binding],[]);return binding.recipientSync;
+  }
+  assert.equal(status(f.bindings[0]).lastTickAt,null);
+  let first;
+  f.state.afterRead=()=>{
+    first=f.bindings.find(binding=>f.paths[0].includes(binding.campaignId));
+    assert.equal(status(first).state,'syncing');assert.ok(status(first).lastAttemptAt);
+    f.state.afterRead=null;f.state.now+=300001;
+  };
+  assert.throws(()=>f.tick(),e=>e.registryCode==='COLDY_RECIPIENT_LEASE_EXPIRED');
+  const interrupted=status(first);
+  assert.equal(interrupted.state,'retrying');assert.equal(interrupted.issue,'timeout');
+  assert.ok(interrupted.lastTickAt);assert.equal(interrupted.lastSyncedAt,null);
+  const prior=f.paths.length;f.next();
+  assert.ok(!f.paths[prior].includes(first.campaignId),'the unattempted binding receives the next slot');
+});
+
+test('an unassigned destination and a provider cooldown have distinct public diagnostics',()=>{
+  const f=fixture();f.enable();f.bindings[0].includeCompanies=false;f.tick();
+  f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],[]);
+  assert.equal(f.bindings[0].recipientSync.state,'no_target');assert.equal(f.bindings[0].recipientSync.lastSyncedAt,null);
+  f.state.failure={id:a,code:'COLDY_RATE_LIMIT',retry:180000};f.next();f.next();
+  f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],[]);
+  assert.equal(f.bindings[0].recipientSync.issue,'rate_limit');assert.ok(f.bindings[0].recipientSync.nextRetryAt);
+});
+
 test('large campaign resumes, a failing campaign cannot block the other project, and 429 respects its retry deadline',()=>{
   const f=fixture();f.enable();f.state.counts={[a]:1001};
   f.state.failure={id:b,code:'COLDY_NOT_FOUND'};f.tick();assert.equal(f.writes.length,0);

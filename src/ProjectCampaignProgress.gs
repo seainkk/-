@@ -81,16 +81,25 @@ function getProjectCampaignCompletions_(request) {
     try {
       if (before < ids.length) projectForecastCollect_(context,ids,state,guard,true);
     } catch (error) {
-      if (['COLDY_NOT_FOUND','COLDY_FORBIDDEN','COLDY_FORECAST_CHANGED','COLDY_RESPONSE'].indexOf(error.registryCode) >= 0) {
-        // One deleted or changing campaign must not prevent the other campaigns from being scanned.
+      var rejectedRequest = error.registryCode === 'COLDY_PROVIDER' && (error.httpStatus === 400 || error.httpStatus === 422);
+      if (rejectedRequest || ['COLDY_NOT_FOUND','COLDY_FORBIDDEN','COLDY_FORECAST_CHANGED','COLDY_RESPONSE'].indexOf(error.registryCode) >= 0) {
+        // A definitive rejection of one campaign must not hold the cursor on that same page indefinitely.
         var failed = ids[state.progress.campaignsDone];
-        state.work[failed] = {unavailable:true};
+        var reason = rejectedRequest ? 'bad_request' : error.registryCode === 'COLDY_FORBIDDEN' ? 'forbidden' : 'unavailable';
+        state.work[failed] = {unavailable:true,reason:reason};
         delete state.report[failed];
         state.progress.campaignsDone++;
         if (error.retryAfterMs > 0) state.retryAt = Date.now() + error.retryAfterMs;
       } else {
-        if (['COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_RATE_LIMIT','COLDY_CONFLICT','COLDY_PROVIDER'].indexOf(error.registryCode) < 0) throw error;
-        state.message = 'Coldy временно отложил получение данных. Сохранили позицию в списке адресатов.';
+        var messages = {
+          COLDY_NETWORK:'Google Apps Script не получил ответ от Coldy. Сверка продолжится с сохранённой страницы.',
+          COLDY_UNAVAILABLE:'Сервер Coldy вернул ошибку (HTTP 5xx). Повторим чтение этой страницы.',
+          COLDY_RATE_LIMIT:'Coldy ограничил частоту запросов (HTTP 429). Продолжим после паузы.',
+          COLDY_CONFLICT:'Данные обновляются в Coldy (HTTP 409). Повторим чтение этой страницы.',
+          COLDY_PROVIDER:'Coldy отклонил запрос данных. Повторим сверку после паузы.'
+        };
+        if (!Object.prototype.hasOwnProperty.call(messages,error.registryCode)) throw error;
+        state.message = messages[error.registryCode];
         state.retryAt = Date.now() + Math.max(15000, Number(error.retryAfterMs) || 60000);
       }
     }
@@ -121,7 +130,7 @@ function getProjectCampaignCompletions_(request) {
       var generated = new Date().toISOString();
       ids.forEach(function (id) {
         if (state.work[id] && (state.work[id].complete || state.work[id].unavailable) && report[id]) {
-          if (state.work[id].unavailable) report[id].reason = 'unavailable';
+          if (state.work[id].unavailable) report[id].reason = state.work[id].reason || 'unavailable';
           state.report[id] = Object.assign({},report[id],{generatedAt:generated});
         }
       });
