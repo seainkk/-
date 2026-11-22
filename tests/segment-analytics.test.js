@@ -139,6 +139,41 @@ test('light dashboard remains unknown and usable when the tracking journal is un
   assert.deepEqual(f.calls.opened, []);
 });
 
+test('campaign counts use a single journal for visible segments and keep contact and launch metrics independent', () => {
+  const other = 'other_project_segment_01', extra = 'second_project_segment_01';
+  const f = fixture({
+    folders: [other, extra].map(id => ({ id, name: 'Кухни', parents: [SOURCE] })),
+    properties: Object.fromEntries([SEGMENT, extra, other].map(id => ['REGISTRY_SEGMENT_PROJECT_' + id, JSON.stringify({ rootId: ROOT, projectId: id === other ? 'neosender' : 'numshield' })])),
+  });
+  vm.runInContext(readFileSync(new URL('../src/RegistryProjects.gs', import.meta.url), 'utf8'), f.context);
+  let reads = 0;
+  f.context.coldyCredentialHash_ = () => 'account';
+  f.context.coldyCampaignRegistry_ = () => {
+    reads++;
+    return { credentialHash: 'account', bindings: [
+      { segmentId: SEGMENT, campaignStatus: 'Active' }, { segmentId: SEGMENT, campaignStatus: 'Completed' },
+      { segmentId: other, campaignStatus: 'Active' }, { segmentId: other, campaignStatus: '' },
+    ] };
+  };
+  const dashboard = (projectId, includeAnalysis) => plain(f.context.callApp({ method: 'getSegmentsDashboard', payload: { includeAnalysis }, accessKey: TEST_ACCESS_KEY, projectId }));
+  for (const includeAnalysis of [false, true]) {
+    const list = dashboard('numshield', includeAnalysis).items;
+    assert.equal(list.length, 2);
+    const card = list.find(item => item.id === SEGMENT);
+    assert.deepEqual(card.coldyMailings, { linked: 2, activeAtBinding: 1 });
+    assert.equal(card.channels.email.inWork, null);
+    assert.notEqual(card.overallStatus, 'in_work');
+    assert.deepEqual(list.find(item => item.id === extra).coldyMailings, { linked: 0, activeAtBinding: 0 });
+    const neo = dashboard('neosender', includeAnalysis).items;
+    assert.deepEqual(neo.map(item => item.id), [other]);
+    assert.deepEqual(neo[0].coldyMailings, { linked: 2, activeAtBinding: null });
+  }
+  assert.equal(reads, 4);
+  f.context.coldyCampaignRegistry_ = () => { throw Error('Missing journal'); };
+  assert.equal(dashboard('numshield', false).items[0].coldyMailings, undefined);
+  assert.deepEqual(f.calls.opened, []);
+});
+
 test('light dashboard mode is strictly validated before metadata reads', () => {
   for (const request of [null, [], 'fast', { includeAnalysis: 'false' }, { includeAnalysis: 0 }, { skipScope: true }]) {
     const f = fixture();

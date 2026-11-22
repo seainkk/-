@@ -64,10 +64,12 @@ def main():
         page.set_content(HTML)
         page.wait_for_selector('[data-source-id="source-companies"]')
         page.wait_for_function('backend.active===0')
+        page.evaluate("backend.segments[0].coldyMailings={linked:2,activeAtBinding:1}")
         page.evaluate("backend.segments.push(makeSegment('web-studios','Веб-студии','no_contacts','partners'))")
         page.locator('#br-view-segments').click()
         page.wait_for_selector('[data-segment="existing-segment"]')
         page.wait_for_function('backend.active===0')
+        expect(page.locator('[data-segment="existing-segment"] [data-channel="email"]')).to_have_text('Email · рассылок Coldy 2 · активных при привязке 1')
         page.locator('[data-segment="existing-segment"] button').filter(has_text='Пополнить базы').click()
         assert page.locator('#br-segment-editor-title').inner_text()=='Пополнить базы сегмента'
         assert page.locator('[data-choose-source="source-draft"]').count()==0
