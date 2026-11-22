@@ -38,7 +38,7 @@ function fixture() {
 
 test('the public page renders only a static shell without visitor identity, access checks or Drive reads', () => {
   const f = fixture();
-  assert.deepEqual(plain(f.context.doGet({ parameter: { access_key: 'untrusted-query-key' } })), { staticShell: true, title: 'Реестр баз', frameMode: 'ALLOWALL' });
+  assert.deepEqual(plain(f.context.doGet({ parameter: { access_key: 'untrusted-query-key' } })), { staticShell: true, title: 'Центр мультиканального аутрича', frameMode: 'ALLOWALL' });
   assert.equal(f.calls.shell, 1);
   assert.equal(f.calls.folders, 0);
   assert.equal(f.context.SHARED_REQUEST_SCOPE_, null);

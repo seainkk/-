@@ -8,14 +8,14 @@ function getColdyBindings_(request) {
     coldyCampaignScope_(context, segmentId);
     var settings = coldySettings_(context);
     if (!settings.configured) return { bindings: [], campaigns: [], configured: false, connected: false };
-    var campaigns = listColdyCampaigns_({});
     return locked_(function () {
       coldyCampaignScope_(context, segmentId);
       if (settings.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите список рассылок.');
       var registry = coldyCampaignRegistry_(context);
-      var choices = campaigns.campaigns || [];
-      if (typeof registryProjectScoped_ === 'function' && registryProjectScoped_()) choices = coldyProjectCampaigns_(context, settings.credentialHash, choices, registry);
-      return { bindings: registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; }).map(coldyCampaignPublicBinding_), campaigns: choices, configured: true, connected: coldySettings_(context).connected === true };
+      var own = registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; });
+      return { bindings: own.map(coldyCampaignPublicBinding_), campaigns: own.map(function (binding) {
+        return { id: binding.campaignId, name: binding.campaignName, status: binding.campaignStatus };
+      }), configured: true, connected: coldySettings_(context).connected === true };
     });
   });
 }
@@ -172,46 +172,86 @@ function coldySegmentMailings_(context, segmentId) {
 
 function refreshColdyMailings_(request) {
   return api_(function () {
-    var input = segmentInput_(request, ['segmentId']), context = authorize_(), segmentId = id_(input.segmentId), startedAt = new Date().toISOString();
-    var snapshot = locked_(function () {
-      coldyCampaignScope_(context, segmentId);
-      var registry = coldyCampaignRegistry_(context), all = registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; }).sort(function (a, b) { return a.id.localeCompare(b.id); });
-      var cursors = registry.analyticsCursors || {}, cursor = all.length ? (Number(cursors[segmentId]) || 0) % all.length : 0, selected = [];
-      for (var index = 0; index < Math.min(10, all.length); index++) selected.push(all[(cursor + index) % all.length]);
-      cursors[segmentId] = all.length ? (cursor + selected.length) % all.length : 0; registry.analyticsCursors = cursors; coldyCampaignSaveRegistry_(context, registry);
-      return { bindings: selected, total: all.length, credentialHash: registry.credentialHash };
+    var input = segmentInput_(request, ['segmentId', 'monitor']), context = authorize_(), segmentId = id_(input.segmentId);
+    if (input.monitor !== undefined && typeof input.monitor !== 'boolean') fail_('INVALID_REQUEST', 'Неизвестный режим мониторинга.');
+    coldyCampaignScope_(context, segmentId);
+    var settings = coldySettings_(context);
+    if (!settings.configured) return coldySegmentMailings_(context, segmentId);
+    var scope = digest_(JSON.stringify([context.rootId, settings.credentialHash]));
+    var cooldown = 'COLDY_ANALYTICS_RETRY_' + scope, key = 'COLDY_ANALYTICS_POLL_' + digest_(scope + '|' + segmentId);
+    var properties = context.properties, lease = Utilities.getUuid(), retryAt = 0, started = Date.now();
+    var claimed = locked_(function () {
+      var previous = JSON.parse(properties.getProperty(key) || '{}'), now = Date.now();
+      retryAt = Number(properties.getProperty(cooldown)) || 0;
+      if (retryAt > now || previous.until > now || (input.monitor && previous.next > now)) return false;
+      properties.setProperty(key, JSON.stringify({ lease: lease, until: now + 360000 }));
+      return true;
     });
-    snapshot.bindings.forEach(function (binding) {
-      var old = locked_(function () { coldyCampaignScope_(context, segmentId); return coldyLoad_(context, 'campaignanalytics', coldyCampaignAnalyticsOwner_(context, binding)); });
-      var campaign = null, summary = null, campaignError = '', summaryError = '';
-      // Provider requests deliberately run outside the global script lock.
-      try { campaign = coldyCampaignRead_(context, binding.campaignId); }
-      catch (error) { if (coldyCampaignAccessError_(error)) throw error; campaignError = error.registryCode || 'COLDY_RESPONSE'; }
-      try { summary = coldyApi_(context, 'GET', '/analytics/campaigns/' + coldyCampaignId_(binding.campaignId) + '/summary?period=all&type=event'); }
-      catch (error) { if (coldyCampaignAccessError_(error)) throw error; summaryError = error.registryCode || 'COLDY_RESPONSE'; }
-      if (snapshot.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился во время обновления показателей.');
-      locked_(function () {
-        coldyCampaignScope_(context, segmentId);
-        var registry = coldyCampaignRegistry_(context), current = coldyCampaignBinding_(registry, segmentId, binding.id);
-        if (snapshot.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Повторите обновление показателей.');
-        if (current.revision !== binding.revision) fail_('COLDY_BINDING_CHANGED', 'Связь рассылки изменилась. Обновите показатели.');
-        var owner = coldyCampaignAnalyticsOwner_(context, binding), latest = coldyLoad_(context, 'campaignanalytics', owner);
-        if (latest && latest.lastAttemptAt && latest.lastAttemptAt >= startedAt && JSON.stringify(latest) !== JSON.stringify(old)) return;
-        var before = old && old.credentialHash === snapshot.credentialHash ? old : {}, now = new Date().toISOString();
-        var sent = campaign ? coldyCampaignMetric_(campaign.total_sent) : null, replies = campaign ? coldyCampaignMetric_(campaign.replies_emails) : null, leads = summary ? coldyCampaignMetric_(summary.interested) : null;
-        var sentAt = sent !== null ? now : before.sentUpdatedAt || null, repliesAt = replies !== null ? now : before.repliesUpdatedAt || null, leadsAt = leads !== null ? now : before.leadsUpdatedAt || null;
-        var known = [sentAt, repliesAt, leadsAt].filter(Boolean).map(Date.parse), stale = sent === null || replies === null || leads === null;
-        coldySave_(context, 'campaignanalytics', owner, { campaignId: binding.campaignId, credentialHash: snapshot.credentialHash,
-          name: campaign ? campaign.name : before.name || binding.campaignName, status: campaign ? campaign.status : before.status || binding.campaignStatus,
-          sent: sent !== null ? sent : coldyCampaignMetric_(before.sent), replies: replies !== null ? replies : coldyCampaignMetric_(before.replies), leads: leads !== null ? leads : coldyCampaignMetric_(before.leads),
-          sentUpdatedAt: sentAt, repliesUpdatedAt: repliesAt, leadsUpdatedAt: leadsAt, updatedAt: known.length ? new Date(Math.min.apply(null, known)).toISOString() : null,
-          lastAttemptAt: startedAt, stale: stale, lastError: campaignError || summaryError || (stale ? 'COLDY_RESPONSE' : '') });
-      });
-    });
-    var result = coldySegmentMailings_(context, segmentId); result.refreshedCampaigns = snapshot.bindings.length; result.hasMore = snapshot.total > snapshot.bindings.length;
-    if (result.hasMore) result.message += ' За одно нажатие обновляются до 10 рассылок; следующее нажатие обновит следующие.';
-    return result;
+    if (claimed) {
+      try { return coldyRefreshBoundMetrics_(context, segmentId); }
+      catch (error) {
+        if (!error || error.registryCode !== 'COLDY_RATE_LIMIT') throw error;
+        retryAt = Date.now() + Math.max(60000, Number(error.retryAfterMs) || 0);
+      } finally {
+        locked_(function () {
+          if (retryAt > Date.now()) properties.setProperty(cooldown, String(Math.max(retryAt, Number(properties.getProperty(cooldown)) || 0)));
+          if (JSON.parse(properties.getProperty(key) || '{}').lease === lease) properties.setProperty(key, JSON.stringify({ next: started + 60000 }));
+        });
+      }
+    }
+    var saved = coldySegmentMailings_(context, segmentId);
+    saved.refreshedCampaigns = 0;
+    if (retryAt > Date.now()) {
+      saved.retryAfterMs = retryAt - Date.now();
+      saved.message = 'Coldy попросил приостановить запросы. Показаны последние сохранённые показатели.';
+    }
+    return saved;
   });
+}
+
+function coldyRefreshBoundMetrics_(context, segmentId) {
+  var startedAt = new Date().toISOString();
+  var snapshot = locked_(function () {
+    coldyCampaignScope_(context, segmentId);
+    var registry = coldyCampaignRegistry_(context), all = registry.bindings.filter(function (binding) { return binding.segmentId === segmentId; }).sort(function (a, b) { return a.id.localeCompare(b.id); });
+    var cursors = registry.analyticsCursors || {}, cursor = all.length ? (Number(cursors[segmentId]) || 0) % all.length : 0, selected = [];
+    for (var index = 0; index < Math.min(10, all.length); index++) selected.push(all[(cursor + index) % all.length]);
+    if (all.length > 10) {
+      cursors[segmentId] = (cursor + selected.length) % all.length;
+      registry.analyticsCursors = cursors; coldyCampaignSaveRegistry_(context, registry);
+    }
+    return { bindings: selected, total: all.length, credentialHash: registry.credentialHash };
+  });
+  snapshot.bindings.forEach(function (binding) {
+    var old = locked_(function () { coldyCampaignScope_(context, segmentId); return coldyLoad_(context, 'campaignanalytics', coldyCampaignAnalyticsOwner_(context, binding)); });
+    var campaign = null, summary = null, campaignError = '', summaryError = '';
+    // Provider requests deliberately run outside the global script lock.
+    try { campaign = coldyCampaignRead_(context, binding.campaignId); }
+    catch (error) { if (coldyCampaignAccessError_(error)) throw error; campaignError = error.registryCode || 'COLDY_RESPONSE'; }
+    try { summary = coldyApi_(context, 'GET', '/analytics/campaigns/' + coldyCampaignId_(binding.campaignId) + '/summary?period=all&type=event'); }
+    catch (error) { if (coldyCampaignAccessError_(error)) throw error; summaryError = error.registryCode || 'COLDY_RESPONSE'; }
+    if (snapshot.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился во время обновления показателей.');
+    locked_(function () {
+      coldyCampaignScope_(context, segmentId);
+      var registry = coldyCampaignRegistry_(context), current = coldyCampaignBinding_(registry, segmentId, binding.id);
+      if (snapshot.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Повторите обновление показателей.');
+      if (current.revision !== binding.revision) fail_('COLDY_BINDING_CHANGED', 'Связь рассылки изменилась. Обновите показатели.');
+      var owner = coldyCampaignAnalyticsOwner_(context, binding), latest = coldyLoad_(context, 'campaignanalytics', owner);
+      if (latest && latest.lastAttemptAt && latest.lastAttemptAt >= startedAt && JSON.stringify(latest) !== JSON.stringify(old)) return;
+      var before = old && old.credentialHash === snapshot.credentialHash ? old : {}, now = new Date().toISOString();
+      var sent = campaign ? coldyCampaignMetric_(campaign.total_sent) : null, replies = campaign ? coldyCampaignMetric_(campaign.replies_emails) : null, leads = summary ? coldyCampaignMetric_(summary.interested) : null;
+      var sentAt = sent !== null ? now : before.sentUpdatedAt || null, repliesAt = replies !== null ? now : before.repliesUpdatedAt || null, leadsAt = leads !== null ? now : before.leadsUpdatedAt || null;
+      var known = [sentAt, repliesAt, leadsAt].filter(Boolean).map(Date.parse), stale = sent === null || replies === null || leads === null;
+      coldySave_(context, 'campaignanalytics', owner, { campaignId: binding.campaignId, credentialHash: snapshot.credentialHash,
+        name: campaign ? campaign.name : before.name || binding.campaignName, status: campaign ? campaign.status : before.status || binding.campaignStatus,
+        sent: sent !== null ? sent : coldyCampaignMetric_(before.sent), replies: replies !== null ? replies : coldyCampaignMetric_(before.replies), leads: leads !== null ? leads : coldyCampaignMetric_(before.leads),
+        sentUpdatedAt: sentAt, repliesUpdatedAt: repliesAt, leadsUpdatedAt: leadsAt, updatedAt: known.length ? new Date(Math.min.apply(null, known)).toISOString() : null,
+        lastAttemptAt: startedAt, stale: stale, lastError: campaignError || summaryError || (stale ? 'COLDY_RESPONSE' : '') });
+    });
+  });
+  var result = coldySegmentMailings_(context, segmentId); result.refreshedCampaigns = snapshot.bindings.length; result.hasMore = snapshot.total > snapshot.bindings.length;
+  if (result.hasMore) result.message += ' За один цикл обновляются до 10 выбранных рассылок.';
+  return result;
 }
 
 /** Existing owner timer calls this once for a bounded workbook item. */

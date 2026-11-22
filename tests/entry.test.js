@@ -8,6 +8,16 @@ const script = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map(m
 const KEY = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG';
 const GOOGLE_ORIGIN = 'https://n-example-script.googleusercontent.com';
 
+test('the public entry and Apps Script shell identify the service and retain the base registry section', () => {
+  const app = readFileSync(new URL('../src/Index.html', import.meta.url), 'utf8');
+  for (const page of [html, app]) {
+    assert.match(page, /<title>Центр мультиканального аутрича<\/title>/);
+    assert.match(page, /Центр <(?:b|span)>мультиканального аутрича</);
+  }
+  assert.match(app, /id="br-view-sources"[^>]*>Реестр баз<\/button>/);
+  assert.match(app, /id="br-sources-title">Реестр баз<\/h1>/);
+});
+
 function fixture({ hash = '#access_key=' + KEY, supported = true, clipboard = true, copyFallback = true, path = '/-/', active = true } = {}) {
   const events = new Map(), timers = new Map(), sequence = [], created = [], copies = [];
   let timerId = 0;
