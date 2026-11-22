@@ -167,8 +167,12 @@ def main():
         page.locator('#br-view-segments').click()
         expect(page.locator('[data-segment="existing-segment"]')).to_be_visible()
         page.evaluate("backend.segments[0].name='Сегмент второго проекта'")
+        startup_reads=len(calls('getAppBootstrap'))
         page.locator('#br-project').select_option('neosender')
+        expect(page.locator('#br-view-segments')).to_be_enabled()
+        expect(page.locator('#br-access-panel')).to_be_hidden()
         expect(page.locator('[data-segment="existing-segment"] .br-segment-row-name')).to_have_text('Сегмент второго проекта')
+        assert len(calls('getAppBootstrap'))==startup_reads
         assert not any(call['projectId']=='neosender' for call in calls('getSourceBases'))
         assert not any(call['projectId']=='neosender' for call in calls('listPreparedJobs'))
         page.evaluate('backend.holdMethods=[]')

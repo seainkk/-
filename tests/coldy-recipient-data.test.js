@@ -82,3 +82,31 @@ test('list drift, malformed page, credential change or a wrong campaign preclude
     (_page, changeCredential) => changeCredential()
   ]) assert.throws(() => fixture(rows, alter).snapshot(), /COLDY_/);
 });
+
+test('targeted blacklist checks use exact addresses and domains; paginated searches resume without unrelated contacts',()=>{
+  const env=vm.createContext({fail_(code){throw new Error(code);}});
+  for(const name of ['Coldy','ColdyRecipientData'])
+    vm.runInContext(readFileSync(new URL('../src/'+name+'.gs',import.meta.url),'utf8'),env);
+  const rows=['one@agency.test','two@agency.test','lead@vendor.test'].map(email=>({email})), calls=[];
+  env.coldyGetBatch_=(_,paths,guard,mode)=>{
+    assert.equal(mode,'recipient-suppression');guard();calls.push(...paths);
+    return paths.map(path=>{
+      const url=new URL('https://example.test'+env.coldyPath_('GET',path)), search=url.searchParams.get('search');
+      if(url.pathname.endsWith('domains'))return {value:{items:[{domain:search==='vendor.test'?'Vendor.Test':'not-agency.test'}],next_starting_after:null}};
+      if(search==='@agency.test')return url.searchParams.has('starting_after')?{value:{items:[{email:'One@Agency.Test'}],next_starting_after:null}}:
+        {value:{items:[{email:'outsider@agency.test'}],next_starting_after:7}};
+      return {value:{items:[],next_starting_after:null}};
+    });
+  };
+  let a=env.coldyRecipientSuppression_({},rows,()=>{},null);assert.equal(a.unavailable,false);
+  assert.equal(a.nextCursor.after,7);
+  const b=env.coldyRecipientSuppression_({},rows,()=>{},a.nextCursor);
+  assert.equal(b.nextCursor,null);assert.deepEqual(Array.from(b.hits).sort(),['lead@vendor.test','one@agency.test']);
+  assert.ok(calls.every(p=>p.includes('search=')));
+  assert.throws(()=>env.coldyPath_('GET','/blacklist/emails'),/INVALID_REQUEST/);
+  assert.throws(()=>env.coldyPath_('GET','/blacklist/domains?search=test.com&starting_after=0'),/INVALID_REQUEST/);
+
+  env.coldyGetBatch_=(_,paths)=>paths.map(()=>({error:{registryCode:'COLDY_RATE_LIMIT',retryAfterMs:68000}}));
+  const deferred=env.coldyRecipientSuppression_({},rows,()=>{},null);
+  assert.equal(deferred.retryAfterMs,68000);assert.equal(deferred.nextCursor.index,0);assert.deepEqual(Array.from(deferred.hits),[]);
+});

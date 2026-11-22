@@ -52,9 +52,13 @@ test('open Sunday consumes only the remainder of the current quota; calendar rol
   const a=account(1,['k'],{dailyLimit:4,sentToday:2}), k=campaign('k',{schedule:{days:['sunday',...weekdays],from:'00:00',to:'24:00'}});
   const r=calc([a],[k],{k:demand([lead(5)])},'2026-11-22T20:59:00Z');
   assert.equal(r.days[0].initial,3);
+  assert.deepEqual([r.today.date,r.today.expected,r.today.capacity],['2026-11-22',2,2]);
   a.sentToday=null;
   const unknown=calc([a],[k],{k:demand([lead(5)])},'2026-11-22T20:59:00Z');
   assert.equal(unknown.days[0].expected,null); assert.ok(unknown.reasons.includes('unknown_today'));
+  assert.equal(unknown.today.expected,null); assert.equal(unknown.today.capacity,null);
+  a.sentToday=3; a.updatedAt='2026-11-21T18:00:00Z';
+  assert.equal(calc([a],[k],{k:demand([lead(5)])},'2026-11-22T20:59:00Z').today.capacity,null);
   const late=calc([],[],{},'2026-11-22T21:01:00Z'); assert.equal(late.startDate,'2026-11-24');
 });
 

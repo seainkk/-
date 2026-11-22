@@ -62,11 +62,13 @@ function projectForecastLeadCohort_(lead,sequence) {
 }
 
 function projectForecastCohortKey_(cohort) {
-  return JSON.stringify([cohort.disposition,cohort.senderId,cohort.sentSteps,cohort.previousStepId,cohort.lastSentAt]);
+  var fields = [cohort.disposition,cohort.senderId,cohort.sentSteps,cohort.previousStepId,cohort.lastSentAt];
+  if (cohort.completionValid) fields.push(true);
+  return JSON.stringify(fields);
 }
 
 /** Normalize one guarded batch response without carrying recipient identities into the forecast. */
-function projectForecastDemandPage_(campaignId,offset,expectedTotal,sequence,page) {
+function projectForecastDemandPage_(campaignId,offset,expectedTotal,sequence,page,withCompletion) {
   if (!coldyUuid_(campaignId) || !Number.isSafeInteger(offset) || offset < 0 ||
       expectedTotal != null && (!Number.isSafeInteger(expectedTotal) || expectedTotal < 0)) {
     fail_('INVALID_REQUEST', 'Проверьте параметры расчёта получателей.');
@@ -79,20 +81,27 @@ function projectForecastDemandPage_(campaignId,offset,expectedTotal,sequence,pag
       expectedTotal != null && expectedTotal !== page.total) {
     fail_('COLDY_FORECAST_CHANGED', 'Список адресатов изменился во время расчёта. Обновите прогноз.');
   }
-  var ids = new Set(), byCohort = new Map();
+  var ids = new Set(), byCohort = new Map(), completion = withCompletion ? projectCampaignProgressCounts_() : null;
   page.items.forEach(function (lead) {
     if (!lead || !Number.isSafeInteger(lead.id) || lead.id < 1 || ids.has(lead.id) ||
         !coldyUuid_(lead.campaign_id) || lead.campaign_id.toLowerCase() !== campaignId) {
       fail_('COLDY_FORECAST_CHANGED', 'Coldy не подтвердил адресатов выбранной рассылки.');
     }
     ids.add(lead.id);
-    var cohort = projectForecastLeadCohort_(lead,sequence), key = projectForecastCohortKey_(cohort);
+    var cohort = projectForecastLeadCohort_(lead,sequence);
+    if (completion) {
+      projectCampaignCountLead_(completion,lead,sequence);
+      if (lead.verification_status === 'valid' && cohort.disposition !== 'stopped') cohort.completionValid = true;
+    }
+    var key = projectForecastCohortKey_(cohort);
     if (!byCohort.has(key)) { cohort.count = 0; byCohort.set(key,cohort); }
     byCohort.get(key).count++;
   });
   var next = offset + page.items.length;
-  return { campaignId: campaignId, offset: offset, nextOffset: next < page.total ? next : null, total: page.total,
+  var result = { campaignId: campaignId, offset: offset, nextOffset: next < page.total ? next : null, total: page.total,
     leadIds: Array.from(ids), cohorts: Array.from(byCohort.values()) };
+  if (completion) result.completion = completion;
+  return result;
 }
 
 /** Merge verified pages by lead ID. Only unfinished scans need the IDs for overlap detection. */
@@ -117,6 +126,8 @@ function projectForecastAppendDemand_(work,page) {
   if (complete && processed !== page.total || !complete && page.nextOffset !== processed || ids.size !== processed) {
     fail_('COLDY_FORECAST_CHANGED', 'Coldy не подтвердил полноту списка адресатов.');
   }
-  return { campaignId: page.campaignId, total: page.total, processed: processed, nextOffset: page.nextOffset, complete: complete,
+  var result = { campaignId: page.campaignId, total: page.total, processed: processed, nextOffset: page.nextOffset, complete: complete,
     cohorts: Array.from(groups.values()), seenIds: complete ? [] : Array.from(ids), lastPageOffset: page.offset, lastPageHash: hash };
+  if (page.completion) result.completion = projectCampaignMergeCounts_(work, page.completion);
+  return result;
 }

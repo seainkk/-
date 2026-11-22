@@ -14,7 +14,7 @@
   }
   function range(payload) {
     const tab = find(payload.sheetId), height = payload.rowCount || payload.values?.length || 1, width = payload.columnCount || payload.values?.[0]?.length || 1;
-    return { id: payload.id, sheetId: tab.id, row: payload.row, column: payload.column, rowCount: height, columnCount: width, totalRows: tab.rowCount, totalColumns: tab.columnCount,
+    return { id: payload.id, sheetId: tab.id, canEdit: state.canEdit, row: payload.row, column: payload.column, rowCount: height, columnCount: width, totalRows: tab.rowCount, totalColumns: tab.columnCount,
       values: Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => cell(tab, payload.row + r, payload.column + c).display)),
       inputs: Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => cell(tab, payload.row + r, payload.column + c).input)),
       versions: Array.from({ length: height }, (_, r) => Array.from({ length: width }, (_, c) => 'v' + cell(tab, payload.row + r, payload.column + c).revision)) };

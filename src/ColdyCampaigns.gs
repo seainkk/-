@@ -8,7 +8,7 @@ function getColdyBindings_(request) {
     coldyCampaignScope_(context, segmentId);
     var settings = coldySettings_(context);
     if (!settings.configured) return { bindings: [], campaigns: [], configured: false, connected: false };
-    return locked_(function () {
+    var result = locked_(function () {
       coldyCampaignScope_(context, segmentId);
       if (settings.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите список рассылок.');
       var registry = coldyCampaignRegistry_(context);
@@ -17,6 +17,8 @@ function getColdyBindings_(request) {
         return { id: binding.campaignId, name: binding.campaignName, status: binding.campaignStatus };
       }), configured: true, connected: coldySettings_(context).connected === true };
     });
+    if (typeof coldyIncomingDecorate_ === 'function') coldyIncomingDecorate_(context,result.bindings,result.campaigns);
+    return result;
   });
 }
 
@@ -40,9 +42,12 @@ function saveColdyBinding_(request) {
         fail_('COLDY_CAMPAIGN_BOUND', 'Рассылка недоступна для привязки в этом проекте.');
       return coldyCampaignReceipt_(registry, requestId, requestHash);
     });
-    if (oldReceipt) return { binding: oldReceipt.binding };
+    if (oldReceipt) {
+      if (typeof coldyIncomingEnsure_ === 'function') coldyIncomingEnsure_(context,false);
+      return { binding: oldReceipt.binding };
+    }
     var credentialHash = coldyCredentialHash_(context), campaign = coldyCampaignRead_(context, campaignId);
-    return locked_(function () {
+    var result = locked_(function () {
       if (credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите настройки.');
       coldyCampaignScope_(context, segmentId);
       var registry = coldyCampaignRegistry_(context);
@@ -64,6 +69,8 @@ function saveColdyBinding_(request) {
       coldyCampaignSaveRegistry_(context, registry);
       return { binding: coldyCampaignPublicBinding_(binding) };
     });
+    if (typeof coldyIncomingEnsure_ === 'function') coldyIncomingEnsure_(context,false);
+    return result;
   });
 }
 
@@ -172,6 +179,7 @@ function coldySegmentMailings_(context, segmentId, checkedFolder) {
     fail_('COLDY_BINDING_CHANGED','Выбор рассылок изменился во время чтения. Обновите показатели.');
   coldyCampaignScope_(context, segmentId,true);
   if (coldySettings_(context).credentialHash !== registry.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Подключение Coldy изменилось во время чтения показателей.');
+  if (typeof coldyIncomingDecorate_ === 'function') coldyIncomingDecorate_(context,bindings.map(coldyCampaignPublicBinding_),campaigns);
   return { id: 'coldy', key: 'coldy', name: 'Coldy', channel: 'email', state: complete ? 'connected' : 'partial', campaigns: campaigns,
     totals: { sent: coldyCampaignSum_(campaigns, 'sent'), replies: coldyCampaignSum_(campaigns, 'replies'), leads: coldyCampaignSum_(campaigns, 'leads') },
     message: !bindings.length ? 'Привяжите существующую рассылку Coldy к сегменту.' : complete ? 'Добавление контакта не означает отправку письма.' : 'Показаны последние сохранённые данные. Часть показателей отсутствует или устарела; обновите Coldy.',
@@ -682,7 +690,7 @@ function coldyCampaignApplyRows_(context, binding, ledger, contacts) {
         if (eligible) {
           var present = entry.record.outcome === 'created' || entry.record.outcome === 'alreadyInCampaign', names = old[0].split('\n').filter(Boolean), label = binding.campaignName + ' [' + binding.campaignId + ']';
           if (present && names.indexOf(label) === -1) names.push(label);
-          wanted[0] = names.join('\n'); wanted[1] = { created: 'Загружен в Coldy', alreadyInCampaign: 'Уже в выбранной рассылке Coldy', workspaceDuplicate: 'Уже в рабочем пространстве Coldy; загрузка в выбранную рассылку не подтверждена', blacklist: 'Чёрный список Coldy; загрузка не подтверждена' }[entry.record.outcome]; wanted[2] = present ? entry.record.at : old[2];
+          wanted[0] = names.join('\n'); wanted[1] = { created: 'Загружен в Coldy', alreadyInCampaign: 'Уже в выбранной рассылке Coldy', workspaceDuplicate: 'Уже в рабочем пространстве Coldy; загрузка в выбранную рассылку не подтверждена', blacklist: 'Не отправляем · чёрный список Coldy; загрузка не подтверждена' }[entry.record.outcome]; wanted[2] = present ? entry.record.at : old[2];
         }
         columns.forEach(function (_column, position) { values[position].push([wanted[position]]); masks[position].push([eligible && wanted[position] !== old[position]]); });
       }

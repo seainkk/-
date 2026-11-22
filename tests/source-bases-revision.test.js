@@ -40,3 +40,31 @@ test('an unusable or moved journal yields no unchanged signal; revoked access an
   assert.throws(()=>f.read(),/SOURCE_CHANGED/);
   f.state.access=false;assert.throws(()=>f.read(),/LINK_ACCESS_REQUIRED/);
 });
+
+test('nearby polls reuse only an opaque revision, with live scope checks and a hard 15-second expiry',()=>{
+  const f=fixture(), entries=new Map();
+  let now=1800000000000, scans=0;
+  f.context.Date={now:()=>now};
+  f.context.CacheService={getScriptCache:()=>({
+    get:key=>entries.get(key)||null,
+    put(key,value,ttl){assert.equal(ttl,15);entries.set(key,value);}
+  })};
+  f.context.sourceBasesDiscover_=()=>{scans++;return f.files;};
+  const original=f.read();
+  assert.equal(f.read(),original);
+  assert.equal(scans,1);
+  const cached=JSON.parse([...entries.values()][0]);
+  assert.deepEqual(Object.keys(cached).sort(),['at','proof','token']);
+  assert.match(cached.proof,/^[\w-]{43}$/);
+  f.files[0].name='Переименована вручную';
+  now+=15000;
+  assert.notEqual(f.read(),original);
+  assert.equal(scans,2);
+  f.meta.version='58';f.read();assert.equal(scans,3);
+  f.props.REGISTRY_SEGMENT_PROJECT_X='neosender';f.read();assert.equal(scans,4);
+  f.state.project='neosender';f.read();assert.equal(scans,5);
+  f.meta.parents=['other'];assert.equal(f.read(),null);
+  f.meta.parents=['root'];f.context.sourceBasesSource_=()=>({state:'source_missing'});
+  assert.equal(f.read(),null);
+  f.state.access=false;assert.throws(()=>f.read(),/LINK_ACCESS_REQUIRED/);
+});

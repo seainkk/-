@@ -5,13 +5,24 @@ function getSourceBasesRevision_(request) {
     if (Object.keys(input).length) fail_('INVALID_REQUEST','Область реестра определяется выбранным проектом.');
     var current = authorize_(), binding = sourceBasesSource_(current);
     if (binding.state !== 'ready') return {revision:null};
+    var cache;
+    try { cache = CacheService.getScriptCache(); } catch (unavailable) {}
+    if (cache) {
+      var recent;
+      try { recent = JSON.parse(cache.get(sourceBasesRevisionKey_(current,binding))); } catch (unavailable) {}
+      if (recent && /^[\w-]{43}$/.test(recent.token) && recent.at <= Date.now() && Date.now()-recent.at < 15000) {
+        var scope = sourceBasesRevisionScope_(current,binding);
+        if (!scope) return {revision:null};
+        if (recent.proof === digest_(JSON.stringify(scope))) return {revision:recent.token};
+      }
+    }
     var files = sourceBasesDiscover_(current,binding.folder);
     return {revision:sourceBasesRevisionToken_(current,binding,files)};
   });
 }
 
 /** A hint only. Direct changes to linked segment folders also get reconciled on the full refresh. */
-function sourceBasesRevisionToken_(context,binding,files) {
+function sourceBasesRevisionScope_(context,binding) {
   var fresh = authorize_();
   if (fresh.rootId !== context.rootId) fail_('SOURCE_CHANGED','Папка реестра изменилась. Обновите реестр.');
   if (typeof Drive === 'undefined' || !Drive.Files || typeof Drive.Files.get !== 'function') return null;
@@ -25,8 +36,22 @@ function sourceBasesRevisionToken_(context,binding,files) {
       metadata.parents.length !== 1 || metadata.parents[0] !== fresh.rootId || !/^\d+$/.test(String(metadata.version))) return null;
   var scopes = Object.keys(props).filter(function (key) { return key.indexOf('REGISTRY_SEGMENT_PROJECT_') === 0; })
     .sort().map(function (key) { return [key,props[key]]; });
+  return ['catalogue-v1',fresh.rootId,registryProjectId_(),binding.source.id,binding.source.name,metadata.id,String(metadata.version),scopes];
+}
+
+function sourceBasesRevisionKey_(context,binding) {
+  return 'source-revision-' + digest_(JSON.stringify([context.rootId,registryProjectId_(),binding.source.id]));
+}
+
+function sourceBasesRevisionToken_(context,binding,files) {
+  var scope = sourceBasesRevisionScope_(context,binding);
+  if (!scope) return null;
   var identities = files.map(function (file) { return [file.id,file.name,file.mimeType,file.url]; })
     .sort(function (a,b) { return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0; });
-  return digest_(JSON.stringify(['catalogue-v1',fresh.rootId,registryProjectId_(),binding.source.id,binding.source.name,
-    metadata.id,String(metadata.version),scopes,identities]));
+  var token = digest_(JSON.stringify(scope.concat([identities])));
+  // Colleagues may poll together. Cache only the opaque change signal, never the files or their names.
+  try { CacheService.getScriptCache().put(sourceBasesRevisionKey_(context,binding),
+    JSON.stringify({at:Date.now(),proof:digest_(JSON.stringify(scope)),token:token}),15); }
+  catch (unavailable) {}
+  return token;
 }

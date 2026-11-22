@@ -43,7 +43,7 @@ for (const required of ['ValidationPolicy.gs', 'LegacyContactHistory.gs', 'Coldy
   if (!files.includes(required)) throw new Error(`Missing ${required}.`);
 }
 if (files.includes('TeamAccess.gs')) throw new Error('Role-based team administration must not ship in shared-link mode.');
-for (const required of ['ServiceSettings.gs','ColdyServiceLimits.gs']) {
+for (const required of ['ServiceSettings.gs','ColdyServiceLimits.gs','ProjectCampaignCompletion.gs','ProjectCampaignProgress.gs','ColdyRecipientAutomation.gs']) {
   if (!files.includes(required)) throw new Error(`Missing ${required}.`);
 }
 console.log(`Validated ${scripts} scripts, HTML assets and Apps Script manifest.`);

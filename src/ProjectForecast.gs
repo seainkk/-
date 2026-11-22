@@ -24,7 +24,8 @@ function projectForecastPreviewRange_(archive,day) {
     });
     return result;
   });
-  return Object.assign({},report,{days:days,periods:periods,startDate:days[0].date,
+  // Yesterday's plan for a whole day cannot stand in for the remaining sends today.
+  return Object.assign({},report,{today:null,days:days,periods:periods,startDate:days[0].date,
     reasons:(report.reasons || []).concat('previous_horizon')});
 }
 
@@ -45,7 +46,8 @@ function projectForecastCachedArchive_(archive) {
   if (!f.queue || !fields.every(function (k) { return count(f.queue[k]); })) return null;
   fields.forEach(function (k) { queue[k] = f.queue[k]; });
   return {day:archive.day, generatedAt:archive.generatedAt, demandScope:archive.demandScope,
-    forecast:{timezone:'Europe/Moscow', startDate:f.startDate, selectedAccounts:f.selectedAccounts, activeCampaigns:f.activeCampaigns, reasons:[], queue:queue,
+    forecast:{timezone:'Europe/Moscow', today:f.today && f.today.date === archive.day && counts.every(function(k){return count(f.today[k]);}) ? totals(f.today,{date:f.today.date}) : null,
+      startDate:f.startDate, selectedAccounts:f.selectedAccounts, activeCampaigns:f.activeCampaigns, reasons:[], queue:queue,
       days:f.days.map(function (r) { return totals(r,{date:r.date}); }),periods:f.periods.map(function (r) { return totals(r,{days:r.days,from:r.from,to:r.to}); })}};
 }
 
@@ -244,7 +246,7 @@ function getProjectSendingForecast_(request) {
     var demandScope = projectForecastDemandScope_(signature,infra);
     var inputs = projectForecastInputStamp_(infra);
     var now = Date.now(), eligible = saved && saved.scope === scope && saved.day === day;
-    if (ready && eligible && !saved.work && saved.inputs === inputs && now - Date.parse(saved.generatedAt) < 60000) return projectForecastResult_(saved);
+    if (ready && eligible && !saved.work && saved.forecast && saved.forecast.today && saved.inputs === inputs && now - Date.parse(saved.generatedAt) < 60000) return projectForecastResult_(saved);
     var receipt = saved && saved.revision;
     var previous = ready && eligible && saved.inputs === inputs && saved.forecast;
     var state = sameDemand ? saved : {
@@ -351,7 +353,7 @@ function projectForecastScope_(selection, infra) {
   return digest_(JSON.stringify([selection,campaigns,accounts]));
 }
 
-function projectForecastCollect_(context, ids, state, guard) {
+function projectForecastCollect_(context, ids, state, guard, withCompletion) {
   var deadline = Date.now() + 18000, pages = 0;
   while (pages < 8 && state.progress.campaignsDone < ids.length) {
     var id = coldyCampaignId_(ids[state.progress.campaignsDone]), work = state.work[id];
@@ -368,18 +370,21 @@ function projectForecastCollect_(context, ids, state, guard) {
         var detailResult = results[index++];
         if (detailResult && detailResult.error) throw detailResult.error;
         var detail = detailResult && detailResult.value;
-        if (!detail || !coldyUuid_(detail.id) || detail.id.toLowerCase() !== id || detail.status !== 'Active')
+        var validStatus = detail && (withCompletion ? ['Active','Draft','Paused','Completed'].indexOf(detail.status) >= 0 : detail.status === 'Active');
+        if (!detail || !coldyUuid_(detail.id) || detail.id.toLowerCase() !== id || !validStatus)
           fail_('COLDY_FORECAST_CHANGED','Состояние рассылки изменилось. Пересчитываем прогноз по актуальным данным.');
         work = {sequence:projectForecastSequence_(detail)};
+        if (withCompletion) work.campaignStatus = detail.status;
         state.work[id] = work;
       }
       // Commit the contiguous prefix only. A retry starts at the first unconfirmed offset.
       offsets.forEach(function (offset) {
         var result = results[index++];
         if (result && result.error) throw result.error;
-        var page = projectForecastDemandPage_(id, offset, work.total, work.sequence, result && result.value);
+        var page = projectForecastDemandPage_(id, offset, work.total, work.sequence, result && result.value, withCompletion);
         var next = projectForecastAppendDemand_(work.campaignId ? work : null, page);
         next.sequence = work.sequence;
+        if (withCompletion) next.campaignStatus = work.campaignStatus;
         state.work[id] = work = next;
         state.progress.contactsRead += page.leadIds.length;
         if (next.complete) state.progress.campaignsDone++;

@@ -531,7 +531,7 @@ function pvExcludedRow_(values, map, forCampaign) {
 function pvExcludedStatus_(value, forCampaign) {
   var status = String(value || '').trim().toLowerCase();
   if (forCampaign && ['рассылка', 'в рассылке', 'запущен'].indexOf(status) >= 0) return true;
-  return ['фильтр', 'не совпал', 'невалид', 'нецелевой', 'срок > 30', 'в плане запис книжка', 'дубль'].indexOf(status) >= 0;
+  return ['фильтр', 'не отправляем', 'не отправлять', 'не совпал', 'невалид', 'нецелевой', 'срок > 30', 'в плане запис книжка', 'дубль'].indexOf(status) >= 0;
 }
 
 function pvApply_(context, state, updates) {

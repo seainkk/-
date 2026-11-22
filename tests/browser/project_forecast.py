@@ -33,7 +33,7 @@ api.getProjectSendingForecast=(payload,project)=>{
   const periods=[1,3,7].map(n=>({days:n,from:days[0].date,to:days[n-1].date,initial:partial?null:n*2,followups:partial?null:n*3,
     expected:partial?null:n*5,modeled:partial?n*4:null,capacity:n*9}));
   return {state:firstPage?'loading':partial?'partial':'ready',pending:firstPage,generatedAt:firstPage?null:'2026-11-22T08:00:00Z',
-    forecast:{days,periods,startDate:days[0].date,timezone:'Europe/Moscow',selectedAccounts:project==='neosender'?9:2,activeCampaigns:1,
+    forecast:{today:{date:'2026-11-22',expected:3,initial:2,followups:1,capacity:4},days,periods,startDate:days[0].date,timezone:'Europe/Moscow',selectedAccounts:project==='neosender'?9:2,activeCampaigns:1,
     queue:{pendingInitial:51,pendingFollowups:12,unresolved:partial?2:0,unreadCampaigns:partial?1:0},
     reasons:partial?['unknown_sender']:[]}};
 };
@@ -63,6 +63,10 @@ def main():
         page.wait_for_function("backend.pending.some(job=>job.method==='getProjectSendingForecast')")
         page.evaluate("backend.holdMethods=[];releaseRpc('getProjectSendingForecast')")
         expect(totals).to_have_text(['5','2','3','9'])
+        view.get_by_role('button',name='Сегодня').click()
+        expect(totals).to_have_text(['3','2','1','4'])
+        expect(view.locator('#pj-forecast-context')).to_contain_text('22.11.2026 · МСК · до конца дня')
+        expect(view.locator('#pj-forecast-daily')).to_be_hidden()
         expect(view.locator('#pj-forecast-queue')).to_contain_text('первого письма ждут 51, повторного — 12')
         view.get_by_role('button',name='3 дня').click()
         expect(totals).to_have_text(['15','6','9','27'])

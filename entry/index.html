@@ -154,6 +154,10 @@
     window.addEventListener('message',(event)=>{
       if(!googleOrigin(event.origin)||!frameSource(event.source)||!event.data||typeof event.data!=='object')return;
       if(ready&&(event.source!==appWindow||event.origin!==appOrigin))return;
+      if(event.data.type==='bases-registry-catalog-hint'&&Number.isSafeInteger(event.data.epoch)){
+        event.source.postMessage({type:'bases-registry-catalog-hint',epoch:event.data.epoch,available:!!savedCatalog},event.origin);
+        return;
+      }
       if(event.data.type==='bases-registry-ready'){
         appWindow=event.source;appOrigin=event.origin;
         if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-preview').hidden=true;$('entry-frame-host').hidden=false;

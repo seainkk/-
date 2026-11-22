@@ -124,6 +124,13 @@ test('repeat entry decrypts only dated names for this link before Google respond
   assert.equal(repeat.body.dataset.state,'loading');
   assert.deepEqual(repeat.ids['entry-preview-list'].children.map(row=>row.textContent),['Справочник']);
   assert.equal(wrong.ids['entry-preview'].hidden,true);
+  for(const [page,available] of [[repeat,true],[wrong,false]]){
+    let hint;
+    const reader={parent:page.currentFrame().contentWindow,postMessage(data){hint=JSON.parse(JSON.stringify(data));}};
+    page.event('message',{source:reader,origin:GOOGLE_ORIGIN,data:{type:'bases-registry-catalog-hint',epoch:3}});
+    assert.deepEqual(hint,{type:'bases-registry-catalog-hint',epoch:3,available});
+    assert.equal(page.body.dataset.state,'loading');
+  }
   const active=repeat.ready();
   assert.equal(repeat.ids['entry-preview'].hidden,true);
   const offline=fixture({storage});
