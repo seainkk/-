@@ -39,6 +39,8 @@ function fixture(){
       const result=paths.map(path=>{
         const id=path.match(/[a-f0-9-]{36}/)[0];fetched.push(path);
         if (environment.missing===id) return {error:Object.assign(new Error(),{registryCode:'COLDY_NOT_FOUND'})};
+        if (environment.pageFailure?.id===id && path.startsWith('/leads/'))
+          return {error:Object.assign(new Error('private@example.test'),environment.pageFailure)};
         if (path.startsWith('/campaigns/')) return {value:{id,status:states[id],
           is_stop_sending_on_reply:true,is_stop_sending_on_company_reply:false,sequences:[{id:1,delay:0},{id:2,delay:1}]}};
         const offset=Number(path.match(/offset=(\d+)/)[1]),total=environment.totals[id];
@@ -88,6 +90,28 @@ test('changing a mailbox selection or moving the bound segment during a provider
   for(const change of [f=>f.environment.revision++,f=>{f.ownership.first='neosender';}]){
     const f=fixture();f.environment.afterFetch=()=>change(f);
     assert.throws(()=>f.get(),e=>e.registryCode==='COLDY_MONITORING_CHANGED');assert.equal(f.stored.size,0);
+  }
+});
+
+test('one rejected or forbidden campaign does not block progress of the other bound campaigns',()=>{
+  for (const [httpStatus,registryCode,reason] of [[400,'COLDY_PROVIDER','bad_request'],[422,'COLDY_PROVIDER','bad_request'],[403,'COLDY_FORBIDDEN','forbidden']]){
+    const f=fixture();f.environment.pageFailure={id:a,httpStatus,registryCode};
+    const rejected=f.get();
+    assert.equal(rejected.campaignCompletions[a].reason,reason);
+    assert.equal(rejected.retryAfterMs,0);assert.equal(rejected.pending,true);
+    const ready=f.get();assert.equal(ready.pending,false);assert.equal(ready.campaignCompletions[b].percent,50);
+    assert.equal(f.fetched.filter(path=>path.startsWith('/leads/')&&path.includes(a)).length,1);
+    assert.ok(!JSON.stringify(ready).includes('private@example.test'));
+  }
+});
+
+test('transient failures keep the cursor and communicate their distinct causes without exposing a provider message',()=>{
+  for (const [registryCode,text] of [['COLDY_RATE_LIMIT',/429/],['COLDY_UNAVAILABLE',/5xx/],['COLDY_NETWORK',/Google Apps Script/]]){
+    const f=fixture();f.environment.pageFailure={id:a,registryCode,retryAfterMs:90000};
+    const waiting=f.get(),reads=f.fetched.length;
+    assert.equal(waiting.pending,true);assert.ok(waiting.retryAfterMs>85000);
+    assert.match(waiting.message,text);assert.ok(!waiting.message.includes('private@example.test'));
+    assert.deepEqual(waiting.campaignCompletions,{});f.get();assert.equal(f.fetched.length,reads);
   }
 });
 
