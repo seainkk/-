@@ -277,14 +277,7 @@ function coldyResponse_(context, settings, method, response, address) {
     if (status === 409) coldyHttpFailure_('COLDY_CONFLICT', method === 'GET' ? 'Coldy пока не подтвердил чтение данных. Повторите обновление позже.' : 'Coldy пока не подтвердил действие: проверьте состояние прежней операции.', status, response);
     if (status === 429) {
       var delay = coldyRetryAfter_(response);
-      if (method === 'GET') {
-        var until = Date.now() + (delay || 60000);
-        throw locked_(function () {
-          var current = coldyCurrent_(context,false);
-          if (coldyCredentialHash_(current) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите действие.');
-          return coldyGetPause_(current,settings,until);
-        });
-      }
+      if (method === 'GET') throw coldyRememberGetPause_(context,settings,Date.now() + (delay || 60000));
       throw coldyRateLimitError_(delay);
     }
     if (status >= 500) coldyHttpFailure_('COLDY_UNAVAILABLE', method === 'GET' ? 'Coldy временно недоступен. Повторите проверку подключения или обновление позже.' : 'Coldy временно не подтвердил действие. Сначала проверьте состояние операции.', status, response);
@@ -321,6 +314,18 @@ function coldyRateLimitError_(delay) {
   var error = registryError_('COLDY_RATE_LIMIT','Coldy просит снизить частоту запросов. Повторите обновление позже.');
   error.httpStatus = 429; error.retryAfterMs = delay;
   return error;
+}
+
+function coldyRememberGetPause_(context,settings,until) {
+  var current = coldyCurrent_(context,false);
+  if (coldyCredentialHash_(current) !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите действие.');
+  // Both the web app and its timer run as the owner. No ledger or sheet operation takes this lock.
+  var lock = LockService.getUserLock(), acquired = lock.tryLock(1500);
+  try {
+    if (acquired) return coldyGetPause_(current,settings,until);
+    var saved = coldyGetPause_(current,settings);
+    return coldyRateLimitError_(Math.max(0,until-Date.now(),saved ? saved.retryAfterMs : 0));
+  } finally { if (acquired) lock.releaseLock(); }
 }
 
 /** Share an absolute deadline across project views and the timer. Only a genuine GET 429 extends it under lock. */

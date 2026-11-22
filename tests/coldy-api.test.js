@@ -51,6 +51,7 @@ function fixture(options={}) {
   function coded(code,message){const e=new Error(`[${code}] ${message}`);e.registryCode=code;return e;}
   const response=(body,status=200,headers={})=>({getResponseCode:()=>status,getContentText:()=>typeof body==='string'?body:JSON.stringify(body),getAllHeaders:()=>headers});
   const c=vm.createContext({Date:Clock,Math,Number,JSON,Array,Object,
+    LockService:{getUserLock:()=>({tryLock:()=>true,releaseLock:()=>{}})},
     api_:fn=>fn(),object_:v=>{if(!v||typeof v!=='object'||Array.isArray(v))throw coded('INVALID_REQUEST','Object required');return v;},
     id_:v=>{if(typeof v!=='string'||!/^[A-Za-z0-9_-]{10,200}$/.test(v))throw coded('INVALID_ID','id');return v;},
     fail_:(code,message)=>{throw coded(code,message);},registryError_:coded,
@@ -381,6 +382,23 @@ test('parallel responses keep the longest absolute deadline, and unrelated roots
   f.c.configureColdy_({apiKey:'second_synthetic_credential'});
   assert.equal(f.c.coldyApi_(current(),'GET','/campaigns').ok,true);
   assert.equal(f.calls.fetch.length,2);
+});
+
+test('recording a provider 429 preserves a caller-owned script lock and a busy lock cannot mask the rate limit',()=>{
+  const f=fixture();f.configure();
+  const settings=f.c.coldySettings_(f.context);
+  const limited=()=>f.c.coldyResponse_(f.context,settings,'GET',f.response({},429,{'Retry-After':'12'}),'/accounts');
+  let available=true,releases=0;
+  f.c.LockService={getUserLock:()=>({tryLock:()=>available,releaseLock:()=>{releases++;}}),
+    getScriptLock:()=>assert.fail('Never acquire or release the caller’s script lock')};
+  f.withLock(()=>{
+    assert.throws(limited,error=>error.httpStatus===429&&error.retryAfterMs===12000);
+    assert.equal(releases,1);
+    assert.throws(()=>f.withLock(()=>{}),/No nested operation locks/);
+  });
+  available=false;
+  assert.throws(limited,error=>error.registryCode==='COLDY_RATE_LIMIT'&&error.retryAfterMs===12000);
+  assert.equal(releases,1,'A lock owned by another execution must not be released');
 });
 
 test('invalid success response cannot leak arbitrary provider data',()=>{

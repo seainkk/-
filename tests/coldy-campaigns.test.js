@@ -343,6 +343,7 @@ test('provider failures do not turn analytics into fake zeroes or leak old succe
 
 function nativeAnalytics(f, override) {
   const groups = [];
+  f.context.LockService={getUserLock:()=>({tryLock:()=>true,releaseLock:()=>{}})};
   const settings = f.context.coldySettings_;
   f.context.coldySettings_ = scope => ({...settings(scope),key:'synthetic-analytics-key'});
   f.context.Drive = {Files:{get(id) { assert.equal(id,ROOT); return {id,mimeType:'application/vnd.google-apps.folder',trashed:false}; }}};

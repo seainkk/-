@@ -245,28 +245,41 @@ function coldyIncomingRead_(context,b,scan,guard){
   });
 }
 
+// Installable triggers run as their creator. Only the lease property is touched under this owner lock.
+function coldyIncomingLeaseLock_(operation){
+  var lock=LockService.getUserLock();
+  if(!lock.tryLock(1500))fail_('BUSY','Фоновая сверка ожидает освобождения очереди.');
+  try{return operation();}finally{lock.releaseLock();}
+}
+
 function coldyRecipientTick_(event){
   var props=PropertiesService.getScriptProperties(), timer=coldyIncomingTimer_(props);
   if(!timer||!timer.uid||!event||event.triggerUid!==timer.uid||timer.verifier!==sharedConfiguredHash_(props)||
     timer.rootId!==(props.getProperty('ROOT_FOLDER_ID')||REGISTRY_CONFIG.defaultRootFolderId)) return;
-  var previous=SHARED_REQUEST_SCOPE_, claim=Utilities.getUuid(), started=Date.now(), acquired=false;
+  var previous=SHARED_REQUEST_SCOPE_, claim=Utilities.getUuid(), started=Date.now(), acquired=false,leaseUntil=0;
   var heartbeatKey=coldyIncomingHeartbeatKey_(timer), at=new Date(started).toISOString();
   function heartbeat(issue,retryAt){props.setProperty(heartbeatKey,JSON.stringify({at:at,issue:issue||null,retryAt:retryAt||0}));}
   SHARED_REQUEST_SCOPE_={keyHash:timer.verifier,automation:true};
-  function timerGuard(){
-    var current=authorize_(), marker=coldyIncomingTimer_(props), lease=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
-    if(current.rootId!==timer.rootId||!marker||marker.uid!==timer.uid||marker.verifier!==timer.verifier)
+  function authorizedTimer(){
+    var current=authorize_(), marker=coldyIncomingTimer_(props);
+    if(current.rootId!==timer.rootId||!marker||marker.rootId!==timer.rootId||marker.uid!==event.triggerUid||marker.verifier!==timer.verifier)
       fail_('COLDY_SCOPE_CHANGED','Изменились параметры фоновой сверки.');
+    return current;
+  }
+  function timerGuard(){
+    var current=authorizedTimer(),lease=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
     if(!lease||lease.id!==claim||lease.until<=Date.now())fail_('COLDY_RECIPIENT_LEASE_EXPIRED','Истекло время текущей попытки сверки.');
     return current;
   }
   try {
     heartbeat();
-    acquired=locked_(function(){
-      var old=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
-      if(old && old.until>started) return false;
-      props.setProperty(COLDY_INCOMING.lease,JSON.stringify({id:claim,until:started+COLDY_INCOMING.leaseMillis}));return true;
-    },300);
+    acquired=coldyIncomingLeaseLock_(function(){
+      authorizedTimer();
+      var now=Date.now(),old=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
+      if(old && old.until>now) return false;
+      leaseUntil=now+COLDY_INCOMING.leaseMillis;
+      props.setProperty(COLDY_INCOMING.lease,JSON.stringify({id:claim,until:leaseUntil}));return true;
+    });
     if(!acquired) return;
     var context=timerGuard(), settings=coldySettings_(context);
     if(!settings.configured) return;
@@ -280,7 +293,9 @@ function coldyRecipientTick_(event){
       if(!(mark.retryAt>Date.now())) jobs.push({project:project,b:b,owner:owner,mark:mark});
     });
     jobs.sort(function(a,b){return (a.mark.attempt||0)-(b.mark.attempt||0)||a.owner.localeCompare(b.owner);});
-    for(var i=0;i<jobs.length && Date.now()-started<COLDY_INCOMING.budget;i++){
+    // A slow Drive registry read must not consume every campaign's work window on every tick.
+    var deadline=Math.min(Date.now()+COLDY_INCOMING.budget,leaseUntil-30000);
+    for(var i=0;i<jobs.length && Date.now()<deadline;i++){
       var job=jobs[i], b=job.b, mark=job.mark, observations={};
       SHARED_REQUEST_SCOPE_.projectId=job.project;
       function guard(){
@@ -302,7 +317,7 @@ function coldyRecipientTick_(event){
         // A hard Apps Script timeout cannot run finally. Persist the fair-queue position before remote calls.
         props.setProperty('COLDY_INCOMING_'+job.owner,JSON.stringify(mark));
         guard();
-        coldyIncomingStep_(context,job,guard,started+COLDY_INCOMING.budget);
+        coldyIncomingStep_(context,job,guard,deadline);
       } catch(error) {
         if(error.registryCode==='LINK_ACCESS_REQUIRED'||error.registryCode==='LINK_SETUP_REQUIRED') throw error;
         var retry=Number(error.retryAfterMs)||0;
@@ -315,9 +330,9 @@ function coldyRecipientTick_(event){
   } catch(error) {
     heartbeat(coldyIncomingIssue_(error));throw error;
   } finally {
-    try {if(acquired) locked_(function(){
+    try {if(acquired) coldyIncomingLeaseLock_(function(){
       var current=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
       if(current&&current.id===claim) props.deleteProperty(COLDY_INCOMING.lease);
-    },1000);} finally {SHARED_REQUEST_SCOPE_=previous;}
+    });} finally {SHARED_REQUEST_SCOPE_=previous;}
   }
 }
