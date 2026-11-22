@@ -60,8 +60,22 @@ function coldyCredentialHash_(context) {
 function testColdyConnection_(request) {
   return api_(function () {
     coldyInput_(request || {}, []);
-    var context = authorize_(), hash = coldyCredentialHash_(context), result = coldyCampaignsFetch_(context);
-    return { connected: true, campaignCount: coldyProjectCampaigns_(context, hash, result.campaigns).length, checkedAt: result.generatedAt };
+    var context = authorize_();
+    return coldyProbeConnection_(context,coldyCredentialHash_(context));
+  });
+}
+
+/** Verify the key with a small authenticated read, independent of campaigns and sender limits. */
+function coldyProbeConnection_(context, credentialHash) {
+  coldyApi_(context,'GET','/leads/reply-tags');
+  var checkedAt = new Date().toISOString();
+  return locked_(function () {
+    var current = coldyCurrent_(context,true);
+    if (coldyCredentialHash_(current) !== credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите проверку.');
+    current.properties.setProperty(COLDY.connectionProperty,JSON.stringify({
+      version:COLDY.version,rootId:current.rootId,credentialHash:credentialHash,checkedAt:checkedAt
+    }));
+    return {connected:true,checkedAt:checkedAt};
   });
 }
 
@@ -132,7 +146,8 @@ function coldyCampaignItems_(items) {
 
 /** One fixed-host request. The caller owns dispatch receipts and recovery, not this HTTP helper. */
 function coldyApi_(context, method, path, payload, options) {
-  var current = coldyCurrent_(context, true), settings = coldySettings_(current);
+  // Read credentials now. Validate the Drive root immediately before the HTTP call below.
+  var current = coldyCurrent_(context, false), settings = coldySettings_(current);
   if (!settings.configured) fail_('COLDY_KEY_REQUIRED', 'Подключите API-ключ Coldy в настройках.');
   method = typeof method === 'string' ? method.toUpperCase() : '';
   var address = coldyPath_(method, path), inputOptions = options === undefined ? {} : coldyInput_(options, ['idempotencyKey']);
@@ -152,7 +167,7 @@ function coldyApi_(context, method, path, payload, options) {
   try {
     response = UrlFetchApp.fetch(COLDY.base + address, request);
   } catch (error) { coldyTransportFailure_(error, method); }
-  return coldyResponse_(context, settings, method, response);
+  return coldyResponse_(context, settings, method, response, address);
 }
 
 function coldyRequestOptions_(method, key) {
@@ -160,7 +175,7 @@ function coldyRequestOptions_(method, key) {
 }
 
 /** A bounded read of verified mailbox IDs or pages of one verified campaign. No writes, redirects or directory queries. */
-function coldyGetBatch_(context, paths, guard) {
+function coldyGetBatch_(context, paths, guard, campaignDetailsOnly) {
   if (!Array.isArray(paths) || !paths.length || paths.length > COLDY.readBatchSize || typeof guard !== 'function')
     fail_('INVALID_REQUEST', 'Некорректная группа запросов Coldy.');
   var scope, summaryCampaign, seen = new Set();
@@ -168,8 +183,9 @@ function coldyGetBatch_(context, paths, guard) {
     var address = coldyPath_('GET',path), accounts = /^\/accounts\/[1-9]\d*$/.test(address);
     var summary = address.match(/^\/analytics\/campaigns\/([\w-]+)\/summary\?period=all&type=event$/);
     if (summary) summaryCampaign = summary[1];
-    var campaign = summary || address.match(/^\/campaigns\/([\w-]+)$/) || address.match(/^\/leads\/campaign\/([\w-]+)\?limit=\d+&offset=\d+$/);
-    var owner = accounts ? 'accounts' : campaign && campaign[1].toLowerCase();
+    var detail = address.match(/^\/campaigns\/([\w-]+)$/);
+    var campaign = summary || detail || address.match(/^\/leads\/campaign\/([\w-]+)\?limit=\d+&offset=\d+$/);
+    var owner = campaignDetailsOnly === true ? detail && 'selected-campaign-details' : accounts ? 'accounts' : campaign && campaign[1].toLowerCase();
     if (!owner || scope && owner !== scope || seen.has(address)) fail_('INVALID_REQUEST', 'Запросы Coldy относятся к разным областям или повторяются.');
     scope = owner; seen.add(address); return address;
   });
@@ -211,7 +227,7 @@ function coldyGetBatch_(context, paths, guard) {
   });
 }
 
-function coldyResponse_(context, settings, method, response) {
+function coldyResponse_(context, settings, method, response, address) {
   var status, body, parsed;
   try {
     status = response.getResponseCode(); body = response.getContentText();
@@ -231,6 +247,12 @@ function coldyResponse_(context, settings, method, response) {
   }
   if (typeof body !== 'string' || body.length > COLDY.maxResponseCharacters) fail_('COLDY_RESPONSE', 'Coldy вернул слишком большой ответ.');
   try { parsed = JSON.parse(body); } catch (error) { fail_('COLDY_RESPONSE', 'Coldy вернул неподдерживаемый ответ.'); }
+  if (address === '/leads/reply-tags') {
+    var tags = Array.isArray(parsed) ? parsed : parsed && parsed.items;
+    if (!Array.isArray(tags) || !tags.every(function (tag) { return tag && Number.isSafeInteger(tag.id) && tag.id > 0; }))
+      fail_('COLDY_RESPONSE','Coldy не подтвердил подключение.');
+    return true; // Only the authentication result is used. Discard the tags on the server.
+  }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail_('COLDY_RESPONSE', 'Coldy вернул неподдерживаемый ответ.');
   return parsed;
 }
@@ -270,7 +292,7 @@ function coldyPath_(method, path) {
     if (route !== '/accounts' && !Number.isSafeInteger(Number(route.slice('/accounts/'.length)))) fail_('INVALID_REQUEST', 'Некорректный идентификатор ящика Coldy.');
     allowed = [];
   }
-  else if (route === '/account-campaign-mappings' || route === '/campaigns' || new RegExp('^/campaigns/' + uuid + '$').test(route) || new RegExp('^/email-verifications/' + identifier + '(?:/results)?$').test(route)) allowed = [];
+  else if (route === '/leads/reply-tags' || route === '/account-campaign-mappings' || route === '/campaigns' || new RegExp('^/campaigns/' + uuid + '$').test(route) || new RegExp('^/email-verifications/' + identifier + '(?:/results)?$').test(route)) allowed = [];
   else if (new RegExp('^/leads/campaign/' + uuid + '$').test(route)) allowed = ['after_id', 'offset', 'limit', 'search'];
   else if (new RegExp('^/analytics/campaigns/' + uuid + '/(?:summary|events|by-account|by-sequence)$').test(route)) allowed = ['period', 'start_date', 'end_date', 'type', 'event_types'].concat(/\/by-account$/.test(route) ? ['search', 'limit', 'offset', 'sort_by', 'sort_order'] : []);
   if (!allowed) fail_('INVALID_REQUEST', 'Неподдерживаемое действие Coldy.');

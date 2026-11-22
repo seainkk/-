@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 const html = readFileSync(new URL('../entry/index.html', import.meta.url), 'utf8');
@@ -33,11 +34,11 @@ test('the public entry and Apps Script shell identify the service and retain the
   assert.match(app, /id="br-sources-title">Исходные базы и выборки<\/h1>/);
 });
 
-function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true } = {}) {
+function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true, storage = new Map() } = {}) {
   const events = new Map(), timers = new Map(), sequence = [], created = [];
   let timerId = 0;
   const location = new URL('https://seainkk.github.io' + path + hash);
-  const window = { location, addEventListener(name, handler) { events.set(name, handler); } };
+  const window = { location, crypto:webcrypto, localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},addEventListener(name, handler) { events.set(name, handler); } };
   const states = [null], pushes = [], sent = [];
   let position = 0, backs = 0;
   window.history = {
@@ -56,6 +57,7 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
       setAttribute(name, value) { node.attributes[name] = value; },
       addEventListener(name, handler) { node.listeners.set(name, handler); },
       append(child) { node.children.push(child); child.parentElement = node; sequence.push(['append', child.tag]); },
+      replaceChildren(...nodes) { node.children=nodes; },
       remove() { node.removed = true; if (node.parentElement) node.parentElement.children = node.parentElement.children.filter(child => child !== node); },
       focus() { node.focused = true; }, select() { node.selected = true; },
     };
@@ -66,7 +68,7 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
     }
     return node;
   }
-  const ids = Object.fromEntries(['entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host'].map(id => [id, element()]));
+  const ids = Object.fromEntries(['entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host','entry-preview','entry-preview-list','entry-preview-time'].map(id => [id, element()]));
   const body = element('body');
   const document = {
     body, getElementById: id => ids[id],
@@ -75,7 +77,7 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
   function Frame() {}
   if (supported) Frame.prototype.credentialless = false;
   const context = vm.createContext({
-    window, document, URL, HTMLIFrameElement: Frame,
+    window, document, URL, HTMLIFrameElement: Frame, TextEncoder, TextDecoder, btoa, atob, Uint8Array,
     navigator: { userActivation: activation },
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
@@ -101,6 +103,34 @@ test('missing, malformed and query-only credentials never create a Google iframe
   }
   const queryOnly = fixture({ path: '/-/?access_key=' + KEY, hash: '' });
   assert.equal(queryOnly.currentFrame(), undefined);
+});
+
+test('repeat entry decrypts only dated names for this link before Google responds, and revocation clears them', async () => {
+  async function until(check) {
+    for(let i=0;i<100&&!check();i++) await new Promise(resolve=>setTimeout(resolve,5));
+    assert.ok(check());
+  }
+  const storage=new Map(), first=fixture({storage}), source=first.ready();
+  const message={type:'bases-registry-catalog',checkedAt:Date.now(),items:[{name:'Справочник',contents:['companies'],email:'excluded@example.test'}]};
+  first.event('message',{source:first.app(),origin:GOOGLE_ORIGIN,data:message});
+  assert.equal(storage.size,0);
+  first.event('message',{source,origin:GOOGLE_ORIGIN,data:message});
+  await until(()=>storage.size===1);
+  const raw=[...storage.values()][0];
+  assert.doesNotMatch(raw,/Справочник|excluded|access_key/);
+  assert.ok(!raw.includes(KEY));
+  const repeat=fixture({storage}),wrong=fixture({storage,hash:'#access_key='+'Z'.repeat(43)});
+  await until(()=>!repeat.ids['entry-preview'].hidden);
+  assert.equal(repeat.body.dataset.state,'loading');
+  assert.deepEqual(repeat.ids['entry-preview-list'].children.map(row=>row.textContent),['Справочник']);
+  assert.equal(wrong.ids['entry-preview'].hidden,true);
+  const active=repeat.ready();
+  assert.equal(repeat.ids['entry-preview'].hidden,true);
+  const offline=fixture({storage});
+  offline.event('message',{source:offline.app(),origin:GOOGLE_ORIGIN,data:{type:'bases-registry-unavailable'}});
+  assert.equal(offline.body.dataset.state,'error');assert.equal(storage.size,1);
+  repeat.event('message',{source:active,origin:GOOGLE_ORIGIN,data:{type:'bases-registry-locked'}});
+  assert.equal(storage.size,0);assert.equal(repeat.ids['entry-preview-list'].children.length,0);
 });
 
 test('unsupported browsers receive a clear instruction instead of a credentialed fallback', () => {

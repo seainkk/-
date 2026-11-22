@@ -1,8 +1,8 @@
 /** Daily sender counters are independent of the organization's billing credits. */
 function coldyServiceLimits_(context, settings) {
-  var monitoring = projectMonitoringRead_(context,settings), ids = monitoring.accountIds;
+  var observation = {}, monitoring = projectMonitoringRead_(context,settings,observation), ids = monitoring.accountIds;
   var signature = projectMonitoringSignature_(context,monitoring);
-  function guard() { return projectInfraMonitoringCurrent_(context,settings.credentialHash,signature); }
+  var guard = projectInfraMonitoringGuard_(context,settings.credentialHash,signature,observation);
   if (!ids.length) {
     guard();
     return coldyLimitsPublic_(null,0,settings);

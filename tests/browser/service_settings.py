@@ -15,7 +15,8 @@ def main():
         page.on('pageerror',lambda error:errors.append(str(error)))
         fixture="""
 const began=new Date().valueOf();Date.now=()=>testClock.now+new Date().valueOf()-began;
-api.getServiceLimits=async({provider})=>{
+api.getServiceLimits=async({provider,connectionOnly})=>{
+  if(connectionOnly)return {provider,configured:true,active:true,checkedAt:'2026-11-22T06:30:00Z',items:[],message:''};
   if(provider==='coldy'&&window.waitColdy)await new Promise(done=>window.resumeColdy=done);
   if(provider==='coldy'&&window.coldyState==='failing')throw Error('Ошибка чтения');
   if(provider==='coldy'&&window.coldyState==='waiting')return {provider,configured:true,active:null,pending:true,items:[],message:'Проверено 20 из 38',retryAfterMs:0};
@@ -49,7 +50,9 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         expect(modal.locator('#br-settings-promouser-limits')).to_contain_text('Нет данных')
         expect(modal.locator('#br-settings-promouser-limits')).to_contain_text('5,75 USD')
         expect(modal.locator('#br-settings-promouser-limits')).to_contain_text('0,00000001 USD')
-        expect(modal.locator('#br-settings-coldy-status')).to_contain_text('Проверяем')
+        expect(modal.locator('#br-settings-coldy-status')).to_have_text('Подключение активно')
+        expect(modal.locator('#br-settings-coldy-note')).to_contain_text('Обновляем дневные лимиты')
+        page.wait_for_function("typeof resumeColdy==='function'")
         page.evaluate("waitColdy=false;resumeColdy()")
         expect(modal.locator('#br-settings-coldy-status')).to_have_text('Подключение активно')
         expect(modal.locator('#br-settings-coldy-limits')).to_contain_text('0 кредитов')

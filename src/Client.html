@@ -11,6 +11,7 @@
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,readPending=0,mutationGeneration=0,pendingView=null,formMode=null;
   let sourceData=null,sourceTimer=null,lastSourceAttempt=0,lastSourceLoaded=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
   let sourceProbeAt=0,sourceCheckedAt=0,sourceProbe=null;
+  let catalogPreview=null,acceptSavedCatalog=false;
   let importOpen=false,importMode='file',importing=false,importFileSelection=0,registrySection='companies',liveUploadForm=null;
   let uploadEntryView='sources',uploadSegmentOptions=null;
   let preparedImport=null,preparedEpoch=0,preparedPollTimer=null,accessEpoch=0,workspaceRpcQueue=Promise.resolve();
@@ -37,10 +38,34 @@
   function sharedKeyFromHash(hash){const match=typeof hash==='string'?hash.match(/^#?access_key=([A-Za-z0-9_-]{43})$/):null;return match&&match[0]===hash?match[1]:null;}
   function sharedRequest(method,payload,key,projectId){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Для входа нужна полная закрытая ссылка.');const request={method,accessKey:key,projectId};if(payload!==undefined)request.payload=payload;return request;}
   function sharedUrl(key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return 'https://seainkk.github.io/-/#access_key='+key;}
-  function notifyEntry(state){try{if(window.top!==window)window.top.postMessage({type:state==='ready'?'bases-registry-ready':'bases-registry-locked'},'https://seainkk.github.io');}catch(ignored){}}
+  function notifyEntry(state,catalogPending){try{if(window.top!==window){const message={type:'bases-registry-'+state};if(catalogPending===true)message.catalogPending=true;window.top.postMessage(message,'https://seainkk.github.io');}}catch(ignored){}}
+  function catalogNames(items,checkedAt){
+    if(!Array.isArray(items)||items.length>200||!Number.isSafeInteger(checkedAt)||checkedAt<=0)return null;
+    const names=[];
+    for(const item of items){
+      if(typeof item?.name!=='string'||!item.name.trim())return null;
+      names.push({name:item.name.trim().slice(0,200),contents:normalizeContents(item.contents)});
+    }
+    return {items:names,checkedAt};
+  }
+  function sendEntryCatalog(preview){
+    if(!accessReady||window.top===window)return;
+    window.top.postMessage({type:'bases-registry-catalog',items:preview?.items??null,checkedAt:preview?.checkedAt??0},'https://seainkk.github.io');
+  }
+  function useFullCatalog(result){
+    sourceData=result;catalogPreview=null;acceptSavedCatalog=false;lastSourceLoaded=Date.now();sourceRefreshError=null;
+    const known=result?.source&&['ready','storage_unavailable'].includes(result.state)&&Array.isArray(result.items);
+    sendEntryCatalog(known?catalogNames(result.items.filter(item=>item.present!==false),lastSourceLoaded):null);
+  }
+  function catalogFailed(error){
+    const parsed=failure(error);sourceRefreshError=parsed.message;
+    if(['ACCESS_DENIED','OUTSIDE_REGISTRY','SOURCE_CHANGED','NOT_FOUND','AUTH_REQUIRED'].includes(parsed.code)){
+      catalogPreview=null;sourceData=null;acceptSavedCatalog=false;sendEntryCatalog(null);
+    }
+  }
   function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
   function isReadRpc(method,payload){
-    if(method==='getServiceLimits')return true;
+    if(method==='getServiceLimits'||method==='getProjectForecastPreview')return true;
     if(method==='getSegmentMailings'&&payload?.live)return false;
     if(method==='getProjectAnalyticsCampaigns')return payload?.refresh!==true;
     return ['getSourceBasesRevision','getProjectAnalytics','getColdyBindings','getProjectInfrastructure','getProjectInfrastructureSelection','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);
@@ -80,8 +105,9 @@
     $('br-project-switch').hidden=!accessReady;$('br-project').value=activeProjectId;
     const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-settings-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
-  function lockAccess(message){
+  function lockAccess(message,unavailable){
     closeServiceSettings(false);
+    catalogPreview=null;acceptSavedCatalog=false;
     sourceProbeAt=0;sourceCheckedAt=0;sourceProbe=null;
     projectDrafts.clear();claimRequests.clear();mailingSegmentId=null;sourceSaving=null;segmentSaving=false;segmentEditorEpoch++;
     $('br-coldy-binding-form').reset();$('br-coldy-upload-preview').hidden=true;$('br-segment-normalized-preview').hidden=true;
@@ -92,7 +118,7 @@
     viewTrail.length=0;pendingImportExit=null;suspendedSegment=null;uploadSegmentOptions=null;uploadEntryView='sources';$('br-import-destination').replaceChildren();$('br-import-segment-name').value='';recoveringOrigins=false;$('br-origin-recovery-status').textContent='';closeSourceOrigin();$('br-lineage-rows').replaceChildren();$('br-source-lineage').open=false;$('br-source-lineage').hidden=true;
     contactPreview=null;contactPreviewEpoch++;segmentImportDestination=null;segmentReturnPending=null;renderContactPreview();
     pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;lastSourceAttempt=0;lastDashboardAttempt=0;lastMailingsAttempt=0;
-    if(message)notifyEntry('locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
+    if(message)notifyEntry(unavailable?'unavailable':'locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
   }
   function switchProject(){
     const chosen=$('br-project').value;
@@ -108,7 +134,7 @@
   function projectSwitchBlocked(){return busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||recoveringOrigins||window.RegistryProject?.hasPending?.()||formIsOpen();}
   async function startSharedAccess(switching){
     if(switching!==true&&requesting())return;lockAccess(null);const startupEpoch=accessEpoch;busy=true;renderAccess();updateControls();
-    try{const key=await readSharedKey();if(startupEpoch!==accessEpoch)return;if(!key)throw new Error('В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const epoch=accessEpoch;
+    try{const key=await readSharedKey();if(startupEpoch!==accessEpoch)return;if(!key)throw new Error('[LINK_ACCESS_REQUIRED] В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const epoch=accessEpoch;
       // Discovery can write service metadata. Only prefetch a visible catalog
       // with a free transport, and accept it after the key is confirmed.
       let catalog=null;
@@ -117,10 +143,24 @@
         catalog=rpc('getSourceBases').then(result=>({result}),error=>({error}));
       }
       while(networkPending>=2){await new Promise(resolve=>setTimeout(resolve,25));if(epoch!==accessEpoch)return;}
-      const result=await rpc('getAppBootstrap');if(epoch!==accessEpoch||accessKey!==key)return;
-      if(result?.user?.accessMode!=='link')throw new Error('Не удалось подтвердить режим доступа сервиса. Обновите страницу и повторите попытку.');bootstrap=result;accessReady=true;accessMessage=null;preparedJobsQueued=true;notifyEntry('ready');
-      catalog?.then(outcome=>{if(!accessReady||epoch!==accessEpoch||accessKey!==key)return;if(outcome.error)sourceRefreshError=failure(outcome.error).message;else{sourceData=outcome.result;sourceRefreshError=null;lastSourceLoaded=Date.now();}sourceLoading=false;renderSources();renderSourcesHealth();updateControls();flushPendingView();});
-    }catch(error){if(startupEpoch!==accessEpoch)return;const parsed=failure(error);lockAccess(parsed.code==='LINK_ACCESS_REQUIRED'?'Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.':parsed.message);sourceLoading=false;}
+      const wantsCatalog=activeView==='sources';
+      const result=await rpc('getAppBootstrap',wantsCatalog?{includeSourcePreview:true}:undefined);if(epoch!==accessEpoch||accessKey!==key)return;
+      if(result?.user?.accessMode!=='link')throw new Error('Не удалось подтвердить режим доступа сервиса. Обновите страницу и повторите попытку.');
+      bootstrap=result;accessReady=true;accessMessage=null;preparedJobsQueued=true;
+      const preview=result.catalogPreview;
+      catalogPreview=wantsCatalog&&preview?catalogNames(preview.items,preview.checkedAt):null;
+      if(catalogPreview&&preview.partial===true)catalogPreview.partial=true;
+      acceptSavedCatalog=wantsCatalog&&!catalogPreview;notifyEntry('ready',acceptSavedCatalog);
+      catalog?.then(outcome=>{
+        if(!accessReady||epoch!==accessEpoch||accessKey!==key)return;
+        if(outcome.error)catalogFailed(outcome.error);else useFullCatalog(outcome.result);
+        sourceLoading=false;renderSources();renderSourcesHealth();updateControls();flushPendingView();
+      });
+    }catch(error){
+      if(startupEpoch!==accessEpoch)return;
+      const parsed=failure(error),denied=accessFailure(parsed.code)||['ACCESS_DENIED','OUTSIDE_REGISTRY','SOURCE_CHANGED','NOT_FOUND'].includes(parsed.code);
+      lockAccess(parsed.message,!denied);sourceLoading=false;
+    }
     finally{busy=false;$('br-loading').hidden=true;render();if(accessReady&&startupEpoch===accessEpoch){armViewTimer();if(!sourceLoading)refreshActiveView({opening:true});}flushPendingView();}
   }
   function settingsVisible(session){return !!session&&settingsSession===session&&accessReady&&session.epoch===accessEpoch&&$('br-settings-dialog').open&&!providerSession&&!coldySession&&!document.hidden;}
@@ -146,8 +186,19 @@
     clearTimeout(check.timer);check.timer=null;check.pending=true;
     try{
       if(check.afterSave){await workspaceRpcQueue;if(!valid())return;check.afterSave=false;}
-      const data=await workspaceRpc('getServiceLimits',{provider},valid);
+      let data;
+      if(provider==='coldy'&&!check.continuing){
+        const connection=await workspaceRpc('getServiceLimits',{provider,connectionOnly:true},valid);
+        if(!connection||!valid())return;
+        if(connection.configured)window.RegistryProject?.confirmConnection?.(connection.active);
+        if(connection.configured===false||connection.active===false||connection.retryAfterMs>0)data=connection;
+        else if(connection.active===true&&!$('br-settings-coldy-limits').childElementCount)
+          renderLimit(provider,{...connection,message:'Обновляем дневные лимиты выбранных почт…'});
+        else if(connection.active!==true)renderLimit(provider,connection);
+      }
+      if(!data)data=await workspaceRpc('getServiceLimits',{provider},valid);
       if(!data||!valid())return;
+      if(provider==='coldy'&&data.configured)window.RegistryProject?.confirmConnection?.(data.active);
       check.continuing=data.pending===true;
       check.next=Math.max(check.continuing?Date.now()+2500:started+60000,Date.now()+(Number(data.retryAfterMs)||0));
       renderLimit(provider,data,check.continuing&&data.active!==true?'Проверяем данные сервиса…':'');
@@ -334,9 +385,9 @@
   }
   async function testColdyConnection(){
     if(settingsSession)settingsSession.coldy.next=0;
-    const current=coldySession;if(!current?.settings?.configured||current.pending)return;current.pending='test';showColdyOwnerHelp();$('br-coldy-message').textContent='Читаем список рассылок…';renderColdySettings(current);
-    try{const data=await workspaceRpc('testColdyConnection',{});if(coldySession===current){showColdyOwnerHelp();current.settings.connected=data.connected===true;window.RegistryProject?.invalidate?.();if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;$('br-coldy-configured').textContent='Coldy подключён.';$('br-coldy-message').textContent='Подключение подтверждено. Рассылок: '+Number(data.campaignCount||0)+'. Платные проверки не запускались.';}}
-    catch(error){if(coldySession===current)showColdyFailure(error);}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
+    const current=coldySession;if(!current?.settings?.configured||current.pending)return;current.pending='test';showColdyOwnerHelp();$('br-coldy-message').textContent='Проверяем API-ключ…';renderColdySettings(current);
+    try{const data=await workspaceRpc('testColdyConnection',{});if(coldySession===current){showColdyOwnerHelp();current.settings.connected=data.connected===true;window.RegistryProject?.confirmConnection?.(current.settings.connected);$('br-coldy-configured').textContent='Подключение активно';$('br-coldy-message').textContent='Coldy подтвердил API-ключ.';}}
+    catch(error){if(coldySession===current){if(failure(error).code==='COLDY_AUTH'){current.settings.connected=false;window.RegistryProject?.confirmConnection?.(false);$('br-coldy-configured').textContent='Ключ отклонён';}showColdyFailure(error);}}finally{if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   function coldyMailingsAlive(current){return !!current&&coldyMailings===current&&accessReady&&current.epoch===accessEpoch;}
   function requestId(){return globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);}
@@ -498,7 +549,8 @@
   }
   function sourceInSection(item,section){const kinds=normalizeContents(item?.contents);return !kinds.length||kinds.includes(section);}
   function renderRegistrySections(){
-    for(const section of ['companies','lpr']){const label=section==='companies'?'Компании':'ЛПР',count=(sourceData?.items||[]).filter(item=>item.present!==false&&sourceInSection(item,section)).length;const node=$('br-section-'+section);node.textContent=label+(sourceData?' · '+count:'');node.setAttribute('aria-pressed',String(registrySection===section));node.disabled=!accessReady||importOpen||gridIsOpen();}
+    const catalog=sourceData||catalogPreview;
+    for(const section of ['companies','lpr']){const label=section==='companies'?'Компании':'ЛПР',count=(catalog?.items||[]).filter(item=>item.present!==false&&sourceInSection(item,section)).length;const node=$('br-section-'+section);node.textContent=label+(catalog&&!catalog.partial?' · '+count:'');node.setAttribute('aria-pressed',String(registrySection===section));node.disabled=!accessReady||importOpen||gridIsOpen();}
   }
   function setRegistrySection(section){if(!['companies','lpr'].includes(section)||importOpen||gridIsOpen())return;registrySection=section;sourceFilters.contents='';$('br-source-contents-filter').value='';renderedSourceKey=null;renderSources();updateControls();}
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
@@ -620,8 +672,9 @@
   }
   function renderSourcesHealth(){
     const node=$('br-sources-health');node.classList.toggle('br-error',!!sourceRefreshError);
-    if(sourceRefreshError){node.textContent=(sourceData?'Не удалось обновить список. Показаны последние данные. ':'Не удалось загрузить исходные базы. ')+sourceRefreshError;return;}
-    if(sourceLoading){node.textContent='Загружаем исходные базы…';return;}
+    if(sourceRefreshError){node.textContent=(sourceData||catalogPreview?'Не удалось обновить список. Показаны последние данные. ':'Не удалось загрузить исходные базы. ')+sourceRefreshError;return;}
+    if(catalogPreview){node.textContent='Список на '+new Date(catalogPreview.checkedAt).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК. Обновляем карточки в фоне…';return;}
+    if(sourceLoading){node.textContent=sourceData?'Обновляем карточки в фоне…':'Загружаем исходные базы…';return;}
     if(sourceSaving){node.textContent='Сохраняем выбранные отметки…';return;}
     if(sourceData?.state==='storage_unavailable'){node.textContent='Общее хранилище недоступно. Файлы можно открывать; изменение отметок отключено.'+(sourceData.storage?.message?' '+sourceData.storage.message:'');return;}
     if(sourceData&&sourceData.state!=='ready'){node.textContent='Источник исходных баз недоступен. Реестр и сегменты продолжают работать.';return;}
@@ -629,8 +682,31 @@
     node.textContent=formIsOpen()||sourceFocused()?'Автообновление приостановлено на время редактирования.':
       (sourceData?.revision?'Проверка изменений каждые 30 секунд.':'Список обновляется каждую минуту, пока раздел открыт.')+(checked?' Проверено в '+new Date(checked).toLocaleTimeString('ru-RU')+'.':'');
   }
+  function renderCatalogPreview(){
+    const section=catalogPreview.items.filter(item=>sourceInSection(item,registrySection)),query=sourceSearchText(sourceFilters.query);
+    const matches=section.filter(item=>sourceSearchText(item.name).includes(query));
+    $('br-sources-count').textContent=catalogPreview.partial?'Первые базы: '+matches.length:'Показано: '+matches.length+' из '+section.length;
+    $('br-source-filters-reset').disabled=!query;$('br-source-filters-note').hidden=true;
+    $('br-sources-folder').hidden=true;
+    $('br-sources-empty').hidden=matches.length>0;
+    $('br-sources-empty-title').textContent=catalogPreview.partial?'Продолжаем загрузку списка…':query?'По поиску ничего не найдено':'В этом разделе пока нет баз';
+    $('br-sources-empty-description').textContent=query?'Измените поисковый запрос.':'Проверяем актуальный список.';
+    const key=JSON.stringify(['preview',registrySection,query,matches]);
+    if(key===renderedSourceKey)return;renderedSourceKey=key;
+    const rows=document.createDocumentFragment();
+    for(const item of matches){
+      const row=document.createElement('article'),title=document.createElement('h2'),kind=document.createElement('span');
+      row.className='br-source-item';title.textContent=item.name;kind.className='br-muted';
+      kind.textContent=item.contents.length?contentsLabel(item.contents):'Тип уточняется';
+      row.append(title,kind);rows.append(row);
+    }
+    $('br-sources-items').replaceChildren(rows);
+  }
   function renderSources(){
     $('br-sources-view').hidden=activeView!=='sources';if(activeView!=='sources')return;
+    const previewOnly=!!catalogPreview&&!sourceData;
+    $('br-source-project-filter').disabled=previewOnly;$('br-source-unassigned-filter').disabled=previewOnly;
+    if(previewOnly){renderRegistrySections();renderSourcesHealth();renderSourceLineage();renderCatalogPreview();return;}
     const data=sourceData,sectionData=data?Object.assign({},data,{items:(data.items||[]).filter(item=>sourceInSection(item,registrySection))}):data,selection=sourceFilterSelection(sectionData,sourceFilters,[...sourceDrafts.keys(),...projectDrafts.keys()]),items=selection.items,filtered=sourceFiltersActive(sourceFilters);renderRegistrySections();
     $('br-sources-count').textContent=data?.source?'Показано: '+selection.matchedCount+' из '+selection.totalCount+(selection.pinnedIds.length?' · Дополнительно с несохранёнными изменениями: '+selection.pinnedIds.length:''):data?'Список недоступен':'Загружаем список…';
     $('br-source-filters-reset').disabled=!filtered;const filterNote=$('br-source-filters-note');filterNote.hidden=!selection.unknownAssociations;filterNote.textContent=selection.unknownAssociations?'Связи с сегментами недоступны для '+selection.unknownAssociations+' баз. Они не включены в фильтр «Без сегмента».':'';
@@ -732,11 +808,11 @@
     const epoch=accessEpoch;
     if(options.automatic&&!sourcesVisible())return;
     sourceLoading=true;lastSourceAttempt=Date.now();updateControls();if(!sourceData&&activeView==='sources')renderSources();renderSourcesHealth();
-    try{const result=await rpc('getSourceBases');if(!accessReady||epoch!==accessEpoch||options.automatic&&!sourcesVisible())return;const previous=sourceData;sourceData=result;sourceRefreshError=null;lastSourceLoaded=Date.now();
+    try{const result=await rpc('getSourceBases');if(!accessReady||epoch!==accessEpoch||options.automatic&&!sourcesVisible())return;const previous=sourceData;useFullCatalog(result);
       for(const id of new Set([...sourceDrafts.keys(),...projectDrafts.keys()])){if(!sourceData.items.some((item)=>item.id===id)){const old=previous?.items.find((item)=>item.id===id);if(old)sourceData.items.push(Object.assign({},old,{present:false}));}}
       for(const [id,message] of sourceMessages)if(!message.error)sourceMessages.delete(id);
       if(activeView==='sources')renderSources();if(!options.automatic&&!options.preserveNotice)notice(null);
-    }catch(error){if(accessReady&&epoch===accessEpoch&&(!options.automatic||sourcesVisible()))sourceRefreshError=failure(error).message;}
+    }catch(error){if(accessReady&&epoch===accessEpoch&&(!options.automatic||sourcesVisible()))catalogFailed(error);}
     finally{if(epoch!==accessEpoch)return;sourceLoading=false;updateControls();if(activeView==='sources')renderSources();renderSourcesHealth();if(segmentEditor)renderSegmentSources();flushPendingView();}
   }
   function updateProjectFields(waiting){
@@ -1444,8 +1520,12 @@
     event.preventDefault();goBack();syncBack();
   });
   window.addEventListener('message',event=>{
-    if(event.source!==window.top||event.origin!=='https://seainkk.github.io'||event.data?.type!=='bases-registry-back')return;
-    goBack();syncBack(true);
+    if(window.top===window||event.source!==window.top||event.origin!=='https://seainkk.github.io')return;
+    if(event.data?.type==='bases-registry-back'){goBack();syncBack(true);return;}
+    if(event.data?.type!=='bases-registry-saved-catalog'||!acceptSavedCatalog||!accessReady||sourceData||catalogPreview||activeView!=='sources')return;
+    const preview=catalogNames(event.data.items,event.data.checkedAt);
+    if(!preview||preview.checkedAt<Date.now()-86400000||preview.checkedAt>Date.now()+300000)return;
+    catalogPreview=preview;acceptSavedCatalog=false;renderSources();updateControls();
   });
   $('br-source-lineage').addEventListener('toggle',renderSourceLineage);
   $('br-origin-recover').addEventListener('click',recoverSourceOrigins);

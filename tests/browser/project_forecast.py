@@ -5,7 +5,14 @@ from project_client import integrated_html
 
 
 FORECAST_API = """
+testClock.now=Date.parse('2026-11-22T10:00:00Z');
 window.forecastCalls=0;
+api.getProjectForecastPreview=(payload,project)=>{
+  if(project!=='numshield')return null;
+  const row={days:1,from:'2026-11-23',to:'2026-11-23',expected:41,initial:1,followups:40,capacity:90};
+  return {day:'2026-11-22',generatedAt:'2026-11-22T07:40:00Z',previewScope:'numshield-example',
+    forecast:{periods:[row],days:[],selectedAccounts:2,activeCampaigns:1}};
+};
 api.getProjectSendingForecast=(payload,project)=>{
   forecastCalls++;
   if(window.forecastState==='waiting'){
@@ -48,8 +55,13 @@ def main():
         page.evaluate("tick(120000)")
         assert page.evaluate('forecastCalls')==0
         assert not page.locator('#pj-segment').input_value()
+        page.evaluate("backend.holdMethods=['getProjectSendingForecast']")
         view.locator('summary').click()
         totals=view.locator('#pj-forecast-totals dd')
+        expect(totals).to_have_text(['41','1','40','90'])
+        expect(view.locator('#pj-forecast-health')).to_contain_text('последний расчёт')
+        page.wait_for_function("backend.pending.some(job=>job.method==='getProjectSendingForecast')")
+        page.evaluate("backend.holdMethods=[];releaseRpc('getProjectSendingForecast')")
         expect(totals).to_have_text(['5','2','3','9'])
         expect(view.locator('#pj-forecast-queue')).to_contain_text('первого письма ждут 51, повторного — 12')
         view.get_by_role('button',name='3 дня').click()

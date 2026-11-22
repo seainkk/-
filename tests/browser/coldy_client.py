@@ -195,7 +195,8 @@ def main():
         page.evaluate("backend.holdMethods=[];releaseRpc('testColdyConnection')")
         registry_idle()
         expect(owner_help).to_be_hidden()
-        expect(page.locator('#br-coldy-message')).to_contain_text('Подключение подтверждено')
+        expect(page.locator('#br-coldy-message')).to_have_text('Coldy подтвердил API-ключ.')
+        expect(page.locator('#br-coldy-configured')).to_have_text('Подключение активно')
 
         page.evaluate("coldyBackend.connectionError='[COLDY_NETWORK] Соединение временно недоступно.'")
         test_connection.click()

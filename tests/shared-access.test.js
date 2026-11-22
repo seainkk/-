@@ -21,7 +21,7 @@ function fixture() {
     DriveApp: { getFolderById(id) { calls.folders++; assert.equal(id, ROOT); return root; } },
     HtmlService: {
       XFrameOptionsMode: { ALLOWALL: 'ALLOWALL' },
-      createTemplateFromFile(name) { assert.equal(name, 'Index'); calls.shell++; return { evaluate: () => ({ setTitle: title => ({ setXFrameOptionsMode: frameMode => ({ staticShell: true, title, frameMode }) }) }) }; },
+      createTemplateFromFile(name) { assert.equal(name, 'Index'); calls.shell++; return { evaluate: () => ({ setFaviconUrl(){return this;}, setTitle: title => ({ setXFrameOptionsMode: frameMode => ({ staticShell: true, title, frameMode }) }) }) }; },
       createHtmlOutput: text => ({ text }),
     },
     Utilities: {

@@ -10,6 +10,7 @@
   let recipientImport=null;
   let forecastData=null,forecastError='',forecastDays=1,forecastBusy=false,forecastSequence=0;
   let forecastTimer=null,forecastCheckedAt=0,forecastRetryAt=0;
+  let forecastArchive=null,forecastPreviewAttempt=0,forecastPreviewVersion=0;
   const recipientRequests=new Map();
   const campaignPageSize=40;
   const liveInterval=60000;
@@ -32,8 +33,20 @@
   }
   function health(id,message,error=false){const node=$(id);if(!node)return;node.textContent=message||'';node.dataset.error=String(error);}
   function node(tag,className,value){const element=document.createElement(tag);if(className)element.className=className;if(value!==undefined)element.textContent=text(value);return element;}
-  function connection(configured,connected){return !configured?'Подключите API Coldy, чтобы получать рассылки и показатели проекта.':!connected?'Ключ Coldy сохранён. Проверьте подключение в настройках.':'';}
-  function connectionBox(id,configured,connected){const box=$(id),message=connection(configured,connected);box.textContent=message;box.hidden=!message;}
+  function renderConnection(section,configured,connected){
+    const button=$('pj-'+section+'-connect'),box=$('pj-'+section+'-connection');
+    button.textContent=configured===false?'Подключить Coldy':'Настройки Coldy';button.disabled=hasPending();
+    const message=configured===false?'Подключите API Coldy, чтобы получать рассылки и показатели проекта.':
+      configured===true&&connected===false?'Ключ Coldy сохранён. Проверьте подключение в настройках.':'';
+    box.textContent=message;box.hidden=!message;
+  }
+  function confirmConnection(connected){
+    if(!ready||typeof connected!=='boolean')return;
+    let changed=false;
+    for(const data of [catalog?.coldy,infrastructure,...Array.from(contexts.values(),context=>context.data)])
+      if(data?.configured===true&&data.connected!==connected){data.connected=connected;changed=true;}
+    if(changed)render();
+  }
   function metrics(id,values){const root=$(id);root.replaceChildren();for(const [label,value] of values){const group=node('div');group.append(node('dt','',label),node('dd','',number(value)));root.append(group);}}
   function badge(value){
     const labels={Active:['Активна','success'],Draft:['Черновик','neutral'],Completed:['Завершена','neutral'],Paused:['На паузе','warning'],
@@ -170,8 +183,24 @@
   }
   function resetForecast(close=true){
     pauseForecast();forecastData=null;forecastError='';forecastCheckedAt=0;forecastRetryAt=0;
+    forecastArchive=null;forecastPreviewAttempt=0;forecastPreviewVersion++;
     if(close){forecastDays=1;if($('pj-forecast'))$('pj-forecast').open=false;}
     renderForecast();
+  }
+  function currentForecastDay(){return new Date(Date.now()+10800000).toISOString().slice(0,10);}
+  async function preloadForecast(){
+    if(view!=='analytics'||!ready||document.hidden||forecastArchive?.day===currentForecastDay()||recentPoll(forecastPreviewAttempt))return;
+    const mark=token(),version=forecastPreviewVersion;
+    const valid=()=>alive(mark)&&version===forecastPreviewVersion&&view==='analytics'&&!document.hidden;
+    forecastPreviewAttempt=Date.now();
+    try{
+      const data=await invoke('getProjectForecastPreview',{},mark,valid);
+      if(valid()&&data?.forecast&&data.generatedAt&&data.day===currentForecastDay()&&
+        (!forecastData||forecastData.previewScope===data.previewScope)&&
+        !(Date.parse(forecastArchive?.generatedAt)>=Date.parse(data.generatedAt))){
+        forecastArchive=data;renderForecast();
+      }
+    }catch(ignored){/* The live calculation reports any error when the forecast is opened. */}
   }
   function scheduleForecast(delay){
     if(forecastTimer!==null)clearTimeout(forecastTimer);
@@ -191,6 +220,9 @@
     try{
       const data=await invoke('getProjectSendingForecast',{},mark,valid);
       if(!data||!valid())return;
+      if(!data.previewScope||data.previewScope!==forecastArchive?.previewScope)forecastArchive=null;
+      if(data.forecast&&data.generatedAt&&data.day&&data.previewScope)
+        forecastArchive={forecast:data.forecast,generatedAt:data.generatedAt,day:data.day,previewScope:data.previewScope};
       forecastData=data;forecastRetryAt=Date.now()+Math.max(0,Number(data.retryAfterMs)||0);
       if(data.pending&&data.state!=='error'&&data.state!=='not_configured'&&data.state!=='no_selection'){
         const unchanged=previous?.pending&&JSON.stringify(previous.progress||{})===JSON.stringify(data.progress||{});
@@ -199,11 +231,14 @@
     }catch(error){
       if(!valid())return;
       const problem=failure(error);
-      if(/^(LINK_|OUTSIDE_|COLDY_(AUTH|FORBIDDEN|CREDENTIAL_CHANGED|MONITORING_CHANGED|SCOPE_CHANGED)|SOURCE_CHANGED)/.test(problem.code))forecastData=null;
+      if(/^(LINK_|OUTSIDE_|COLDY_(AUTH|FORBIDDEN|CREDENTIAL_CHANGED|MONITORING_CHANGED|SCOPE_CHANGED)|SOURCE_CHANGED)/.test(problem.code)){
+        forecastData=null;forecastArchive=null;forecastPreviewVersion++;
+      }
       forecastError=problem.message;
     }finally{if(alive(mark)&&sequence===forecastSequence){forecastBusy=false;renderForecast();}}
   }
   const forecastReasons={
+    previous_horizon:'Последний день нового периода выходит за даты прежнего расчёта. Он появится после обновления.',
     stale_membership:'Данные о назначениях ящиков требуют обновления.',
     missing_accounts:'Coldy подтвердил сведения только для части выбранных ящиков.',
     unknown_status:'Состояние части ящиков неизвестно.',
@@ -224,7 +259,11 @@
   }
   function renderForecast(){
     if(!$('pj-forecast'))return;
-    const response=forecastData,report=response?.forecast,period=report?.periods?.find(item=>item.days===forecastDays);
+    const today=currentForecastDay(),response=forecastData?.day&&forecastData.day!==today?null:forecastData;
+    const archive=forecastArchive?.day===today?forecastArchive:null;
+    const historical=!!archive&&!response?.generatedAt;
+    const report=historical?archive.forecast:response?.forecast,generatedAt=historical?archive.generatedAt:response?.generatedAt;
+    const period=report?.periods?.find(item=>item.days===forecastDays);
     const body=$('pj-forecast-report'),rows=$('pj-forecast-rows'),reasons=$('pj-forecast-reasons'),queue=$('pj-forecast-queue');
     body.hidden=!period;rows.replaceChildren();reasons.replaceChildren();reasons.hidden=true;queue.textContent='';queue.hidden=true;
     $('pj-forecast-refresh').disabled=forecastBusy||Date.now()<forecastRetryAt;
@@ -238,21 +277,23 @@
     }
     else if(!message&&(forecastBusy||response?.pending))message='Получаем данные для прогноза…';
     else if(!message&&response)message=({no_selection:'Для расчёта выберите почты мониторинга и привяжите рассылки проекта.',not_configured:'Для расчёта подключите Coldy.',error:'Не удалось получить прогноз. Повторите расчёт.'})[response.state]||'';
+    if(historical)message=[forecastBusy||response?.pending?'Показан последний расчёт. Обновляем прогноз в фоне.':'Показан последний расчёт.',message==='Получаем данные для прогноза…'?'':message].filter(Boolean).join(' ');
+    else if(period&&forecastBusy&&!forecastError&&!response?.message)message='Обновляем прогноз в фоне.';
     health('pj-forecast-health',message,!!forecastError||response?.state==='error');
     if(!period){$('pj-forecast-totals').replaceChildren();$('pj-forecast-context').textContent='';return;}
     const range=period.from===period.to?forecastDate(period.from):forecastDate(period.from)+' – '+forecastDate(period.to);
     const context=[range+' · МСК','выбранных ящиков '+number(report.selectedAccounts),'активных рассылок '+number(report.activeCampaigns)];
-    if(response.generatedAt)context.push('расчёт на '+timestamp(response.generatedAt)+' МСК');
+    if(generatedAt)context.push('расчёт на '+timestamp(generatedAt)+' МСК');
     $('pj-forecast-context').textContent=context.join(' · ');
     const totals=[['Ожидается писем',period.expected],['Первые письма',period.initial],['Повторные письма',period.followups],['Предел по лимитам',period.capacity]];
     const hasScenario=item=>item.expected===null&&Number.isFinite(item.modeled);
     if(hasScenario(period))totals.push(['По разобранной части (сценарий)',period.modeled]);
     metrics('pj-forecast-totals',totals);
-    if(report.queue&&(response.generatedAt||response.progress?.contactsRead>0)){
+    if(report.queue&&(generatedAt||response?.progress?.contactsRead>0)){
       const q=report.queue,parts=['первого письма ждут '+number(q.pendingInitial),'повторного — '+number(q.pendingFollowups)];
       if(q.unresolved>0)parts.push('неизвестен отправитель или следующий шаг у '+number(q.unresolved));
       if(q.unreadCampaigns>0)parts.push('ещё не полностью прочитано рассылок '+number(q.unreadCampaigns));
-      queue.textContent=(response.generatedAt?'В очереди на момент расчёта ':'Среди уже прочитанных адресатов ')+parts.join(', ')+'.';queue.hidden=false;
+      queue.textContent=(generatedAt?'В очереди на момент расчёта ':'Среди уже прочитанных адресатов ')+parts.join(', ')+'.';queue.hidden=false;
     }
     $('pj-forecast-daily').hidden=forecastDays===1;
     const displayedDays=(report.days||[]).filter(day=>day.date>=period.from&&day.date<=period.to),dailyScenario=displayedDays.some(hasScenario);
@@ -263,7 +304,7 @@
       if(dailyScenario)tr.append(node('td','pj-number',hasScenario(day)?number(day.modeled):'—'));
       rows.append(tr);
     }
-    const notes=new Set((report.reasons||[]).map(code=>forecastReasons[code]||'Для части отправок не хватает подтверждённых данных.'));
+    const notes=new Set((report.reasons||[]).filter(code=>code!=='previous_horizon'||forecastDays===7).map(code=>forecastReasons[code]||'Для части отправок не хватает подтверждённых данных.'));
     if(hasScenario(period)||dailyScenario)notes.add('Сценарий показывает, сколько писем можно отправить по известной части очереди, если остальные получатели не займут время выбранных ящиков.');
     if([period.initial,period.followups,period.expected,period.capacity].some(value=>value===null))notes.add('Прочерк означает, что для расчёта не хватает данных.');
     for(const note of notes)reasons.append(node('li','',note));reasons.hidden=!notes.size;
@@ -303,6 +344,7 @@
     if(view==='analytics'&&(recipientImport?.open||recipientImport?.running))return;
     const mark=token(),requestedView=view;
     if(view==='analytics'){
+      void preloadForecast();
       if(!catalog||options.manual||catalogLoadedAt===0||!isEditing()&&Date.now()-catalogLoadedAt>=30000)await loadCatalog();
       if(!alive(mark)||view!==requestedView)return;
       if(ready&&view==='analytics'&&segmentId){const context=currentContext();if(!options.manual&&context?.data&&!context.error&&(isEditing()||Date.now()-(context.loadedAt||0)<30000)){render();return;}await loadSegment(segmentId,options);}
@@ -513,13 +555,15 @@
   async function loadInfrastructure(){
     if(!ready||infraLoading||mailboxPicker?.open)return;
     const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';infraNotice='';render();notify();
-    let initial=false;
+    let initial=false,continuation=false;
     try{const data=await invoke('getProjectInfrastructure',{},mark);if(!alive(mark)||sequence!==infraSequence||!data)return;infrastructure=data;infraLoadedAt=Date.now();
-      initial=data.configured===true&&data.monitoring?.accountIds?.length>0&&!initialSyncAttempted&&!data.nextCursor&&!data.syncPaused&&!data.error&&!(data.retryAfterMs>0)&&(data.stale===true||data.capacity?.stale===true||!recentPoll(Date.parse(data.capacity?.updatedAt)));
+      continuation=!!(data.nextCursor&&data.poolOnly);
+      initial=data.configured===true&&data.monitoring?.accountIds?.length>0&&!initialSyncAttempted&&!data.syncPaused&&!(data.retryAfterMs>0)&&
+        (continuation||!data.nextCursor&&!data.error&&(data.stale===true||data.capacity?.stale===true||!recentPoll(Date.parse(data.capacity?.updatedAt))));
       if(initial)initialSyncAttempted=true;
     }catch(error){if(alive(mark)&&sequence===infraSequence)infraError=failure(error).message;}
     finally{if(alive(mark)&&sequence===infraSequence){infraLoading=false;render();notify();}}
-    if(initial&&alive(mark)&&view==='infrastructure'&&pollVisible())await syncInfrastructure(false,false,true);
+    if(initial&&alive(mark)&&view==='infrastructure'&&pollVisible())await syncInfrastructure(continuation,false,true);
   }
   async function syncInfrastructure(continuation=false,diagnostics=false,automatic=false){
     if(!ready||infraLoading||mailboxPicker?.open||!infrastructure?.monitoring?.accountIds?.length)return;
@@ -559,10 +603,16 @@
     notify();
   }
   async function openMailboxPicker(){
-    if(!ready||view!=='infrastructure'||infraLoading||hasPending()||mailboxPicker?.open)return;
+    if(!ready||view!=='infrastructure'||infraLoading&&!infrastructure?.monitoring||hasPending()||mailboxPicker?.open)return;
     const current=mailboxPicker||{data:null,selected:new Set(),query:'',limit:100,pending:null,error:'',conflict:false,operation:null,sequence:0};mailboxPicker=current;current.open=true;
+    const saved=infrastructure?.monitoring;
+    if(!current.data&&saved?.scopeToken&&Array.isArray(saved.accountIds)){
+      current.selected=new Set(saved.accountIds);
+      const accounts=(infrastructure.accounts||[]).filter(item=>current.selected.has(item.id)&&item.email);
+      if(accounts.length===current.selected.size)current.data={configured:infrastructure.configured,selection:saved,accounts};
+    }
     $('pj-mailbox-search').value=current.query;$('pj-mailbox-dialog').showModal();renderMailboxPicker();notify();
-    if(!current.operation)await loadMailboxSelection(current);
+    if(!current.data&&!current.operation)await loadMailboxSelection(current);
   }
   async function loadMailboxSelection(current=mailboxPicker){
     if(!current?.open||current.pending||current.operation)return;
@@ -575,16 +625,26 @@
   }
   async function refreshMailboxInventory(){
     const current=mailboxPicker;if(!current?.open||current.pending||current.operation||!current.query)return;
-    const mark=token(),sequence=++current.sequence;current.pending='inventory';current.error='';renderMailboxPicker(false);notify();
+    const mark=token(),sequence=++current.sequence,query=current.query;current.pending='inventory';current.error='';renderMailboxPicker(false);notify();
     try{
-      const fresh=await invoke('getProjectInfrastructureSelection',{query:current.query},mark,()=>pickerAlive(current,mark)&&sequence===current.sequence);
+      const fresh=await invoke('getProjectInfrastructureSelection',{query},mark,()=>pickerAlive(current,mark)&&sequence===current.sequence);
       if(!pickerAlive(current,mark)||sequence!==current.sequence||!fresh)return;
       if(current.data?.selection?.scopeToken&&fresh.selection?.scopeToken!==current.data.selection.scopeToken){current.data=null;current.selected.clear();current.conflict=true;current.error='Подключение изменилось. Загрузите сохранённый выбор заново.';}
       else if(current.data&&fresh.selection?.revision!==current.data.selection?.revision){current.conflict=true;current.error='Коллега изменил выбор почт. Загрузите сохранённый выбор и проверьте его перед сохранением.';}
-      else{const kept=(current.data?.accounts||[]).filter(item=>current.selected.has(item.id));
-        current.data={...fresh,accounts:[...new Map(kept.concat(fresh.accounts||[]).map(item=>[item.id,item])).values()]};current.conflict=false;}
-      if(!current.data){current.data=fresh;current.selected=new Set(fresh.selection?.accountIds||[]);}
-    }catch(error){if(pickerAlive(current,mark)&&sequence===current.sequence)current.error=failure(error).message;}
+      else{
+        if(!current.data)current.selected=new Set(fresh.selection?.accountIds||[]);
+        const accounts=new Map((current.data?.accounts||[]).map(item=>[item.id,item]));
+        const matched=Array.isArray(fresh.matchIds)?new Set(fresh.matchIds):null;
+        for(const item of fresh.accounts||[])if(!accounts.has(item.id)||!matched||matched.has(item.id))accounts.set(item.id,item);
+        current.data={...fresh,accounts:[...accounts.values()]};current.conflict=false;current.foundQuery=query;
+      }
+    }catch(error){if(pickerAlive(current,mark)&&sequence===current.sequence){
+      const parsed=failure(error);current.error=parsed.message;
+      if(['COLDY_CREDENTIAL_CHANGED','SOURCE_CHANGED','OUTSIDE_REGISTRY','COLDY_MONITORING_CHANGED'].includes(parsed.code)){
+        current.conflict=true;
+        if(parsed.code!=='COLDY_MONITORING_CHANGED'){current.data=null;current.selected.clear();}
+      }
+    }}
     finally{if(pickerAlive(current,mark)&&sequence===current.sequence){current.pending=null;renderMailboxPicker();render();notify();}}
   }
   async function saveMailboxSelection(retry=false){
@@ -610,16 +670,16 @@
   }
   function renderMailboxPicker(rows=true){
     const current=mailboxPicker;if(!current?.open||view!=='infrastructure'||!$('pj-mailbox-dialog').open)return;
-    const locked=!!current.pending||!!current.operation;
+    const locked=current.pending==='load'||!!current.operation;
     $('pj-mailbox-fields').disabled=locked||!current.data||current.conflict;
     $('pj-mailbox-cancel').textContent=current.operation?'Закрыть':'Отмена';
-    $('pj-mailbox-save').disabled=locked||current.conflict||!current.data?.configured||!mailboxDirty(current);
+    $('pj-mailbox-save').disabled=locked||!!current.pending||current.conflict||!current.data?.configured||!mailboxDirty(current);
     $('pj-mailbox-retry').hidden=!current.operation?.failed;$('pj-mailbox-retry').disabled=!!current.pending;
     $('pj-mailbox-reload').hidden=!current.conflict;$('pj-mailbox-reload').disabled=!!current.pending;
-    const pending=current.pending==='load'?'Загружаем список почт…':current.pending==='inventory'?'Обновляем список из Coldy…':current.pending==='save'?'Сохраняем выбор…':'';
-    health('pj-mailbox-health',current.error||pending||(!current.data?.configured?'Сначала подключите Coldy в настройках.':''),!!current.error);
+    const pending=current.pending==='load'?'Загружаем список почт…':current.pending==='inventory'?'Ищем в Coldy. Доступные ящики можно выбирать.':current.pending==='save'?'Сохраняем выбор…':'';
+    health('pj-mailbox-health',current.error||pending||(current.data?.configured===false?'Сначала подключите Coldy в настройках.':''),!!current.error);
     $('pj-mailbox-count').textContent='Выбрано: '+number(current.selected.size);
-    $('pj-mailbox-inventory').disabled=locked||!current.query;
+    $('pj-mailbox-inventory').disabled=locked||!!current.pending||!current.query;
     if(!rows)return;
     const accounts=[...(current.data?.accounts||[])],known=new Set(accounts.map(item=>item.id));
     for(const id of current.selected)if(!known.has(id))accounts.push({id,email:'Ящик недоступен в текущем списке',missing:true});
@@ -627,10 +687,10 @@
     const root=$('pj-mailbox-rows');root.replaceChildren();
     for(const account of filtered.slice(0,current.limit)){
       const label=node('label','pj-mailbox-row'),checkbox=node('input');checkbox.type='checkbox';checkbox.dataset.monitoringAccount=text(account.id);checkbox.checked=current.selected.has(account.id);checkbox.disabled=locked||!!account.missing&&!checkbox.checked;
-      checkbox.addEventListener('change',()=>{if(!mailboxPicker?.open||current.pending||current.operation||current.conflict)return;if(checkbox.checked)current.selected.add(account.id);else current.selected.delete(account.id);renderMailboxPicker(false);notify();});
+      checkbox.addEventListener('change',()=>{if(mailboxPicker!==current||!current.open||current.pending==='load'||current.operation||current.conflict)return;if(checkbox.checked)current.selected.add(account.id);else current.selected.delete(account.id);renderMailboxPicker(false);notify();});
       const identity=node('span','',account.email||account.name||'Ящик без адреса');if(account.name||account.provider)identity.append(node('small','',[account.name,account.provider].filter(Boolean).join(' · ')));label.append(checkbox,identity);root.append(label);
     }
-    $('pj-mailbox-shown').textContent=filtered.length?'Показано '+number(Math.min(current.limit,filtered.length))+' из '+number(filtered.length)+(query?' по запросу':'')+'.':query?'Совпадений в списке нет. Для поиска используйте кнопку «Найти в Coldy».':'Введите ID, email или название ящика для добавления.';
+    $('pj-mailbox-shown').textContent=filtered.length?'Показано '+number(Math.min(current.limit,filtered.length))+' из '+number(filtered.length)+(query?' по запросу':'')+'.':current.pending==='inventory'?'В доступном списке совпадений пока нет.':query&&current.foundQuery===current.query?'В Coldy совпадений нет.':query?'Совпадений в списке нет. Для поиска используйте кнопку «Найти в Coldy».':'Введите ID, email или название ящика для добавления.';
     $('pj-mailbox-more').hidden=filtered.length<=current.limit;
   }
   function renderCatalog(){
@@ -641,10 +701,8 @@
   }
   function renderAnalytics(){
     const context=currentContext(),configured=context?.data?.configured??catalog?.coldy?.configured,connected=context?.data?.connected??catalog?.coldy?.connected;
-    $('pj-analytics-connect').textContent=configured===undefined?'Подключение Coldy':configured?'Настройки Coldy':'Подключить Coldy';$('pj-analytics-connect').disabled=hasPending();
+    renderConnection('analytics',configured,connected);
     $('pj-analytics-refresh').disabled=catalogLoading||!!context?.loading||!!context?.metricsLoading||!!context?.operation||!!recipientImport?.running;
-    if(configured===undefined){$('pj-analytics-connection').hidden=true;$('pj-analytics-connection').textContent='';}
-    else connectionBox('pj-analytics-connection',configured===true,connected===true);
     health('pj-analytics-health',catalogError||context?.error||context?.metricsError||(catalogLoading?'Загружаем сегменты…':context?.loading?'Получаем рассылки…':context?.metricsLoading?'Получаем показатели…':context?.data?.bindings?.length&&!context.mailings?.generatedAt?'Ожидаем первое обновление выбранных рассылок.':''),!!catalogError||!!context?.error||!!context?.metricsError);
     renderCatalog();
     const empty=$('pj-analytics-empty');empty.hidden=!!segmentId;
@@ -687,7 +745,7 @@
     const total=pinned.length+others.length;
     $('pj-campaign-more').hidden=visible.length>=total;
     $('pj-campaign-shown').textContent=campaigns.length?'Показано '+number(visible.length)+' из '+number(total):'';
-    if(!visible.length){const row=node('tr'),cell=node('td','br-muted',context?.loading?'Загружаем рассылки…':context?.error||catalogError?'Список рассылок недоступен.':configured?'В этом сегменте пока нет выбранных рассылок.':'Подключите Coldy, чтобы выбрать рассылки.');cell.colSpan=6;row.append(cell);tbody.append(row);}
+    if(!visible.length){const row=node('tr'),cell=node('td','br-muted',context?.error||catalogError?'Список рассылок недоступен.':context?.loading||configured==null?'Загружаем рассылки…':configured===false?'Подключите Coldy, чтобы выбрать рассылки.':'В этом сегменте пока нет выбранных рассылок.');cell.colSpan=6;row.append(cell);tbody.append(row);}
     const stats=new Map((context?.mailings?.campaigns||[]).map(item=>[item.id,item]));
     const hasDraft=dirty(context);
     for(const campaign of visible){
@@ -716,14 +774,13 @@
   }
   function renderInfrastructure(){
     const data=infrastructure,accounts=data?.accounts||[];
-    $('pj-infrastructure-connect').textContent=data?.configured?'Настройки Coldy':'Подключить Coldy';$('pj-infrastructure-connect').disabled=hasPending();
-    $('pj-infrastructure-select').disabled=infraLoading||hasPending();
+    renderConnection('infrastructure',data?.configured,data?.connected);
+    $('pj-infrastructure-select').disabled=infraLoading&&!data?.monitoring||hasPending();
     $('pj-infrastructure-refresh').disabled=infraLoading||!data?.monitoring?.accountIds?.length;
     const diagnosticCursor=!!data?.nextCursor&&data.poolOnly!==true;
     $('pj-infrastructure-continue').hidden=!data?.nextCursor||diagnosticCursor;$('pj-infrastructure-continue').disabled=infraLoading;
     $('pj-diagnostics-refresh').disabled=infraLoading||!data?.monitoring?.accountIds?.length;
     $('pj-diagnostics-refresh').textContent=diagnosticCursor?'Продолжить диагностику':'Обновить диагностику';
-    connectionBox('pj-infrastructure-connection',data?.configured===true,data?.connected===true);
     const progress=data?.syncProgress||data?.detailProgress,steps=data?.nextCursor&&progress?number(progress.completed)+' из '+number(progress.total):'';
     const progressText=steps?(diagnosticCursor?'Диагностика ящиков':'Карта назначений и расписания')+' · '+steps:'';
     const syncError=infraError||data?.error?.message;
@@ -737,7 +794,7 @@
     const busy=all.filter(item=>poolState(item)==='busy').length,free=all.filter(item=>poolState(item)==='free').length;
     metrics('pj-infrastructure-totals',[['В мониторинге',selectedCount],['Свободны',selectedCount===null?null:free],['Заняты',selectedCount===null?null:busy],['Занятость неизвестна',selectedCount===null?null:Math.max(0,selectedCount-free-busy)]]);
     const empty=$('pj-infrastructure-empty');empty.hidden=all.length>0;
-    empty.textContent=infraLoading?'Получаем список из Coldy…':!data?.configured?'Подключите Coldy, чтобы увидеть почтовые ящики проекта.':data?.state==='no_selection'||data?.monitoring&&!data.monitoring.accountIds?.length?'Выберите почты для мониторинга кнопкой «Выбрать почты».':infraError||data?.state==='error'?'Не удалось получить список ящиков. Повторите синхронизацию.':data?.state==='not_synced'?'Почтовые ящики ещё не синхронизированы. Нажмите «Обновить из Coldy».':'Выбранные почты пока недоступны. Обновите список через «Выбрать почты».';
+    empty.textContent=syncError?'Не удалось получить список ящиков. Повторите синхронизацию.':infraLoading||data?.configured==null?'Получаем список из Coldy…':data.configured===false?'Подключите Coldy, чтобы увидеть почтовые ящики проекта.':data.state==='no_selection'||data.monitoring&&!data.monitoring.accountIds?.length?'Выберите почты для мониторинга кнопкой «Выбрать почты».':data.state==='not_synced'?'Почтовые ящики ещё не синхронизированы. Нажмите «Обновить из Coldy».':'Выбранные почты пока недоступны. Обновите список через «Выбрать почты».';
     $('pj-infrastructure-content').hidden=!all.length;
     $('pj-infrastructure-updated').textContent=selectedCount>0?
       [capacity?.updatedAt?'Занятость на '+timestamp(capacity.updatedAt)+' МСК':'','Обновление раз в минуту, пока раздел открыт'].filter(Boolean).join(' · '):'';
@@ -771,14 +828,16 @@
     return parts.join(', ');
   }
   function renderCampaignSchedule(campaign,cell){
-    const schedule=campaign.schedule,days=scheduleDays(schedule?.days);
-    if(!days||!schedule?.from||!schedule.to){cell.append(node('span','pj-unavailable','График неизвестен'));return;}
+    const schedule=campaign.schedule||campaign.lastKnownSchedule,days=scheduleDays(schedule?.days);
+    const note={pending:'Запрашиваем график…',error:'Не удалось проверить график',unavailable:'Coldy не передал график',stale:'График требует обновления'}[campaign.scheduleState];
+    if(!days||!schedule?.from||!schedule.to){cell.append(node('span','pj-unavailable',note||'График неизвестен'));return;}
     cell.append(node('span','',days+' · '+schedule.from+'–'+schedule.to));
     cell.append(node('small','pj-cell-note',schedule.timezone==='Europe/Moscow'?'МСК':schedule.timezone||'Часовой пояс неизвестен'));
     if(Number.isFinite(schedule.gapStartSeconds)&&Number.isFinite(schedule.gapEndSeconds)){
       const gap=schedule.gapStartSeconds===schedule.gapEndSeconds?number(schedule.gapStartSeconds):number(schedule.gapStartSeconds)+'–'+number(schedule.gapEndSeconds);
       cell.append(node('small','pj-cell-note','Интервал между письмами '+gap+' с'));
     }
+    if(campaign.lastKnownSchedule)cell.append(node('small','pj-cell-note',['Сохранённый график',poolDate(campaign.scheduleUpdatedAt),note].filter(Boolean).join(' · ')));
   }
   function renderMailboxCapacity(accounts,capacity){
     const campaignMap=new Map((capacity?.campaigns||[]).map(campaign=>[campaign.id,campaign]));
@@ -904,14 +963,22 @@
     $('pj-infrastructure-select').addEventListener('click',()=>openMailboxPicker());
     $('pj-mailbox-cancel').addEventListener('click',()=>{closeMailboxPicker();render();});
     $('pj-mailbox-dialog').addEventListener('cancel',event=>{event.preventDefault();closeMailboxPicker();render();});
-    $('pj-mailbox-search').addEventListener('input',()=>{if(!mailboxPicker||mailboxPicker.pending||mailboxPicker.operation)return;mailboxPicker.query=$('pj-mailbox-search').value.trim();mailboxPicker.limit=100;renderMailboxPicker();});
+    $('pj-mailbox-search').addEventListener('input',()=>{
+      const current=mailboxPicker;if(!current||current.pending==='load'||current.operation||current.conflict)return;
+      const query=$('pj-mailbox-search').value.trim();
+      if(current.query!==query){
+        if(current.pending==='inventory'){current.sequence++;current.pending=null;}
+        current.error='';current.foundQuery=null;current.query=query;current.limit=100;
+      }
+      renderMailboxPicker();
+    });
     $('pj-mailbox-more').addEventListener('click',()=>{if(!mailboxPicker)return;mailboxPicker.limit+=100;renderMailboxPicker();});
-    $('pj-mailbox-clear').addEventListener('click',()=>{if(!mailboxPicker||mailboxPicker.pending||mailboxPicker.operation)return;mailboxPicker.selected.clear();renderMailboxPicker();notify();});
+    $('pj-mailbox-clear').addEventListener('click',()=>{if(!mailboxPicker||mailboxPicker.pending==='load'||mailboxPicker.operation||mailboxPicker.conflict)return;mailboxPicker.selected.clear();renderMailboxPicker();notify();});
     $('pj-mailbox-inventory').addEventListener('click',()=>refreshMailboxInventory());
     $('pj-mailbox-search').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();refreshMailboxInventory();}});
     $('pj-mailbox-save').addEventListener('click',()=>saveMailboxSelection());$('pj-mailbox-retry').addEventListener('click',()=>saveMailboxSelection(true));
     $('pj-mailbox-reload').addEventListener('click',()=>loadMailboxSelection());
   }
-  window.RegistryProject={configure,show,refresh,lock,invalidate,hasPending,isLoading,isEditing};
+  window.RegistryProject={configure,show,refresh,lock,invalidate,confirmConnection,hasPending,isLoading,isEditing};
 })();
 </script>

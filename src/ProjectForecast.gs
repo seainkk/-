@@ -1,3 +1,59 @@
+/** A completed report is historical evidence while current counters and recipients refresh. */
+function projectForecastArchive_(saved) {
+  if (!saved) return null;
+  if (!saved.generatedAt || !saved.forecast) return saved.lastReport || null;
+  return {selection:saved.selection, demandScope:saved.demandScope, day:saved.day, forecast:saved.forecast, generatedAt:saved.generatedAt};
+}
+
+function projectForecastPreviewRange_(archive,day) {
+  if (!archive || !archive.forecast || !archive.generatedAt) return null;
+  if (archive.day === day) return archive.forecast;
+  var delta = Date.parse(day) - Date.parse(archive.day);
+  if (delta !== 86400000 || !Array.isArray(archive.forecast.days)) return null;
+  var report = archive.forecast, byDate = new Map(report.days.map(function (row) { return [row.date,row]; }));
+  var days = [];
+  for (var i=1;i<=7;i++) {
+    var date = new Date(Date.parse(day) + i*86400000).toISOString().slice(0,10);
+    days.push(byDate.get(date) || {date:date,initial:null,followups:null,expected:null,capacity:null,modeled:null});
+  }
+  var periods = [1,3,7].map(function (count) {
+    var rows = days.slice(0,count), result = {days:count,from:rows[0].date,to:rows[count-1].date};
+    ['initial','followups','expected','capacity','modeled'].forEach(function (field) {
+      result[field] = rows.every(function (r) { return Number.isSafeInteger(r[field]); }) ?
+        rows.reduce(function (total,r) { return total+r[field]; },0) : null;
+    });
+    return result;
+  });
+  return Object.assign({},report,{days:days,periods:periods,startDate:days[0].date,
+    reasons:(report.reasons || []).concat('previous_horizon')});
+}
+
+function getProjectForecastPreview_(request) {
+  return api_(function () {
+    projectAnalyticsInput_(request, []);
+    var context = authorize_(), settings = coldySettings_(context);
+    if (!settings.configured) return null;
+    var owner = projectMonitoringOwner_(settings.credentialHash);
+    var saved = projectForecastArchive_(coldyLoad_(context,'sendingforecast',owner));
+    var day = new Date(Date.now() + 10800000).toISOString().slice(0,10);
+    var forecast = projectForecastPreviewRange_(saved,day);
+    if (!forecast || !saved.demandScope) return null;
+    var observed = {}, monitoring = projectMonitoringRead_(context,settings,observed), signature = projectMonitoringSignature_(context,monitoring);
+    if (!monitoring.accountIds.length || saved.selection !== signature) return null;
+    var inventory = projectInfraRead_(context,settings);
+    if (!projectInfraMonitoringMatches_(inventory,signature) || !inventory.capacity) return null;
+    // Check each campaign against today's actual segment ownership. Never fetch recipient pages for a preview.
+    var guard = projectInfraMonitoringGuard_(context,settings.credentialHash,signature,observed);
+    return locked_(function () {
+      var fresh = guard(), visible = projectCapacitySelected_(fresh,inventory.capacity);
+      var membership = visible.capacity.campaigns.map(function (c) { return {id:c.id,segmentId:visible.owners[c.id].segmentId}; });
+      var scope = projectForecastDemandScope_(signature,{capacity:{campaigns:membership}});
+      if (scope !== saved.demandScope || new Date(Date.now()+10800000).toISOString().slice(0,10) !== day) return null;
+      return {forecast:forecast, generatedAt:saved.generatedAt, previewScope:scope, day:day};
+    });
+  });
+}
+
 /** The client chooses a display period. All provider IDs and forecast inputs are resolved on the server. */
 function getProjectSendingForecast_(request) {
   return api_(function () {
@@ -7,10 +63,11 @@ function getProjectSendingForecast_(request) {
       return {state:state, pending:false, retryAfterMs:0, forecast:null, generatedAt:null, message:message};
     }
     if (!settings.configured) return empty('not_configured', 'Подключите Coldy в настройках проекта.');
-    var monitoring = projectMonitoringRead_(context, settings);
+    var observation = {}, monitoring = projectMonitoringRead_(context, settings, observation);
     var signature = projectMonitoringSignature_(context, monitoring);
+    var checkSelection = projectInfraMonitoringGuard_(context,settings.credentialHash,signature,observation);
     if (!monitoring.accountIds.length) {
-      projectInfraMonitoringCurrent_(context, settings.credentialHash, signature);
+      checkSelection();
       return empty('no_selection', 'Для расчёта выберите почты проекта в разделе «Инфраструктура».');
     }
 
@@ -50,8 +107,10 @@ function getProjectSendingForecast_(request) {
       if (sameDemand && ready && saved.scope === projectForecastScope_(signature,infra) && saved.inputs === projectForecastInputStamp_(infra))
         return projectForecastResult_(saved);
       var paused = empty('partial',sameDemand && saved.message || 'Следующее обновление будет доступно после паузы.');
+      paused.day = day;
       paused.retryAfterMs = Math.max(0,saved.retryAt - Date.now());
       if (sameDemand) paused.progress = saved.progress;
+      if (matching && infra.capacity.updatedAt) paused.previewScope = projectForecastDemandScope_(signature,infra);
       return paused;
     }
     if (!ready && !continueRecipients) {
@@ -59,8 +118,10 @@ function getProjectSendingForecast_(request) {
         infra.error && infra.error.message || 'Обновляем назначения, расписания и лимиты. Проверено почт: ' +
           infra.detailProgress.completed + ' из ' + infra.detailProgress.total + '.');
       waiting.retryAfterMs = infra.retryAfterMs || (infra.error ? 60000 : 0);
+      waiting.day = day;
       waiting.pending = !waiting.retryAfterMs;
       if (sameDemand) waiting.progress = saved.progress;
+      if (matching && infra.capacity.updatedAt) waiting.previewScope = projectForecastDemandScope_(signature,infra);
       var reportAge = saved && checked - Date.parse(saved.generatedAt);
       // A pending diagnostics cursor can coexist with a verified map and still-fresh mailbox observations.
       if (saved && saved.forecast && saved.generatedAt && saved.selection === signature && saved.day === day &&
@@ -86,15 +147,20 @@ function getProjectSendingForecast_(request) {
       scope:scope, selection:signature, day:day, startedAt:now, generatedAt:previous ? saved.generatedAt : null,
       forecast:previous || null, progress:{campaignsDone:0,campaignsTotal:ids.length,contactsRead:0}, work:{}, retryAt:0
     };
+    var archive = projectForecastArchive_(saved);
+    if (archive && archive.selection === signature && archive.demandScope === demandScope &&
+        (archive.day === day || Date.parse(day)-Date.parse(archive.day) === 86400000))
+      state.lastReport = archive;
+    else delete state.lastReport;
     if (!ready || state.scope !== scope || state.inputs && state.inputs !== inputs) { state.forecast = null; state.generatedAt = null; }
     state.demandScope = demandScope; state.scope = scope;
     state.inputs = inputs;
     state.retryAt = 0; state.message = '';
-    var credential = settings.credentialHash, project = registryProjectId_();
+    var project = registryProjectId_();
     function guard(id) {
       if (registryProjectId_() !== project || !segments.has(id))
         fail_('COLDY_MONITORING_CHANGED', 'Изменился проект рассылки. Обновите прогноз.');
-      var fresh = projectInfraMonitoringCurrent_(context, credential, signature);
+      var fresh = checkSelection();
       var ownerNow = projectCapacityOwners_(fresh, [id])[id];
       if (!ownerNow || ownerNow.bindingState !== 'linked' || ownerNow.segmentId !== segments.get(id) || ownerNow.segmentProjectId !== project)
         fail_('COLDY_MONITORING_CHANGED', 'Изменилась привязка рассылки. Обновите прогноз.');
@@ -122,7 +188,7 @@ function getProjectSendingForecast_(request) {
     }
     // Optimistic checkpoint. Competing tabs can read the same page, but only one advances it.
     var committed = locked_(function () {
-      var fresh = projectInfraMonitoringCurrent_(context, credential, signature);
+      var fresh = checkSelection();
       var current = projectInfraPublic_(fresh, projectInfraRead_(fresh, settings), signature);
       if (new Date(Date.now() + 10800000).toISOString().slice(0,10) !== day || projectForecastDemandScope_(signature,current) !== demandScope)
         fail_('COLDY_MONITORING_CHANGED', 'Изменились почты или рассылки проекта. Обновите прогноз.');
@@ -131,6 +197,7 @@ function getProjectSendingForecast_(request) {
       if (!currentReady || currentScope !== scope || currentInputs !== inputs) {
         state.work = collected; state.forecast = null; state.generatedAt = null;
       }
+      if (!state.work) delete state.lastReport;
       var latest = coldyLoad_(fresh, 'sendingforecast', owner);
       if ((latest && latest.revision) !== receipt) {
         if (latest && latest.day === day && projectForecastSameDemand_(latest,signature,current)) {
@@ -227,5 +294,5 @@ function projectForecastResult_(state) {
   return {state:retry ? 'partial' : state.work ? 'loading' :
       state.forecast && state.forecast.periods.some(function (p) { return p.expected === null; }) ? 'partial' : 'ready',
     pending:!!state.work && !retry, retryAfterMs:retry, message:state.message || '', generatedAt:state.generatedAt,
-    forecast:state.forecast, progress:state.progress};
+    forecast:state.forecast, progress:state.progress, previewScope:state.demandScope, day:state.day};
 }

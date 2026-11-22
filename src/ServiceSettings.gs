@@ -2,7 +2,8 @@
 function getServiceLimits_(request) {
   return api_(function () {
     var input = object_(request), provider = input.provider;
-    if (Object.keys(input).length !== 1 || ['coldy','promouser'].indexOf(provider) < 0)
+    var connectionOnly = provider === 'coldy' && input.connectionOnly === true;
+    if (['coldy','promouser'].indexOf(provider) < 0 || Object.keys(input).length !== (connectionOnly ? 2 : 1))
       fail_('INVALID_REQUEST','Выберите сервис для просмотра лимитов.');
     var context = authorize_(), project = registryProjectId_(), promo = provider === 'promouser';
     var settings = promo ? pvSettings_(context) : coldySettings_(context);
@@ -18,7 +19,13 @@ function getServiceLimits_(request) {
       result.active = null; result.message = retryMessage; result.retryAfterMs = until - Date.now();
     } else {
       try {
-        result = promo ? pvServiceLimits_(context, settings) : coldyServiceLimits_(context, settings);
+        if (connectionOnly) {
+          var verifiedAt = Date.parse(settings.checkedAt), age = Date.now() - verifiedAt;
+          result.checkedAt = settings.connected && age >= 0 && age < 45000 ? settings.checkedAt : coldyProbeConnection_(context,settings.credentialHash).checkedAt;
+          result.active = true;
+        } else {
+          result = promo ? pvServiceLimits_(context, settings) : coldyServiceLimits_(context, settings);
+        }
       } catch (error) {
         var code = error.registryCode;
         var messages = {
@@ -55,6 +62,13 @@ function getServiceLimits_(request) {
         result.items = []; result.checkedAt = null; result.message = 'Обновите подключение Promouser.';
       }
       result.items.push({label:'Лимит автооплаты за заказ',value:latest.autoPayLimitUsd,unit:'USD'});
+    } else if (result.active && !latest.connected) {
+      result.active = null; result.checkedAt = null; result.items = [];
+      result.message = 'Подключение Coldy требует повторной проверки.';
+    } else if (!connectionOnly && result.active === null && latest.connected) {
+      // A delayed quota or unavailable mailbox does not undo a just-confirmed credential.
+      var proofAge = Date.now() - Date.parse(latest.checkedAt);
+      if (proofAge >= 0 && proofAge < 60000) { result.active = true; result.checkedAt = latest.checkedAt; }
     }
     return result;
   });

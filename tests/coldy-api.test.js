@@ -25,7 +25,7 @@ test('connection saves report credential rotation without treating same-key sett
   assert.equal(f.calls.fetch.length,0);
 });
 
-test('campaign catalog reads and connection counts use the current project even for an existing provider cache',()=>{
+test('campaign catalog reads use the current project even for an existing provider cache',()=>{
   const extra='710f6f14-1f31-4571-9ca3-d3ec89ba22aa';
   const f=fixture({transport:({response})=>response({items:[{id:CAMPAIGN,name:'Закреплена',status:'Active'},{id:extra,name:'Общая',status:'Draft'}]})});
   f.configure();
@@ -35,7 +35,6 @@ test('campaign catalog reads and connection counts use the current project even 
   f.c.coldyCampaignId_=id=>id.toLowerCase();
   f.context.properties.getProperties=()=>({});
   f.c.coldyCampaignRegistry_=()=>({credentialHash:f.c.coldyCredentialHash_(f.context),bindings:[{segmentId:'foreign_segment',campaignId:CAMPAIGN}]});
-  assert.equal(f.c.testColdyConnection_({}).campaignCount,1);
   for(const refresh of [false,true]) assert.deepEqual(plain(f.c.listColdyCampaigns_({refresh})).campaigns.map(item=>item.id),[extra]);
   project='neosender';
   const own=plain(f.c.listColdyCampaigns_({}));assert.equal(own.cached,true);assert.deepEqual(own.campaigns.map(item=>item.id),[CAMPAIGN,extra]);
@@ -84,6 +83,7 @@ function fixture(options={}) {
     UrlFetchApp:{fetch:(url,request)=>{
       assert.equal(locked,false,'Provider HTTP must be outside global lock');assert.equal(request.followRedirects,false);calls.fetch.push({url,request:plain(request)});
       if(options.transport)return options.transport({url,request,response,calls,properties,files});
+      if(url.endsWith('/leads/reply-tags'))return response([{id:12,name:KEY}]);
       return response({items:[{id:CAMPAIGN,name:'Кухни',status:'Draft',private_provider_data:KEY}]});
     }}
   });
@@ -124,22 +124,43 @@ test('removing Coldy key pauses its selected provider and never silently activat
   assert.equal(f.c.configureColdy_({emailValidationProvider:'promouser'}).emailValidationProvider,'promouser');
 });
 
-test('connection check makes one read-only fixed-host request and returns only normalized metadata',()=>{
+test('connection check makes one small authenticated read without loading the campaign catalog or saving the tags',()=>{
   const f=fixture();f.configure();const result=f.c.testColdyConnection_({});
-  assert.equal(result.connected,true);assert.equal(result.campaignCount,1);assert.equal(f.c.getColdySettings_({}).connected,true);
-  assert.equal(f.calls.fetch.length,1);const call=f.calls.fetch[0];assert.equal(call.url,'https://developer.coldy.ai/api/v1/campaigns');assert.equal(call.request.method,'get');assert.equal(call.request.headers.Authorization,`Bearer ${KEY}`);assert.equal(call.url.includes(KEY),false);assert.equal(call.request.payload,undefined);
-  const list=plain(f.c.listColdyCampaigns_({}));assert.deepEqual(list.campaigns,[{id:CAMPAIGN,name:'Кухни',status:'Draft'}]);assert.equal(list.cached,true);assert.equal(JSON.stringify(list).includes(KEY),false);assert.equal(f.calls.fetch.length,1);
+  assert.deepEqual(Object.keys(result).sort(),['checkedAt','connected']);assert.equal(result.connected,true);assert.equal(f.c.getColdySettings_({}).connected,true);
+  assert.equal(f.calls.fetch.length,1);const call=f.calls.fetch[0];assert.equal(call.url,'https://developer.coldy.ai/api/v1/leads/reply-tags');assert.equal(call.request.method,'get');assert.equal(call.request.headers.Authorization,`Bearer ${KEY}`);assert.equal(call.url.includes(KEY),false);assert.equal(call.request.payload,undefined);
+  assert.equal(f.calls.creates.length+f.calls.updates.length,0);
+  assert.ok(!JSON.stringify(result).includes(KEY));assert.equal(f.c.coldyCachedCampaigns_(f.context),null);
+  assert.throws(()=>f.c.coldyPath_('GET','/leads/reply-tags?limit=5'),/INVALID_REQUEST/);
+  assert.throws(()=>f.c.coldyPath_('POST','/leads/reply-tags'),/INVALID_REQUEST/);
+  for(const body of [[{id:0}],{items:null},{}]){
+    const bad=fixture({transport:({response})=>response(body)});bad.configure();assert.throws(()=>bad.c.testColdyConnection_({}),/COLDY_RESPONSE/);assert.equal(bad.c.getColdySettings_({}).connected,false);
+  }
 });
 
 test('credential rotation cannot return metadata cached under a previous organization',()=>{
-  const f=fixture();f.configure();f.c.testColdyConnection_({});const first=plain(f.c.coldyCachedCampaigns_(f.context));assert.ok(first);
+  const f=fixture();f.configure();f.c.listColdyCampaigns_({});const first=plain(f.c.coldyCachedCampaigns_(f.context));assert.ok(first);
   const settings=f.c.configureColdy_({apiKey:'second_organization_fixture_secret'});assert.equal(settings.connected,false);assert.equal(f.c.coldyCachedCampaigns_(f.context),null);
   f.c.listColdyCampaigns_({});assert.equal(f.calls.fetch.length,2);assert.equal(f.calls.fetch[1].request.headers.Authorization,'Bearer second_organization_fixture_secret');
   assert.equal(f.c.getColdySettings_({}).connected,true);
 });
 
+test('settings can verify Coldy before any mailbox read and reuse only a fresh, current-key receipt',()=>{
+  let reject=false;
+  const f=fixture({transport:({response})=>response(reject?{}:[],reject?401:200)});
+  vm.runInContext(readFileSync(new URL('../src/ServiceSettings.gs',import.meta.url),'utf8'),f.c);
+  f.c.registryProjectId_=()=>'numshield';
+  f.c.coldyServiceLimits_=()=>assert.fail('The status check must not wait for selected mailbox limits');
+  const check=()=>f.c.getServiceLimits_({provider:'coldy',connectionOnly:true});
+  assert.equal(check().configured,false);assert.equal(f.calls.fetch.length,0);
+  f.configure();const first=check();assert.equal(first.active,true);assert.deepEqual(plain(first.items),[]);
+  assert.equal(check().checkedAt,first.checkedAt);assert.equal(f.calls.fetch.length,1);
+  f.tick(45001);assert.notEqual(check().checkedAt,first.checkedAt);assert.equal(f.calls.fetch.length,2);
+  reject=true;f.c.configureColdy_({apiKey:'new_synthetic_key'});assert.equal(check().active,false);assert.equal(f.calls.fetch.length,3);
+  assert.equal(f.c.getColdySettings_({}).connected,false);
+});
+
 test('an organization key changed during a request never records that response as the new connection',()=>{
-  const f=fixture({transport:({response,properties})=>{properties.set('COLDY_API_KEY','rotated_during_response');return response({items:[{id:CAMPAIGN,name:'Old org',status:'Draft'}]});}});f.configure();
+  const f=fixture({transport:({response,properties})=>{properties.set('COLDY_API_KEY','rotated_during_response');return response([]);}});f.configure();
   assert.throws(()=>f.c.testColdyConnection_({}),/COLDY_CREDENTIAL_CHANGED/);assert.equal(f.c.getColdySettings_({}).connected,false);assert.equal(f.calls.creates.length,0);
 });
 
@@ -150,7 +171,7 @@ test('expired campaign cache refreshes once; explicit refresh bypasses a fresh c
 
 test('malformed campaign metadata is not stored as a successful connection',()=>{
   for(const body of [{items:[{id:'bad-id',name:'X',status:'Draft'}]},{items:[{id:CAMPAIGN,name:'X',status:'Draft'},{id:CAMPAIGN,name:'Y',status:'Draft'}]},{items:null}]){
-    const f=fixture({transport:({response})=>response(body)});f.configure();assert.throws(()=>f.c.testColdyConnection_({}),/COLDY_RESPONSE/);assert.equal(f.c.getColdySettings_({}).connected,false);assert.equal(f.calls.creates.length,0);
+    const f=fixture({transport:({response})=>response(body)});f.configure();assert.throws(()=>f.c.listColdyCampaigns_({}),/COLDY_RESPONSE/);assert.equal(f.c.getColdySettings_({}).connected,false);assert.equal(f.calls.creates.length,0);
   }
 });
 
@@ -209,7 +230,7 @@ test('failed connection read can be repeated without claiming a saved upload or 
 test('failed read preserves the previously confirmed campaign snapshot and connection timestamp',()=>{
   let unavailable=false;
   const f=fixture({transport:({response})=>{if(unavailable)throw new Error('Timeout '+KEY);return response({items:[{id:CAMPAIGN,name:'Existing',status:'Draft'}]});}});
-  f.configure();f.c.testColdyConnection_({});
+  f.configure();f.c.listColdyCampaigns_({});
   const cached=plain(f.c.coldyCachedCampaigns_(f.context)),settings=plain(f.c.getColdySettings_({})),writes=f.calls.creates.length+f.calls.updates.length;
   unavailable=true;f.tick(1000);
   assert.throws(()=>f.c.testColdyConnection_({}),/COLDY_NETWORK/);

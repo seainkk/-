@@ -15,6 +15,7 @@ function projectCapacityValidate_(saved) {
         item.waitSchedule !== null && typeof item.waitSchedule !== 'boolean') invalid();
     if (item.allSendersSelected !== undefined && typeof item.allSendersSelected !== 'boolean') invalid();
     if (item.scheduleUpdatedAt != null && !Number.isFinite(Date.parse(item.scheduleUpdatedAt))) invalid();
+    if (item.scheduleCheck !== undefined && ['pending','checked','error','denied','invalid'].indexOf(item.scheduleCheck) < 0) invalid();
     ids.add(item.id);
     var s = item.schedule;
     if (s !== null && (!s || !projectCapacitySchedule_(s, item.id) ||
@@ -122,54 +123,88 @@ function projectCapacityAdvance_(context, settings, state) {
       var mapping = projectCapacityMappings_(response, state.detailIds, settings.key, receivedAt);
       state.verifiedProvider = true;
       var selected = projectCapacitySelected_(context, mapping).capacity;
-      if (state.finalCapacityCheck && state.selectedOnly && state.cursorIndex === state.detailIds.length) {
-        // This is the last provider read of a long pass. Keep only schedules that were actually
-        // observed for a campaign still present; newly active campaigns have no verified schedule.
-        var previous = new Map(state.capacity.campaigns.map(function (c) { return [c.id,c]; }));
-        selected.campaigns.forEach(function (c) {
-          var old = previous.get(c.id);
-          if (!old) return;
+      var confirmation = state.finalCapacityCheck && state.selectedOnly && state.cursorIndex === state.detailIds.length;
+      var previous = new Map((state.capacity ? state.capacity.campaigns : []).map(function (c) { return [c.id,c]; }));
+      selected.campaigns.forEach(function (c) {
+        var old = previous.get(c.id);
+        if (old) {
           c.schedule = old.schedule;
           c.waitSchedule = old.waitSchedule;
-          c.scheduleUpdatedAt = old.scheduleUpdatedAt || null;
-        });
-        state.capacity = selected;
+          c.scheduleUpdatedAt = old.scheduleUpdatedAt === undefined && old.schedule ? state.capacity.updatedAt : old.scheduleUpdatedAt || null;
+        }
+        c.scheduleCheck = confirmation && old ? old.scheduleCheck || 'checked' : 'pending';
+      });
+      state.capacity = selected;
+      if (confirmation) {
         state.inventoryAt = selected.updatedAt;
         state.finalMembershipConfirmed = true;
         delete state.capacityWork;
         return;
       }
-      state.capacity = selected;
       work.mapped = true;
       // Publish assignments before waiting for any individual campaign schedule.
       if (state.poolOnly && state.capacity.campaigns.length) return;
     }
-    var campaigns = state.capacity.campaigns, currentCampaigns = projectCapacitySelected_(context,state.capacity).capacity.campaigns;
-    var visibleIds = new Set(currentCampaigns.map(function (campaign) { return campaign.id; }));
+    var campaigns = state.capacity.campaigns, scoped = projectCapacitySelected_(context,state.capacity);
+    var visibleIds = new Set(scoped.capacity.campaigns.map(function (campaign) { return campaign.id; }));
+    var project = typeof registryProjectId_ === 'function' ? registryProjectId_() : 'numshield';
+    var parallel = typeof UrlFetchApp !== 'undefined' && typeof UrlFetchApp.fetchAll === 'function';
     var deadline = Date.now() + PROJECT_INFRASTRUCTURE.detailBudgetMillis;
     var first = work.cursor, stop = Math.min(first + PROJECT_INFRASTRUCTURE.batch, campaigns.length);
-    for (; work.cursor < stop; work.cursor++) {
-      if (work.cursor > first && Date.now() >= deadline) break;
-      var campaign = campaigns[work.cursor];
-      if (!visibleIds.has(campaign.id)) continue;
-      try {
-        var detail = read('/campaigns/' + campaign.id);
+    function finished(c) { return ['checked','denied','invalid'].indexOf(c.scheduleCheck) >= 0; }
+    while (work.cursor < stop && (work.cursor === first || Date.now() < deadline)) {
+      var end = Math.min(stop, work.cursor + (parallel ? COLDY.readBatchSize : 1));
+      var group = campaigns.slice(work.cursor,end).filter(function (c) {
+        return visibleIds.has(c.id) && !finished(c);
+      });
+      var ids = group.map(function (c) { return c.id; });
+      function guard() {
+        // The last guard starts on receipt, before potentially slow Drive ownership checks.
+        receivedAt = new Date().toISOString();
+        var fresh = projectInfraMonitoringCurrent_(context,settings.credentialHash,state.monitoringSignature);
+        var owners = projectCapacityOwners_(fresh,ids);
+        if ((typeof registryProjectId_ === 'function' && registryProjectId_() !== project) || ids.some(function (id) {
+          var owner = owners[id];
+          return !owner || owner.bindingState !== 'linked' || owner.segmentProjectId !== project || owner.segmentId !== scoped.owners[id].segmentId;
+        })) fail_('COLDY_MONITORING_CHANGED','Изменилась привязка рассылки к сегменту. Обновите данные.');
+      }
+      var responses = ids.length ? coldyGetBatch_(context,ids.map(function (id) { return '/campaigns/' + id; }),guard,true) : [];
+      var retry = null;
+      group.forEach(function (campaign,index) {
+        var error = responses[index].error;
+        if (error) {
+          campaign.scheduleCheck = 'error';
+          if (error.registryCode === 'COLDY_NOT_FOUND' || error.registryCode === 'COLDY_FORBIDDEN') {
+            campaign.scheduleCheck = 'denied'; campaign.schedule = null; campaign.scheduleUpdatedAt = null; campaign.waitSchedule = null;
+            return;
+          }
+          if (['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE'].indexOf(error.registryCode) < 0) throw error;
+          if (!retry || (error.retryAfterMs || 0) > (retry.retryAfterMs || 0)) retry = error;
+          return;
+        }
+        var detail = responses[index].value;
         if (!detail || !coldyUuid_(detail.id) || detail.id.toLowerCase() !== campaign.id || detail.status !== 'Active')
           fail_('COLDY_INFRA_ACCOUNT_CHANGED', 'Рассылка изменилась после получения карты назначений.');
         campaign.name = projectInfraText_(detail.name, settings.key, 1000) || campaign.name;
         campaign.waitSchedule = typeof detail.wait_schedule === 'boolean' ? detail.wait_schedule : null;
-        campaign.schedule = projectCapacitySchedule_(detail.schedule, campaign.id);
+        var schedule = projectCapacitySchedule_(detail.schedule, campaign.id);
+        if (detail.schedule != null && !schedule) {
+          campaign.scheduleCheck = 'invalid';
+          return;
+        }
+        campaign.schedule = schedule;
         campaign.scheduleUpdatedAt = receivedAt;
-      } catch (error) {
-        if (error.registryCode !== 'COLDY_NOT_FOUND' && error.registryCode !== 'COLDY_FORBIDDEN') throw error;
-        // The complete membership is still evidence of an assignment; the window is unknown.
-        campaign.schedule = null;
-        campaign.scheduleUpdatedAt = null;
-      }
+        campaign.scheduleCheck = 'checked';
+      });
+      while (work.cursor < end && (!visibleIds.has(campaigns[work.cursor].id) || finished(campaigns[work.cursor]))) work.cursor++;
+      if (retry) throw retry;
     }
     if (work.cursor === campaigns.length) delete state.capacityWork;
   } catch (error) {
     if (projectInfraScopeError_(error) || error.registryCode === 'COLDY_CREDENTIAL_CHANGED') throw error;
+    (group || []).forEach(function (campaign) {
+      if (['checked','denied','invalid'].indexOf(campaign.scheduleCheck) < 0) campaign.scheduleCheck = 'error';
+    });
     if (state.capacity && (!work.mapped || error.registryCode === 'COLDY_INFRA_ACCOUNT_CHANGED' || error.registryCode === 'COLDY_AUTH')) state.capacity.stale = true;
     state.lastError = projectInfraError_(error); state.warnings.push(state.lastError.message);
     if (['COLDY_RATE_LIMIT','COLDY_NETWORK','COLDY_UNAVAILABLE'].indexOf(error.registryCode) !== -1) {
@@ -216,10 +251,16 @@ function projectCapacityPublic_(context, settings, saved, result) {
     // In older snapshots schedules were fetched after that snapshot's membership map. Its date
     // is a lower bound for freshness, never an invented timestamp for the individual schedule.
     if (item.scheduleUpdatedAt === undefined && item.schedule && !saved.finalMembershipConfirmed) observed = Date.parse(cap.updatedAt);
-    var scheduleStale = !Number.isFinite(observed) || observed < now - PROJECT_INFRASTRUCTURE.cacheMillis;
+    var checking = item.scheduleCheck === 'pending' || work && !work.mapped;
+    var failed = ['error','denied','invalid'].indexOf(item.scheduleCheck) >= 0;
+    var expired = !Number.isFinite(observed) || observed < now - PROJECT_INFRASTRUCTURE.cacheMillis;
+    var scheduleStale = !!(checking || failed || expired || stale);
+    var scheduleState = failed ? 'error' : checking ? 'pending' : expired && item.schedule ? 'stale' :
+      item.schedule ? (stale ? 'stale' : 'ready') : Number.isFinite(observed) ? 'unavailable' : saved.lastError ? 'error' : 'pending';
     var current = { id: item.id, name: projectInfraText_(item.name, settings.key, 1000), status: item.status, allSendersSelected: item.allSendersSelected === true,
       waitSchedule: scheduleStale ? null : item.waitSchedule, schedule: scheduleStale ? null : item.schedule,
-      scheduleUpdatedAt:item.scheduleUpdatedAt || null, scheduleStale:scheduleStale, endAt: null,
+      lastKnownSchedule:scheduleStale ? item.schedule : null, scheduleUpdatedAt:item.scheduleUpdatedAt || null,
+      scheduleStale:scheduleStale, scheduleState:scheduleState, endAt: null,
       bindingState: owner.bindingState, segmentId: owner.segmentId, segmentName: owner.segmentName,
       segmentProjectId: owner.segmentProjectId || null, segmentProjectName: owner.segmentProjectName || null };
     byId.set(item.id,current);
