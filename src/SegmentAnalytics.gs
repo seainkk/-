@@ -41,7 +41,7 @@ function segmentDashboardMailings_(context, items) {
     if (registry.credentialHash !== coldyCredentialHash_(context)) return;
   } catch (error) {
     // A disconnected provider or unreadable journal leaves counts unknown.
-    if (error.registryCode === 'COLDY_SCOPE_CHANGED' || /^LINK_/.test(error.registryCode || '')) throw error;
+    if (['SOURCE_CHANGED', 'COLDY_SCOPE_CHANGED', 'OUTSIDE_REGISTRY'].indexOf(error.registryCode) >= 0 || /^LINK_/.test(error.registryCode || '')) throw error;
     return;
   }
   items.forEach(function (item) { item.coldyMailings = counts.get(item.id); });
