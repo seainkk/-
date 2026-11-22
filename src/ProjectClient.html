@@ -8,6 +8,8 @@
   let infrastructure=null,infraLoading=false,infraError='',infraNotice='',infraSequence=0,infraLoadedAt=0,initialSyncAttempted=false;
   let mailboxPicker=null,infraSyncMode='';
   let recipientImport=null;
+  let forecastData=null,forecastError='',forecastDays=1,forecastBusy=false,forecastSequence=0;
+  let forecastTimer=null,forecastCheckedAt=0,forecastRetryAt=0;
   const recipientRequests=new Map();
   const campaignPageSize=40;
   const liveInterval=60000;
@@ -24,7 +26,10 @@
   function token(){return {generation,epoch:accessEpoch};}
   function alive(mark){return ready&&mark.generation===generation&&mark.epoch===accessEpoch;}
   function notify(){try{config?.onStateChange?.();}catch(ignored){}}
-  function mutation(details){try{config?.onMutation?.(details);}catch(ignored){}}
+  function mutation(details){
+    if(details?.kind==='binding'||details?.kind==='monitoring')resetForecast(false);
+    try{config?.onMutation?.(details);}catch(ignored){}
+  }
   function health(id,message,error=false){const node=$(id);if(!node)return;node.textContent=message||'';node.dataset.error=String(error);}
   function node(tag,className,value){const element=document.createElement(tag);if(className)element.className=className;if(value!==undefined)element.textContent=text(value);return element;}
   function connection(configured,connected){return !configured?'Подключите API Coldy, чтобы получать рассылки и показатели проекта.':!connected?'Ключ Coldy сохранён. Проверьте подключение в настройках.':'';}
@@ -57,6 +62,7 @@
     return dashboardNames?.slice(0,10)||[];
   }
   function clear(){
+    resetForecast();
     closeMailboxPicker(true);
     closeRecipientImport();recipientImport=null;recipientRequests.clear();
     generation++;catalog=null;catalogLoading=false;catalogError='';catalogSequence++;catalogLoadedAt=0;segmentId='';contexts.clear();
@@ -68,6 +74,7 @@
   function invalidate(options={}){
     if(options.credentialsChanged){clear();}
     else{
+      resetForecast(false);
       catalogLoadedAt=0;catalogSequence++;catalogLoading=false;catalogError='';
       for(const context of contexts.values()){context.loadedAt=0;if(context.data){delete context.data.configured;delete context.data.connected;}context.sequence++;context.loading=false;context.metricsLoading=false;context.searching=false;}
       infraSequence++;infraLoadedAt=0;infraLoading=false;infraError='';
@@ -78,6 +85,7 @@
   function show(next,options={}){
     if(options.epoch!==undefined&&options.epoch!==accessEpoch){clear();accessEpoch=options.epoch;}
     ready=options.ready===true;view=views.has(next)?next:null;
+    if((view!=='analytics'||!ready)&&$('pj-forecast')?.open){$('pj-forecast').open=false;pauseForecast();}
     if(view!=='infrastructure'||!ready)closeMailboxPicker();
     if(view!=='analytics'||!ready)closeRecipientImport();
     if(!ready){view=null;if(catalog||infrastructure||contexts.size)clear();}
@@ -155,6 +163,108 @@
   }
   function pollVisible(){return ready&&!document.hidden&&!isEditing()&&!hasPending()&&config?.canPoll?.()!==false;}
   function recentPoll(at){const age=Date.now()-at;return at>0&&age>=0&&age<liveInterval;}
+  function forecastVisible(){return view==='analytics'&&$('pj-forecast')?.open&&pollVisible();}
+  function pauseForecast(){
+    if(forecastTimer!==null)clearTimeout(forecastTimer);
+    forecastTimer=null;forecastBusy=false;forecastSequence++;
+  }
+  function resetForecast(close=true){
+    pauseForecast();forecastData=null;forecastError='';forecastCheckedAt=0;forecastRetryAt=0;
+    if(close){forecastDays=1;if($('pj-forecast'))$('pj-forecast').open=false;}
+    renderForecast();
+  }
+  function scheduleForecast(delay){
+    if(forecastTimer!==null)clearTimeout(forecastTimer);
+    forecastTimer=setTimeout(()=>{forecastTimer=null;void readForecast(true);},delay);
+  }
+  async function readForecast(explicit=false){
+    if(!forecastVisible()||forecastBusy)return;
+    if(Date.now()<forecastRetryAt){
+      if(forecastData?.pending&&forecastTimer===null)scheduleForecast(forecastRetryAt-Date.now());
+      return;
+    }
+    if(!explicit&&recentPoll(forecastCheckedAt))return;
+    const mark=token(),sequence=++forecastSequence,previous=forecastData;
+    const valid=()=>alive(mark)&&sequence===forecastSequence&&forecastVisible();
+    if(forecastTimer!==null){clearTimeout(forecastTimer);forecastTimer=null;}
+    forecastBusy=true;forecastError='';forecastCheckedAt=Date.now();renderForecast();
+    try{
+      const data=await invoke('getProjectSendingForecast',{},mark,valid);
+      if(!data||!valid())return;
+      forecastData=data;forecastRetryAt=Date.now()+Math.max(0,Number(data.retryAfterMs)||0);
+      if(data.pending&&data.state!=='error'&&data.state!=='not_configured'&&data.state!=='no_selection'){
+        const unchanged=previous?.pending&&JSON.stringify(previous.progress||{})===JSON.stringify(data.progress||{});
+        scheduleForecast(Math.max(unchanged?6000:1500,forecastRetryAt-Date.now()));
+      }
+    }catch(error){
+      if(!valid())return;
+      const problem=failure(error);
+      if(/^(LINK_|OUTSIDE_|COLDY_(AUTH|FORBIDDEN|CREDENTIAL_CHANGED|MONITORING_CHANGED|SCOPE_CHANGED)|SOURCE_CHANGED)/.test(problem.code))forecastData=null;
+      forecastError=problem.message;
+    }finally{if(alive(mark)&&sequence===forecastSequence){forecastBusy=false;renderForecast();}}
+  }
+  const forecastReasons={
+    stale_membership:'Данные о назначениях ящиков требуют обновления.',
+    missing_accounts:'Coldy подтвердил сведения только для части выбранных ящиков.',
+    unknown_status:'Состояние части ящиков неизвестно.',
+    missing_limit:'Для части ящиков неизвестен дневной лимит.',
+    missing_schedule:'Неизвестно расписание части рассылок.',
+    outside_campaigns:'Часть ящиков используется также в рассылках за пределами выбранного набора.',
+    incomplete_demand:'Данные об очереди отправки получены частично.',
+    unknown_sender:'Не удалось определить ящик отправителя для части очереди.',
+    unknown_lead:'Неизвестно, продолжит ли часть получателей цепочку.',
+    unknown_sequence:'Для части получателей неизвестен следующий шаг или срок отправки.',
+    missing_gap:'Для части отправителей неизвестен интервал между письмами.',
+    unknown_today:'Неизвестен доступный остаток отправок до полуночи.',
+    model_limit:'Объём очереди превысил предел расчёта.'
+  };
+  function forecastDate(value){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(value||''))return '—';
+    const parts=value.split('-');return parts[2]+'.'+parts[1]+'.'+parts[0];
+  }
+  function renderForecast(){
+    if(!$('pj-forecast'))return;
+    const response=forecastData,report=response?.forecast,period=report?.periods?.find(item=>item.days===forecastDays);
+    const body=$('pj-forecast-report'),rows=$('pj-forecast-rows'),reasons=$('pj-forecast-reasons'),queue=$('pj-forecast-queue');
+    body.hidden=!period;rows.replaceChildren();reasons.replaceChildren();reasons.hidden=true;queue.textContent='';queue.hidden=true;
+    $('pj-forecast-refresh').disabled=forecastBusy||Date.now()<forecastRetryAt;
+    for(const button of $('pj-forecast').querySelectorAll('[data-forecast-days]'))button.setAttribute('aria-pressed',String(Number(button.dataset.forecastDays)===forecastDays));
+    const progress=response?.progress;
+    let message=forecastError||response?.message||'';
+    if(!forecastError&&response?.retryAfterMs>0&&Date.now()<forecastRetryAt)message=message||'Coldy попросил подождать. Расчёт продолжится после паузы.';
+    else if(!message&&(forecastBusy||response?.pending))message=progress?
+      'Идёт расчёт. Рассылок обработано '+number(progress.campaignsDone)+' из '+number(progress.campaignsTotal)+', контактов проверено '+number(progress.contactsRead)+'.':'Получаем данные для прогноза…';
+    else if(!message&&response)message=({no_selection:'Для расчёта выберите почты мониторинга и привяжите рассылки проекта.',not_configured:'Для расчёта подключите Coldy.',error:'Не удалось получить прогноз. Повторите расчёт.'})[response.state]||'';
+    health('pj-forecast-health',message,!!forecastError||response?.state==='error');
+    if(!period){$('pj-forecast-totals').replaceChildren();$('pj-forecast-context').textContent='';return;}
+    const range=period.from===period.to?forecastDate(period.from):forecastDate(period.from)+' – '+forecastDate(period.to);
+    const context=[range+' · МСК','выбранных ящиков '+number(report.selectedAccounts),'активных рассылок '+number(report.activeCampaigns)];
+    if(response.generatedAt)context.push('расчёт на '+timestamp(response.generatedAt)+' МСК');
+    $('pj-forecast-context').textContent=context.join(' · ');
+    const totals=[['Ожидается писем',period.expected],['Первые письма',period.initial],['Повторные письма',period.followups],['Предел по лимитам',period.capacity]];
+    const hasScenario=item=>item.expected===null&&Number.isFinite(item.modeled);
+    if(hasScenario(period))totals.push(['По разобранной части (сценарий)',period.modeled]);
+    metrics('pj-forecast-totals',totals);
+    if(report.queue&&response.generatedAt){
+      const q=report.queue,parts=['первого письма ждут '+number(q.pendingInitial),'повторного — '+number(q.pendingFollowups)];
+      if(q.unresolved>0)parts.push('неизвестен отправитель или следующий шаг у '+number(q.unresolved));
+      if(q.unreadCampaigns>0)parts.push('ещё не полностью прочитано рассылок '+number(q.unreadCampaigns));
+      queue.textContent='В очереди на момент расчёта '+parts.join(', ')+'.';queue.hidden=false;
+    }
+    $('pj-forecast-daily').hidden=forecastDays===1;
+    const displayedDays=(report.days||[]).filter(day=>day.date>=period.from&&day.date<=period.to),dailyScenario=displayedDays.some(hasScenario);
+    $('pj-forecast-scenario-column').hidden=!dailyScenario;
+    if(forecastDays>1)for(const day of displayedDays){
+      const tr=node('tr'),date=node('th','',forecastDate(day.date));date.scope='row';tr.append(date);
+      for(const key of ['initial','followups','expected','capacity'])tr.append(node('td','pj-number',number(day[key])));
+      if(dailyScenario)tr.append(node('td','pj-number',hasScenario(day)?number(day.modeled):'—'));
+      rows.append(tr);
+    }
+    const notes=new Set((report.reasons||[]).map(code=>forecastReasons[code]||'Для части отправок не хватает подтверждённых данных.'));
+    if(hasScenario(period)||dailyScenario)notes.add('Сценарий показывает, сколько писем можно отправить по известной части очереди, если остальные получатели не займут время выбранных ящиков.');
+    if([period.initial,period.followups,period.expected,period.capacity].some(value=>value===null))notes.add('Прочерк означает, что для расчёта не хватает данных.');
+    for(const note of notes)reasons.append(node('li','',note));reasons.hidden=!notes.size;
+  }
   async function pollSelected(){
     if(!pollVisible()||isLoading())return;
     if(view==='infrastructure'){
@@ -186,7 +296,7 @@
   }
   async function refresh(options={}){
     if(!ready||!view)return;
-    if(options.automatic)return pollSelected();
+    if(options.automatic)return Promise.all([pollSelected(),readForecast()]);
     if(view==='analytics'&&(recipientImport?.open||recipientImport?.running))return;
     const mark=token(),requestedView=view;
     if(view==='analytics'){
@@ -740,6 +850,18 @@
   function isEditing(){const context=currentContext();return view==='infrastructure'?!!mailboxPicker&&(mailboxPicker.open||!!mailboxPicker.operation):view==='analytics'&&!!context&&(context.picker||dirty(context)||!!context.operation||!!recipientImport?.open);}
   function isLoading(){return view==='analytics'?catalogLoading||!!currentContext()?.loading||!!currentContext()?.metricsLoading||hasPending():view==='infrastructure'?infraLoading||!!mailboxPicker?.pending:false;}
   if($('pj-segment')){
+    $('pj-forecast').addEventListener('toggle',()=>{
+      if($('pj-forecast').open){renderForecast();void readForecast(!forecastData||forecastData.pending);}
+      else pauseForecast();
+    });
+    $('pj-forecast-refresh').addEventListener('click',()=>readForecast(true));
+    for(const button of $('pj-forecast').querySelectorAll('[data-forecast-days]'))button.addEventListener('click',()=>{
+      forecastDays=Number(button.dataset.forecastDays);renderForecast();
+    });
+    document.addEventListener('visibilitychange',()=>{
+      if(document.hidden)pauseForecast();
+      else if(forecastVisible())void readForecast(!forecastData||forecastData.pending);
+    });
     $('pj-selection-open').addEventListener('click',()=>{const context=currentContext();if(!context?.data?.configured||context.operation)return;context.picker=true;render();notify();$('pj-campaign-search').focus();});
     $('pj-campaign-lookup').addEventListener('submit',event=>{event.preventDefault();findCampaigns();});
     $('pj-campaign-extend').addEventListener('click',()=>findCampaigns(true));

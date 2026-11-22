@@ -2,6 +2,29 @@
   <div class="pj-heading"><div><p class="pj-eyebrow">Проект · Coldy</p><h1 id="pj-analytics-title">Аналитика</h1><p class="br-muted">Рассылки и результаты по сегментам.</p></div><div class="pj-toolbar"><button id="pj-analytics-connect" class="br-button" type="button" aria-haspopup="dialog">Подключить Coldy</button><button id="pj-analytics-refresh" class="br-button" type="button">↻ Обновить данные</button></div></div>
   <p id="pj-analytics-health" class="pj-health" role="status" aria-live="polite"></p>
   <div id="pj-analytics-connection" class="pj-connection" hidden></div>
+  <details id="pj-forecast" class="pj-card pj-forecast">
+    <summary>Прогноз отправок</summary>
+    <div class="pj-forecast-body">
+      <div class="pj-toolbar">
+        <div class="pj-forecast-periods" role="group" aria-label="Период прогноза">
+          <button type="button" data-forecast-days="1" aria-pressed="true">Завтра</button>
+          <button type="button" data-forecast-days="3" aria-pressed="false">3 дня</button>
+          <button type="button" data-forecast-days="7" aria-pressed="false">Неделя</button>
+        </div>
+        <button id="pj-forecast-refresh" class="br-button" type="button">Пересчитать</button>
+      </div>
+      <p id="pj-forecast-health" class="pj-health" role="status" aria-live="polite"></p>
+      <div id="pj-forecast-report" hidden>
+        <p id="pj-forecast-context" class="br-muted"></p>
+        <dl id="pj-forecast-totals" class="pj-metrics" aria-label="Прогноз за период"></dl>
+        <p id="pj-forecast-queue" class="br-muted" hidden></p>
+        <div id="pj-forecast-daily" class="pj-table-wrap" hidden>
+          <table class="pj-table"><caption class="pj-sr-only">Прогноз по дням, московское время</caption><thead><tr><th scope="col">Дата</th><th scope="col">Первые письма</th><th scope="col">Повторные</th><th scope="col">Ожидается всего</th><th scope="col">Предел по лимитам</th><th id="pj-forecast-scenario-column" scope="col" hidden>По разобранной части (сценарий)</th></tr></thead><tbody id="pj-forecast-rows"></tbody></table>
+        </div>
+        <ul id="pj-forecast-reasons" class="pj-forecast-reasons" hidden></ul>
+      </div>
+    </div>
+  </details>
   <div class="pj-filter"><label for="pj-segment">Сегмент</label><select id="pj-segment"><option value="">Выберите сегмент</option></select><span id="pj-analytics-updated" class="br-muted"></span></div>
   <div id="pj-analytics-empty" class="pj-empty" hidden></div>
   <div id="pj-analytics-content" hidden>
