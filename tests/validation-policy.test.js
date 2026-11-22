@@ -7,7 +7,7 @@ import {readFileSync} from 'node:fs';
 function fixture(initial={}) {
  const properties=new Map(Object.entries(initial));let locked=false;
  const context={rootId:'policy_registry_root_12345',properties:{getProperty:key=>properties.get(key)??null,setProperty:(key,value)=>properties.set(key,value),deleteProperty:key=>properties.delete(key)}};
- const c=vm.createContext({Date,JSON,Math,Number,Array,console:{warn(){}},
+ const c=vm.createContext({Date,JSON,Math,Number,Array,console:{warn(){}},Utilities:{getUuid:()=>crypto.randomUUID()},
   authorize_:()=>context,api_:fn=>fn(),object_:value=>value,digest_:value=>crypto.createHash('sha256').update(String(value)).digest('base64url'),
   fail_:(code,message)=>{throw Object.assign(new Error(`[${code}] ${message}`),{registryCode:code});},
   locked_:fn=>{assert.equal(locked,false);locked=true;try{return fn();}finally{locked=false;}},

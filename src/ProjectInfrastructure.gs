@@ -91,7 +91,10 @@ function refreshProjectInfrastructure_(request) {
           state.poolOnly = true;
           if (state.detailIds.length) { state.capacityRequested = true; state.capacityWork = { mapped: false, cursor: 0 }; }
         }
-      } else state = JSON.parse(JSON.stringify(before));
+      } else {
+        state = JSON.parse(JSON.stringify(before));
+        delete state.verifiedProvider;
+      }
       state.lastError = null; state.retryAt = 0; state.warnings = [];
       if (state.selectedOnly && state.capacityWork) projectCapacityAdvance_(context, settings, state);
       else {
@@ -127,8 +130,8 @@ function refreshProjectInfrastructure_(request) {
       state.lastAttemptAt = state.updatedAt;
       coldySave_(fresh, 'infrastructure', projectMonitoringOwner_(settings.credentialHash), state);
       // A successful authenticated account read also verifies this connection.
-      if (!state.lastError && (input.inventoryOnly === true || state.verifiedProvider === true)) fresh.properties.setProperty(COLDY.connectionProperty, JSON.stringify({ version: COLDY.version,
-        rootId: fresh.rootId, credentialHash: settings.credentialHash, checkedAt: state.updatedAt }));
+      if (!state.lastError && (input.inventoryOnly === true || state.verifiedProvider === true))
+        coldyRememberConnection_(fresh,settings,state.updatedAt);
       return state;
     });
     return projectInfraPublic_(context, committed, monitoringSignature);
@@ -243,9 +246,9 @@ function projectInfraSelectedIds_(accounts, selectedIds) {
   return selectedIds.filter(function (id) { return !!available[id]; });
 }
 
-function projectInfraRead_(context, settings) {
+function projectInfraRead_(context, settings, observation) {
   if (!settings.configured) return null;
-  var owner = projectMonitoringOwner_(settings.credentialHash), saved = coldyLoad_(context, 'infrastructure', owner);
+  var owner = projectMonitoringOwner_(settings.credentialHash), saved = coldyLoad_(context, 'infrastructure', owner, observation);
   if (owner !== projectMonitoringOwner_(settings.credentialHash)) fail_('COLDY_MONITORING_CHANGED', 'Проект изменился. Обновите список почт.');
   if (!saved) return null;
   if (saved.version !== PROJECT_INFRASTRUCTURE.version || saved.rootId !== context.rootId || saved.credentialHash !== settings.credentialHash ||
@@ -276,7 +279,7 @@ function projectInfraRead_(context, settings) {
   return saved;
 }
 
-function projectInfraInventory_(response, key) {
+function projectInfraInventory_(response, key, identityOnly) {
   if (!response || !Array.isArray(response.items) || response.items.length > PROJECT_INFRASTRUCTURE.maxAccounts ||
       response.next_cursor || response.nextPageToken || response.has_more === true ||
       Number.isSafeInteger(response.total) && response.total > response.items.length) fail_('COLDY_INFRA_INCOMPLETE', 'Coldy вернул неполный или слишком большой список ящиков. Сохранённый список не заменён.');
@@ -286,8 +289,11 @@ function projectInfraInventory_(response, key) {
     var id = projectInfraId_(item.id), email = projectInfraEmail_(item.email);
     if (seen[id]) fail_('COLDY_RESPONSE', 'Coldy вернул повторяющийся идентификатор ящика.');
     seen[id] = true;
-    return { id: id, email: email, listedName: item.first_name !== undefined || item.last_name !== undefined, name: [projectInfraText_(item.first_name, key, 200), projectInfraText_(item.last_name, key, 200)].filter(Boolean).join(' '),
-      provider: projectInfraNullableText_(item.service, key, 200), status: null, sentTotal: projectInfraCount_(item.total_sent),
+    var name = [projectInfraText_(item.first_name, key, 200), projectInfraText_(item.last_name, key, 200)].filter(Boolean).join(' ');
+    var provider = projectInfraNullableText_(item.service, key, 200);
+    if (identityOnly) return {id:id, email:email, name:name, provider:provider};
+    return { id: id, email: email, listedName: item.first_name !== undefined || item.last_name !== undefined, name:name,
+      provider:provider, status: null, sentTotal: projectInfraCount_(item.total_sent),
       sentToday: projectInfraCount_(item.sent_today), dailyLimit: projectInfraCount_(item.limit), errorCount: null,
       errors: projectInfraProviderErrors_(item.error_text, key), tags: projectInfraTags_(item.tags, key),
       warmup: projectInfraWarmup_(item, false, key), updatedAt: null, stale: true, syncError: null };

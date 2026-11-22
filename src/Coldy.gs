@@ -1,7 +1,7 @@
 /** Coldy Public API. Provider credentials stay in Script Properties only. */
 var COLDY = Object.freeze({
   base: 'https://developer.coldy.ai/api/v1', version: 1,
-  keyProperty: 'COLDY_API_KEY', connectionProperty: 'COLDY_CONNECTION',
+  keyProperty: 'COLDY_API_KEY', connectionProperty: 'COLDY_CONNECTION', revisionProperty:'COLDY_KEY_REVISION',
   autoProperty: 'COLDY_AUTO_VALIDATE_EMAILS', providerProperty: 'EMAIL_VALIDATION_PROVIDER',
   folderProperty: 'COLDY_STATE_FOLDER_ID', cacheMillis: 300000,
   maxJsonCharacters: 15000000, maxResponseCharacters: 12000000, readBatchSize: 5,
@@ -27,10 +27,14 @@ function configureColdy_(request) {
       if (input.emailValidationProvider === 'coldy' && !key && !(input.clearKey && old.emailValidationProvider === 'coldy')) fail_('COLDY_KEY_REQUIRED', 'Сначала подключите API-ключ Coldy.');
       if (input.autoValidateEmails === true) fail_('COLDY_MANUAL_VALIDATION', 'Проверка Coldy запускается вручную после предпросмотра новых email.');
       coldyCurrent_(context, false);
+      if (rotated) properties.setProperty(COLDY.revisionProperty, Utilities.getUuid());
       if (key) properties.setProperty(COLDY.keyProperty, key); else properties.deleteProperty(COLDY.keyProperty);
       properties.setProperty(COLDY.providerProperty, provider);
       properties.setProperty(COLDY.autoProperty, 'false');
-      if (rotated) properties.deleteProperty(COLDY.connectionProperty);
+      if (rotated) {
+        properties.deleteProperty(old.proofSlot);
+        properties.deleteProperty(old.rejectionSlot);
+      }
       var result = coldySettingsPublic_(coldySettings_(context));
       result.credentialChanged = rotated;
       return result;
@@ -42,9 +46,14 @@ function coldySettings_(context) {
   var current = coldyCurrent_(context, false), properties = current.properties;
   var key = properties.getProperty(COLDY.keyProperty) || '', credentialHash = key ? digest_(key) : '';
   var provider = typeof emailValidationProvider_ === 'function' ? emailValidationProvider_(current) : (properties.getProperty(COLDY.providerProperty) === 'coldy' ? 'coldy' : 'promouser');
-  var connection = coldyPropertyJson_(properties, COLDY.connectionProperty);
+  // Separate successful receipts across replacement (including A -> B -> A) and every rejection.
+  var revision = properties.getProperty(COLDY.revisionProperty) || '';
+  var rejectionSlot = 'COLDY_REJECTED_' + current.rootId + '_' + credentialHash + '_' + revision;
+  var rejected = key && properties.getProperty(rejectionSlot) || '';
+  var proofSlot = revision || rejected ? 'COLDY_VERIFIED_' + current.rootId + '_' + credentialHash + '_' + revision + '_' + rejected : COLDY.connectionProperty;
+  var connection = coldyPropertyJson_(properties, proofSlot);
   var connected = !!key && !!connection && connection.version === COLDY.version && connection.rootId === current.rootId && connection.credentialHash === credentialHash;
-  return { key: key, configured: !!key, connected: connected, credentialHash: credentialHash, emailValidationProvider: provider === 'coldy' ? 'coldy' : 'promouser', autoValidateEmails: false, manualValidation: true, checkedAt: connected ? String(connection.checkedAt || '') : '' };
+  return { key: key, configured: !!key, connected: connected, credentialHash: credentialHash, revision:revision, rejectionSlot:rejectionSlot, rejected:!!rejected && !connected, proofSlot:proofSlot, emailValidationProvider: provider === 'coldy' ? 'coldy' : 'promouser', autoValidateEmails: false, manualValidation: true, checkedAt: connected ? String(connection.checkedAt || '') : '' };
 }
 
 function coldySettingsPublic_(settings) {
@@ -61,22 +70,31 @@ function testColdyConnection_(request) {
   return api_(function () {
     coldyInput_(request || {}, []);
     var context = authorize_();
-    return coldyProbeConnection_(context,coldyCredentialHash_(context));
+    return coldyProbeConnection_(context,coldySettings_(context));
   });
 }
 
 /** Verify the key with a small authenticated read, independent of campaigns and sender limits. */
-function coldyProbeConnection_(context, credentialHash) {
+function coldyProbeConnection_(context, settings) {
   coldyApi_(context,'GET','/leads/reply-tags');
-  var checkedAt = new Date().toISOString();
-  return locked_(function () {
-    var current = coldyCurrent_(context,true);
-    if (coldyCredentialHash_(current) !== credentialHash) fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите проверку.');
-    current.properties.setProperty(COLDY.connectionProperty,JSON.stringify({
-      version:COLDY.version,rootId:current.rootId,credentialHash:credentialHash,checkedAt:checkedAt
-    }));
-    return {connected:true,checkedAt:checkedAt};
-  });
+  return {connected:true,checkedAt:coldyRememberConnection_(coldyCurrent_(context,true),settings,new Date().toISOString())};
+}
+
+function coldyRememberConnection_(context,settings,checkedAt) {
+  function currentProof() {
+    var fresh=coldySettings_(context);
+    if (fresh.credentialHash !== settings.credentialHash || fresh.revision !== settings.revision)
+      fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Повторите проверку.');
+    if (fresh.proofSlot !== settings.proofSlot)
+      fail_('COLDY_AUTH','Coldy отклонил ключ во время проверки.');
+    return fresh;
+  }
+  var before=currentProof();
+  if (before.connected && Date.parse(before.checkedAt) >= Date.parse(checkedAt)) return before.checkedAt;
+  // This slot belongs exclusively to the credential/rejection observed before the GET.
+  context.properties.setProperty(settings.proofSlot,JSON.stringify({version:COLDY.version,rootId:context.rootId,
+    credentialHash:settings.credentialHash,checkedAt:checkedAt}));
+  return currentProof().checkedAt;
 }
 
 function listColdyCampaigns_(request) {
@@ -122,14 +140,14 @@ function coldyCachedCampaigns_(context, settings) {
 }
 
 function coldyCampaignsFetch_(context) {
-  var credentialHash = coldyCredentialHash_(context), response = coldyApi_(context, 'GET', '/campaigns');
+  var settings=coldySettings_(context), credentialHash=settings.credentialHash, response = coldyApi_(context, 'GET', '/campaigns');
   if (!response || !Array.isArray(response.items)) fail_('COLDY_RESPONSE', 'Coldy не подтвердил список рассылок.');
   var campaigns = coldyCampaignItems_(response.items), generatedAt = new Date().toISOString();
   return locked_(function () {
     var current = coldyCurrent_(context, true);
     if (coldyCredentialHash_(current) !== credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Повторите проверку подключения.');
     coldySave_(current, 'campaigns', credentialHash, { rootId: current.rootId, credentialHash: credentialHash, campaigns: campaigns, generatedAt: generatedAt });
-    current.properties.setProperty(COLDY.connectionProperty, JSON.stringify({ version: COLDY.version, rootId: current.rootId, credentialHash: credentialHash, checkedAt: generatedAt }));
+    coldyRememberConnection_(current,settings,generatedAt);
     return { campaigns: campaigns, generatedAt: generatedAt };
   });
 }
@@ -235,7 +253,11 @@ function coldyResponse_(context, settings, method, response, address) {
   if (status < 200 || status >= 300) {
     if (status === 401) {
       var fresh = coldyCurrent_(context, false);
-      if (coldyCredentialHash_(fresh) === settings.credentialHash) fresh.properties.deleteProperty(COLDY.connectionProperty);
+      var active = coldySettings_(fresh);
+      if (active.credentialHash === settings.credentialHash && active.proofSlot === settings.proofSlot) {
+        fresh.properties.setProperty(settings.rejectionSlot,Utilities.getUuid());
+        fresh.properties.deleteProperty(settings.proofSlot);
+      }
       coldyHttpFailure_('COLDY_AUTH', 'Coldy не принял API-ключ. Проверьте ключ выбранной организации.', status, response);
     }
     if (status === 403) coldyHttpFailure_('COLDY_FORBIDDEN', 'Coldy отклонил доступ к действию. Проверьте права организации.', status, response);
@@ -357,6 +379,7 @@ function coldyLoad_(context, kind, owner, observation) {
   if (observation && fileId && folderId && file && /^\d+$/.test(String(file.version))) {
     // A strong Drive version covers the JSON and metadata. The ordinary read verifies its envelope.
     var version = String(file.version);
+    observation.file = {id:fileId, folderId:folderId, version:version};
     observation.unchanged = function () {
       if (properties.getProperty(COLDY.folderProperty) !== folderId || properties.getProperty(scope.indexKey) !== fileId) return false;
       return String(coldyStateCheck_(scope,folder,fileId).version) === version;

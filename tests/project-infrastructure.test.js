@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import crypto from 'node:crypto';
+import {gzipSync,gunzipSync} from 'node:zlib';
 import vm from 'node:vm';
 
 const ROOT = 'infrastructure_root_1234567890';
@@ -232,6 +233,35 @@ test('a changed segment binding during a group of schedule reads discards the wh
   assert.ok(f.state().capacity.campaigns.every(c=>c.schedule===null));
 });
 
+test('a forecast reuses only an unchanged bindings blob and still checks every actual segment folder and project',()=>{
+  const f=capacityFixture([]), observation={};
+  const ids=[ACTIVE_ONE,ACTIVE_TWO],segments=['segment_kitchens','segment_studios'];
+  let version=1,reads=0,outreachReads=0,checks=0,detached='',foreign='',linked=2;
+  f.c.registryProjectId_=()=> 'numshield';
+  f.c.registryProjectName_=()=> 'Намшилд';
+  f.c.registrySegmentProject_=(_ctx,segment)=>segment===foreign?'neosender':'numshield';
+  f.c.coldyCampaignRegistry_=(_ctx,observed)=>{
+    reads++; const pinned=version;observed.unchanged=()=>pinned===version;
+    return {bindings:ids.slice(0,linked).map((campaignId,i)=>({campaignId,segmentId:segments[i]}))};
+  };
+  f.c.segmentSourceFolder_=()=>{outreachReads++;return {getId:()=> 'checked_parent_folder'};};
+  f.c.segmentFolder_=(_ctx,parent,id,verified)=>{
+    checks++;assert.equal(verified,true);assert.equal(parent.getId(),'checked_parent_folder');
+    if(detached===id)throw f.coded('OUTSIDE_SEGMENTS','Moved');
+    return {getId:()=>id,getName:()=>id};
+  };
+  const read=()=>f.resolveOwners(f.c.authorize_(),ids,observation);
+  assert.equal(Object.keys(read()).length,2);assert.equal(reads,1);assert.equal(outreachReads,1);assert.equal(checks,2);
+  detached=segments[0];
+  assert.equal(read()[ACTIVE_ONE].bindingState,'unknown');assert.equal(reads,1);assert.equal(checks,4);
+  detached='';foreign=segments[1];
+  assert.equal(read()[ACTIVE_TWO],undefined);assert.equal(reads,1);assert.equal(checks,5);
+  foreign='';version++;linked=1;
+  assert.equal(read()[ACTIVE_TWO],undefined);assert.equal(reads,2);
+  observation.unchanged=()=>{throw f.coded('OUTSIDE_REGISTRY','Moved journal');};
+  assert.throws(read,/OUTSIDE_REGISTRY/);
+});
+
 test('twenty selected senders share four guarded HTTP groups with no directory request or private provider fields',()=>{
   const accounts=Array.from({length:30},(_,i)=>account(i+1)),ids=accounts.slice(10).map(a=>String(a.id));
   const f=fixture({accounts,monitoringIds:ids});f.configure();
@@ -286,10 +316,10 @@ test('a later unauthorized batch response revokes connection even when an earlie
   let invalid=false;
   const f=fixture({accounts,transport:({path,response,defaultResponse})=>invalid&&path==='/accounts/3'?response({},401):
     invalid&&path==='/accounts/2'?response({},429,{'Retry-After':'20'}):defaultResponse()});
-  f.configure();parallelReads(f);f.refresh();assert.ok(f.properties.get(f.c.COLDY.connectionProperty));
+  f.configure();parallelReads(f);f.refresh();const proofSlot=f.c.coldySettings_(f.c.authorize_()).proofSlot;assert.ok(f.properties.get(proofSlot));
   invalid=true;
   const r=f.refresh();assert.equal(r.error.code,'COLDY_AUTH');assert.equal(r.connected,false);
-  assert.equal(f.properties.has(f.c.COLDY.connectionProperty),false);
+  assert.equal(f.properties.has(proofSlot),false);
 });
 
 test('batch transport rejects mixed campaigns, directory reads and unrelated endpoints before calling the provider',()=>{
@@ -461,6 +491,44 @@ test('forecast preview uses the dated report without touching Coldy and requires
   assert.equal(get(),null);
   f.c.projectCapacityOwners_=owners; f.select([]);
   assert.equal(get(),null);assert.equal(f.calls.http.length,before);
+});
+
+test('warm forecast preview needs only live metadata, drops changed journals/ownership and never waits for the writer lock',()=>{
+  const f=forecastFixture(30),report=f.complete(),keyHash=hash(KEY);
+  const cache=new Map(), folder='private_folder_1234', outreach='outreach_folder_1234', segment='segment_directory_1';
+  const mime='application/vnd.google-apps.folder',files={},listed=new Map();
+  const folderMeta=(id,parent,appProperties={})=>({id,parents:[parent],trashed:false,mimeType:mime,appProperties});
+  listed.set(folder,folderMeta(folder,ROOT,{registryPrivateRole:'coldy_folder',registryColdyRoot:ROOT}));
+  listed.set(outreach,folderMeta(outreach,ROOT));listed.set(segment,folderMeta(segment,outreach));
+  f.properties.set('COLDY_STATE_FOLDER_ID',folder);f.properties.set('SEGMENTS_FOLDER_ID',outreach);
+  f.c.REGISTRY_CONFIG={defaultSegmentsFolderId:outreach};
+  f.c.CacheService={getScriptCache:()=>({get:key=>cache.get(key)||null,put:(key,value,ttl)=>{assert.equal(ttl,21600);cache.set(key,value);}})};
+  f.c.locked_=()=>{throw new Error('A forecast preview must not wait for a writer');};
+  let project='numshield',scans=0;
+  f.c.registrySegmentProject_=()=>project;
+  f.c.Drive.Files.list=()=>{scans++;return {files:Array.from(listed.values())};};
+  for(const kind of ['monitoring','infrastructure','sendingforecast','campaignbindings']){
+    const id=kind+'_file_id_1234',scope=f.c.coldyStoreScope_(f.c.authorize_(),kind,keyHash,false);
+    f.properties.set(scope.indexKey,id);
+    files[kind]={id,folderId:folder,version:'10'};
+    listed.set(id,{id,parents:[folder],trashed:false,mimeType:'application/json',appProperties:plain(f.c.coldyStoreTags_(scope)),version:'10'});
+  }
+  const load=f.c.coldyLoad_;
+  function observe(read,kind){if(read){read.file={...files[kind]};const before=read.file.version;read.unchanged=()=>listed.get(read.file.id)?.version===before;}}
+  f.c.coldyLoad_=(ctx,kind,owner,read)=>{observe(read,kind);return load(ctx,kind,owner);};
+  const owners=f.c.projectCapacityOwners_;
+  f.c.projectCapacityOwners_=(ctx,ids,read)=>{observe(read,'campaignbindings');return project==='numshield'&&listed.get(segment).parents[0]===outreach?owners(ctx,ids):{};};
+  const get=()=>plain(f.c.getProjectForecastPreview_({}));
+  assert.deepEqual(get().forecast,report.forecast);assert.equal(cache.size,1);
+  const loads=f.calls.loads.length,lists=scans;
+  assert.deepEqual(get().forecast,report.forecast);assert.equal(f.calls.loads.length,loads);assert.equal(scans,lists+1);
+  assert.doesNotMatch([...cache.values()].join(''),/private recipient|sensitive@example|cohorts|seenIds|sender1@example/);
+  project='neosender';assert.equal(get(),null);
+  project='numshield';listed.get(segment).parents=['other_scope'];assert.equal(get(),null);
+  listed.get(segment).parents=[outreach];
+  listed.get(files.monitoring.id).version='11';files.monitoring.version='11';f.select([]);
+  assert.equal(get(),null);
+  assert.ok(f.calls.loads.length>loads,'A changed selection invalidates the aggregate before display');
 });
 
 test('a mailbox quota changed during final computation reuses verified recipients but never publishes the old limits',()=>{
@@ -1373,11 +1441,55 @@ test('mailbox lookup finds all matching names and reuses positive and negative r
   assert.deepEqual(search('белоцветов'),['1','2']);
   assert.equal(f.calls.saves.length,writes);
   assert.deepEqual(search('несовпадение'),[]);assert.deepEqual(search('несовпадение'),[]);
-  assert.deepEqual(f.calls.http,['/accounts/1','/accounts','/accounts']);
-  assert.ok([...recent.values()].every(value=>JSON.parse(value).every(id=>/^\d+$/.test(id))));
+  assert.deepEqual(search('sender3@'),['3']);
+  assert.deepEqual(f.calls.http,['/accounts/1','/accounts'],'A different query reuses the directory from the first explicit text search');
+  for(const [key,value] of recent){
+    if(key.startsWith('mailbox-directory-')){
+      const entry=JSON.parse(value);
+      assert.equal(entry.count,3);
+      assert.ok(entry.rows.every(row=>row.length===4));
+      assert.doesNotMatch(value,/warmup|password|secret|total_sent/);
+    }else assert.ok(JSON.parse(value).every(id=>/^\d+$/.test(id)));
+  }
   project='neosender';assert.deepEqual(search('несовпадение'),[]);assert.deepEqual(f.calls.http.at(-1),'/accounts');
-  assert.equal(f.calls.http.length,4);
-  f.configure('other_fixture_secret');assert.deepEqual(search('несовпадение'),[]);assert.equal(f.calls.http.length,5);
+  assert.equal(f.calls.http.length,3);
+  f.configure('other_fixture_secret');assert.deepEqual(search('несовпадение'),[]);assert.equal(f.calls.http.length,4);
+  f.configure(KEY);assert.deepEqual(search('несовпадение'),[]);assert.equal(f.calls.http.length,5,'Restoring the same key does not restore its old directory');
+  const settings=f.c.coldySettings_(f.c.authorize_());
+  f.properties.set(settings.rejectionSlot,'observed-401');
+  assert.throws(()=>search('Белоцветов'),/COLDY_AUTH/);assert.equal(f.calls.http.length,5);
+});
+
+test('an evicted, incomplete or expired mailbox directory never suppresses an authoritative search',()=>{
+  const org=Array.from({length:1159},(_,i)=>account(i+1)), f=fixture({accounts:org,monitoringIds:null});
+  const slots=new Map(), blob=value=>({getBytes:()=>Buffer.from(value),getDataAsString:()=>Buffer.from(value).toString('utf8')});
+  f.c.CacheService={getScriptCache:()=>({get:key=>slots.get(key)||null,put:(key,value,ttl)=>{assert.ok(Buffer.byteLength(value)<=100000);assert.equal(ttl,60);slots.set(key,value);}})};
+  Object.assign(f.c.Utilities,{newBlob:blob,gzip:b=>blob(gzipSync(b.getBytes())),ungzip:b=>blob(gunzipSync(b.getBytes())),
+    base64Encode:value=>Buffer.from(value).toString('base64'),base64Decode:value=>Buffer.from(value,'base64')});
+  f.configure();
+  const query=q=>plain(f.c.getProjectInfrastructureSelection_({query:q})).matchIds;
+  assert.deepEqual(query('sender1159@'),['1159']);
+  const slot=[...slots.keys()].find(key=>key.startsWith('mailbox-directory-'));
+  assert.ok(slots.get(slot).startsWith('z'));
+  assert.deepEqual(query('sender1158@'),['1158']);assert.equal(f.calls.http.length,1);
+  const raw=JSON.parse(gunzipSync(Buffer.from(slots.get(slot).slice(1),'base64')));
+  assert.equal(raw.count,1159);assert.deepEqual(raw.rows[0],['1','sender1@example.test','Sender 1','google']);
+  assert.ok(!JSON.stringify([...f.cache.values()]).includes('sender200@example.test'),'Unmatched accounts never enter the durable journal');
+  raw.rows.pop();slots.set(slot,JSON.stringify(raw));assert.deepEqual(query('sender1157@'),['1157']);
+  assert.equal(f.calls.http.length,2);
+  slots.delete(slot);assert.deepEqual(query('sender1156@'),['1156']);assert.equal(f.calls.http.length,3);
+  raw.rows.push(['1159','sender1159@example.test','Sender 1159','google']);raw.at-=60000;
+  slots.set(slot,JSON.stringify(raw));assert.deepEqual(query('sender1155@'),['1155']);assert.equal(f.calls.http.length,4);
+});
+
+test('an incomplete provider list or a selection change before returning publishes no searchable directory',()=>{
+  for(const mode of ['partial','changed']){
+    const f=fixture({monitoringIds:null,transport:({response,defaultResponse})=>mode==='partial'
+      ?response({items:[account(1)],has_more:true}):defaultResponse(),afterSave:f=>{if(mode==='changed')f.select(['1']);}});
+    let puts=0;f.c.CacheService={getScriptCache:()=>({get:()=>null,put:()=>{puts++;}})};f.configure();
+    assert.throws(()=>f.c.getProjectInfrastructureSelection_({query:'Sender'}),mode==='partial'?/COLDY_INFRA_INCOMPLETE/:/COLDY_MONITORING_CHANGED/);
+    assert.equal(puts,0);
+  }
 });
 
 test('two tabs share a recent monitored snapshot and partial cursor while manual sync can refresh immediately', () => {
@@ -1394,8 +1506,8 @@ test('two tabs share a recent monitored snapshot and partial cursor while manual
 
 test('empty monitoring never asserts provider verification or downloads either directory',()=>{
   const f=fixture({monitoringIds:null});f.configure();
-  const stamp=f.properties.get(f.c.COLDY.connectionProperty);
+  const proofSlot=f.c.coldySettings_(f.c.authorize_()).proofSlot, stamp=f.properties.get(proofSlot);
   assert.equal(f.refresh().state,'no_selection');assert.equal(f.refresh({includeCapacity:true}).state,'no_selection');
   assert.deepEqual(f.calls.http,[]);assert.deepEqual(f.calls.saves,[]);
-  assert.equal(f.properties.get(f.c.COLDY.connectionProperty),stamp);
+  assert.equal(f.properties.get(proofSlot),stamp);
 });

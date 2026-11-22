@@ -57,7 +57,7 @@ function fixture(options={}) {
     digest_:v=>crypto.createHash('sha256').update(String(v)).digest('base64url'),
     authorize_:()=>{if(!authorized)throw coded('LINK_ACCESS_REQUIRED','Access revoked');return{rootId,properties:props};},
     locked_:fn=>{assert.equal(locked,false,'No nested operation locks');locked=true;calls.locks++;try{return fn();}finally{locked=false;}},
-    Utilities:{newBlob:(text,mime,name)=>({text,mime,name})},
+    Utilities:{newBlob:(text,mime,name)=>({text,mime,name}),getUuid:()=>crypto.randomUUID()},
     DriveApp:{getFileById:id=>({getBlob:()=>({getDataAsString:()=>{calls.driveReads.push(['blob',id]);return files.get(id).body;}})})},
     Drive:{Files:{
       get:id=>{calls.driveReads.push(['get',id]);if(!files.has(id))throw new Error('Missing '+KEY);return plain(files.get(id));},
@@ -157,6 +157,46 @@ test('settings can verify Coldy before any mailbox read and reuse only a fresh, 
   f.tick(45001);assert.notEqual(check().checkedAt,first.checkedAt);assert.equal(f.calls.fetch.length,2);
   reject=true;f.c.configureColdy_({apiKey:'new_synthetic_key'});assert.equal(check().active,false);assert.equal(f.calls.fetch.length,3);
   assert.equal(f.c.getColdySettings_({}).connected,false);
+});
+
+test('a live connection survives contention on the quota lock and reports the actual observation time',()=>{
+  const f=fixture();f.configure();
+  vm.runInContext(readFileSync(new URL('../src/ServiceSettings.gs',import.meta.url),'utf8'),f.c);
+  f.c.registryProjectId_=()=>'numshield';
+  const busy=()=>{throw Object.assign(new Error('Busy'),{registryCode:'BUSY'});};
+  f.c.locked_=busy;f.c.coldyServiceLimits_=busy;
+  const read=connectionOnly=>f.c.getServiceLimits_(connectionOnly?{provider:'coldy',connectionOnly:true}:{provider:'coldy'});
+  const observed=read(true);assert.equal(observed.active,true);f.tick(2200);
+  const waiting=read(false);
+  assert.equal(waiting.active,true);assert.equal(waiting.checkedAt,observed.checkedAt);
+  assert.equal(waiting.pending,true);assert.equal(waiting.busy,true);assert.equal(waiting.retryAfterMs,5000);
+  assert.match(waiting.message,/дневные лимиты/);assert.deepEqual(plain(waiting.items),[]);assert.equal(f.calls.fetch.length,1);
+});
+
+test('an overlapping 401 invalidates older successful observations and a later real verification can recover',()=>{
+  let reject=false,overlap=false;
+  const f=fixture({transport:({response})=>{
+    if(overlap){overlap=false;reject=true;assert.throws(()=>f.c.testColdyConnection_({}),/COLDY_AUTH/);reject=false;}
+    return response(reject?{}:[],reject?401:200);
+  }});
+  f.configure();f.c.testColdyConnection_({});overlap=true;
+  assert.throws(()=>f.c.testColdyConnection_({}),/COLDY_AUTH/);
+  assert.equal(f.c.getColdySettings_({}).connected,false);
+  assert.equal(f.c.testColdyConnection_({}).connected,true);
+  assert.equal(f.c.getColdySettings_({}).connected,true);
+});
+
+test('removing and re-adding the same key fences older successes and late 401s from the new connection',()=>{
+  for(const status of [200,401]){
+    let replace=false;
+    const f=fixture({transport:({response})=>{
+      if(replace){replace=false;f.c.configureColdy_({clearKey:true});f.configure();f.c.testColdyConnection_({});return response([],status);}
+      return response([]);
+    }});
+    f.configure();replace=true;
+    assert.throws(()=>f.c.testColdyConnection_({}),status===401?/COLDY_AUTH/:/COLDY_CREDENTIAL_CHANGED/);
+    assert.equal(f.c.getColdySettings_({}).connected,true);
+  }
 });
 
 test('an organization key changed during a request never records that response as the new connection',()=>{

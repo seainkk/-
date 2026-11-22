@@ -250,9 +250,9 @@ function creation_(context, kind, requestId, args, callback) {
   }
 }
 
-function locked_(callback) {
+function locked_(callback, waitMillis) {
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(10000)) fail_('BUSY', 'Сейчас выполняется другое сохранение. Повторите через несколько секунд.');
+  if (!lock.tryLock(waitMillis === undefined ? 10000 : waitMillis)) fail_('BUSY', 'Сейчас выполняется другое сохранение. Повторите через несколько секунд.');
   try { return callback(); } finally { lock.releaseLock(); }
 }
 

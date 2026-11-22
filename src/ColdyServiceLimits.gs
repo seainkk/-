@@ -13,10 +13,9 @@ function coldyServiceLimits_(context, settings) {
   var token = Utilities.getUuid(), deadline = Date.now() + 45000;
   var state = locked_(function () {
     var current = guard(), now = Date.now(), saved = coldyPropertyJson_(current.properties,slot);
-    var receipt = coldyPropertyJson_(current.properties,COLDY.connectionProperty);
-    var verified = receipt && receipt.version === COLDY.version && receipt.rootId === current.rootId && receipt.credentialHash === settings.credentialHash;
-    if (!coldyLimitsCheckpoint_(saved,signature,ids.length,now) || saved.cursor === ids.length && !verified)
-      saved = {signature:signature, cursor:0, limit:0, sent:0, remaining:0, firstAt:0, lastAt:0, lease:'', leaseUntil:0, retryAt:0};
+    var fresh = coldySettings_(current), verified = fresh.connected && fresh.proofSlot === settings.proofSlot;
+    if (!coldyLimitsCheckpoint_(saved,signature,ids.length,now) || saved.proofSlot !== settings.proofSlot || saved.cursor === ids.length && !verified)
+      saved = {signature:signature, proofSlot:settings.proofSlot, cursor:0, limit:0, sent:0, remaining:0, firstAt:0, lastAt:0, lease:'', leaseUntil:0, retryAt:0};
     if (saved.retryAt > now) {
       var throttle = registryError_('COLDY_RATE_LIMIT','Coldy просит подождать перед следующим запросом.');
       throttle.retryAfterMs = saved.retryAt - now;
@@ -26,7 +25,7 @@ function coldyServiceLimits_(context, settings) {
     saved.lease = token; saved.leaseUntil = now + 120000;
     current.properties.setProperty(slot,JSON.stringify(saved));
     return saved;
-  });
+  },0);
   if (state.lease !== token) return coldyLimitsPublic_(state,ids.length,settings);
 
   var initialCursor = state.cursor, stop = Math.min(ids.length,state.cursor + PROJECT_INFRASTRUCTURE.batch), problem;
@@ -69,7 +68,7 @@ function coldyServiceLimits_(context, settings) {
   var committed = locked_(function () {
     var current = guard(), saved = coldyPropertyJson_(current.properties,slot);
     if (!saved || saved.signature !== signature || saved.lease !== token)
-      return coldyLimitsCheckpoint_(saved,signature,ids.length,Date.now()) ? saved : null;
+      return coldyLimitsCheckpoint_(saved,signature,ids.length,Date.now()) && saved.proofSlot === settings.proofSlot ? saved : null;
     state.lease = ''; state.leaseUntil = 0;
     // A long request can cross midnight. Never publish counters collected on different days.
     if (problem && problem.registryCode === 'COLDY_AUTH' || state.firstAt && !coldyLimitsSameDay_(state.firstAt,Date.now())) {
@@ -78,12 +77,7 @@ function coldyServiceLimits_(context, settings) {
     }
     current.properties.setProperty(slot,JSON.stringify(state));
     if (!problem && state.cursor > initialCursor) {
-      var receipt = coldyPropertyJson_(current.properties,COLDY.connectionProperty);
-      if (!receipt || receipt.version !== COLDY.version || receipt.rootId !== current.rootId || receipt.credentialHash !== settings.credentialHash ||
-          !(Date.parse(receipt.checkedAt) >= state.lastAt)) {
-        current.properties.setProperty(COLDY.connectionProperty,JSON.stringify({version:COLDY.version,rootId:current.rootId,
-          credentialHash:settings.credentialHash,checkedAt:new Date(state.lastAt).toISOString()}));
-      }
+      coldyRememberConnection_(current,settings,new Date(state.lastAt).toISOString());
     }
     return state;
   });
