@@ -100,6 +100,38 @@ test('unconfigured infrastructure is honest and performs no HTTP, cache creation
   assert.deepEqual(f.calls.saves, []);
 });
 
+test('explicit inventory diagnostics expose only bounded shape metadata without saving or exposing sender data', () => {
+  const f = fixture({ transport: ({ response }) => response({
+    items: [account(1, { smtp_password: KEY })], total: 7, has_more: true, next_cursor: 'private-cursor-' + KEY,
+    data: { items: [account(2), account(3)] }, accounts: [account(4)], results: [account(5)], private_key: KEY,
+  }) });
+  f.configure(); const properties = [...f.properties];
+  const result = plain(f.c.getProjectInfrastructure_({ diagnose: true }));
+  assert.deepEqual(result, { diagnostics: { itemsIsArray: true, itemsLength: 1, maxSupportedAccounts: 1000,
+    reportedTotal: 7, hasMore: true, hasContinuation: true, dataArrayLength: null, dataItemsLength: 2,
+    accountsArrayLength: 1, resultsArrayLength: 1 } });
+  assert.deepEqual(f.calls.http, ['/accounts']); assert.deepEqual(f.calls.saves, []);
+  assert.deepEqual([...f.properties], properties); assert.equal(f.cache.size, 0);
+  assert.ok(!JSON.stringify(result).includes(KEY)); assert.ok(!JSON.stringify(result).includes('@'));
+  assert.throws(() => f.c.getProjectInfrastructure_({ diagnose: 'yes' }), /INVALID_REQUEST/);
+});
+
+test('inventory diagnostics reject stale access or changed credentials after provider reads', () => {
+  for (const action of ['revoke', 'rotate', 'root']) {
+    const f = fixture({ transport: ({ defaultResponse, f }) => {
+      const result = defaultResponse();
+      if (action === 'revoke') f.revoke();
+      else if (action === 'rotate') f.configure('different-provider-credential');
+      else f.switchRoot();
+      return result;
+    } });
+    f.configure();
+    assert.throws(() => f.c.getProjectInfrastructure_({ diagnose: true }),
+      action === 'revoke' ? /LINK_ACCESS_REQUIRED/ : action === 'rotate' ? /COLDY_CREDENTIAL_CHANGED/ : /SOURCE_CHANGED/);
+    assert.deepEqual(f.calls.http, ['/accounts']); assert.deepEqual(f.calls.saves, []);
+  }
+});
+
 test('first synchronization exposes the complete inventory and a finite first detail batch', () => {
   const f = fixture({ accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)) });
   f.configure();
