@@ -32,7 +32,7 @@ function fixture(options = {}) {
     id_: value => { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{10,200}$/.test(value)) throw coded('INVALID_ID', 'Invalid ID'); return value; },
     fail_: (code, message) => { throw coded(code, message); }, registryError_: coded, digest_: hash,
     authorize_: () => { if (!authorized) throw coded('LINK_ACCESS_REQUIRED', 'Revoked'); return { rootId, properties: props }; },
-    locked_: callback => { assert.equal(locked, false, 'No nested locks'); locked = true; calls.locks++; try { return callback(); } finally { locked = false; } },
+    locked_: callback => { assert.equal(locked, false, 'No nested locks'); if (options.beforeLock) options.beforeLock(f); locked = true; calls.locks++; try { return callback(); } finally { locked = false; } },
     Utilities: { getUuid: () => `fixture-request-${++sequence}` },
     Drive: { Files: { get: id => { if (id !== root.id) throw coded('OUTSIDE_REGISTRY', 'Wrong root'); return plain(root); } } },
     UrlFetchApp: { fetch: (url, request) => {
@@ -62,7 +62,7 @@ function fixture(options = {}) {
     if (options.movedStore) throw coded('OUTSIDE_REGISTRY', 'Moved store');
     calls.loads.push({ rootId: context.rootId, kind, owner });
     const result = cache.get(`${context.rootId}|${kind}|${owner}`);
-    if (options.afterLoad) options.afterLoad(f);
+    if (options.afterLoad && kind === 'infrastructure') options.afterLoad(f);
     return result ? plain(result) : null;
   };
   c.coldySave_ = (context, kind, owner, value) => {
@@ -76,15 +76,34 @@ function fixture(options = {}) {
     return value;
   };
   vm.runInContext(readFileSync(new URL('../src/ProjectInfrastructure.gs', import.meta.url), 'utf8'), c);
+  vm.runInContext(readFileSync(new URL('../src/ProjectMonitoring.gs', import.meta.url), 'utf8'), c);
   // Small boundary/race scenarios explicitly retain five-detail batches. Large
   // inventory tests below exercise the unchanged production configuration.
   if (options.detailBatch !== undefined) c.PROJECT_INFRASTRUCTURE = Object.freeze({ ...c.PROJECT_INFRASTRUCTURE, batch: options.detailBatch });
   const f = { c, calls, properties, cache, root, response, coded,
-    configure: key => c.configureColdy_({ apiKey: key || KEY }),
+    configure: key => {
+      const apiKey = key || KEY, result = c.configureColdy_({ apiKey });
+      // Pre-existing small scenarios explicitly model a saved selection of
+      // their sender fixture. monitoringIds:null exercises the real default.
+      const storeKey = `${rootId}|monitoring|${hash(apiKey)}`;
+      if (apiKey === KEY && options.monitoringIds !== null && !cache.has(storeKey)) {
+        const ids = options.monitoringIds === undefined ? accounts.map(item => String(item.id)) : options.monitoringIds;
+        cache.set(storeKey, { version: 1, rootId, credentialHash: hash(apiKey), revision: 1,
+          configured: true, accountIds: plain(c.projectMonitoringIds_(ids, 'INVALID_REQUEST')), receipts: [] });
+      }
+      return result;
+    },
     get: () => plain(c.getProjectInfrastructure_({})), refresh: input => plain(c.refreshProjectInfrastructure_(input || {})),
     tick: value => { now += value; }, setAccounts: value => { accounts = value; },
     revoke: () => { authorized = false; }, switchRoot: () => { rootId = 'other_registry_root_1234567890'; },
     state: () => cache.get(`${ROOT}|infrastructure|${hash(properties.get('COLDY_API_KEY') || '')}`),
+    select: ids => {
+      const credentialHash = hash(properties.get('COLDY_API_KEY') || ''), storeKey = `${rootId}|monitoring|${credentialHash}`;
+      if (ids === null) { cache.delete(storeKey); return; }
+      const previous = cache.get(storeKey);
+      cache.set(storeKey, { version: 1, rootId, credentialHash, revision: (previous?.revision || 0) + 1,
+        configured: true, accountIds: plain(c.projectMonitoringIds_(ids, 'INVALID_REQUEST')), receipts: [] });
+    },
   };
   return f;
 }
@@ -103,6 +122,112 @@ test('unconfigured infrastructure is honest and performs no HTTP, cache creation
   assert.deepEqual(f.calls.saves, []);
 });
 
+test('a project without an explicit selection monitors no senders even after listing all 1159 available accounts', () => {
+  const f = fixture({ monitoringIds: null, accounts: Array.from({ length: 1159 }, (_, index) => account(index + 1)) });
+  f.configure(); const empty = f.get();
+  assert.equal(empty.state, 'no_selection'); assert.equal(empty.monitoring.configured, false);
+  assert.equal(empty.monitoring.selectedCount, 0); assert.deepEqual(empty.monitoring.accountIds, []);
+  assert.equal(empty.availableCount, null); assert.equal(empty.totals.accounts, 0);
+  assert.deepEqual(f.calls.http, []);
+  const listed = f.refresh();
+  assert.equal(listed.state, 'no_selection'); assert.equal(listed.availableCount, 1159);
+  assert.deepEqual(listed.accounts, []); assert.equal(listed.nextCursor, null);
+  assert.deepEqual(f.state().detailIds, []); assert.deepEqual(f.calls.http, ['/accounts']);
+  const requests = f.calls.http.length; f.get(); assert.equal(f.calls.http.length, requests);
+  assert.ok(!JSON.stringify(listed).includes('@'), 'The monitoring view does not disclose the unselected inventory');
+});
+
+test('only selected senders are returned, counted and fetched while the full inventory remains private for the picker', () => {
+  const f = fixture({ monitoringIds: ['2', '4'], accounts: [account(1, { total_sent: 999999, error_text: 'Unselected failure' }), account(2), account(3), account(4)] });
+  f.configure(); const result = f.refresh();
+  assert.deepEqual(result.accounts.map(item => item.id), ['2', '4']);
+  assert.deepEqual(f.calls.http, ['/accounts', '/accounts/2', '/accounts/4']);
+  assert.equal(result.state, 'ready'); assert.equal(result.availableCount, 4);
+  assert.equal(result.monitoring.selectedCount, 2); assert.equal(result.totals.accounts, 2);
+  assert.equal(result.totals.sentTotal, 60); assert.equal(result.totals.sentToday, 6);
+  assert.equal(result.totals.dailyLimit, 200); assert.equal(result.totals.accountsWithErrors, 0);
+  assert.equal(result.countersScope, 'selected_accounts'); assert.equal(f.state().accounts.length, 4);
+  const requests = f.calls.http.length, picker = plain(f.c.getProjectInfrastructureSelection_({}));
+  assert.equal(picker.accounts.length, 4); assert.equal(f.calls.http.length, requests);
+  assert.equal(f.get().accounts.length, 2); assert.equal(f.calls.http.length, requests);
+});
+
+test('explicit inventory-only refresh never fetches sender details and leaves a selected-only continuation', () => {
+  const f = fixture({ monitoringIds: ['2', '4'], accounts: [account(1), account(2), account(3), account(4)] });
+  f.configure(); const listed = f.refresh({ inventoryOnly: true });
+  assert.deepEqual(f.calls.http, ['/accounts']); assert.deepEqual(f.state().detailIds, ['2', '4']);
+  assert.deepEqual(listed.detailProgress, { completed: 0, total: 2 }); assert.ok(listed.nextCursor);
+  const requests = f.calls.http.length; f.get(); assert.equal(f.calls.http.length, requests);
+  const final = f.refresh({ cursor: listed.nextCursor });
+  assert.equal(final.state, 'ready'); assert.deepEqual(f.calls.http, ['/accounts', '/accounts/2', '/accounts/4']);
+  assert.throws(() => f.refresh({ inventoryOnly: true, cursor: listed.nextCursor }), /INVALID_REQUEST/);
+  assert.throws(() => f.refresh({ inventoryOnly: 'yes' }), /INVALID_REQUEST/);
+});
+
+test('legacy full-inventory caches do not become an implicit monitoring selection or expose old cursors', () => {
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)) });
+  f.configure(); const legacyCursor = f.refresh().nextCursor;
+  delete f.state().detailIds; delete f.state().monitoringSignature; f.select(null);
+  const requests = f.calls.http.length, empty = f.get();
+  assert.equal(empty.state, 'no_selection'); assert.equal(empty.availableCount, 7);
+  assert.deepEqual(empty.accounts, []); assert.equal(empty.nextCursor, null);
+  assert.deepEqual(empty.detailProgress, { completed: 0, total: 0 }); assert.equal(f.calls.http.length, requests);
+  assert.throws(() => f.refresh({ cursor: legacyCursor }), /COLDY_INFRA_CURSOR_STALE/);
+  assert.equal(f.calls.http.length, requests);
+  f.select(['2']); const selected = f.get();
+  assert.deepEqual(selected.accounts.map(item => item.id), ['2']); assert.equal(selected.totals.sentTotal, 20);
+  assert.equal(selected.nextCursor, null); assert.deepEqual(selected.detailProgress, { completed: 0, total: 1 });
+  assert.equal(f.calls.http.length, requests);
+  f.refresh(); assert.deepEqual(f.calls.http.slice(requests), ['/accounts', '/accounts/2']);
+});
+
+test('a monitoring change during inventory or detail reads stops the old job without persistence or later fanout', () => {
+  for (const changeAt of ['/accounts', '/accounts/2']) {
+    const f = fixture({ monitoringIds: ['2', '4'], accounts: [account(1), account(2), account(3), account(4)],
+      transport: ({ path, defaultResponse, f }) => { const result = defaultResponse(); if (path === changeAt) f.select(['4']); return result; } });
+    f.configure();
+    assert.throws(() => f.refresh(), /COLDY_MONITORING_CHANGED/);
+    assert.deepEqual(f.calls.http, changeAt === '/accounts' ? ['/accounts'] : ['/accounts', '/accounts/2']);
+    assert.equal(f.calls.saves.length, 0); assert.equal(f.state(), undefined);
+    assert.deepEqual(f.get().monitoring.accountIds, ['4']);
+  }
+});
+
+test('saved and acknowledged cursors become stale after a teammate changes the monitoring selection', () => {
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 25 }, (_, index) => account(index + 1)) });
+  f.configure(); const first = f.refresh(); f.refresh({ cursor: first.nextCursor });
+  f.select(['25']); const requests = f.calls.http.length, current = f.get();
+  assert.deepEqual(current.accounts.map(item => item.id), ['25']); assert.equal(current.totals.sentTotal, 250);
+  assert.equal(current.nextCursor, null); assert.deepEqual(current.detailProgress, { completed: 0, total: 1 });
+  assert.throws(() => f.refresh({ cursor: first.nextCursor }), /COLDY_INFRA_CURSOR_STALE/);
+  assert.equal(f.calls.http.length, requests);
+  const fresh = f.refresh(); assert.equal(fresh.state, 'ready');
+  assert.deepEqual(f.calls.http.slice(requests), ['/accounts', '/accounts/25']);
+});
+
+test('selection changes before the final registry lock cannot persist an old monitoring result', () => {
+  let armed = false;
+  const f = fixture({ monitoringIds: ['2', '4'], accounts: [account(1), account(2), account(3), account(4)],
+    beforeLock: current => { if (armed) { armed = false; current.select(['4']); } } });
+  f.configure(); armed = true;
+  assert.throws(() => f.refresh(), /COLDY_MONITORING_CHANGED/);
+  assert.deepEqual(f.calls.http, ['/accounts', '/accounts/2', '/accounts/4']); assert.equal(f.calls.saves.length, 0);
+  assert.deepEqual(f.get().monitoring.accountIds, ['4']);
+});
+
+test('a failed fresh inventory after changing selection preserves only the current selection and error continuation', () => {
+  let unavailable = false;
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)),
+    transport: ({ path, defaultResponse }) => { if (path === '/accounts' && unavailable) throw new Error('Network ' + KEY); return defaultResponse(); } });
+  f.configure(); const old = f.refresh(); f.select(['2']); unavailable = true;
+  const failed = f.refresh();
+  assert.equal(failed.error.code, 'COLDY_NETWORK'); assert.equal(failed.syncPaused, true);
+  assert.deepEqual(failed.accounts.map(item => item.id), ['2']); assert.deepEqual(f.state().detailIds, ['2']);
+  assert.deepEqual(failed.detailProgress, { completed: 0, total: 1 }); assert.notEqual(failed.nextCursor, old.nextCursor);
+  const requests = f.calls.http.length; assert.throws(() => f.refresh({ cursor: old.nextCursor }), /COLDY_INFRA_CURSOR_STALE/);
+  assert.equal(f.calls.http.length, requests); assert.ok(!JSON.stringify(failed).includes(KEY));
+});
+
 test('explicit inventory diagnostics expose only bounded shape metadata without saving or exposing sender data', () => {
   const f = fixture({ transport: ({ response }) => response({
     items: [account(1, { smtp_password: KEY })], total: 7, has_more: true, next_cursor: 'private-cursor-' + KEY,
@@ -114,7 +239,7 @@ test('explicit inventory diagnostics expose only bounded shape metadata without 
     reportedTotal: 7, hasMore: true, hasContinuation: true, dataArrayLength: null, dataItemsLength: 2,
     accountsArrayLength: 1, resultsArrayLength: 1 } });
   assert.deepEqual(f.calls.http, ['/accounts']); assert.deepEqual(f.calls.saves, []);
-  assert.deepEqual([...f.properties], properties); assert.equal(f.cache.size, 0);
+  assert.deepEqual([...f.properties], properties); assert.equal(f.cache.size, 1, 'Only the preconfigured monitoring fixture exists');
   assert.ok(!JSON.stringify(result).includes(KEY)); assert.ok(!JSON.stringify(result).includes('@'));
   assert.throws(() => f.c.getProjectInfrastructure_({ diagnose: 'yes' }), /INVALID_REQUEST/);
 });
@@ -143,7 +268,7 @@ test('first synchronization exposes the complete inventory and a finite first de
   assert.equal(result.state, 'partial');
   assert.equal(result.syncPaused, false);
   assert.equal(result.error, null);
-  assert.equal(result.countersScope, 'organization_accounts');
+  assert.equal(result.countersScope, 'selected_accounts');
   assert.equal(result.connected, true);
   assert.deepEqual(result.detailProgress, { completed: 5, total: 7 });
   assert.match(result.nextCursor, /^[A-Za-z0-9_-]{43}$/);
@@ -316,7 +441,7 @@ test('unknown, invalid and absent metrics remain null instead of inventing zero'
 
 test('empty confirmed inventory has zero account counters, while an unavailable inventory does not', () => {
   const f = fixture({ accounts: [] }); f.configure(); const empty = f.refresh();
-  assert.equal(empty.state, 'ready'); assert.equal(empty.totals.accounts, 0);
+  assert.equal(empty.state, 'no_selection'); assert.equal(empty.totals.accounts, 0);
   assert.equal(empty.totals.sentTotal, 0); assert.equal(empty.totals.errorCount, null);
   assert.deepEqual(f.calls.http, ['/accounts']);
   const bad = fixture({ transport: ({ response }) => response({ message: [KEY] }, 500) }); bad.configure();
@@ -422,7 +547,9 @@ test('a missing account stays visible as stale until a complete later inventory 
   const partial = f.refresh();
   assert.equal(partial.accounts[0].status, 'Connected'); assert.equal(partial.accounts[0].stale, true);
   assert.equal(partial.accounts[0].syncError.code, 'COLDY_NOT_FOUND');
-  f.setAccounts([]); const removed = f.refresh(); assert.equal(removed.accounts.length, 0); assert.equal(removed.state, 'ready');
+  f.setAccounts([]); const removed = f.refresh(); assert.equal(removed.accounts.length, 0); assert.equal(removed.state, 'partial');
+  assert.deepEqual(removed.monitoring.accountIds, ['1']); assert.deepEqual(removed.monitoring.missingAccountIds, ['1']);
+  assert.equal(removed.totals.accounts, 1); assert.equal(removed.totals.sentTotal, null); assert.ok(removed.warnings.length);
 });
 
 test('malformed or incomplete inventory cannot replace the last complete sender list', () => {
@@ -445,7 +572,8 @@ test('credential rotation and clearing cannot expose another organization cache 
   const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 6 }, (_, index) => account(index + 1)) });
   f.configure(); const old = f.refresh();
   f.configure('second_organization_fixture_secret');
-  const fresh = f.get(); assert.equal(fresh.state, 'not_synced'); assert.deepEqual(fresh.accounts, []);
+  const fresh = f.get(); assert.equal(fresh.state, 'no_selection'); assert.deepEqual(fresh.accounts, []);
+  assert.equal(fresh.monitoring.configured, false);
   assert.throws(() => f.refresh({ cursor: old.nextCursor }), /COLDY_INFRA_CURSOR_STALE/);
   f.c.configureColdy_({ clearKey: true }); assert.equal(f.get().state, 'not_configured');
   assert.deepEqual(f.get().accounts, []);
@@ -483,7 +611,7 @@ test('pure cache reads also reject revoked access and moved state instead of fal
 
 test('older initial inventory responses cannot overwrite a newer completed synchronization', () => {
   let nested = false;
-  const f = fixture({ accounts: [account(1)], transport: ({ path, defaultResponse, f }) => {
+  const f = fixture({ monitoringIds: ['1', '2', '3'], accounts: [account(1)], transport: ({ path, defaultResponse, f }) => {
     const old = defaultResponse();
     if (path === '/accounts' && !nested) {
       nested = true; f.tick(1); f.setAccounts([account(2), account(3)]); f.refresh();

@@ -4,7 +4,8 @@
   const $=id=>document.getElementById(id), views=new Set(['analytics','infrastructure']);
   let config=null, view=null, ready=false, accessEpoch=null, generation=0;
   let catalog=null,catalogLoading=false,catalogError='',catalogSequence=0,catalogLoadedAt=0,segmentId='';
-  let infrastructure=null,infraLoading=false,infraError='',infraSequence=0,initialSyncAttempted=false;
+  let infrastructure=null,infraLoading=false,infraError='',infraNotice='',infraSequence=0,initialSyncAttempted=false;
+  let mailboxPicker=null;
   const contexts=new Map();
   const text=value=>value===undefined||value===null?'':String(value);
   const number=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0?new Intl.NumberFormat('ru-RU').format(value):'—';
@@ -31,8 +32,9 @@
   function dirty(context){if(!context?.data)return false;const draft=selected(context),saved=new Set((context.data.campaigns||[]).filter(item=>item.selected).map(item=>item.id));return draft.size!==saved.size||[...draft].some(id=>!saved.has(id));}
   function configure(options){config=options||{};render();}
   function clear(){
+    closeMailboxPicker(true);
     generation++;catalog=null;catalogLoading=false;catalogError='';catalogSequence++;catalogLoadedAt=0;segmentId='';contexts.clear();
-    infrastructure=null;infraLoading=false;infraError='';infraSequence++;initialSyncAttempted=false;
+    infrastructure=null;infraLoading=false;infraError='';infraNotice='';infraSequence++;initialSyncAttempted=false;
     scrub();
   }
   function lock(){ready=false;clear();view=null;render();}
@@ -48,6 +50,7 @@
   function show(next,options={}){
     if(options.epoch!==undefined&&options.epoch!==accessEpoch){clear();accessEpoch=options.epoch;}
     ready=options.ready===true;view=views.has(next)?next:null;
+    if(view!=='infrastructure'||!ready)closeMailboxPicker();
     if(!ready){view=null;if(catalog||infrastructure||contexts.size)clear();}
     render();
   }
@@ -159,21 +162,21 @@
     if(alive(mark)&&!context.operation)await loadSegment(id);
   }
   async function loadInfrastructure(){
-    if(!ready||infraLoading)return;
-    const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';render();notify();
+    if(!ready||infraLoading||mailboxPicker?.open)return;
+    const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';infraNotice='';render();notify();
     let initial=false;
     try{const data=await invoke('getProjectInfrastructure',{},mark);if(!alive(mark)||sequence!==infraSequence||!data)return;infrastructure=data;
-      initial=data.configured===true&&!initialSyncAttempted&&!data.syncPaused&&!data.error&&!(data.retryAfterMs>0)&&(data.state==='not_synced'||data.stale===true);
+      initial=data.configured===true&&data.monitoring?.accountIds?.length>0&&!initialSyncAttempted&&!data.syncPaused&&!data.error&&!(data.retryAfterMs>0)&&(data.state==='not_synced'||data.stale===true);
       if(initial)initialSyncAttempted=true;
     }catch(error){if(alive(mark)&&sequence===infraSequence)infraError=failure(error).message;}
     finally{if(alive(mark)&&sequence===infraSequence){infraLoading=false;render();notify();}}
     if(initial&&alive(mark)&&view==='infrastructure')await syncInfrastructure();
   }
   async function syncInfrastructure(continuation=false){
-    if(!ready||infraLoading)return;
+    if(!ready||infraLoading||mailboxPicker?.open||!infrastructure?.monitoring?.accountIds?.length)return;
     let cursor=continuation?infrastructure?.nextCursor:null;
     if(continuation&&!cursor)return;
-    const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';initialSyncAttempted=true;render();notify();
+    const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';infraNotice='';initialSyncAttempted=true;render();notify();
     const seen=new Set();let previous=continuation?(infrastructure?.detailProgress?.completed??-1):-1;
     try{
       for(let batch=0;batch<1001;batch++){
@@ -193,6 +196,91 @@
     }
     catch(error){if(alive(mark)&&sequence===infraSequence)infraError=failure(error).message;}
     finally{if(alive(mark)&&sequence===infraSequence){infraLoading=false;render();notify();}}
+  }
+  function pickerAlive(current,mark){return alive(mark)&&mailboxPicker===current&&current.open&&view==='infrastructure';}
+  function mailboxDirty(current=mailboxPicker){const ids=current?.data?.selection?.accountIds;if(!ids)return false;const saved=new Set(ids);return saved.size!==current.selected.size||[...saved].some(id=>!current.selected.has(id));}
+  function closeMailboxPicker(hard=false){
+    const current=mailboxPicker;if(current){current.open=false;current.sequence++;if(hard||!current.operation)mailboxPicker=null;}
+    const dialog=$('pj-mailbox-dialog');if(dialog?.open)dialog.close();
+    if($('pj-mailbox-rows')){$('pj-mailbox-rows').replaceChildren();$('pj-mailbox-search').value='';$('pj-mailbox-count').textContent='';$('pj-mailbox-shown').textContent='';health('pj-mailbox-health','');}
+    notify();
+  }
+  async function openMailboxPicker(){
+    if(!ready||view!=='infrastructure'||infraLoading||hasPending()||mailboxPicker?.open)return;
+    const current=mailboxPicker||{data:null,selected:new Set(),query:'',limit:100,pending:null,error:'',conflict:false,operation:null,sequence:0};mailboxPicker=current;current.open=true;
+    $('pj-mailbox-search').value=current.query;$('pj-mailbox-dialog').showModal();renderMailboxPicker();notify();
+    if(!current.operation)await loadMailboxSelection(current);
+  }
+  async function loadMailboxSelection(current=mailboxPicker){
+    if(!current?.open||current.pending||current.operation)return;
+    const mark=token(),sequence=++current.sequence;current.pending='load';current.error='';renderMailboxPicker();notify();
+    try{const data=await invoke('getProjectInfrastructureSelection',{},mark,()=>pickerAlive(current,mark)&&sequence===current.sequence);
+      if(!pickerAlive(current,mark)||sequence!==current.sequence||!data)return;
+      current.data=data;current.selected=new Set(data.selection?.accountIds||[]);current.query='';current.limit=100;current.conflict=false;$('pj-mailbox-search').value='';
+    }catch(error){if(pickerAlive(current,mark)&&sequence===current.sequence)current.error=failure(error).message;}
+    finally{if(pickerAlive(current,mark)&&sequence===current.sequence){current.pending=null;renderMailboxPicker();notify();}}
+  }
+  async function refreshMailboxInventory(){
+    const current=mailboxPicker;if(!current?.open||current.pending||current.operation)return;
+    const mark=token(),sequence=++current.sequence;current.pending='inventory';current.error='';renderMailboxPicker(false);notify();
+    try{
+      const data=await invoke('refreshProjectInfrastructure',{inventoryOnly:true},mark,()=>pickerAlive(current,mark)&&sequence===current.sequence);
+      if(!pickerAlive(current,mark)||sequence!==current.sequence||!data)return;
+      infrastructure=data;
+      if(data.error||data.syncPaused||data.state==='error')throw new Error(data.error?.message||'Не удалось обновить список почт. Повторите позже.');
+      const fresh=await invoke('getProjectInfrastructureSelection',{},mark,()=>pickerAlive(current,mark)&&sequence===current.sequence);
+      if(!pickerAlive(current,mark)||sequence!==current.sequence||!fresh)return;
+      if(current.data?.selection?.scopeToken&&fresh.selection?.scopeToken!==current.data.selection.scopeToken){current.data=null;current.selected.clear();current.conflict=true;current.error='Подключение изменилось. Загрузите сохранённый выбор заново.';}
+      else if(current.data&&fresh.selection?.revision!==current.data.selection?.revision){current.conflict=true;current.error='Коллега изменил выбор почт. Загрузите сохранённый выбор и проверьте его перед сохранением.';}
+      else{current.data=fresh;current.conflict=false;}
+      if(!current.data){current.data=fresh;current.selected=new Set(fresh.selection?.accountIds||[]);}
+    }catch(error){if(pickerAlive(current,mark)&&sequence===current.sequence)current.error=failure(error).message;}
+    finally{if(pickerAlive(current,mark)&&sequence===current.sequence){current.pending=null;renderMailboxPicker();render();notify();}}
+  }
+  async function saveMailboxSelection(retry=false){
+    const current=mailboxPicker;if(!current?.open||current.pending||!current.data||current.conflict)return;
+    if(!current.operation){if(retry||!mailboxDirty(current))return;const selection=current.data.selection;current.operation={payload:{accountIds:[...current.selected].sort(),expectedRevision:selection.revision,scopeToken:selection.scopeToken,requestId:uuid()},running:false,failed:false};}
+    else if(!retry)return;
+    const operation=current.operation,mark=token();operation.running=true;operation.failed=false;current.pending='save';current.error='';renderMailboxPicker(false);render();notify();
+    try{
+      const result=await invoke('saveProjectInfrastructureSelection',operation.payload,mark,()=>pickerAlive(current,mark));
+      if(!alive(mark)||mailboxPicker!==current||current.operation!==operation)return;
+      if(!result){operation.failed=true;current.error='Результат сохранения не подтверждён. Продолжите тот же запрос.';return;}
+      infrastructure=result.infrastructure;current.operation=null;initialSyncAttempted=true;infraSequence++;infraLoading=false;infraError='';
+      infraNotice=result.replayed&&result.savedRevision!==undefined&&result.selection?.revision!==result.savedRevision?'Ваш запрос уже сохранён. После него коллега изменил выбор; показана актуальная версия.':'Выбор почт сохранён. Показатели обновляются кнопкой «Синхронизировать».';
+      closeMailboxPicker(true);mutation({kind:'monitoring'});render();
+    }catch(error){
+      if(alive(mark)&&mailboxPicker===current&&current.operation===operation){const parsed=failure(error);
+        const definite=['COLDY_MONITORING_STALE','COLDY_MONITORING_SCOPE_CHANGED','COLDY_MONITORING_REQUEST_MISMATCH','COLDY_MONITORING_ACCOUNT_MISSING','INVALID_REQUEST','COLDY_KEY_REQUIRED','COLDY_CREDENTIAL_CHANGED','SOURCE_CHANGED','OUTSIDE_REGISTRY'].includes(parsed.code);
+        if(definite){current.operation=null;current.conflict=['COLDY_MONITORING_STALE','COLDY_MONITORING_SCOPE_CHANGED','COLDY_CREDENTIAL_CHANGED'].includes(parsed.code);current.error=current.conflict?'Выбор или подключение изменились. Загрузите сохранённый выбор и проверьте его перед сохранением.':parsed.message;
+          if(['COLDY_MONITORING_SCOPE_CHANGED','COLDY_CREDENTIAL_CHANGED'].includes(parsed.code)){current.data=null;current.selected.clear();}
+        }else{operation.failed=true;current.error=parsed.message+' Результат не подтверждён. Продолжите тот же запрос.';}
+      }
+    }finally{operation.running=false;if(alive(mark)&&mailboxPicker===current){current.pending=null;renderMailboxPicker();render();notify();}}
+  }
+  function renderMailboxPicker(rows=true){
+    const current=mailboxPicker;if(!current?.open||view!=='infrastructure'||!$('pj-mailbox-dialog').open)return;
+    const locked=!!current.pending||!!current.operation;
+    $('pj-mailbox-fields').disabled=locked||!current.data||current.conflict;
+    $('pj-mailbox-cancel').textContent=current.operation?'Закрыть':'Отмена';
+    $('pj-mailbox-save').disabled=locked||current.conflict||!current.data?.configured||!mailboxDirty(current);
+    $('pj-mailbox-retry').hidden=!current.operation?.failed;$('pj-mailbox-retry').disabled=!!current.pending;
+    $('pj-mailbox-reload').hidden=!current.conflict;$('pj-mailbox-reload').disabled=!!current.pending;
+    const pending=current.pending==='load'?'Загружаем список почт…':current.pending==='inventory'?'Обновляем список из Coldy…':current.pending==='save'?'Сохраняем выбор…':'';
+    health('pj-mailbox-health',current.error||pending||(!current.data?.configured?'Сначала подключите Coldy в настройках.':''),!!current.error);
+    $('pj-mailbox-count').textContent='Выбрано: '+number(current.selected.size)+' · Доступно: '+number(current.data?.availableCount);
+    if(!rows)return;
+    const accounts=[...(current.data?.accounts||[])],known=new Set(accounts.map(item=>item.id));
+    for(const id of current.selected)if(!known.has(id))accounts.push({id,email:'Ящик недоступен в текущем списке',missing:true});
+    const query=current.query.toLocaleLowerCase(),filtered=accounts.filter(item=>[item.email,item.name,item.provider].some(value=>text(value).toLocaleLowerCase().includes(query)));
+    const root=$('pj-mailbox-rows');root.replaceChildren();
+    for(const account of filtered.slice(0,current.limit)){
+      const label=node('label','pj-mailbox-row'),checkbox=node('input');checkbox.type='checkbox';checkbox.dataset.monitoringAccount=text(account.id);checkbox.checked=current.selected.has(account.id);checkbox.disabled=locked||!!account.missing&&!checkbox.checked;
+      checkbox.addEventListener('change',()=>{if(!mailboxPicker?.open||current.pending||current.operation||current.conflict)return;if(checkbox.checked)current.selected.add(account.id);else current.selected.delete(account.id);renderMailboxPicker(false);notify();});
+      const identity=node('span','',account.email||account.name||'Ящик без адреса');if(account.name||account.provider)identity.append(node('small','',[account.name,account.provider].filter(Boolean).join(' · ')));label.append(checkbox,identity);root.append(label);
+    }
+    $('pj-mailbox-shown').textContent=filtered.length?'Показано '+number(Math.min(current.limit,filtered.length))+' из '+number(filtered.length)+(query?' по запросу':'')+'.':current.data?.accounts?.length?'По запросу почты не найдены.':'Список пуст. Нажмите «Обновить список почт».';
+    $('pj-mailbox-more').hidden=filtered.length<=current.limit;
   }
   function renderCatalog(){
     const select=$('pj-segment'),previous=select.value,segments=catalog?.segments||[];
@@ -242,16 +330,17 @@
   function renderInfrastructure(){
     const data=infrastructure,accounts=data?.accounts||[];
     $('pj-infrastructure-connect').textContent=data?.configured?'Настройки Coldy':'Подключить Coldy';$('pj-infrastructure-connect').disabled=hasPending();
-    $('pj-infrastructure-refresh').disabled=infraLoading;
+    $('pj-infrastructure-select').disabled=infraLoading||hasPending();
+    $('pj-infrastructure-refresh').disabled=infraLoading||!data?.monitoring?.accountIds?.length;
     $('pj-infrastructure-continue').hidden=!data?.nextCursor;$('pj-infrastructure-continue').disabled=infraLoading;
     connectionBox('pj-infrastructure-connection',data?.configured===true,data?.connected===true);
     const progress=data?.detailProgress;const progressText=progress&&progress.completed<progress.total?'Данные ящиков: '+progress.completed+' из '+progress.total+'. Нажмите «Продолжить синхронизацию».':'';
     const syncError=infraError||data?.error?.message;
-    health('pj-infrastructure-health',syncError||(infraLoading?'Синхронизируем почтовые ящики…':progressText||(data?.warnings||[]).join(' ')),!!syncError);
+    health('pj-infrastructure-health',syncError||(infraLoading?'Синхронизируем почтовые ящики…':infraNotice||progressText||(data?.warnings||[]).join(' ')),!!syncError);
     const knownList=data?.configured===true&&(!!data.lastSyncAt||typeof data?.totals?.accounts==='number');
     metrics('pj-infrastructure-totals',[['Почтовые ящики',knownList?data?.totals?.accounts:null],['Отправлено',knownList?data?.totals?.sentTotal:null],['За сегодня',knownList?data?.totals?.sentToday:null],['Ящики с ошибками',knownList?data?.totals?.accountsWithErrors:null]]);
     const empty=$('pj-infrastructure-empty');empty.hidden=accounts.length>0;
-    empty.textContent=infraLoading?'Получаем список из Coldy…':!data?.configured?'Подключите Coldy, чтобы увидеть почтовые ящики проекта.':infraError||data?.state==='error'?'Не удалось получить список ящиков. Повторите синхронизацию.':data?.state==='not_synced'?'Почтовые ящики ещё не синхронизированы. Нажмите «Синхронизировать».':'В Coldy пока нет доступных почтовых ящиков.';
+    empty.textContent=infraLoading?'Получаем список из Coldy…':!data?.configured?'Подключите Coldy, чтобы увидеть почтовые ящики проекта.':data?.state==='no_selection'||data?.monitoring&&!data.monitoring.accountIds?.length?'Выберите почты для мониторинга кнопкой «Выбрать почты».':infraError||data?.state==='error'?'Не удалось получить список ящиков. Повторите синхронизацию.':data?.state==='not_synced'?'Почтовые ящики ещё не синхронизированы. Нажмите «Синхронизировать».':'Выбранные почты пока недоступны. Обновите список через «Выбрать почты».';
     $('pj-infrastructure-content').hidden=!accounts.length;
     $('pj-infrastructure-updated').textContent=data?.lastSyncAt?'Список обновлён: '+timestamp(data.lastSyncAt):'';
     const rows=$('pj-account-rows');rows.replaceChildren();
@@ -268,7 +357,7 @@
       for(const value of [account.sentTotal,account.sentToday,account.dailyLimit])row.append(node('td','',number(value)));
       const errors=node('td');if(account.errors?.length){errors.append(node('div','pj-account-error',account.errors.map(item=>typeof item==='string'?item:[item.code,item.message].filter(Boolean).join(': ')).join('\n')));}else errors.append(node('span','br-muted',account.errorCount===0?'Нет':account.errorCount!==null&&account.errorCount!==undefined?number(account.errorCount):'—'));row.append(errors);rows.append(row);
     }
-    $('pj-infrastructure-note').textContent=(data?.warnings||[]).join(' ')+(data?.warnings?.length?' ':'')+'Показатели относятся к ящикам проекта в Coldy. Недоступные значения отмечены «—».';
+    $('pj-infrastructure-note').textContent=(data?.warnings||[]).join(' ')+(data?.warnings?.length?' ':'')+'Показатели относятся только к выбранным почтам. Недоступные значения отмечены «—».';
     $('pj-infrastructure-continue').hidden=!data?.nextCursor;$('pj-infrastructure-continue').disabled=infraLoading;
     if(data?.nextCursor&&data.detailProgress)$('pj-infrastructure-continue').textContent='Продолжить синхронизацию · '+number(data.detailProgress.completed)+' из '+number(data.detailProgress.total);
   }
@@ -285,9 +374,9 @@
     for(const id of ['pj-analytics-health','pj-selection-health','pj-infrastructure-health','pj-analytics-updated','pj-infrastructure-updated','pj-analytics-connection','pj-infrastructure-connection','pj-selection-count','pj-analytics-note','pj-infrastructure-note'])$(id).textContent='';
     $('pj-infrastructure-continue').hidden=true;
   }
-  function hasPending(){return [...contexts.values()].some(context=>context.operation?.running);}
-  function isEditing(){const context=currentContext();return view==='analytics'&&!!context&&(dirty(context)||!!context.operation);}
-  function isLoading(){return view==='analytics'?catalogLoading||!!currentContext()?.loading||hasPending():view==='infrastructure'?infraLoading:false;}
+  function hasPending(){return !!mailboxPicker?.operation?.running||[...contexts.values()].some(context=>context.operation?.running);}
+  function isEditing(){const context=currentContext();return view==='infrastructure'?!!mailboxPicker&&(mailboxPicker.open||!!mailboxPicker.operation):view==='analytics'&&!!context&&(dirty(context)||!!context.operation);}
+  function isLoading(){return view==='analytics'?catalogLoading||!!currentContext()?.loading||hasPending():view==='infrastructure'?infraLoading||!!mailboxPicker?.pending:false;}
   if($('pj-segment')){
     $('pj-segment').addEventListener('change',()=>{segmentId=$('pj-segment').value;render();notify();if(segmentId)loadSegment(segmentId);});
     $('pj-selection-save').addEventListener('click',()=>saveSelection());$('pj-selection-retry').addEventListener('click',()=>saveSelection(true));
@@ -295,6 +384,15 @@
     $('pj-analytics-refresh').addEventListener('click',()=>refresh({manual:true}));
     $('pj-infrastructure-refresh').addEventListener('click',()=>syncInfrastructure());
     $('pj-infrastructure-continue').addEventListener('click',()=>syncInfrastructure(true));
+    $('pj-infrastructure-select').addEventListener('click',()=>openMailboxPicker());
+    $('pj-mailbox-cancel').addEventListener('click',()=>{closeMailboxPicker();render();});
+    $('pj-mailbox-dialog').addEventListener('cancel',event=>{event.preventDefault();closeMailboxPicker();render();});
+    $('pj-mailbox-search').addEventListener('input',()=>{if(!mailboxPicker||mailboxPicker.pending||mailboxPicker.operation)return;mailboxPicker.query=$('pj-mailbox-search').value.trim();mailboxPicker.limit=100;renderMailboxPicker();});
+    $('pj-mailbox-more').addEventListener('click',()=>{if(!mailboxPicker)return;mailboxPicker.limit+=100;renderMailboxPicker();});
+    $('pj-mailbox-clear').addEventListener('click',()=>{if(!mailboxPicker||mailboxPicker.pending||mailboxPicker.operation)return;mailboxPicker.selected.clear();renderMailboxPicker();notify();});
+    $('pj-mailbox-inventory').addEventListener('click',()=>refreshMailboxInventory());
+    $('pj-mailbox-save').addEventListener('click',()=>saveMailboxSelection());$('pj-mailbox-retry').addEventListener('click',()=>saveMailboxSelection(true));
+    $('pj-mailbox-reload').addEventListener('click',()=>loadMailboxSelection());
   }
   window.RegistryProject={configure,show,refresh,lock,invalidate,hasPending,isLoading,isEditing};
 })();

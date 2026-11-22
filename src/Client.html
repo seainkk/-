@@ -32,7 +32,7 @@
   function sharedUrl(key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return 'https://seainkk.github.io/-/#access_key='+key;}
   function notifyEntry(state){try{if(window.top!==window)window.top.postMessage({type:state==='ready'?'bases-registry-ready':'bases-registry-locked'},'https://seainkk.github.io');}catch(ignored){}}
   function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
-  function isReadRpc(method){return ['getProjectAnalytics','getProjectInfrastructure','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);}
+  function isReadRpc(method){return ['getProjectAnalytics','getProjectInfrastructure','getProjectInfrastructureSelection','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);}
   async function readRpc(method,payload,canDispatch){
     const epoch=accessEpoch;
     while(networkPending>=2){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');if(canDispatch&&!canDispatch())return null;await new Promise(resolve=>setTimeout(resolve,25));}

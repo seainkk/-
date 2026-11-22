@@ -15,15 +15,27 @@
   </div>
 </section>
 <section id="pj-infrastructure-view" class="pj-view" hidden aria-labelledby="pj-infrastructure-title">
-  <div class="pj-heading"><div><p class="pj-eyebrow">Проект · Coldy</p><h1 id="pj-infrastructure-title">Инфраструктура</h1><p class="br-muted">Почтовые ящики, используемые для отправки писем.</p></div><div class="pj-toolbar"><button id="pj-infrastructure-connect" class="br-button" type="button" aria-haspopup="dialog">Подключить Coldy</button><button id="pj-infrastructure-refresh" class="br-button" type="button">↻ Синхронизировать</button></div></div>
+  <div class="pj-heading"><div><p class="pj-eyebrow">Проект · Coldy</p><h1 id="pj-infrastructure-title">Инфраструктура</h1><p class="br-muted">Выбранные почты проекта и их показатели из Coldy.</p></div><div class="pj-toolbar"><button id="pj-infrastructure-select" class="br-button br-primary" type="button" aria-haspopup="dialog">Выбрать почты</button><button id="pj-infrastructure-connect" class="br-button" type="button" aria-haspopup="dialog">Подключить Coldy</button><button id="pj-infrastructure-refresh" class="br-button" type="button">↻ Синхронизировать</button></div></div>
   <p id="pj-infrastructure-health" class="pj-health" role="status" aria-live="polite"></p>
   <div class="pj-toolbar"><button id="pj-infrastructure-continue" class="br-button" type="button" hidden>Продолжить синхронизацию</button></div>
   <div id="pj-infrastructure-connection" class="pj-connection" hidden></div>
   <dl id="pj-infrastructure-totals" class="pj-metrics" aria-label="Почтовая инфраструктура проекта"></dl>
   <div id="pj-infrastructure-empty" class="pj-empty" hidden></div>
   <div id="pj-infrastructure-content" class="pj-card" hidden>
-    <div class="pj-card-heading"><div><h2>Почтовые ящики</h2><p id="pj-infrastructure-period" class="br-muted">Список и доступные показатели загружаются из Coldy.</p></div><span id="pj-infrastructure-updated" class="br-muted"></span></div>
+    <div class="pj-card-heading"><div><h2>Почты в мониторинге</h2><p id="pj-infrastructure-period" class="br-muted">Показатели относятся только к выбранным почтам.</p></div><span id="pj-infrastructure-updated" class="br-muted"></span></div>
     <div class="pj-table-wrap"><table class="pj-table pj-infrastructure-table"><thead><tr><th scope="col">Почта</th><th scope="col">Состояние</th><th scope="col">Отправлено</th><th scope="col">За сегодня</th><th scope="col">Лимит в день</th><th scope="col">Ошибки</th></tr></thead><tbody id="pj-account-rows"></tbody></table></div>
     <p id="pj-infrastructure-note" class="pj-footnote br-muted">Синхронизация получает список ящиков и доступные показатели Coldy.</p>
   </div>
 </section>
+<dialog id="pj-mailbox-dialog" class="pj-mailbox-dialog" aria-labelledby="pj-mailbox-title">
+  <div class="pj-heading"><div><h2 id="pj-mailbox-title">Выбрать почты</h2><p class="br-muted">Выбор общий для команды. Отметьте только нужные почты для мониторинга.</p></div><button id="pj-mailbox-cancel" class="br-button" type="button">Отмена</button></div>
+  <p id="pj-mailbox-health" class="pj-health" role="status" aria-live="polite"></p>
+  <fieldset id="pj-mailbox-fields" class="pj-mailbox-fields">
+    <label for="pj-mailbox-search">Поиск по почте<input id="pj-mailbox-search" type="search" placeholder="Название или email" autocomplete="off"></label>
+    <div class="pj-toolbar"><span id="pj-mailbox-count" class="br-muted"></span><button id="pj-mailbox-clear" class="br-button" type="button">Снять весь выбор</button><button id="pj-mailbox-inventory" class="br-button" type="button">↻ Обновить список почт</button></div>
+    <div id="pj-mailbox-rows" class="pj-mailbox-rows"></div>
+    <p id="pj-mailbox-shown" class="br-muted"></p><button id="pj-mailbox-more" class="br-button" type="button" hidden>Показать ещё</button>
+  </fieldset>
+  <div class="pj-toolbar pj-mailbox-footer"><button id="pj-mailbox-save" class="br-button br-primary" type="button" disabled>Сохранить выбор</button><button id="pj-mailbox-retry" class="br-button" type="button" hidden>Продолжить тот же запрос</button><button id="pj-mailbox-reload" class="br-button" type="button" hidden>Загрузить сохранённый выбор</button></div>
+  <p class="br-muted">Обновление списка получает только адреса из Coldy. Показатели синхронизируются отдельно, для выбранных почт.</p>
+</dialog>
