@@ -1,0 +1,119 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+
+const a='11111111-1111-4111-8111-111111111111', b='22222222-2222-4222-8222-222222222222';
+const copy=v=>JSON.parse(JSON.stringify(v));
+function fixture(){
+  const state={now:Date.now(),key:'verifier',credential:'organization',triggers:[],revision:1,blocked:[],afterRead:null};
+  const bindings=[{id:'binding1',segmentId:'kitchens',campaignId:a,includeCompanies:true,includeLpr:false,revision:1},
+    {id:'binding2',segmentId:'studios',campaignId:b,includeCompanies:false,includeLpr:true,revision:1}];
+  const projects={kitchens:'numshield',studios:'neosender'};
+  const data=new Map(),privateFiles=new Map(),paths=[],writes=[],saves=[],versions={companies:'1',lpr:'1'};
+  const props={getProperty:k=>data.get(k)||null,setProperty:(k,v)=>data.set(k,v),deleteProperty:k=>data.delete(k),getProperties:()=>Object.fromEntries(data)};
+  const context={properties:props,rootId:'root'};
+  function fail(code,message){throw Object.assign(new Error(message||code),{registryCode:code});}
+  function trigger(id){return {getUniqueId:()=>id,getHandlerFunction:()=>'coldyRecipientTick_'};}
+  class Clock extends Date {constructor(...args){super(...(args.length?args:[state.now]));}static now(){return state.now;}}
+  let serial=0;
+  const r=vm.createContext({Date:Clock,Utilities:{getUuid:()=>String(++serial)},PropertiesService:{getScriptProperties:()=>props},
+    REGISTRY_CONFIG:{defaultRootFolderId:'root'},SHARED_REQUEST_SCOPE_:{keyHash:state.key,projectId:'numshield'},
+    ScriptApp:{getProjectTriggers:()=>state.triggers,newTrigger:name=>{
+      assert.equal(name,'coldyRecipientTick_');return {timeBased:()=>({everyMinutes:minutes=>{
+        assert.equal(minutes,1);return {create(){if(state.consent===false)throw Error('Unapproved');const t=trigger('timer-'+(++serial));state.triggers.push(t);return t;}};
+      }})};
+    },deleteTrigger:t=>{state.triggers=state.triggers.filter(x=>x!==t);}},
+    sharedConfiguredHash_:()=>state.key,authorize_:()=>{if(r.SHARED_REQUEST_SCOPE_?.keyHash!==state.key)fail('LINK_ACCESS_REQUIRED');return context;},
+    registryRoot_:()=>{},api_:fn=>fn(),locked_:fn=>fn(),fail_:fail,registryError_:code=>Object.assign(Error(code),{registryCode:code}),
+    digest_:s=>createHash('sha256').update(s).digest('base64url'),
+    coldyCredentialHash_:()=>state.credential,coldySettings_:()=>({configured:true,credentialHash:state.credential}),coldyInput_:()=>{},
+    registryProjectId_:()=>r.SHARED_REQUEST_SCOPE_.projectId,registrySegmentProject_:(_c,id)=>projects[id],registryProjectName_:p=>['numshield','neosender'].includes(p)?p:'',
+    coldyCampaignScope_:(_c,seg)=>{if(projects[seg]!==r.SHARED_REQUEST_SCOPE_.projectId)fail('COLDY_SCOPE_CHANGED');},
+    coldyCampaignRegistry_:()=>({bindings:copy(bindings)}),coldyCampaignBinding_:(registry,seg,id)=>{
+      const record=registry.bindings.find(x=>x.id===id&&x.segmentId===seg);if(!record)fail('COLDY_BINDING_CHANGED');return record;
+    },
+    coldyCampaignDetail_:(_id,v)=>v,coldyCampaignId_:id=>id,coldyUuid_:s=>/^[\da-f-]{36}$/.test(s),coldyEmail_:s=>s,
+    coldyLoad_:(_c,kind,owner)=>copy(privateFiles.get(kind+owner)||null),coldySave_:(_c,kind,owner,value)=>{saves.push(kind);privateFiles.set(kind+owner,copy(value));},
+    coldyRecipientSheetTarget_:(_c,bind,kind)=>({fileId:bind.segmentId+kind,sheetId:1}),
+    coldyRecipientSheetVersion_:(_c,_bind,kind)=>versions[kind],contactSyncMetadata_:()=>({}),
+    coldyRecipientSheetWrite_:(_c,bind,kind,target,rows,guard,_before,opts)=>{
+      guard();assert.equal(opts.existingOnly,true);assert.equal(projects[bind.segmentId],r.SHARED_REQUEST_SCOPE_.projectId);
+      writes.push({id:bind.campaignId,kind,target:copy(target),rows:copy(rows)});
+    },
+    coldyGetBatch_:(_c,list,guard)=>{
+      guard();const results=list.map(path=>{
+        assert.match(path,/^\/(campaigns\/|leads\/campaign\/)/);paths.push(path);
+        const id=path.match(/[\da-f-]{36}/)[0];
+        if(state.failure?.id===id)return {error:Object.assign(Error(),{registryCode:state.failure.code,retryAfterMs:state.failure.retry||0})};
+        if(path.startsWith('/campaigns/'))return {value:{id,name:'Test',status:'Active'}};
+        const offset=Number(path.match(/offset=(\d+)/)[1]),total=state.counts?.[id]??1;
+        return {value:{total,offset,limit:200,items:Array.from({length:Math.min(200,total-offset)},(_,i)=>({
+          id:offset+i+1,email:'contact'+(offset+i)+'@example.test',campaign_id:id,amount_sequences_sent:state.revision,
+          stop_sending:false,status:'Sent',reply_text:null
+        }))}};
+      });state.afterRead?.();guard();return results;
+    }
+  });
+  for(const name of ['ColdyRecipientData','ColdyRecipientAutomation']){
+    vm.runInContext(readFileSync(new URL('../src/'+name+'.gs',import.meta.url),'utf8'),r,{filename:name+'.gs'});
+  }
+  r.coldyRecipientHistoricalBlocks_=()=>[];
+  r.coldyRecipientSuppression_=()=>({hits:state.blocked,nextCursor:null,unavailable:false,retryAfterMs:0});
+  const enable=()=>r.enableColdyRecipientSync_({});const tick=(uid=state.triggers[0]?.getUniqueId())=>r.coldyRecipientTick_({triggerUid:uid});
+  return {state,bindings,projects,props,data,paths,writes,saves,versions,r,enable,tick,next(){state.now+=60000;tick();}};
+}
+
+test('dedicated minute trigger installs once and only accepts its own UID, root and verifier',()=>{
+  const f=fixture();f.state.consent=false;assert.equal(f.enable().needsOwnerSetup,true);
+  f.state.consent=true;assert.equal(f.enable().enabled,true);assert.equal(f.enable().intervalMinutes,1);
+  assert.equal(f.state.triggers.length,1);f.tick('wrong');assert.equal(f.paths.length,0);
+  f.data.set('ROOT_FOLDER_ID','elsewhere');f.tick();assert.equal(f.paths.length,0);f.data.delete('ROOT_FOLDER_ID');
+  f.state.key='revoked';f.tick();assert.equal(f.paths.length,0);assert.equal(f.writes.length,0);
+});
+
+test('both project bindings update enrolled Email rows offline, and manual sheet edits or new provider data invalidate the fast path',()=>{
+  const f=fixture();f.enable();f.tick();
+  assert.deepEqual(f.writes.map(x=>x.kind).sort(),['companies','lpr']);assert.equal(f.r.SHARED_REQUEST_SCOPE_.projectId,'numshield');
+  f.next();assert.equal(f.writes.length,4,'a full negative blacklist observation is distinct from an unchecked email');
+  const saves=f.saves.length;f.next();assert.equal(f.writes.length,4);assert.equal(f.saves.length,saves);
+  f.versions.companies='2';f.next();assert.equal(f.writes.length,5);assert.equal(f.writes.at(-1).kind,'companies');
+  f.state.revision=2;f.next();assert.equal(f.writes.length,7);assert.equal(f.writes.at(-1).rows[0].sentCount,2);
+  const rows=[{id:a}];f.r.coldyIncomingDecorate_(f.r.authorize_(),[f.bindings[0]],rows);
+  assert.equal(rows[0].recipientSync.state,'synced');assert.ok(rows[0].recipientSync.lastSyncedAt);
+});
+
+test('large campaign resumes, a failing campaign cannot block the other project, and 429 respects its retry deadline',()=>{
+  const f=fixture();f.enable();f.state.counts={[a]:1001};
+  f.state.failure={id:b,code:'COLDY_NOT_FOUND'};f.tick();assert.equal(f.writes.length,0);
+  f.next();assert.ok(f.writes.length>0);const rows=f.writes.flatMap(x=>x.rows);assert.equal(rows.length,1001);
+  const offsets=f.paths.filter(p=>p.includes(a)&&p.includes('/leads/'));
+  assert.equal(new Set(offsets).size,6);
+  f.state.failure={id:a,code:'COLDY_RATE_LIMIT',retry:180000};f.next();const before=f.paths.length;
+  f.next();f.next();assert.equal(f.paths.length,before);delete f.state.failure;f.next();assert.ok(f.paths.length>before);
+});
+
+test('binding or key revocation during provider reading prevents sheet writes',()=>{
+  const f=fixture();f.enable();f.state.afterRead=()=>{f.state.key='different';};
+  assert.throws(()=>f.tick(),e=>e.registryCode==='LINK_ACCESS_REQUIRED');assert.equal(f.writes.length,0);
+  const g=fixture();g.enable();g.state.afterRead=()=>{g.bindings.length=0;};
+  g.tick();assert.equal(g.writes.length,0);assert.equal(g.saves.length,0);
+});
+
+test('legacy manual import enrolls only its recorded managed Email GID; an unrelated replacement is never claimed',()=>{
+  const f=fixture();f.bindings.splice(1);const binding=f.bindings[0];
+  delete binding.includeCompanies;delete binding.includeLpr;
+  function storeReceipt(kind,sheetId){
+    const key='old-request-'+kind;
+    const slot=f.r.digest_(JSON.stringify(['root','numshield',binding.segmentId,binding.id,kind]));
+    f.data.set('COLDY_RECIPIENT_SLOT_'+slot,key);
+    f.data.set(key,JSON.stringify({state:'complete',target:{fileId:binding.segmentId+kind,sheetId},
+      fingerprint:f.r.digest_(JSON.stringify(['root','numshield',binding.segmentId,binding.id,binding.campaignId,kind,'organization']))}));
+  }
+  storeReceipt('companies',1);storeReceipt('lpr',702);
+  f.enable();f.tick();
+  assert.deepEqual(f.writes.map(write=>write.kind),['companies']);
+  f.next();const before={saves:f.saves.length,writes:f.writes.length};
+  f.next();assert.equal(f.saves.length,before.saves);assert.equal(f.writes.length,before.writes);
+});

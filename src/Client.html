@@ -26,6 +26,8 @@
   let settingsSession=null,settingsTimer=null;
   let dashboard=null,dashboardLoading=false,dashboardAnalysisLoading=false,dashboardAnalysisTimer=null,dashboardRequest=0,dashboardError=null,lastDashboardAttempt=0,lastDashboardLoaded=0,renderedDashboardKey=null;
   let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0,lastMailingsLoaded=0;
+  const mailingsBySegment=new Map();
+  let entryCatalogEpoch=-1,renderedMailings=null;
   let viewTimer=null,segmentEditor=null,segmentEditorEpoch=0,segmentSaving=false,segmentPreviewLoading=false,segmentError=null,segmentBackScroll=0;
   const segmentCategories={partners:'Партнерка',clients:'Клиенты'};
   let segmentSection='clients';
@@ -64,7 +66,7 @@
   }
   function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
   function isReadRpc(method,payload){
-    if(method==='getServiceLimits'||method==='getProjectForecastPreview')return true;
+    if(method==='getServiceLimits'||method==='getProjectForecastPreview'||method==='getProjectCampaignCompletions')return true;
     if(method==='getSegmentMailings'&&payload?.live)return false;
     if(method==='getProjectAnalyticsCampaigns')return payload?.refresh!==true;
     return ['getSourceBasesRevision','getProjectAnalytics','getColdyBindings','getProjectInfrastructure','getProjectInfrastructureSelection','getAppBootstrap','getGridWorkbook','getGridRange','getContactWorkspace','getPromouserSettings','getContactAutomationState','getValidationState','getColdySettings','getColdyValidationState','getSegmentsDashboard','getSegmentMailings','listPreparedJobs'].includes(method);
@@ -106,6 +108,7 @@
   }
   function lockAccess(message,unavailable){
     closeServiceSettings(false);
+    mailingsBySegment.clear();renderedMailings=null;entryCatalogEpoch=-1;
     catalogPreview=null;acceptSavedCatalog=false;
     sourceProbeAt=0;sourceCheckedAt=0;sourceProbe=null;
     projectDrafts.clear();claimRequests.clear();mailingSegmentId=null;sourceSaving=null;segmentSaving=false;segmentEditorEpoch++;
@@ -122,16 +125,24 @@
   function switchProject(){
     const chosen=$('br-project').value;
     if(!Object.hasOwn(projectNames,chosen)||chosen===activeProjectId||!accessReady||projectSwitchBlocked()){$('br-project').value=activeProjectId;return;}
+    const sessionKey=accessKey,sessionBootstrap={user:bootstrap.user,registry:bootstrap.registry};
+    const sharedPreview=sourceData?.source?catalogNames(sourceData.items.filter(item=>item.present!==false),lastSourceLoaded):catalogPreview;
     activeProjectId=chosen;
     try{window.localStorage.setItem(projectPreference,chosen);}catch(ignored){}
     if(activeView==='mailings')activeView='segments';
     registrySection='companies';segmentSection='clients';segmentBackScroll=0;
     setSourceFilters();
-    startSharedAccess(true);
+    // The same authenticated link covers both projects. Drop all project-specific data
+    // and let the new project's guarded requests repopulate the already open interface.
+    lockAccess(null);
+    accessKey=sessionKey;bootstrap=sessionBootstrap;accessReady=true;preparedJobsQueued=true;
+    catalogPreview=activeView==='sources'?sharedPreview:null;
+    render();armViewTimer();refreshActiveView({opening:true});flushPendingView();
   }
   function projectSwitchBlocked(){return busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||recoveringOrigins||window.RegistryProject?.hasPending?.()||formIsOpen();}
   async function startSharedAccess(switching){
     if(switching!==true&&requesting())return;lockAccess(null);const startupEpoch=accessEpoch;busy=true;renderAccess();updateControls();
+    if(activeView==='sources'&&window.top!==window)window.top.postMessage({type:'bases-registry-catalog-hint',epoch:startupEpoch},'https://seainkk.github.io');
     try{const key=await readSharedKey();if(startupEpoch!==accessEpoch)return;if(!key)throw new Error('[LINK_ACCESS_REQUIRED] В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const epoch=accessEpoch;
       // Discovery can write service metadata. Only prefetch a visible catalog
       // with a free transport, and accept it after the key is confirmed.
@@ -142,7 +153,7 @@
       }
       while(networkPending>=2){await new Promise(resolve=>setTimeout(resolve,25));if(epoch!==accessEpoch)return;}
       const wantsCatalog=activeView==='sources';
-      const result=await rpc('getAppBootstrap',wantsCatalog?{includeSourcePreview:true}:undefined);if(epoch!==accessEpoch||accessKey!==key)return;
+      const result=await rpc('getAppBootstrap',wantsCatalog&&entryCatalogEpoch!==epoch?{includeSourcePreview:true}:undefined);if(epoch!==accessEpoch||accessKey!==key)return;
       if(result?.user?.accessMode!=='link')throw new Error('Не удалось подтвердить режим доступа сервиса. Обновите страницу и повторите попытку.');
       bootstrap=result;accessReady=true;accessMessage=null;preparedJobsQueued=true;
       const preview=result.catalogPreview;
@@ -381,7 +392,7 @@
     serviceKeyMayChange('coldy');
     const payload={emailValidationProvider:$('br-coldy-provider').value,autoValidateEmails:false};
     const key=$('br-coldy-key').value.trim();if(key)payload.apiKey=key;$('br-coldy-key').value='';current.pending='save';showColdyOwnerHelp();$('br-coldy-message').textContent='Сохраняем подключение…';renderColdySettings(current);
-    try{const data=await workspaceRpc('configureColdy',payload);if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='Настройки сохранены. Ранее проверенные контакты сохраняют результаты.';if(coldyMailings)coldyMailings.loaded=false;window.RegistryProject?.invalidate?.({credentialsChanged:data.credentialChanged===true||(data.credentialChanged===undefined&&!!key)});if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;}}
+    try{const data=await workspaceRpc('configureColdy',payload);if(coldySession===current){showColdySettings(current,data);$('br-coldy-message').textContent='Настройки сохранены. Ранее проверенные контакты сохраняют результаты.';if(data.credentialChanged===true||(data.credentialChanged===undefined&&key))clearSegmentMailings();if(coldyMailings)coldyMailings.loaded=false;window.RegistryProject?.invalidate?.({credentialsChanged:data.credentialChanged===true||(data.credentialChanged===undefined&&!!key)});if(['analytics','infrastructure'].includes(activeView))pendingView=activeView;}}
     catch(error){if(coldySession===current)showColdyFailure(error);}finally{delete payload.apiKey;if(coldySession===current){current.pending=null;renderColdySettings(current);}}
   }
   async function testColdyConnection(){
@@ -395,6 +406,20 @@
   function coldyBindingId(binding){return String(binding?.id||binding?.bindingId||'');}
   function coldyCampaignLabel(campaign){return String(campaign?.name||campaign?.id||'Рассылка')+(campaign?.status?' · '+String(campaign.status):'');}
   function coldyTimestamp(value){const date=new Date(value);return Number.isFinite(date.getTime())?date.toLocaleString('ru-RU'):'';}
+  function renderSegmentRecipientSync(){
+    const current=coldyMailings;
+    if(!coldyMailingsAlive(current)||current.segmentId!==mailingSegmentId)return;
+    const states=new Map((current.data?.bindings||[]).map(binding=>[binding.campaignId,binding.recipientSync]));
+    if(mailings?.segment?.id===mailingSegmentId&&lastMailingsLoaded>=(current.loadedAt||0)){
+      const service=mailings.services?.find(item=>item.id==='coldy');
+      for(const campaign of service?.campaigns||[])if(campaign.recipientSync)states.set(campaign.id,campaign.recipientSync);
+    }
+    for(const node of $('br-coldy-bindings-list').querySelectorAll('[data-recipient-sync]')){
+      const message=window.RegistryProject?.recipientSyncText?.(states.get(node.dataset.recipientSync))||'';
+      node.hidden=!message;if(node.textContent!==message)node.textContent=message;
+    }
+    window.RegistryProject?.renderRecipientSyncSetup?.('br-recipient-sync-setup',[...states.values()]);
+  }
   function renderColdyBindings(current=coldyMailings){
     if(!coldyMailingsAlive(current)||current.segmentId!==mailingSegmentId)return;const data=current.data,disabled=!!current.busy,unresolved=!!current.failed&&!!current.step;
     $('br-coldy-bindings-message').textContent=current.error||(current.busy?current.busyMessage||'Обновляем Coldy…':!data?'Загружаем привязки…':data.configured?'Выберите существующую рассылку Coldy для этого сегмента.':'Откройте «Настройки» и сохраните API-ключ Coldy.');
@@ -407,18 +432,19 @@
     const list=$('br-coldy-bindings-list');list.replaceChildren();
     for(const binding of data?.bindings||[]){const id=coldyBindingId(binding),campaign=data.campaigns?.find(item=>String(item.id)===String(binding.campaignId)),row=document.createElement('article');row.className='br-coldy-binding';
       const title=document.createElement('strong');title.textContent=String(campaign?.name||binding.campaignName||binding.campaignId);row.append(title);
+      const sync=document.createElement('p');sync.className='br-muted pj-recipient-sync';sync.hidden=true;sync.dataset.recipientSync=binding.campaignId;row.append(sync);
       const details=document.createElement('p');details.className='br-muted';details.textContent=[binding.includeCompanies?'Компании':null,binding.includeLpr?'ЛПР':null,binding.autoUpload?'Автозагрузка включена':'Ручная загрузка',binding.allowActive?'Разрешена загрузка в активную рассылку':'Только черновик / пауза'].filter(Boolean).join(' · ');row.append(details);
       const actions=document.createElement('div');actions.className='br-provider-actions';const preview=button('','Предпросмотр загрузки');preview.dataset.coldyPreview=id;preview.disabled=disabled||unresolved;preview.addEventListener('click',()=>previewColdyUpload(id));
       const resume=button('','Проверить незавершённую загрузку');resume.dataset.coldyResume=id;resume.disabled=disabled||unresolved;resume.addEventListener('click',()=>resumeColdyUpload(id));
       const edit=button('','Изменить');edit.dataset.coldyEdit=id;edit.disabled=disabled||unresolved;edit.addEventListener('click',()=>{select.value=String(binding.campaignId);$('br-coldy-companies').checked=binding.includeCompanies===true;$('br-coldy-lpr').checked=binding.includeLpr===true;$('br-coldy-autoupload').checked=binding.autoUpload===true;$('br-coldy-active-consent').checked=false;current.editing=true;$('br-coldy-bindings-message').textContent='Измените параметры и сохраните привязку. Разрешение для активной рассылки подтвердите повторно.';select.focus();});
       const remove=button('','Убрать привязку');remove.dataset.coldyRemove=id;remove.disabled=disabled||unresolved;remove.addEventListener('click',()=>removeColdyBinding(id));actions.append(preview,resume,edit,remove);row.append(actions);list.append(row);
     }
-    renderColdyUpload(current);
+    renderSegmentRecipientSync();renderColdyUpload(current);
   }
   async function loadColdyBindings(segmentId,force=false){
     let current=coldyMailings;if(!current||current.segmentId!==segmentId||current.epoch!==accessEpoch){$('br-coldy-binding-form').reset();current={segmentId,epoch:accessEpoch,data:null,loaded:false,busy:false,error:null,editing:false,preview:null,job:null,step:null,failed:false,removeRequests:new Map()};coldyMailings=current;}
     if(current.busy||current.loaded&&!force)return;current.busy=true;current.busyMessage='Загружаем привязки Coldy…';renderColdyBindings(current);
-    try{const data=await workspaceRpc('getColdyBindings',{segmentId});if(coldyMailingsAlive(current)){current.data=data;current.loaded=true;current.error=null;}}
+    try{const data=await workspaceRpc('getColdyBindings',{segmentId});if(coldyMailingsAlive(current)){current.data=data;current.loaded=true;current.loadedAt=Date.now();current.error=null;}}
     catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
   }
   async function findColdyBinding(){
@@ -441,12 +467,12 @@
     if(!values.campaignId||!values.includeCompanies&&!values.includeLpr){current.error='Выберите рассылку и хотя бы один источник email.';renderColdyBindings(current);return;}
     const fingerprint=JSON.stringify(values);if(!current.bindingRequest||current.bindingRequest.fingerprint!==fingerprint)current.bindingRequest={fingerprint,payload:{...values,requestId:requestId()}};
     current.busy=true;current.busyMessage='Сохраняем привязку…';current.error=null;renderColdyBindings(current);
-    try{await workspaceRpc('saveColdyBinding',current.bindingRequest.payload);if(!coldyMailingsAlive(current))return;window.RegistryProject?.invalidate?.();current.bindingRequest=null;current.editing=false;current.searchMatches=[];current.searchMessage='';current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;$('br-coldy-active-consent').checked=false;notice('Привязка Coldy сохранена.');}
+    try{await workspaceRpc('saveColdyBinding',current.bindingRequest.payload);if(!coldyMailingsAlive(current))return;clearSegmentMailings();window.RegistryProject?.invalidate?.();current.bindingRequest=null;current.editing=false;current.searchMatches=[];current.searchMessage='';current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;$('br-coldy-active-consent').checked=false;notice('Привязка Coldy сохранена.');}
     catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
   }
   async function removeColdyBinding(bindingId){
     const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;const request=current.removeRequests.get(bindingId)||requestId();current.removeRequests.set(bindingId,request);current.busy=true;current.busyMessage='Убираем привязку…';renderColdyBindings(current);
-    try{await workspaceRpc('removeColdyBinding',{segmentId:current.segmentId,bindingId,requestId:request});if(!coldyMailingsAlive(current))return;window.RegistryProject?.invalidate?.();current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;current.removeRequests.delete(bindingId);current.preview=null;current.job=null;current.step=null;current.failed=false;current.error=null;}
+    try{await workspaceRpc('removeColdyBinding',{segmentId:current.segmentId,bindingId,requestId:request});if(!coldyMailingsAlive(current))return;clearSegmentMailings();window.RegistryProject?.invalidate?.();current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;current.removeRequests.delete(bindingId);current.preview=null;current.job=null;current.step=null;current.failed=false;current.error=null;}
     catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
   }
   function renderColdyUpload(current=coldyMailings){
@@ -482,7 +508,7 @@
   }
   async function refreshColdyMailings(){
     const current=coldyMailings;if(!coldyMailingsAlive(current)||current.busy)return;current.busy=true;current.busyMessage='Обновляем показатели Coldy…';current.error=null;renderColdyBindings(current);
-    try{const refreshed=await workspaceRpc('refreshColdyMailings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;window.RegistryProject?.invalidate?.();current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;mailings=await workspaceRpc('getSegmentMailings',{segmentId:current.segmentId});if(coldyMailingsAlive(current)){renderMailings();notice(refreshed.hasMore?'Обновлены следующие '+Number(refreshed.refreshedCampaigns||0)+' рассылок. Нажмите обновление ещё раз, чтобы получить остальные.':'Показатели Coldy обновлены. Проверьте время данных и предупреждения.');}}
+    try{const refreshed=await workspaceRpc('refreshColdyMailings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;clearSegmentMailings();window.RegistryProject?.invalidate?.();current.data=await workspaceRpc('getColdyBindings',{segmentId:current.segmentId});if(!coldyMailingsAlive(current))return;const updated=await workspaceRpc('getSegmentMailings',{segmentId:current.segmentId});if(coldyMailingsAlive(current)&&updated){keepSegmentMailings(updated);renderMailings();notice(refreshed.hasMore?'Обновлены следующие '+Number(refreshed.refreshedCampaigns||0)+' рассылок. Нажмите обновление ещё раз, чтобы получить остальные.':'Показатели Coldy обновлены. Проверьте время данных и предупреждения.');}}
     catch(error){if(coldyMailingsAlive(current))current.error=failure(error).message;}finally{if(coldyMailingsAlive(current)){current.busy=false;renderColdyBindings(current);}}
   }
   function nativeUrl(id,sheetId){return 'https://docs.google.com/spreadsheets/d/'+encodeURIComponent(id)+'/edit'+(sheetId===undefined?'':'#gid='+encodeURIComponent(sheetId));}
@@ -696,7 +722,7 @@
     const node=$('br-sources-health');node.classList.toggle('br-error',!!sourceRefreshError);
     if(sourceRefreshError){node.textContent=(sourceData||catalogPreview?'Не удалось обновить список. Показаны последние данные. ':'Не удалось загрузить исходные базы. ')+sourceRefreshError;return;}
     if(catalogPreview){node.textContent='Список на '+new Date(catalogPreview.checkedAt).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК. Обновляем карточки в фоне…';return;}
-    if(sourceLoading){node.textContent=sourceData?'Обновляем карточки в фоне…':'Загружаем исходные базы…';return;}
+    if(sourceLoading&&!sourceData){node.textContent='Загружаем исходные базы…';return;}
     if(sourceSaving){node.textContent='Сохраняем выбранные отметки…';return;}
     if(sourceData?.state==='storage_unavailable'){node.textContent='Общее хранилище недоступно. Файлы можно открывать; изменение отметок отключено.'+(sourceData.storage?.message?' '+sourceData.storage.message:'');return;}
     if(sourceData&&sourceData.state!=='ready'){node.textContent='Источник исходных баз недоступен. Реестр и сегменты продолжают работать.';return;}
@@ -911,7 +937,7 @@
     }if(count>20)throw new Error('За один раз можно добавить до 20 листов.');return loads;
   }
   function segmentById(id){return dashboard?.items?.find((item)=>item.id===id);}
-  function renderSegmentsHealth(){const node=$('br-segments-health');node.classList.toggle('br-error',!!dashboardError);node.textContent=dashboardError?'Не удалось обновить сегменты. '+dashboardError:dashboardLoading?'Обновляем сегменты…':dashboard?.analysisPending===true?'Список готов. Сведения о контактах обновляются в фоне.':formIsOpen()?'Автообновление приостановлено на время редактирования.':'Данные обновляются каждую минуту, пока раздел открыт.'+(lastDashboardLoaded?' Проверено в '+new Date(lastDashboardLoaded).toLocaleTimeString('ru-RU')+'.':'');}
+  function renderSegmentsHealth(){const node=$('br-segments-health');node.classList.toggle('br-error',!!dashboardError);node.textContent=dashboardError?'Не удалось обновить сегменты. '+dashboardError:dashboardLoading&&!dashboard?'Получаем список сегментов…':dashboard?.analysisPending===true?'Список готов. Сведения о контактах обновляются в фоне.':formIsOpen()?'Автообновление приостановлено на время редактирования.':'Данные обновляются каждую минуту, пока раздел открыт.'+(lastDashboardLoaded?' Проверено в '+new Date(lastDashboardLoaded).toLocaleTimeString('ru-RU')+'.':'');}
   function renderUnassignedSegments(items){
     const list=$('br-unassigned-rows');list.replaceChildren();$('br-unassigned').hidden=!items?.length;
     for(const item of items||[]){
@@ -948,7 +974,7 @@
       const upload=button('br-primary','Загрузить базу');upload.dataset.editSegment=item.id;upload.dataset.segmentFocus=item.id+'/upload';upload.addEventListener('click',()=>openBaseUpload('segments',item.id));
       const replenish=button('','Пополнить базы');replenish.title='Выбрать готовые базы из реестра';replenish.dataset.editSegment=item.id;replenish.dataset.segmentFocus=item.id+'/replenish';replenish.addEventListener('click',()=>openSegmentEditor({segmentId:item.id,replenish:true}));
       const edit=button('','Редактировать сегмент');edit.dataset.editSegment=item.id;edit.dataset.segmentFocus=item.id+'/edit';edit.addEventListener('click',()=>openSegmentEditor({segmentId:item.id}));
-      const campaigns=button('br-link-button','Рассылки →');campaigns.dataset.segmentFocus=item.id+'/mailings';campaigns.addEventListener('click',()=>{segmentBackScroll=window.scrollY;mailingSegmentId=item.id;if(mailings?.segment?.id!==item.id)mailings=null;mailingsError=null;setView('mailings');});
+      const campaigns=button('br-link-button','Рассылки →');campaigns.dataset.segmentFocus=item.id+'/mailings';campaigns.addEventListener('click',()=>openSegmentMailings(item.id));
       if(item.pendingImport){
         const resume=button('br-primary','Продолжить пополнение');resume.dataset.editSegment=item.id;resume.dataset.segmentFocus=item.id+'/resume';
         resume.addEventListener('click',()=>resumeDashboardImport(item));actions.append(resume);
@@ -994,15 +1020,47 @@
     catch(error){if(current())dashboardError=failure(error).message;}
     finally{if(epoch!==accessEpoch||request!==dashboardRequest)return;dashboardLoading=false;dashboardAnalysisLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();if(dashboard?.analysisPending===true&&activeView==='segments'&&!formIsOpen())scheduleSegmentAnalysis();}
   }
+  function openSegmentMailings(id){
+    segmentBackScroll=window.scrollY;mailingSegmentId=id;mailingsError=null;
+    const saved=mailingsBySegment.get(id);
+    mailings=saved&&Date.now()-saved.checkedAt<300000?saved.data:null;
+    lastMailingsLoaded=mailings?saved.checkedAt:0;
+    setView('mailings');
+    if(coldyMailings?.segmentId!==id)loadColdyBindings(id);
+  }
+  function keepSegmentMailings(result){
+    mailings=result;lastMailingsLoaded=Date.now();
+    const id=result?.segment?.id;
+    if(!id)return;
+    mailingsBySegment.delete(id);mailingsBySegment.set(id,{data:result,checkedAt:lastMailingsLoaded});
+    if(mailingsBySegment.size>12)mailingsBySegment.delete(mailingsBySegment.keys().next().value);
+  }
+  function clearSegmentMailings(){
+    mailingsBySegment.clear();mailings=null;renderedMailings=null;lastMailingsLoaded=0;
+    if(activeView==='mailings')renderMailings();
+  }
   function renderMailings(){
     $('br-mailings-view').hidden=activeView!=='mailings';if(activeView!=='mailings')return;
-    const segment=mailings?.segment||segmentById(mailingSegmentId);$('br-mailings-title').textContent='Рассылки'+(segment?.name?' · '+segment.name:'');$('br-mailings-health').textContent=mailingsError?'Не удалось загрузить экран рассылок. '+mailingsError:mailingsLoading?'Загружаем рассылки…':mailings?.message||'Сервисы ещё не подключены. Показатели появятся после подключения.';
+    renderSegmentRecipientSync();
+    const segment=mailings?.segment||segmentById(mailingSegmentId);$('br-mailings-title').textContent='Рассылки'+(segment?.name?' · '+segment.name:'');$('br-mailings-health').textContent=mailingsError?'Не удалось обновить рассылки. '+mailingsError:mailings?mailings.message||'':'Получаем показатели рассылок…';
+    if(mailings&&renderedMailings===mailings)return;
+    renderedMailings=mailings;
     const totals=$('br-mailings-totals'),services=$('br-mailings-services');totals.replaceChildren();services.replaceChildren();if(!mailings)return;
     function appendMetrics(parent,values,connected){const list=document.createElement('dl');list.className='br-mailing-metrics';for(const entry of [['Отправлено','sent'],['Ответы','replies'],['Лиды','leads']]){const group=document.createElement('div');const label=document.createElement('dt');label.textContent=entry[0];const value=document.createElement('dd');value.textContent=mailingMetric(values?.[entry[1]],connected);group.append(label,value);list.append(group);}parent.append(list);}
     const totalTitle=document.createElement('h2');totalTitle.textContent='Итого по сегменту';totals.append(totalTitle);appendMetrics(totals,mailings.totals,['connected','partial'].includes(mailings.state));
     for(const service of mailings.services||[]){const block=document.createElement('section');block.className='br-mailing-service';const title=document.createElement('h2');title.textContent=service.name+' · '+(service.channel==='email'?'Email':service.channel==='telegram'?'Telegram':service.channel);block.append(title);const connected=['connected','partial'].includes(service.state);const state=document.createElement('p');state.className='br-muted';state.textContent=(connected?'Сервис подключён':'Сервис не подключён')+(service.generatedAt?' · Данные: '+coldyTimestamp(service.generatedAt):'')+(service.cached?' · Из кеша':'')+(service.message?' · '+service.message:'');block.append(state);appendMetrics(block,service.totals,connected);
-      const wrap=document.createElement('div');wrap.className='br-mailing-table-wrap';const table=document.createElement('table');table.className='br-mailing-table';const head=document.createElement('thead'),hr=document.createElement('tr');for(const name of ['Кампания','Отправлено','Ответы','Лиды']){const th=document.createElement('th');th.scope='col';th.textContent=name;hr.append(th);}head.append(hr);table.append(head);const body=document.createElement('tbody');
-      if(connected&&Array.isArray(service.campaigns)&&service.campaigns.length){for(const campaign of service.campaigns){const tr=document.createElement('tr');for(const value of [campaign.name,mailingMetric(campaign.sent,true),mailingMetric(campaign.replies,true),mailingMetric(campaign.leads,true)]){const td=document.createElement('td');td.textContent=String(value??'—');tr.append(td);}body.append(tr);}}else{const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=4;td.className='br-muted';td.textContent=connected?'Пока нет кампаний.':'Кампании появятся после подключения сервиса.';tr.append(td);body.append(tr);}table.append(body);wrap.append(table);block.append(wrap);services.append(block);
+      const coldy=service.id==='coldy'||service.key==='coldy',columns=['Кампания','Отправлено','Ответы','Лиды'];
+      if(coldy)columns.push('Ход и завершение');
+      const wrap=document.createElement('div');wrap.className='br-mailing-table-wrap';const table=document.createElement('table');table.className='br-mailing-table';const head=document.createElement('thead'),hr=document.createElement('tr');for(const name of columns){const th=document.createElement('th');th.scope='col';th.textContent=name;hr.append(th);}head.append(hr);table.append(head);const body=document.createElement('tbody');
+      if(connected&&Array.isArray(service.campaigns)&&service.campaigns.length){
+        for(const campaign of service.campaigns){
+          const tr=document.createElement('tr');
+          for(const value of [campaign.name,mailingMetric(campaign.sent,true),mailingMetric(campaign.replies,true),mailingMetric(campaign.leads,true)]){const td=document.createElement('td');td.textContent=String(value??'—');tr.append(td);}
+          if(coldy){const cell=tr.insertCell(),completion=window.RegistryProject?.campaignCompletion?.(campaign);if(completion)cell.append(completion);}
+          body.append(tr);
+        }
+      }else{const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=columns.length;td.className='br-muted';td.textContent=connected?'Пока нет кампаний.':'Кампании появятся после подключения сервиса.';tr.append(td);body.append(tr);}
+      table.append(body);wrap.append(table);block.append(wrap);services.append(block);
     }
   }
   async function refreshMailings(options={}){
@@ -1014,8 +1072,11 @@
     try{const result=monitored
       ?await workspaceRpc('getSegmentMailings',{segmentId:id,live:true},()=>current()&&activeView==='mailings'&&!document.hidden&&!formIsOpen())
       :await readRpc('getSegmentMailings',{segmentId:id},current);
-      if(current()&&result){mailings=result;mailingsError=null;lastMailingsLoaded=Date.now();}}
-    catch(error){if(accessReady&&epoch===accessEpoch&&mailingSegmentId===id)mailingsError=failure(error).message;}
+      if(current()&&result){keepSegmentMailings(result);mailingsError=null;}}
+    catch(error){if(accessReady&&epoch===accessEpoch&&mailingSegmentId===id){
+      const problem=failure(error);if(/DENIED|OUTSIDE|NOT_FOUND|SCOPE_CHANGED|SOURCE_CHANGED|CREDENTIAL_CHANGED/.test(problem.code))clearSegmentMailings();
+      mailingsError=problem.message;
+    }}
     finally{if(epoch===accessEpoch){mailingsLoading=false;updateControls();if(activeView==='mailings')renderMailings();flushPendingView();}}await bindings;
   }
   function segmentRecoveryLocked(){return segmentError?.code==='SEGMENT_RECOVERY_REQUIRED';}
@@ -1422,8 +1483,19 @@
   function updateControls(){
     $('br-origin-recover').disabled=!sourceData?.canEdit||recoveringOrigins||requesting()||!accessReady;
     const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-settings-open').disabled=!accessReady||gridIsOpen()||!!window.RegistryProject?.hasPending?.();$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
-    for(const row of root.querySelectorAll('.br-source-item')){const item=sourceItem(row.dataset.sourceId),draft=sourceDrafts.get(item?.id),badContents=draft&&Object.prototype.hasOwnProperty.call(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor||badContents;const add=row.querySelector('[data-add-source]');if(add){add.disabled=!readySource(item)||sourceDrafts.has(item.id)||waiting||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}}
-    for(const add of root.querySelectorAll('[data-add-source]')){const item=sourceItem(add.dataset.addSource);add.disabled=!readySource(item)||sourceDrafts.has(item.id)||editing||importOpen||!!segmentEditor;}
+    // Repeated state updates in another section must not walk hidden catalog cards.
+    if(activeView==='sources'){
+      const itemsById=new Map((sourceData?.items||[]).map(item=>[item.id,item]));
+      for(const row of $('br-sources-items').querySelectorAll('[data-source-id]')){
+        const item=itemsById.get(row.dataset.sourceId),draft=sourceDrafts.get(item?.id);
+        const cannotEdit=!sourceCanEdit(sourceData,item)||waiting||!!segmentEditor;
+        const badContents=draft&&Object.hasOwn(draft.values,'contents')&&!normalizeContents(draft.values.contents).length;
+        for(const field of row.querySelectorAll('.br-source-fields select,.br-source-fields input'))field.disabled=cannotEdit;
+        for(const action of row.querySelectorAll('.br-source-actions button'))action.disabled=action.dataset.sourceCancel?!!sourceSaving||importing||segmentSaving:cannotEdit||badContents;
+        const add=row.querySelector('[data-add-source]');
+        if(add){add.disabled=!readySource(item)||!!draft||editing||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}
+      }
+    }
     for(const analyze of root.querySelectorAll('[data-preview-source]'))analyze.disabled=editing||importOpen||!!segmentEditor;
     for(const work of root.querySelectorAll('[data-grid-source]'))work.disabled=editing||importOpen||!!segmentEditor;
     $('br-contact-preview-refresh').disabled=!contactPreview||!!contactPreview.loading||!!contactPreview.queued||editing||importOpen||!!segmentEditor;
@@ -1451,8 +1523,11 @@
     if(['analytics','infrastructure'].includes(activeView))return window.RegistryProject?.refresh?.(options);
     const loadedAt=activeView==='sources'?sourceData&&lastSourceLoaded:activeView==='segments'?dashboard&&lastDashboardLoaded:mailings?.segment?.id===mailingSegmentId&&lastMailingsLoaded;
     if(options.opening&&!pendingSyncViews.has(activeView)&&loadedAt&&Date.now()-loadedAt<30000)return;
-    pendingSyncViews.delete(activeView);
-    if(activeView==='sources')return options.automatic?pollSources():refreshSourceBases(Object.assign({},options,{preserveNotice:!options.manual}));
+    const invalidated=pendingSyncViews.delete(activeView);
+    if(activeView==='sources'){
+      if(options.automatic||options.opening&&!invalidated&&sourceData?.revision&&lastSourceLoaded)return pollSources();
+      return refreshSourceBases(Object.assign({},options,{preserveNotice:!options.manual}));
+    }
     if(activeView==='segments')return refreshSegments(options);
     if(activeView==='mailings')return refreshMailings(options);
   }
@@ -1565,6 +1640,7 @@
   });
   window.addEventListener('message',event=>{
     if(window.top===window||event.source!==window.top||event.origin!=='https://seainkk.github.io')return;
+    if(event.data?.type==='bases-registry-catalog-hint'&&event.data.epoch===accessEpoch&&event.data.available===true){entryCatalogEpoch=accessEpoch;return;}
     if(event.data?.type==='bases-registry-back'){goBack();syncBack(true);return;}
     if(event.data?.type!=='bases-registry-saved-catalog'||!acceptSavedCatalog||!accessReady||sourceData||catalogPreview||activeView!=='sources')return;
     const preview=catalogNames(event.data.items,event.data.checkedAt);
@@ -1649,7 +1725,7 @@
     if(!accessReady||dashboard?.state!=='ready'||!lastDashboardLoaded||pendingSyncViews.has('segments')||Date.now()-lastDashboardLoaded>60000)return null;
     return {state:dashboard.state,source:dashboard.source,loadedAt:lastDashboardLoaded,segments:dashboard.items.map(({id,name,category,url,coldyMailings})=>({id,name,category,url,previewNames:coldyMailings?.previewNames}))};
   }
-  window.RegistryProject?.configure?.({transport:workspaceRpc,peekSegments:peekProjectSegments,canPoll:()=>!formIsOpen()&&!viewMutationBlocked(),openConnection:()=>openServiceSettings('coldy'),onStateChange:()=>updateControls(),onMutation:()=>{mailings=null;lastMailingsLoaded=0;if(coldyMailings)coldyMailings.loaded=false;}});
+  window.RegistryProject?.configure?.({transport:workspaceRpc,peekSegments:peekProjectSegments,canPoll:()=>!formIsOpen()&&!viewMutationBlocked(),openConnection:()=>openServiceSettings('coldy'),onRecipientSyncEnabled:()=>{if(activeView==='mailings'&&mailingSegmentId)void loadColdyBindings(mailingSegmentId,true);},onStateChange:()=>updateControls(),onMutation:()=>{clearSegmentMailings();if(coldyMailings)coldyMailings.loaded=false;}});
   render();startSharedAccess();
 })();
 </script>

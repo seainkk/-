@@ -66,7 +66,17 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         assert calls('getSourceBases')==2
         expect(page.locator('#br-source-project-filter')).to_be_enabled()
         expect(page.get_by_role('heading',name='Быстрый список')).to_have_count(0)
+        # A colleague can return after 30s and continue with the same cards while Drive verifies its version.
+        page.locator('#br-view-retarget').click()
         tick(31000)
+        page.evaluate("backend.holdMethods=['getSourceBasesRevision']")
+        bases.click()
+        page.wait_for_function("backend.pending.some(p=>p.method==='getSourceBasesRevision')")
+        expect(source).to_be_visible()
+        expect(source.locator('[data-grid-source]')).to_be_enabled()
+        assert calls('getSourceBases')==2
+        page.evaluate("backend.holdMethods=[];releaseRpc('getSourceBasesRevision')")
+        page.wait_for_function('backend.active===0')
         assert calls('getSourceBasesRevision')==1 and calls('getSourceBases')==2
         page.evaluate("backend.sources[0].name='Новое название';backend.revision='v2'")
         tick(31000)

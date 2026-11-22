@@ -27,6 +27,8 @@ function callApp(request) {
         claimRegistrySegment: typeof claimRegistrySegment_ === 'function' ? claimRegistrySegment_ : null,
         getProjectAnalytics: typeof getProjectAnalytics_ === 'function' ? getProjectAnalytics_ : null,
         getProjectSendingForecast: typeof getProjectSendingForecast_ === 'function' ? getProjectSendingForecast_ : null,
+        getProjectCampaignCompletions: typeof getProjectCampaignCompletions_ === 'function' ? getProjectCampaignCompletions_ : null,
+        enableColdyRecipientSync: typeof enableColdyRecipientSync_ === 'function' ? enableColdyRecipientSync_ : null,
         getProjectForecastPreview: typeof getProjectForecastPreview_ === 'function' ? getProjectForecastPreview_ : null,
         getProjectAnalyticsCampaigns: typeof getProjectAnalyticsCampaigns_ === 'function' ? getProjectAnalyticsCampaigns_ : null,
         getProjectInfrastructure: typeof getProjectInfrastructure_ === 'function' ? getProjectInfrastructure_ : null,

@@ -203,7 +203,8 @@ function coldyGetBatch_(context, paths, guard, campaignDetailsOnly) {
     if (summary) summaryCampaign = summary[1];
     var detail = address.match(/^\/campaigns\/([\w-]+)$/);
     var campaign = summary || detail || address.match(/^\/leads\/campaign\/([\w-]+)\?limit=\d+&offset=\d+$/);
-    var owner = campaignDetailsOnly === true ? detail && 'selected-campaign-details' : accounts ? 'accounts' : campaign && campaign[1].toLowerCase();
+    var suppression = campaignDetailsOnly === 'recipient-suppression' && /^\/blacklist\/(emails|domains)\?search=/.test(address);
+    var owner = suppression ? 'recipient-suppression' : campaignDetailsOnly === true ? detail && 'selected-campaign-details' : accounts ? 'accounts' : campaign && campaign[1].toLowerCase();
     if (!owner || scope && owner !== scope || seen.has(address)) fail_('INVALID_REQUEST', 'Запросы Coldy относятся к разным областям или повторяются.');
     scope = owner; seen.add(address); return address;
   });
@@ -315,6 +316,11 @@ function coldyPath_(method, path) {
     allowed = [];
   }
   else if (route === '/leads/reply-tags' || route === '/account-campaign-mappings' || route === '/campaigns' || new RegExp('^/campaigns/' + uuid + '$').test(route) || new RegExp('^/email-verifications/' + identifier + '(?:/results)?$').test(route)) allowed = [];
+  else if (route === '/blacklist/emails' || route === '/blacklist/domains') {
+    // Only filtered, read-only lookups scoped by the caller to the campaign's confirmed recipients.
+    if (!bits[1] || !bits[1].startsWith('search=')) fail_('INVALID_REQUEST','Для проверки исключений нужны адреса выбранной рассылки.');
+    allowed = ['search','starting_after'];
+  }
   else if (new RegExp('^/leads/campaign/' + uuid + '$').test(route)) allowed = ['after_id', 'offset', 'limit', 'search'];
   else if (new RegExp('^/analytics/campaigns/' + uuid + '/(?:summary|events|by-account|by-sequence)$').test(route)) allowed = ['period', 'start_date', 'end_date', 'type', 'event_types'].concat(/\/by-account$/.test(route) ? ['search', 'limit', 'offset', 'sort_by', 'sort_order'] : []);
   if (!allowed) fail_('INVALID_REQUEST', 'Неподдерживаемое действие Coldy.');
@@ -325,6 +331,7 @@ function coldyPath_(method, path) {
     var name, value; try { name = decodeURIComponent(split[0]); value = decodeURIComponent(split[1].replace(/\+/g, ' ')); } catch (error) { fail_('INVALID_REQUEST', 'Некорректные параметры Coldy.'); }
     if (allowed.indexOf(name) < 0 || seen[name] && name !== 'event_types' || !value || value.length > 500 || /[\u0000-\u001f\u007f]/.test(value)) fail_('INVALID_REQUEST', 'Некорректные параметры Coldy.');
     seen[name] = true;
+    if (name === 'starting_after' && (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)))) fail_('INVALID_REQUEST','Некорректное продолжение списка исключений.');
     if (['offset', 'after_id', 'limit'].indexOf(name) >= 0 && (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < (name === 'offset' ? 0 : 1) || name === 'limit' && Number(value) > (/\/by-account$/.test(route) ? 500 : 200))) fail_('INVALID_REQUEST', 'Некорректный размер страницы Coldy.');
     if (name === 'period' && ['7d', '1m', '3m', '6m', '1y', 'all'].indexOf(value) < 0 || name === 'type' && ['event', 'cohort'].indexOf(value) < 0 || name === 'sort_order' && ['asc', 'desc'].indexOf(value) < 0 || name === 'sort_by' && ['email', 'sender_provider', 'contacted', 'opened', 'replied', 'bounced', 'sent'].indexOf(value) < 0) fail_('INVALID_REQUEST', 'Некорректный фильтр Coldy.');
     return encodeURIComponent(name) + '=' + encodeURIComponent(value);

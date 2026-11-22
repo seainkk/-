@@ -7,6 +7,7 @@
     <div class="pj-forecast-body">
       <div class="pj-toolbar">
         <div class="pj-forecast-periods" role="group" aria-label="Период прогноза">
+          <button type="button" data-forecast-days="0" aria-pressed="false">Сегодня</button>
           <button type="button" data-forecast-days="1" aria-pressed="true">Завтра</button>
           <button type="button" data-forecast-days="3" aria-pressed="false">3 дня</button>
           <button type="button" data-forecast-days="7" aria-pressed="false">Неделя</button>
@@ -34,7 +35,8 @@
       <p id="pj-selection-health" class="pj-health" role="status" aria-live="polite"></p>
       <form id="pj-campaign-lookup" class="pj-campaign-filter" hidden><label for="pj-campaign-search">Название, ссылка или ID рассылки Coldy</label><input id="pj-campaign-search" type="search" maxlength="500" autocomplete="off"><button id="pj-campaign-find" type="submit" class="br-button">Найти</button><button id="pj-campaign-extend" type="button" class="br-button" hidden>Обновить справочник Coldy</button><button id="pj-campaign-back" type="button" class="br-button">← Назад</button></form>
       <span id="pj-campaign-shown" class="br-muted" role="status"></span>
-      <div class="pj-table-wrap"><table class="pj-table pj-campaign-table"><thead><tr><th scope="col"><span class="pj-sr-only">Выбор</span></th><th scope="col">Рассылка</th><th scope="col">Состояние в Coldy</th><th scope="col">Отправлено</th><th scope="col">Ответы</th><th scope="col">Лиды</th></tr></thead><tbody id="pj-campaign-rows"></tbody></table></div>
+      <div id="pj-recipient-sync-setup" class="pj-footnote" hidden><span role="status"></span> <button type="button" class="pj-jump" data-enable-recipient-sync>Включить сверку Email</button></div>
+      <div class="pj-table-wrap"><table class="pj-table pj-campaign-table"><thead><tr><th scope="col"><span class="pj-sr-only">Выбор</span></th><th scope="col">Рассылка</th><th scope="col">Состояние в Coldy</th><th scope="col">Отправлено</th><th scope="col">Ответы</th><th scope="col">Лиды</th><th scope="col">Ход и завершение</th></tr></thead><tbody id="pj-campaign-rows"></tbody></table></div>
       <button id="pj-campaign-more" type="button" class="br-button" hidden>Показать ещё</button>
       <p id="pj-analytics-note" class="pj-footnote br-muted">Выбор связывает существующие рассылки с аналитикой сегмента. Снятие выбора удаляет связь и её автозагрузку контактов. Отправка писем настраивается в Coldy.</p>
     </div>
@@ -55,7 +57,7 @@
     </section>
     <section class="pj-card" aria-labelledby="pj-schedule-title">
       <div class="pj-card-heading"><h2 id="pj-schedule-title">Расписание рассылок</h2><span id="pj-infrastructure-updated" class="br-muted"></span></div>
-      <div class="pj-table-wrap"><table class="pj-table pj-schedule-table"><thead><tr><th scope="col">Рассылка и сегмент</th><th scope="col">Статус Coldy</th><th scope="col">График отправок</th><th scope="col">Плановое завершение</th></tr></thead><tbody id="pj-schedule-rows"></tbody></table></div>
+      <div class="pj-table-wrap"><table class="pj-table pj-schedule-table"><thead><tr><th scope="col">Рассылка и сегмент</th><th scope="col">Статус Coldy</th><th scope="col">График отправок</th><th scope="col">Ход и завершение</th></tr></thead><tbody id="pj-schedule-rows"></tbody></table></div>
       <p id="pj-infrastructure-note" class="pj-footnote br-muted" hidden></p>
     </section>
     <details id="pj-infrastructure-diagnostics" class="pj-card pj-diagnostics"><summary>Состояние ящиков и счётчики Coldy</summary>

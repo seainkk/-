@@ -42,9 +42,11 @@ function getProjectAnalyticsCampaigns_(request) {
         return binding.segmentId === segmentId;
       });
       var owners = {}; owners[segmentId] = selected;
-      return { state: 'ready', segment: selected, bindings: own.map(coldyCampaignPublicBinding_),
+      var result = { state: 'ready', segment: selected, bindings: own.map(coldyCampaignPublicBinding_),
         campaigns: own.map(function (binding) { return projectAnalyticsCampaign_({ id: binding.campaignId, name: binding.campaignName, status: binding.campaignStatus }, binding, selected, owners, true); }),
         configured: true, connected: currentSettings.connected === true, generatedAt: null, cached: true };
+      if (typeof coldyIncomingDecorate_ === 'function') coldyIncomingDecorate_(context,result.bindings,result.campaigns);
+      return result;
     }
     var listed;
     if (query.id) listed = { campaigns: [coldyCampaignRead_(context, query.id)], generatedAt: new Date().toISOString(), cached: false };
@@ -101,9 +103,11 @@ function getProjectAnalyticsCampaigns_(request) {
     campaigns.sort(function (a, b) { return collator.compare(a.name, b.name); });
     var fresh = coldySettings_(context);
     if (settings.credentialHash !== fresh.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите список рассылок.');
-    return { state: listed.state || 'ready', segment: current, bindings: bindings.map(coldyCampaignPublicBinding_),
+    var found = { state: listed.state || 'ready', segment: current, bindings: bindings.map(coldyCampaignPublicBinding_),
       campaigns: campaigns, configured: true, connected: fresh.connected === true,
       generatedAt: listed.generatedAt || null, cached: listed.cached === true, truncated: candidates > 40, matchCount: matchCount };
+    if (typeof coldyIncomingDecorate_ === 'function') coldyIncomingDecorate_(context,found.bindings,found.campaigns);
+    return found;
   });
 }
 

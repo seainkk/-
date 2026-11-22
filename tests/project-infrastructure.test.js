@@ -486,6 +486,7 @@ test('forecast preview uses the dated report without touching Coldy and requires
   assert.equal(tomorrow.forecast.days[0].date,completed.forecast.days[1].date);
   assert.equal(tomorrow.forecast.periods[0].expected,completed.forecast.days[1].expected);
   assert.equal(tomorrow.forecast.periods[2].expected,null);
+  assert.equal(tomorrow.forecast.today,null,'A previous whole-day projection cannot be shown as sends still due today');
   assert.equal(tomorrow.generatedAt,completed.generatedAt);
   const owners=f.c.projectCapacityOwners_; f.c.projectCapacityOwners_=()=>({});
   assert.equal(get(),null);

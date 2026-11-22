@@ -1,20 +1,26 @@
 /** Model the selected sending pool. All queues, dates and allocations are local to this calculation. */
-function projectForecastCalculate_(infrastructure, demands, nowMs) {
+function projectForecastCalculate_(infrastructure, demands, nowMs, completionReports) {
   var day = 86400000, zone = 'Europe/Moscow', now = Number(nowMs), data = infrastructure || {};
   var today = Date.parse(new Date(now + 10800000).toISOString().slice(0, 10) + 'T00:00:00+03:00');
-  var horizon = today + 8 * day, zones = new Map(), reasons = new Set(), rows = [], campaigns = new Map();
+  var horizonDays = completionReports ? 366 : 8;
+  var horizon = today + horizonDays * day, zones = new Map(), reasons = new Set(), rows = [], campaigns = new Map();
   var selection = new Set((data.monitoring && data.monitoring.accountIds || []).map(String));
   var membership = data.capacity || {}, observed = new Map((data.accounts || []).map(function (a) { return [String(a.id), a]; }));
   var mappingUnknown = selection.size > 0 && (!membership.updatedAt || membership.stale || membership.state === 'unknown');
   var missing = Array.from(selection).some(function (id) { return !observed.has(id); });
   if (mappingUnknown) reasons.add('stale_membership');
+  if (completionReports && (mappingUnknown || missing || !selection.size)) return;
   if (missing) reasons.add('missing_accounts');
   function date(at) { return new Date(at + 10800000).toISOString().slice(0, 10); }
   var queue = {pendingInitial:0,pendingFollowups:0,unresolved:0,unreadCampaigns:0};
+  var inactive = new Set();
   for (var i = 0; i < 8; i++) rows.push({date:date(today + i * day), initial:0, followups:0, expected:0, capacity:0,modeled:0});
   (membership.campaigns || []).forEach(function (source) {
     if (String(source.status).toLowerCase() !== 'active' || campaigns.has(source.id)) return;
     var demand = demands && demands[source.id] || {}, schedule = source.schedule;
+    if (completionReports && demand.complete && demand.campaignStatus && String(demand.campaignStatus).toLowerCase() !== 'active') {
+      inactive.add(source.id); return;
+    }
     var windows = projectForecastWindows_(schedule, today, horizon, zones);
     var slow = schedule && projectInfraCount_(schedule.gapEndSeconds), fast = schedule && projectInfraCount_(schedule.gapStartSeconds);
     var gap = fast != null && slow != null && slow >= fast ? (fast + slow) * 500 : null;
@@ -29,16 +35,20 @@ function projectForecastCalculate_(infrastructure, demands, nowMs) {
     var fresh = !source.stale && !source.syncError && !!source.updatedAt;
     var blocked = fresh && ((source.errors || []).length > 0 || ['failed','error','disabled','paused','disconnected','blocked'].indexOf(status) >= 0);
     var online = fresh && ['connected','active','ready','enabled','ok'].indexOf(status) >= 0;
+    var observedAt = Date.parse(source.updatedAt);
     var account = {id:id, blocked:blocked, online:online, limit:fresh ? projectInfraCount_(source.dailyLimit) : null,
-      sentToday:projectInfraCount_(source.sentToday), outside:cap.outsideActive === true, campaigns:[], nextAt:now};
+      sentToday:fresh && Number.isFinite(observedAt) && date(observedAt) === date(now) ? projectInfraCount_(source.sentToday) : null,
+      outside:cap.outsideActive === true, campaigns:[], nextAt:now};
     if (!blocked && cap.state !== 'free' && (cap.state !== 'busy' || !Array.isArray(cap.campaignIds))) mappingUnknown = true;
     (cap.campaignIds || []).forEach(function (key) {
+      if (inactive.has(key)) return;
       var c = campaigns.get(key);
       if (!c) { mappingUnknown = true; return; }
       if (!c.assigned.has(id)) { account.campaigns.push(c); c.owners.push(account); c.assigned.set(id,account); }
     });
   });
   if (mappingUnknown) reasons.add('stale_membership');
+  if (completionReports && mappingUnknown) return;
   // An uncertainty in one pool can affect any later campaign sharing that mailbox.
   // Separate connected components so a second, independent pool still has its own forecast.
   var visited = new Set(), components = [];
@@ -58,14 +68,18 @@ function projectForecastCalculate_(infrastructure, demands, nowMs) {
     if (senders.size) components.push({campaigns:list,accounts:Array.from(senders)});
   });
   var budget = {sends:0, limit:50000};
+  if (completionReports) {
+    components.forEach(function (pool) { projectCampaignEstimatePool_(pool,completionReports,now,today,horizonDays,budget); });
+    return;
+  }
   components.forEach(function (pool) {
     projectForecastPool_(pool, rows, reasons, now, today, day, budget, queue);
   });
   var days = rows.slice(1);
-  if (mappingUnknown || missing) days.forEach(function (row) {
+  if (mappingUnknown || missing) rows.forEach(function (row) {
     row.capacity = row.expected = row.initial = row.followups = row.modeled = null;
   });
-  days.forEach(function (row) {
+  rows.forEach(function (row) {
     if (row.expected !== null) row.modeled = row.expected;
     else if (!row.modeledEvidence) row.modeled = null;
     delete row.modeledEvidence;
@@ -75,7 +89,7 @@ function projectForecastCalculate_(infrastructure, demands, nowMs) {
     var value = period.reduce(function (v, row) { return v + row[key]; }, 0);
     return Number.isSafeInteger(value) ? value : null;
   }
-  return {timezone:zone, startDate:days[0].date, selectedAccounts:selection.size, activeCampaigns:campaigns.size, days:days,queue:queue,
+  return {timezone:zone, today:rows[0], startDate:days[0].date, selectedAccounts:selection.size, activeCampaigns:campaigns.size, days:days,queue:queue,
     periods:[1,3,7].map(function (length) {
       var period = days.slice(0,length);
       var modeled = sum(period,'modeled');
@@ -99,7 +113,7 @@ function projectForecastWindows_(schedule, from, to, zones) {
   if (end < start) end += day;
   var offsets;
   try { offsets = projectCapacityZone_(schedule.timezone, from, to, zones); } catch (error) { return null; }
-  var windows = Array.from({length:8}, function () { return []; });
+  var windows = Array.from({length:Math.ceil((to-from)/day)}, function () { return []; });
   offsets.forEach(function (range) {
     var offset = range[2], first = Math.floor((range[0] + offset) / day) * day - day;
     for (var local = first; local <= range[1] + offset; local += day) {
@@ -178,7 +192,7 @@ function projectForecastLoadDemand_(c, now, queue) {
     if (index) queue.pendingFollowups += count;
     else queue.pendingInitial += count;
     c.measuredDemand = true;
-    projectForecastPush_(projectForecastQueue_(c,assigned)[index ? 1 : 0],{time:due,count:count,index:index});
+    projectForecastPush_(projectForecastQueue_(c,assigned)[index ? 1 : 0],{time:due,count:count,index:index,completionValid:g.completionValid});
   });
 }
 
@@ -187,7 +201,7 @@ function projectForecastPool_(pool, rows, reasons, now, today, day, budget, queu
   var uncertain = false, cannotModel = false, measured = pool.campaigns.some(function (c) { return c.measuredDemand; });
   for (var index = 0; index < rows.length; index++) {
     var start = Math.max(now,today + index * day), end = today + (index + 1) * day;
-    var daily = rows[index], uncertainNow = false, blockedNow = false, capAccounts = 0, capCampaigns = 0;
+    var daily = rows[index], uncertainNow = false, blockedNow = false, capAccounts = 0, capCampaigns = 0, unknownBalance = false;
     pool.campaigns.forEach(function (c) {
       c.hasQueue = Array.from(c.queues.values()).some(function (queues) { return queues[0].length || queues[1].length; });
     });
@@ -208,7 +222,10 @@ function projectForecastPool_(pool, rows, reasons, now, today, day, budget, queu
       if (!c.windows) warn('missing_schedule');
       if (c.gap === null && c.hasQueue) warn('missing_gap');
       // Coldy has no campaign-wide current-day counters in the public snapshot.
-      if (!index && c.hasQueue && (c.dailyLimit !== null || c.firstDailyLimit !== null || c.followupDailyLimit !== null)) warn('unknown_today');
+      if (!index && (c.dailyLimit !== null || c.firstDailyLimit !== null || c.followupDailyLimit !== null)) {
+        unknownBalance = true;
+        if (c.hasQueue) warn('unknown_today');
+      }
     });
     pool.accounts.forEach(function (a) {
       a.remaining = a.limit;
@@ -219,14 +236,17 @@ function projectForecastPool_(pool, rows, reasons, now, today, day, budget, queu
       if (!a.online) warn('unknown_status');
       if (a.limit === null) warn('missing_limit');
       if (a.outside) warn('outside_campaigns');
-      if (!index && a.sentToday === null && active.some(function (c) { return c.hasQueue; })) warn('unknown_today');
+      if (!index && a.sentToday === null) {
+        unknownBalance = true;
+        if (active.some(function (c) { return c.hasQueue; })) warn('unknown_today');
+      }
       var slots = projectForecastSlotBound_(active,index,start);
       capAccounts += Math.min(a.remaining === null ? Infinity : a.remaining,slots);
     });
     var bound = Math.min(capAccounts,capCampaigns);
     if (bound !== 0 && uncertainNow) uncertain = true;
     if (bound !== 0 && blockedNow) cannotModel = true;
-    if (Number.isSafeInteger(bound) && daily.capacity !== null && Number.isSafeInteger(daily.capacity + bound)) daily.capacity += bound;
+    if ((bound === 0 || !unknownBalance) && Number.isSafeInteger(bound) && daily.capacity !== null && Number.isSafeInteger(daily.capacity + bound)) daily.capacity += bound;
     else daily.capacity = null;
     if (bound === 0) continue;
     var estimate = {expected:0,initial:0,followups:0};
@@ -273,7 +293,8 @@ function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
           var at = Math.max(ready,window[0]);
           if (at > event.time) { earliest = Math.min(earliest,at); return; }
           var rank = kind === (firstFirst ? 0 : 1) ? 0 : 1;
-          if (!best || rank < best.rank || rank === best.rank && group.time < best.group.time)
+          if (!best || rank < best.rank || rank === best.rank && (group.time < best.group.time ||
+              budget.tracking && group.time === best.group.time && (c.lastAllocation || 0) < (best.c.lastAllocation || 0)))
             best = {c:c,heap:heap,group:group,kind:kind,rank:rank};
         });
       });
@@ -289,7 +310,15 @@ function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
     if (daily.expected !== null) { daily.expected++; if (best.kind) daily.followups++; else daily.initial++; }
     if (next < c.sequence.steps.length) {
       var due = event.time + c.sequence.steps[next].delayDays * 86400000;
-      projectForecastPush_(projectForecastQueue_(c,a.id)[1],{time:due,count:1,index:next});
+      projectForecastPush_(projectForecastQueue_(c,a.id)[1],{time:due,count:1,index:next,completionValid:group.completionValid});
+    }
+    if (budget.tracking) {
+      c.lastAllocation = budget.sends;
+      if (c.trackRemaining > 0 && group.completionValid && --c.trackRemaining === 0) {
+        c.completion.state = 'estimated'; c.completion.reason = budget.deferredToday ? 'from_tomorrow' : null;
+        c.completion.estimatedDate = new Date(event.time + 10800000).toISOString().slice(0,10);
+        if (--budget.tracking === 0) return true;
+      }
     }
     a.nextAt = event.time + c.gap;
     if (a.remaining > 0 && a.nextAt < end) projectForecastPush_(events,{time:a.nextAt,account:a});

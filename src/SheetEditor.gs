@@ -15,7 +15,10 @@ function getGridWorkbook_(request) {
     // Keep the final access check after all metadata and cell reads.
     scope = gridFile_(input.id, false, scope.context.rootId);
     var result = { id: scope.file.getId(), name: name, url: spreadsheetUrl_(scope.file.getId()), canEdit: scope.canEdit, sheets: metadata };
-    if (input.includeInitialRange) result.initialRange = initial;
+    if (input.includeInitialRange) {
+      if (initial) initial.canEdit = scope.canEdit;
+      result.initialRange = initial;
+    }
     if (scope.canEdit && typeof contactSyncMailingStatusNeeded_ === 'function' && contactSyncMailingStatusNeeded_(scope.tags)) result.needsMailingStatus = true;
     return result;
   });
@@ -27,8 +30,9 @@ function getGridRange_(request) {
     var area = gridArea_(input, GRID_EDITOR_LIMITS.readCells), scope = gridFile_(input.id, false);
     var sheet = gridSheet_(SpreadsheetApp.openById(scope.file.getId()), input.sheetId);
     gridCheckArea_(sheet, area);
-    gridFile_(input.id, false, scope.context.rootId);
-    return gridRead_(scope.file.getId(), sheet, area);
+    var result = gridRead_(scope.file.getId(), sheet, area);
+    result.canEdit = gridFile_(input.id, false, scope.context.rootId).canEdit;
+    return result;
   });
 }
 

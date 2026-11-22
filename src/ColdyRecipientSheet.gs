@@ -34,7 +34,7 @@ function coldyRecipientSheetVersion_(context, binding, kind, target, metadata) {
 }
 
 /** Stable column notes survive campaign renaming and manual spreadsheet column reordering. */
-function coldyRecipientSheetColumns_(headers, notes, binding) {
+function coldyRecipientSheetColumns_(headers, notes, binding, receiptOnly, withReceipts) {
   var keys = headers.map(contactSyncHeaderKey_), positions = {}, additions = [];
   var marker = 'registry/coldy-recipient/v1/' + coldyCampaignId_(binding.campaignId) + '/';
   function existing(label, required) {
@@ -49,6 +49,11 @@ function coldyRecipientSheetColumns_(headers, notes, binding) {
   }
   positions.email = existing('Email', true);
   positions.workflow = existing(CONTACT_MAILING_STATUS.header, true);
+  if (receiptOnly || withReceipts) {
+    positions.receipt = existing(COLDY_CAMPAIGNS.headers[1],false);
+    if (positions.receipt < 0) positions.receipt = add(COLDY_CAMPAIGNS.headers[1],'');
+  }
+  if (receiptOnly) return {positions:positions,additions:additions};
   positions.owner = existing('Компания / ЛПР', false);
   positions.memberships = existing(COLDY_CAMPAIGNS.headers[0], false);
   if (positions.memberships < 0) positions.memberships = add(COLDY_CAMPAIGNS.headers[0], '');
@@ -76,7 +81,7 @@ function coldyRecipientSheetFacts_(item, binding) {
   var contact = { 'Not contacted': 'Пока не связались', Sent: 'Письмо отправлено', Opened: 'Письмо открыто', Replied: 'Получен ответ', Bounce: 'Баунс' };
   var campaign = { Active: 'Активна', Paused: 'На паузе', Completed: 'Завершена', Draft: 'Черновик' };
   return {
-    status: item.doNotSend === true ? 'Не отправляем' : item.bounced === true ? 'Баунс' :
+    status: item.doNotSend === true || item.blacklisted === true ? 'Не отправляем' : item.bounced === true ? 'Баунс' :
       item.replied === true ? 'Получен ответ' : contact[item.status] || (item.sentCount > 0 ? 'Письмо отправлено' : 'Нет данных'),
     campaign: campaign[binding.campaignStatus] || 'Нет данных',
     sent: Number.isSafeInteger(item.sentCount) && item.sentCount >= 0 ? item.sentCount : 'Нет данных',
@@ -85,7 +90,7 @@ function coldyRecipientSheetFacts_(item, binding) {
 }
 
 /** Only the authoritative intake list reaches this helper, already aggregated by email across all lead IDs. */
-function coldyRecipientSheetPlan_(binding, kind, recipients, existing, known, lastRow, layout, read) {
+function coldyRecipientSheetPlan_(binding, kind, recipients, existing, known, lastRow, layout, read, existingOnly) {
   var seen = new Set(), writes = [], hashes = [], next = lastRow + 1;
   var counts = { processed: recipients.length, appended: 0, existing: 0, excluded: 0 };
   var positions = layout.positions, membership = binding.campaignName + ' [' + binding.campaignId + ']';
@@ -94,10 +99,10 @@ function coldyRecipientSheetPlan_(binding, kind, recipients, existing, known, la
     if (!key || seen.has(email)) fail_('COLDY_RESPONSE', 'В порции есть неподтверждённый или повторяющийся адрес.');
     seen.add(email);
     var hash = digest_(key), matched = existing[email] || [];
-    if (!matched.length && known.has(hash)) { counts.excluded++; return; }
+    if (!matched.length && (existingOnly || known.has(hash))) { counts.excluded++; return; }
     if (matched.length) counts.existing++;
     else { counts.appended++; matched = [next++]; }
-    hashes.push(hash);
+    if (!existingOnly) hashes.push(hash);
     matched.forEach(function (row) {
       function cell(field) { return read(row, positions[field]); }
       function put(field, value) {
@@ -107,6 +112,12 @@ function coldyRecipientSheetPlan_(binding, kind, recipients, existing, known, la
         writes.push({ row: row, col: positions[field], value: value });
       }
       if (row > lastRow) put('email', email);
+      var oldStatus = cell('workflow'), workflow = String(oldStatus.value || '').trim().toLowerCase();
+      if (item.suppressionOnly && existingOnly) {
+        if (!cell('receipt').formula) put('receipt','Не отправляем · чёрный список Coldy; загрузка не подтверждена');
+        if (!oldStatus.formula && ['', 'новый', 'в рассылке'].indexOf(workflow) >= 0) put('workflow','фильтр');
+        return;
+      }
       var observed = Object.assign({}, item);
       var savedCount = cell('sent').value;
       if (Number.isSafeInteger(savedCount) && savedCount >= 0) observed.sentCount = Math.max(savedCount, observed.sentCount || 0);
@@ -117,17 +128,26 @@ function coldyRecipientSheetPlan_(binding, kind, recipients, existing, known, la
       });
       if (observed.status === 'Not contacted' && observed.sentCount > 0) observed.status = 'Sent';
       var facts = coldyRecipientSheetFacts_(observed, binding);
-      var oldStatus = cell('workflow'), workflow = String(oldStatus.value || '').trim().toLowerCase();
-      var blocked = observed.bounced === true || observed.doNotSend === true;
+      if (existingOnly && !observed.status && !observed.replied && !observed.bounced && !observed.doNotSend &&
+          !observed.blacklisted && ['Письмо открыто','Письмо отправлено','Пока не связались'].indexOf(cell('status').value) >= 0)
+        facts.status = cell('status').value;
+      var manualStop = workflow === 'не отправляем' || workflow === 'не отправлять';
+      if (manualStop || existingOnly && item.blacklisted == null && cell('status').value === 'Не отправляем') facts.status = 'Не отправляем';
+      var blocked = observed.bounced === true || facts.status === 'Не отправляем';
       var desired = blocked ? 'фильтр' : 'в рассылке';
       if (!oldStatus.formula && (!workflow || workflow === 'новый' || blocked && workflow === 'в рассылке')) put('workflow', desired);
-      else if (blocked && !pvExcludedStatus_(workflow, true)) fail_('COLDY_SCHEMA', 'В строке ' + row + ' проверьте рабочий статус перед записью запрета на отправку.');
-      if (positions.owner >= 0 && !cell('owner').value && !cell('owner').formula) {
+      else if (!existingOnly && blocked && !pvExcludedStatus_(workflow, true)) fail_('COLDY_SCHEMA', 'В строке ' + row + ' проверьте рабочий статус перед записью запрета на отправку.');
+      if (!existingOnly && positions.owner >= 0 && !cell('owner').value && !cell('owner').formula) {
         var display = kind === 'companies' ? item.company : [item.firstName, item.lastName].filter(Boolean).join(' ');
         if (display) put('owner', display);
       }
       var stored = String(cell('memberships').value || ''), labels = stored.split('\n').filter(Boolean);
-      if (!coldyCampaignHasMembership_(stored, binding.campaignId)) put('memberships', labels.concat([membership]).join('\n'));
+      if (!existingOnly || !cell('memberships').formula) {
+        if (!coldyCampaignHasMembership_(stored,binding.campaignId)) put('memberships',labels.concat([membership]).join('\n'));
+        else if (existingOnly) put('memberships',labels.map(function (label) {
+          return coldyCampaignHasMembership_(label,binding.campaignId) ? membership : label;
+        }).join('\n'));
+      }
       Object.keys(facts).forEach(function (field) {
         if (!cell(field).formula) put(field, facts[field]);
       });
@@ -188,7 +208,8 @@ function coldyRecipientSheetRequests_(sheet, width, lastRow, layout, plan) {
 }
 
 /** Caller journals each provider page before acknowledgement. The atomic batch writes literal values only. */
-function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, guard, beforeApply) {
+function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, guard, beforeApply, options) {
+  var existingOnly = !!options && options.existingOnly === true;
   if (!Array.isArray(recipients) || recipients.length > 1000 || typeof guard !== 'function') fail_('INVALID_REQUEST', 'Некорректная порция контактов рассылки.');
   function currentVersion() {
     return coldyRecipientSheetVersion_(context, binding, kind, target, contactSyncMetadata_(target.fileId));
@@ -203,11 +224,24 @@ function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, g
     if (!width || !lastRow || width > COLDY_CAMPAIGNS.maxColumns || lastRow > COLDY_CAMPAIGNS.maxRows) fail_('COLDY_SCHEMA', 'Проверьте размер и заголовки рабочей вкладки Email.');
     var version = currentVersion();
     var header = sheet.getRange(1, 1, 1, width);
-    var layout = coldyRecipientSheetColumns_(header.getDisplayValues()[0], header.getNotes()[0], binding);
-    var snapshot = coldyRecipientSheetRead_(sheet, width, lastRow, layout, recipients);
-    var plan = coldyRecipientSheetPlan_(binding, kind, recipients, snapshot.existing, new Set(state.known), lastRow, layout, snapshot.cell);
-    if (width + layout.additions.length > COLDY_CAMPAIGNS.maxColumns || plan.lastRow > COLDY_CAMPAIGNS.maxRows) fail_('COLDY_SCHEMA', 'Недостаточно места для истории контактов рассылки.');
-    var requests = coldyRecipientSheetRequests_(sheet, width, lastRow, layout, plan);
+    var headers = header.getDisplayValues()[0], notes = header.getNotes()[0];
+    var layout, snapshot;
+    if (existingOnly) {
+      var emailCols = contactSyncHeaderColumns_(headers.map(contactSyncHeaderKey_),'Email');
+      if (emailCols.length !== 1) fail_('COLDY_SCHEMA','Проверьте заголовок Email в рабочей таблице.');
+      layout = {positions:{email:emailCols[0]},additions:[]};
+      snapshot = coldyRecipientSheetRead_(sheet,width,lastRow,layout,recipients);
+      var matches = recipients.filter(function (r) { return snapshot.existing[pvEmail_(r.email)]; });
+      if (matches.length) layout = coldyRecipientSheetColumns_(headers,notes,binding,
+        matches.every(function (r) { return r.suppressionOnly; }),matches.some(function (r) { return r.suppressionOnly; }));
+    } else {
+      layout = coldyRecipientSheetColumns_(headers,notes,binding);
+      snapshot = coldyRecipientSheetRead_(sheet,width,lastRow,layout,recipients);
+    }
+    var plan = coldyRecipientSheetPlan_(binding, kind, recipients, snapshot.existing, new Set(state.known), lastRow, layout, snapshot.cell, existingOnly);
+    var hasTargets = !existingOnly || plan.counts.existing > 0;
+    if (hasTargets && (width + layout.additions.length > COLDY_CAMPAIGNS.maxColumns || plan.lastRow > COLDY_CAMPAIGNS.maxRows)) fail_('COLDY_SCHEMA', 'Недостаточно места для истории контактов рассылки.');
+    var requests = hasTargets ? coldyRecipientSheetRequests_(sheet, width, lastRow, layout, plan) : [];
     var result = Object.assign({ fileId: target.fileId, sheetId: target.sheetId }, plan.counts);
     locked_(function () {
       guard(); contactSyncAssertLease_(claim);
@@ -219,8 +253,10 @@ function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, g
       }
     });
     // Remember successfully imported recipients so a later manual deletion remains effective.
-    var known = contactSyncUnion_(state.known, plan.hashes);
-    if (known.length !== state.known.length) { state.known = known; contactSyncSaveState_(claim.context, state); }
+    if (plan.hashes.length) {
+      var known = contactSyncUnion_(state.known, plan.hashes);
+      if (known.length !== state.known.length) { state.known = known; contactSyncSaveState_(claim.context, state); }
+    }
     return result;
   }, false);
 }

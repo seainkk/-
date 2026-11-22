@@ -53,6 +53,32 @@ def main():
         def release(method):
             page.evaluate('(method)=>releaseGridRpc(method)', method)
 
+        # Returning to a visited sheet immediately shows its display values, then verifies access
+        # and replaces them with current cells before it enables editing. Slow reads allow navigation.
+        reset()
+        page.locator('[data-sheet-id="1"]').click()
+        page.wait_for_function("document.getElementById('rg-grid-status').dataset.state==='saved'")
+        page.evaluate("gridServerEdit(0,2,1,'Актуальная версия');gridBackend.holdMethods=['getGridRange']")
+        page.locator('[data-sheet-id="0"]').click()
+        held('getGridRange')
+        assert page.locator('#rg-cell-2-1').inner_text() == 'Альфа'
+        assert 'сверяем' in page.locator('#rg-grid-status').inner_text()
+        assert page.locator('#rg-grid-formula').is_disabled()
+        assert page.locator('[data-sheet-id="1"]').is_enabled()
+        page.locator('[data-sheet-id="1"]').click()
+        assert page.locator('#rg-cell-2-1').inner_text() == 'Альфа'
+        page.locator('[data-sheet-id="0"]').click()
+        page.evaluate('gridBackend.holdMethods=[];gridBackend.canEdit=false')
+        release('getGridRange')
+        page.wait_for_function("document.getElementById('rg-grid-readonly').hidden===false")
+        assert page.locator('#rg-cell-2-1').inner_text() == 'Актуальная версия'
+        assert page.locator('#rg-grid-formula').is_disabled()
+        assert not page.evaluate("gridBackend.calls.some(c=>c.method==='saveGridRange')")
+        page.evaluate("gridBackend.failures.getGridRange=['OUTSIDE_REGISTRY']")
+        page.locator('[data-sheet-id="1"]').click()
+        page.wait_for_selector('#rg-grid-panel[hidden]',state='attached')
+        assert page.locator('#rg-grid-body').inner_text() == ''
+
         def integrated_styles(width):
             # Real Index.html loads global Styles before GridStyles and nests
             # the panel in the app. The isolated editor used to miss collisions.

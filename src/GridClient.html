@@ -3,6 +3,7 @@
   'use strict';
   const $=id=>document.getElementById(id),panel=$('rg-grid-panel');
   const ROW_HEIGHT=28,COLUMN_WIDTH=120,ROW_GUTTER=52,WINDOW_ROWS=80,WINDOW_COLUMNS=50,MAX_READ=5000,MAX_WRITE=5000;
+  const PREVIEW_TTL=60000,PREVIEW_SHEETS=4,PREVIEW_CHARS=160000;
   let session=null,generation=0,dragging=false;
   function gridColumnName(value){let text='';for(let n=value;n>0;n=Math.floor((n-1)/26))text=String.fromCharCode(65+(n-1)%26)+text;return text;}
   function gridAddress(row,column){return gridColumnName(column)+row;}
@@ -19,11 +20,11 @@
   function hasPending(){return !!session&&(!!session.inFlight||!!session.failed||session.queue.length>0||session.dirty.size>0||dirtyEditor()||session.contactBusy||session.validationBusy);}
   function notify(current=session){if(!alive(current))return;update();try{window.dispatchEvent(new CustomEvent('registry-grid-state',{detail:{open:true,pending:hasPending()}}));}catch(ignored){}}
   function hint(text){$('rg-grid-hint').textContent=text||'';}
-  function rpc(current,method,payload,canDispatch){const next=current.rpcTail.catch(()=>{}).then(()=>{if(!alive(current))throw new Error('[GRID_CLOSED] Таблица закрыта.');if(canDispatch&&!canDispatch())return null;return current.transport(method,payload,canDispatch);});current.rpcTail=next.then(()=>{},()=>{});return next;}
+  function rpc(current,method,payload,canDispatch){const next=current.rpcTail.catch(()=>{}).then(()=>{if(!alive(current))throw new Error('[GRID_CLOSED] Таблица закрыта.');if(canDispatch&&!canDispatch())return null;if(method!=='getGridRange')current.sheetPreviews.clear();return current.transport(method,payload,canDispatch);});current.rpcTail=next.then(()=>{},()=>{});return next;}
   function effective(row,column,current=session){const id=key(row,column),draft=current?.dirty.get(id),cell=current?.cache.get(id);return draft?draft.value:cell?.input??'';}
-  function cellDisplay(row,column,current=session){const draft=current?.dirty.get(key(row,column));return draft?draft.value:current?.cache.get(key(row,column))?.display??'';}
+  function cellDisplay(row,column,current=session){const draft=current?.dirty.get(key(row,column));return draft?draft.value:current?.cache.get(key(row,column))?.display??current?.preview?.values[row-1]?.[column-1]??'';}
   function setError(error,current=session){if(!alive(current))return;current.error=gridFailure(error);notify(current);settle(current);}
-  function editAllowed(){return !!session&&session.book?.canEdit===true&&!session.transition&&!!sheet()&&session.cache.has(key(session.active.row,session.active.column));}
+  function editAllowed(){return !!session&&!session.preview&&session.book?.canEdit===true&&!session.transition&&!!sheet()&&session.cache.has(key(session.active.row,session.active.column));}
   function update(){
     const current=session;if(!current||!panel)return;
     if(current.closeAfterOperation&&!current.contactBusy&&!current.validationBusy&&!current.transition){
@@ -31,13 +32,13 @@
       if(current.contactFailed||current.pvEmailFailed||current.phoneFailed||current.coldyFailed||current.failed)hint('Результат запроса не подтверждён. Можно повторить тот же запрос или закрыть таблицу.');
       else queueMicrotask(()=>{if(alive(current))close();});
     }
-    const pending=hasPending(),loading=current.loading||current.transition,error=current.error,readonly=current.book?.canEdit!==true,status=$('rg-grid-status');
+    const pending=hasPending(),loading=current.loading||current.transition,error=current.error,readonly=current.book?.canEdit!==true||!!current.preview,status=$('rg-grid-status');
     status.dataset.state=error?(error.code==='GRID_CONFLICT'?'conflict':'error'):pending?'saving':loading?'loading':'saved';
-    status.textContent=error?(error.code==='GRID_CONFLICT'?'Конфликт изменений':'Изменения не подтверждены'):pending?'Сохраняем…':loading?'Загружаем ячейки…':readonly?'Только просмотр':'Все изменения сохранены';
+    status.textContent=error?(error.code==='GRID_CONFLICT'?'Конфликт изменений':'Изменения не подтверждены'):pending?'Сохраняем…':current.preview?'Последние данные · сверяем с Google Таблицей…':loading?'Загружаем ячейки…':readonly?'Только просмотр':'Все изменения сохранены';
     $('rg-grid-new-contacts').disabled=readonly||current.contactBusy||current.validationBusy||current.transition||!current.book||current.workspace?.canSync===false;
     $('rg-grid-new-contacts').textContent=current.contactBusy?'Проверяем новые…':'Проверить новые контакты';
     $('rg-grid-contact-retry').disabled=current.contactBusy;
-    $('rg-grid-readonly').hidden=!current.book||!readonly;
+    $('rg-grid-readonly').hidden=!current.book||current.book.canEdit===true;
     $('rg-grid-error').hidden=!error;$('rg-grid-error-text').textContent=error?error.message+(current.dirty.size||dirtyEditor()?' Несохранённые значения остаются в редакторе.':' Перечитайте текущее состояние таблицы.'):'';$('rg-grid-discard').textContent=current.failed?.kind==='append'?'Проверить текущее состояние таблицы':'Отменить несохранённые правки и перечитать';
     $('rg-grid-retry').hidden=!current.failed||error?.code==='GRID_CONFLICT';$('rg-grid-retry').disabled=!!current.inFlight;
     $('rg-grid-discard').disabled=!!current.inFlight;$('rg-grid-copy-draft').disabled=!current.dirty.size;
@@ -48,7 +49,7 @@
     $('rg-grid-add-columns').disabled=readonly||pending||current.transition||!current.book;
     $('rg-grid-formula').disabled=readonly||current.transition||!current.cache.has(key(current.active.row,current.active.column));
     $('rg-grid-address').disabled=!current.book||current.transition;
-    for(const tab of $('rg-grid-tabs').querySelectorAll('button'))tab.disabled=current.transition;
+    for(const tab of $('rg-grid-tabs').querySelectorAll('button'))tab.disabled=current.transition&&!current.switchingSheet;
     if(!current.formulaFocused){$('rg-grid-formula').value=effective(current.active.row,current.active.column,current);current.formulaDirty=false;}
     if(document.activeElement!==$('rg-grid-address'))$('rg-grid-address').value=gridAddress(current.active.row,current.active.column);
     const selected=rect(current),meta=sheet(current);$('rg-grid-position').textContent=meta?selected.rows+' × '+selected.columns+' · '+meta.rowCount+' строк':'';
@@ -73,16 +74,32 @@
   function mergeRange(current,data){
     if(!alive(current)||String(data.sheetId??current.sheetId)!==String(current.sheetId))return;
     const values=data.values||[],inputs=data.inputs||values,versions=data.versions||[];
+    if(typeof data.canEdit==='boolean')current.book.canEdit=data.canEdit;
     for(let r=0;r<values.length;r++)for(let c=0;c<values[r].length;c++){const id=key((data.row||1)+r,(data.column||1)+c);current.cache.set(id,{display:gridText(values[r][c]),input:gridText(inputs[r]?.[c]),version:versions[r]?.[c]});}
     const meta=sheet(current);if(Number.isSafeInteger(data.totalRows)&&data.totalRows>0)meta.rowCount=data.totalRows;if(Number.isSafeInteger(data.totalColumns)&&data.totalColumns>0)meta.columnCount=data.totalColumns;
+    if(data.row<=WINDOW_ROWS&&data.column<=WINDOW_COLUMNS){
+      current.sheetPreviews.delete(current.sheetId);
+      if(data.row===1&&data.column===1&&values.length===Math.min(WINDOW_ROWS,meta.rowCount)&&
+          values.every(line=>line.length===Math.min(WINDOW_COLUMNS,meta.columnCount))&&
+          values.reduce((n,line)=>n+line.reduce((sum,value)=>sum+gridText(value).length,0),0)<=PREVIEW_CHARS){
+        // Only display values are reused. Write versions and formulas always come from a new read.
+        current.sheetPreviews.set(current.sheetId,{checkedAt:Date.now(),values});
+        if(current.sheetPreviews.size>PREVIEW_SHEETS)current.sheetPreviews.delete(current.sheetPreviews.keys().next().value);
+      }
+    }
     if(current.cache.size>25000){for(const id of current.cache.keys()){const [r,c]=id.split(':').map(Number);if(!current.dirty.has(id)&&(r<current.window.row||r>=current.window.row+WINDOW_ROWS||c<current.window.column||c>=current.window.column+WINDOW_COLUMNS))current.cache.delete(id);if(current.cache.size<=20000)break;}}
+  }
+  function closeOnScopeFailure(current,error){
+    const problem=gridFailure(error);
+    if(!alive(current)||!/^(LINK_|OUTSIDE_|SOURCE_CHANGED$|GRID_PROTECTED$|NOT_FOUND$|ACCESS_DENIED$|AUTH_REQUIRED$)/.test(problem.code))return false;
+    lock(true);current.onScopeError?.(problem.message);return true;
   }
   async function loadWindow(row,column,options={}){
     const current=session,meta=sheet(current);if(!current||!meta)return;
     row=Math.max(1,Math.min(row,meta.rowCount));column=Math.max(1,Math.min(column,meta.columnCount));
     current.window={row,column};const request=++current.loadSequence,sheetId=current.sheetId,height=Math.min(WINDOW_ROWS,meta.rowCount-row+1),width=Math.min(WINDOW_COLUMNS,meta.columnCount-column+1);let cached=true;for(let r=0;r<height&&cached;r++)for(let c=0;c<width;c++)if(!current.cache.has(key(row+r,column+c))){cached=false;break;}if(cached){current.loading=false;draw();if(options.focus)$('rg-grid-viewport').focus({preventScroll:true});return;}current.loading=true;draw();
-    try{const data=await rpc(current,'getGridRange',{id:current.id,sheetId,row,column,rowCount:Math.min(WINDOW_ROWS,meta.rowCount-row+1),columnCount:Math.min(WINDOW_COLUMNS,meta.columnCount-column+1)},()=>alive(current)&&request===current.loadSequence&&String(current.sheetId)===String(sheetId));if(!data||!alive(current)||request!==current.loadSequence||String(current.sheetId)!==String(sheetId))return;mergeRange(current,data);current.loading=false;draw();if(options.focus)$('rg-grid-viewport').focus({preventScroll:true});}
-    catch(error){if(alive(current)&&request===current.loadSequence){current.loading=false;setError(error,current);}}
+    try{const data=await rpc(current,'getGridRange',{id:current.id,sheetId,row,column,rowCount:height,columnCount:width},()=>alive(current)&&request===current.loadSequence&&String(current.sheetId)===String(sheetId));if(!data||!alive(current)||request!==current.loadSequence||String(current.sheetId)!==String(sheetId))return;current.preview=null;mergeRange(current,data);current.loading=false;draw();if(options.focus)$('rg-grid-viewport').focus({preventScroll:true});}
+    catch(error){if(closeOnScopeFailure(current,error))return;if(alive(current)&&request===current.loadSequence){current.loading=false;current.preview=null;current.sheetPreviews.delete(sheetId);draw();setError(error,current);}}
   }
   async function refreshVisible(){
     const current=session,meta=sheet(current);
@@ -101,7 +118,7 @@
     try{
       const data=await rpc(current,'getGridRange',{id:current.id,sheetId,row,column,rowCount,columnCount},valid);
       if(!data||!valid()||String(data.sheetId)!==String(sheetId))return;
-      let changed=data.totalRows!==meta.rowCount||data.totalColumns!==meta.columnCount;
+      let changed=data.totalRows!==meta.rowCount||data.totalColumns!==meta.columnCount||typeof data.canEdit==='boolean'&&data.canEdit!==current.book.canEdit;
       const revisions=new Set();
       for(let r=0;r<data.values.length;r++)for(let c=0;c<data.values[r].length;c++){
         const id=key(row+r,column+c),previous=current.cache.get(id);
@@ -116,10 +133,10 @@
         }
         mergeRange(current,data);draw();
       }
-      $('rg-grid-live').textContent='Проверено в '+new Date(current.liveCheckedAt).toLocaleTimeString('ru-RU');
+      $('rg-grid-live').textContent='Видимые ячейки сверены в '+new Date().toLocaleTimeString('ru-RU');
     }catch(error){
       const problem=gridFailure(error);
-      if(alive(current)&&/^(LINK_|OUTSIDE_|SOURCE_CHANGED|GRID_PROTECTED|NOT_FOUND)/.test(problem.code)){lock(true);current.onScopeError?.(problem.message);return;}
+      if(closeOnScopeFailure(current,error))return;
       if(!valid())return;
       $('rg-grid-live').textContent=problem.code==='GRID_SHEET_MISSING'?'Лист удалён. Обновите таблицу.':'Не удалось обновить видимые ячейки';
     }finally{current.livePending=false;}
@@ -271,7 +288,7 @@
   function commitFormula(cancel=false){const current=session;if(!current)return;const value=$('rg-grid-formula').value,currentValue=effective(current.active.row,current.active.column,current),changed=current.formulaDirty;current.formulaFocused=false;current.formulaDirty=false;if(!cancel&&changed&&value!==currentValue)queueRange(current.active.row,current.active.column,[[value]]);update();}
   function requestId(){return globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);}
   function queueRange(row,column,values,mode='user',history=null){
-    const current=session,meta=sheet(current);if(!current||current.book?.canEdit!==true||current.transition)return false;
+    const current=session,meta=sheet(current);if(!current||current.preview||current.book?.canEdit!==true||current.transition)return false;
     const height=values.length,width=values[0]?.length||0;if(!height||!width||height*width>MAX_WRITE){hint('За один раз можно изменить до '+MAX_WRITE+' ячеек. Выберите меньший диапазон.');return false;}
     if(row<1||column<1||row+height-1>meta.rowCount||column+width-1>meta.columnCount){hint('Диапазон выходит за границы листа. Сначала добавьте строки или столбцы.');return false;}
     const sequence=++current.editSequence,expected=[],before=[],normalized=values.map(items=>Array.from({length:width},(_,c)=>gridText(items[c])));
@@ -317,8 +334,26 @@
     }catch(error){if(alive(current))hint(gridFailure(error).message);}
     finally{if(alive(current)){current.transition=false;notify(current);}}
   }
-  async function switchSheet(id){const current=session;if(!current||current.transition||String(id)===String(current.sheetId))return;commitEditor();if(current.formulaDirty)commitFormula();current.transition=true;notify(current);try{await flush(current);if(!alive(current))return;current.sheetId=id;current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];current.active={row:1,column:1};current.selection={r1:1,c1:1,r2:1,c2:1};const view=$('rg-grid-viewport');view.scrollTop=0;view.scrollLeft=0;renderTabs();$('rg-grid-native').href='https://docs.google.com/spreadsheets/d/'+encodeURIComponent(current.id)+'/edit#gid='+encodeURIComponent(id);await loadWindow(1,1,{focus:true});}catch(error){if(alive(current)&&!current.error)setError(error,current);}finally{if(alive(current)){current.transition=false;notify(current);}}}
-  async function reload(discard=false){const current=session;if(!current||current.inFlight)return;if(hasPending()&&!discard){hint('Сначала дождитесь сохранения. При ошибке можно явно отменить несохранённые правки.');return;}commitEditor(true);current.formulaDirty=false;current.formulaFocused=false;clearTimeout(current.saveTimer);current.queue=[];current.failed=null;current.error=null;current.dirty.clear();current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];current.transition=true;notify(current);try{await refreshBook(current);if(alive(current))await loadWindow(current.window.row,current.window.column,{focus:true});}catch(error){setError(error,current);}finally{if(alive(current)){current.transition=false;notify(current);}}}
+  async function switchSheet(id){
+    const current=session;
+    if(!current||current.transition&&!current.switchingSheet||String(id)===String(current.sheetId))return;
+    commitEditor();if(current.formulaDirty)commitFormula();
+    const turn=++current.sheetChange,latest=()=>alive(current)&&current.sheetChange===turn;
+    current.switchingSheet=false;current.transition=true;notify(current);
+    try{
+      await flush(current);if(!latest())return;
+      current.sheetId=id;current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];
+      current.active={row:1,column:1};current.selection={r1:1,c1:1,r2:1,c2:1};
+      const saved=current.sheetPreviews.get(id);
+      current.preview=saved&&Date.now()-saved.checkedAt<PREVIEW_TTL?saved:null;
+      current.switchingSheet=true;
+      const view=$('rg-grid-viewport');view.scrollTop=0;view.scrollLeft=0;renderTabs();
+      $('rg-grid-native').href='https://docs.google.com/spreadsheets/d/'+encodeURIComponent(current.id)+'/edit#gid='+encodeURIComponent(id);
+      await loadWindow(1,1,{focus:true});
+    }catch(error){if(latest()&&!current.error)setError(error,current);}
+    finally{if(latest()){current.switchingSheet=false;current.transition=false;notify(current);}}
+  }
+  async function reload(discard=false){const current=session;if(!current||current.inFlight)return;current.preview=null;if(hasPending()&&!discard){hint('Сначала дождитесь сохранения. При ошибке можно явно отменить несохранённые правки.');return;}commitEditor(true);current.formulaDirty=false;current.formulaFocused=false;clearTimeout(current.saveTimer);current.queue=[];current.failed=null;current.error=null;current.dirty.clear();current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];current.transition=true;notify(current);try{await refreshBook(current);if(alive(current))await loadWindow(current.window.row,current.window.column,{focus:true});}catch(error){setError(error,current);}finally{if(alive(current)){current.transition=false;notify(current);}}}
   async function runAppend(axis,existing=null){const current=session;if(!current||current.transition||current.book?.canEdit!==true)return;commitEditor();try{await flush(current);}catch(error){return;}if(!alive(current))return;current.transition=true;const meta=sheet(current),op=existing||{kind:'append',axis,requestId:requestId(),payload:{id:current.id,sheetId:current.sheetId,count:axis==='rows'?100:1,requestId:requestId()}};if(!existing){op.payload.requestId=op.requestId;if(axis==='rows')op.payload.expectedRowCount=meta.rowCount;else op.payload.expectedColumnCount=meta.columnCount;}current.inFlight=op;notify(current);try{await rpc(current,axis==='rows'?'appendGridRows':'appendGridColumns',op.payload);if(!alive(current))return;current.failed=null;current.error=null;await refreshBook(current);if(alive(current))await loadWindow(current.window.row,current.window.column);}catch(error){if(alive(current)){current.failed=op;current.error=gridFailure(error);}}finally{if(alive(current)){current.inFlight=null;current.transition=false;notify(current);settle(current);}}}
   function undo(redo=false){const current=session;if(!current||hasPending()||current.transition){hint('Дождитесь сохранения, чтобы отменить или повторить изменение.');return;}const from=redo?current.redo:current.undo,item=from.pop();if(!item)return;if(!queueRange(item.row,item.column,redo?item.after:item.before,redo?'redo':'undo',item))from.push(item);}
   async function writeClipboard(text){try{await navigator.clipboard.writeText(text);hint('Скопировано');}catch(error){const input=document.createElement('textarea');input.value=text;input.style.position='fixed';input.style.left='-10000px';panel.append(input);input.select();const done=document.execCommand('copy');input.remove();$('rg-grid-viewport').focus();hint(done?'Скопировано':'Браузер не разрешил копирование. Используйте Ctrl+C.');}}
@@ -340,16 +375,16 @@
     }
     close();
   }
-  function lock(locked=true){const current=session;if(!current)return;generation++;session=null;clearTimeout(current.saveTimer);clearTimeout(current.scrollTimer);clearTimeout(current.contactTimer);clearTimeout(current.validationTimer);clearTimeout(current.coldyValidationTimer);$('rg-grid-coldy-credit-consent').checked=false;for(const id of ['rg-grid-coldy-counts','rg-grid-coldy-sample','rg-grid-coldy-jobs','rg-grid-phone-counts','rg-grid-phone-sample','rg-grid-pv-email-counts','rg-grid-pv-email-sample'])$(id).replaceChildren();$('rg-grid-coldy-message').textContent='';$('rg-grid-phone-message').textContent='';$('rg-grid-provider-key').value='';$('rg-grid-provider-form').inert=false;$('rg-grid-provider-message').textContent='';$('rg-grid-provider-configured').textContent='';$('rg-grid-validation').hidden=true;$('rg-grid-contact-progress').hidden=true;$('rg-grid-validation-jobs').replaceChildren();for(const item of current.waiters.splice(0))item.reject(new Error('[GRID_CLOSED] Таблица закрыта.'));current.queue=[];current.failed=null;current.dirty.clear();current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];panel.hidden=true;$('rg-grid-body').replaceChildren();$('rg-grid-head').replaceChildren();$('rg-grid-colgroup').replaceChildren();$('rg-grid-tabs').replaceChildren();$('rg-grid-title').textContent='Таблица';$('rg-grid-native').removeAttribute('href');$('rg-grid-formula').value='';$('rg-grid-editor').value='';$('rg-grid-editor').hidden=true;$('rg-grid-error-text').textContent='';$('rg-grid-error').hidden=true;hint('');document.body.style.overflow=current.bodyOverflow;try{current.onClose?.({locked});}catch(ignored){}try{if(current.returnFocus?.isConnected&&!current.returnFocus.disabled)current.returnFocus.focus({preventScroll:true});}catch(ignored){}try{window.dispatchEvent(new CustomEvent('registry-grid-state',{detail:{open:false,pending:false}}));}catch(ignored){}}
+  function lock(locked=true){const current=session;if(!current)return;current.sheetPreviews?.clear();current.preview=null;generation++;session=null;clearTimeout(current.saveTimer);clearTimeout(current.scrollTimer);clearTimeout(current.contactTimer);clearTimeout(current.validationTimer);clearTimeout(current.coldyValidationTimer);$('rg-grid-coldy-credit-consent').checked=false;for(const id of ['rg-grid-coldy-counts','rg-grid-coldy-sample','rg-grid-coldy-jobs','rg-grid-phone-counts','rg-grid-phone-sample','rg-grid-pv-email-counts','rg-grid-pv-email-sample'])$(id).replaceChildren();$('rg-grid-coldy-message').textContent='';$('rg-grid-phone-message').textContent='';$('rg-grid-provider-key').value='';$('rg-grid-provider-form').inert=false;$('rg-grid-provider-message').textContent='';$('rg-grid-provider-configured').textContent='';$('rg-grid-validation').hidden=true;$('rg-grid-contact-progress').hidden=true;$('rg-grid-validation-jobs').replaceChildren();for(const item of current.waiters.splice(0))item.reject(new Error('[GRID_CLOSED] Таблица закрыта.'));current.queue=[];current.failed=null;current.dirty.clear();current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];panel.hidden=true;$('rg-grid-body').replaceChildren();$('rg-grid-head').replaceChildren();$('rg-grid-colgroup').replaceChildren();$('rg-grid-tabs').replaceChildren();$('rg-grid-title').textContent='Таблица';$('rg-grid-native').removeAttribute('href');$('rg-grid-formula').value='';$('rg-grid-editor').value='';$('rg-grid-editor').hidden=true;$('rg-grid-error-text').textContent='';$('rg-grid-error').hidden=true;hint('');document.body.style.overflow=current.bodyOverflow;try{current.onClose?.({locked});}catch(ignored){}try{if(current.returnFocus?.isConnected&&!current.returnFocus.disabled)current.returnFocus.focus({preventScroll:true});}catch(ignored){}try{window.dispatchEvent(new CustomEvent('registry-grid-state',{detail:{open:false,pending:false}}));}catch(ignored){}}
   async function open(options={}){
     if(!panel)throw new Error('Редактор таблиц недоступен. Обновите страницу.');if(session){if(hasPending())return false;lock(false);}if(typeof options.transport!=='function'||!options.id)throw new Error('Не указана таблица для открытия.');
     const current={epoch:++generation,id:String(options.id),transport:options.transport,onClose:options.onClose,bodyOverflow:document.body.style.overflow,returnFocus:document.activeElement,book:null,sheetId:null,cache:new Map(),committed:new Map(),dirty:new Map(),queue:[],failed:null,inFlight:null,error:null,waiters:[],rpcTail:Promise.resolve(),active:{row:1,column:1},selection:{r1:1,c1:1,r2:1,c2:1},window:{row:1,column:1},loadSequence:0,editSequence:0,undo:[],redo:[],loading:true,transition:false,formulaFocused:false,formulaDirty:false,workspace:null,workspaceLoaded:false,contactBusy:false,contactFailed:false,contactDirty:false,contactStep:null,contactTimer:null,validation:null,validationTimer:null,validationBusy:false,validationOpenEpoch:0,payRequests:new Map(),coldyValidation:null,coldyValidationTimer:null,coldyPreview:null,coldyStep:null,coldyFailed:false,phonePreview:null,phoneStep:null,phoneFailed:false,pvEmailPreview:null,pvEmailStep:null,pvEmailFailed:false};session=current;panel.hidden=false;document.body.style.overflow='hidden';$('rg-grid-title').textContent='Открываем таблицу…';$('rg-grid-editor').hidden=true;hint('Двойной щелчок или F2 — изменить ячейку. Enter — подтвердить, Esc — отменить ввод.');notify(current);
-    current.liveCheckedAt=Date.now();
+    current.liveCheckedAt=Date.now();current.sheetPreviews=new Map();current.sheetChange=0;current.switchingSheet=false;current.preview=null;
     current.openSettings=options.openSettings;
     $('rg-grid-provider-settings').hidden=!!current.openSettings;
     $('rg-grid-service-settings').hidden=!current.openSettings;
     current.onScopeError=options.onScopeError;
-    $('rg-grid-live').textContent='Проверка изменений каждые 30 секунд';
+    $('rg-grid-live').textContent='Видимые ячейки обновляются каждые 30 секунд';
     try{
       const data=await refreshBook(current,current.sheetId,true);
       if(alive(current)&&data?.initialRange&&String(data.initialRange.sheetId)===String(current.sheetId)){

@@ -66,7 +66,7 @@ function fixture() {
     version++; call.committed++; if(call.dropAck){call.dropAck=false;throw Error('unknown acknowledgement');}
   };
   const run=(records, config={})=>env.coldyRecipientSheetWrite_({rootId},config.binding||binding,config.kind||'companies',config.target||target,records,
-    ()=>{if(!call.scope)throw Error('scope changed');},config.before);
+    ()=>{if(!call.scope)throw Error('scope changed');},config.before,config.existingOnly ? {existingOnly:true} : undefined);
   const named=(row,field)=>rows[row-1][rows[0].indexOf(field)];
   const field=(row,key)=>named(row,env.COLDY_RECIPIENT_COLUMNS[key]+' · '+binding.campaignName);
   return {env,rows,formulas,notes,validations,state,call,run,named,field,change:()=>{version++;}};
@@ -134,4 +134,39 @@ test('verifies both the original physical route and a revision change while pers
   f.call.sheetId=target.sheetId;
   assert.throws(()=>f.run([lead('a@example.test')],{before:()=>f.change()}),/CONFLICT/);
   assert.equal(f.call.committed,0);
+});
+
+test('background sync only touches matching existing email rows and owned facts, preserving filters, names and formulas',()=>{
+  const f=fixture(), auto={existingOnly:true};
+  const emptyWidth=f.rows[0].length;
+  const miss=f.run([lead('absent@example.test')],auto);
+  assert.equal(miss.excluded,1);assert.equal(f.call.committed,0);assert.equal(f.rows[0].length,emptyWidth);
+  f.rows.push(['не отправляем','manual@example.test','','','Валиден'],['новый','seen@example.test','Вручную']);
+  const suppressed=lead('seen@example.test',{status:'Replied',sentCount:3,replied:true,blacklisted:true});
+  f.run([suppressed,lead('manual@example.test'),lead('absent@example.test')],auto);
+  assert.equal(f.rows.length,3);assert.equal(f.rows[1][2],'');assert.equal(f.rows[1][0],'не отправляем');
+  assert.equal(f.field(2,'status'),'Не отправляем');assert.equal(f.field(3,'status'),'Не отправляем');
+  assert.equal(f.field(3,'sent'),3);assert.equal(f.field(3,'replied'),'Да');assert.equal(f.rows[2][0],'фильтр');
+  assert.equal(f.env.pvExcludedStatus_('Не отправляем',true),true);
+  assert.equal(f.env.pvExcludedStatus_('  Не отправлять '),true);
+  const commits=f.call.committed;
+  f.run([suppressed],auto);assert.equal(f.call.committed,commits);
+  f.run([lead('seen@example.test',{status:'Replied',sentCount:3,replied:true})],auto);
+  assert.equal(f.field(3,'status'),'Не отправляем');
+  f.run([{...suppressed,blacklisted:false}],auto);
+  assert.equal(f.field(3,'status'),'Получен ответ');assert.equal(f.rows[2][0],'фильтр');
+  f.formulas.set('3:1','=manual_status()');
+  f.run([{...suppressed,doNotSend:true,blacklisted:false}],auto);
+  assert.equal(f.field(3,'stopped'),'Да');assert.equal(f.field(3,'status'),'Не отправляем');
+});
+
+test('historical blacklist receipts write a suppression without claiming that a rejected contact joined the campaign',()=>{
+  const f=fixture(), auto={existingOnly:true};
+  f.rows.push(['новый','rejected@example.test','Ручное имя']);
+  const rejected={email:'rejected@example.test',suppressionOnly:true,blacklisted:true};
+  f.run([lead('unknown@example.test'),rejected],auto);
+  assert.equal(f.rows.length,2);assert.equal(f.rows[1][0],'фильтр');
+  assert.equal(f.rows[0].includes('Coldy: рассылки'),false);
+  assert.match(f.named(2,'Coldy: статус'),/Не отправляем/);
+  f.run([rejected],auto);assert.equal(f.call.committed,1);
 });

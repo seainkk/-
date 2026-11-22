@@ -37,6 +37,18 @@ function infra(){
  return {state:!backend.configured?'not_configured':!total?'no_selection':!backend.infraSynced?'not_synced':completed<total?'partial':'ready',configured:backend.configured,connected:backend.connected,accounts,capacity:poolData(accounts),monitoring:{...monitoring(),selectedCount:total,missingAccountIds:[]},availableCount:backend.inventoryLoaded?(backend.largeInventory||6):null,totals:{accounts:backend.configured?total:null,sentTotal:accounts.length&&accounts.every(item=>item.sentTotal!==null)?accounts.reduce((sum,item)=>sum+item.sentTotal,0):null,sentToday:null,dailyLimit:null,errorCount:null,accountsWithErrors:accounts.filter(item=>item.errors.length).length},lastSyncAt:backend.infraSynced?backend.lastSyncAt:null,warnings:[],nextCursor,poolOnly,syncProgress:poolOnly?{completed:backend.poolPending?1:2,total:2}:{completed,total},detailProgress:{completed:poolOnly?0:completed,total},syncPaused:false,retryAfterMs:0,error:null,countersScope:'selected_accounts',stale:!total};
 }
 function api(name,p){
+ if(name==='enableColdyRecipientSync'){
+   for(const binding of backend.bindings)binding.recipientSync={enabled:true,state:'waiting',lastSyncedAt:null,nextRetryAt:null};
+   return {enabled:true,needsOwnerSetup:false,intervalMinutes:1};
+ }
+ if(name==='getProjectCampaignCompletions'){
+   const report={
+     [A]:{sent:12,remaining:36,total:48,percent:backend.completionPercent??25,estimatedDate:'2026-12-01',state:'estimated',reason:null},
+     [C]:{sent:1,remaining:4,total:5,percent:20,estimatedDate:null,state:'paused',reason:'paused'}
+   };
+   return {generatedAt:'2026-11-22T09:00:00Z',pending:false,retryAfterMs:0,freshForMs:p.preview?backend.completionTtl||0:0,
+     campaignCompletions:Object.fromEntries(backend.bindings.filter(b=>report[b.campaignId]).map(b=>[b.campaignId,report[b.campaignId]]))};
+ }
  if(name==='getProjectAnalytics')return {state:backend.catalogState||'ready',segments:backend.catalogState?[]:[{id:'segment-a',name:'Segment A'},{id:'segment-b',name:'Segment B'}],coldy:{configured:backend.configured,connected:backend.connected,checkedAt:null}};
  if(name==='getProjectAnalyticsCampaigns'){
   const terms=String(p.query||'').toLowerCase().split(/\s+/).filter(Boolean);
@@ -44,7 +56,8 @@ function api(name,p){
   const result=campaigns(p.segmentId).filter(row=>row.selected||terms.length&&terms.every(term=>row.name.toLowerCase().includes(term))&&++found<=40);
   return {state:backend.configured?'ready':'not_configured',configured:backend.configured,connected:backend.connected,segment:{id:p.segmentId,name:p.segmentId==='segment-a'?'Segment A':'Segment B'},bindings:clone(backend.bindings.filter(x=>x.segmentId===p.segmentId)),campaigns:backend.configured?result:[],truncated:found>40,matchCount:found,generatedAt:'2026-11-22T09:00:00Z',cached:p.refresh!==true};
  }
- if(name==='getSegmentMailings')return {services:[service(p.segmentId)]};
+ if(name==='getSegmentMailings')return {segment:{id:p.segmentId,name:p.segmentId},state:'connected',services:[service(p.segmentId)]};
+ if(name==='getColdyBindings')return {configured:true,campaigns:campaigns(p.segmentId),bindings:clone(backend.bindings.filter(b=>b.segmentId===p.segmentId))};
  if(name==='refreshColdyMailings')return service(p.segmentId);
  if(name==='saveColdyBinding'){if(backend.receipts[p.requestId])return clone(backend.receipts[p.requestId]);const existing=backend.bindings.find(x=>x.campaignId===p.campaignId);if(existing&&existing.segmentId!==p.segmentId)throw new Error('[COLDY_CAMPAIGN_BOUND] Bound elsewhere');if(existing&&p.preserveExisting)return backend.receipts[p.requestId]={binding:clone(existing)};const binding={...p,id:'binding-created-0000001',campaignName:'New campaign',revision:1};backend.bindings.push(binding);backend.saveMutations++;const result={binding};backend.receipts[p.requestId]=clone(result);if(backend.failAfterSave){backend.failAfterSave=false;throw new Error('[GOOGLE_ERROR] Ответ потерян');}return result;}
  if(name==='removeColdyBinding'){if(backend.receipts[p.requestId])return clone(backend.receipts[p.requestId]);backend.bindings=backend.bindings.filter(x=>x.id!==p.bindingId);return backend.receipts[p.requestId]={removed:true};}
@@ -99,7 +112,7 @@ INTEGRATED_PROJECT = FIXTURE.replace('window.backend={','window.backend=Object.a
     "lastSyncAt:'2026-11-22T09:00:00Z'};", "lastSyncAt:'2026-11-22T09:00:00Z'});",1).replace(
     'function api(name,p)', 'function projectApi(name,p)').replace('clone(api(name,p))','clone(projectApi(name,p))')
 INTEGRATED_PROJECT = '(function(){'+INTEGRATED_PROJECT+r"""
-for(const method of ['getProjectAnalytics','getProjectAnalyticsCampaigns','getSegmentMailings','refreshColdyMailings','saveColdyBinding','removeColdyBinding','getProjectInfrastructure','refreshProjectInfrastructure','getProjectInfrastructureSelection','saveProjectInfrastructureSelection'])api[method]=payload=>projectApi(method,payload);
+for(const method of ['getProjectAnalytics','getProjectAnalyticsCampaigns','getProjectCampaignCompletions','getSegmentMailings','getColdyBindings','enableColdyRecipientSync','refreshColdyMailings','saveColdyBinding','removeColdyBinding','getProjectInfrastructure','refreshProjectInfrastructure','getProjectInfrastructureSelection','saveProjectInfrastructureSelection'])api[method]=payload=>projectApi(method,payload);
 api.getColdySettings=()=>({configured:backend.configured,connected:backend.connected,emailValidationProvider:'promouser',manualValidation:true,autoValidateEmails:false});
 api.testColdyConnection=()=>({connected:true,campaignCount:3});
 api.configureColdy=p=>({configured:true,connected:true,emailValidationProvider:p.emailValidationProvider,manualValidation:true,autoValidateEmails:false,credentialChanged:!!p.apiKey});
@@ -139,6 +152,50 @@ def main():
             page.locator('#pj-campaign-search').fill(query)
             page.locator('#pj-campaign-find').click()
             idle()
+
+        def check_completion(rows):
+            cell=page.locator(rows+' [data-completion-campaign="11111111-1111-4111-8111-111111111111"]')
+            expect(cell.get_by_role('progressbar')).to_have_attribute('value','25')
+            expect(cell).to_contain_text('25')
+            expect(cell.locator('.pj-completion-date')).to_contain_text('01.12.2026')
+
+        # A fresh preview avoids a second RPC until its TTL expires. Manual refresh updates it on demand.
+        reset(setup='backend.completionTtl=700;')
+        page.locator('#pj-segment').select_option('segment-a')
+        check_completion('#pj-campaign-rows')
+        assert count('getProjectCampaignCompletions')==1
+        gauge=page.locator('#pj-campaign-rows [data-completion-campaign="11111111-1111-4111-8111-111111111111"] progress')
+        page.evaluate('backend.completionPercent=50')
+        expect(gauge).to_have_attribute('value','50')
+        page.evaluate('backend.completionPercent=75');page.locator('#pj-analytics-refresh').click()
+        expect(gauge).to_have_attribute('value','75');idle()
+        # A late result for the previous project cannot overwrite the new project's percentage.
+        page.evaluate("backend.holdMethods=['getProjectCampaignCompletions'];void RegistryProject.refresh({manual:true})")
+        page.wait_for_function("backend.pending.some(x=>x.name==='getProjectCampaignCompletions')")
+        page.evaluate("backend.holdMethods=[];backend.completionPercent=10;RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refresh({opening:true})")
+        expect(gauge).to_have_count(0)
+        page.locator('#pj-segment').select_option('segment-a')
+        expect(gauge).to_have_attribute('value','10')
+        page.evaluate("release('getProjectCampaignCompletions')");idle()
+        expect(gauge).to_have_attribute('value','10')
+        # Once the association is removed, a pending update cannot resurrect its progress.
+        page.evaluate("backend.holdMethods=['getProjectCampaignCompletions'];void RegistryProject.refresh({manual:true})")
+        page.wait_for_function("backend.pending.some(x=>x.name==='getProjectCampaignCompletions')")
+        page.locator('[data-project-campaign="11111111-1111-4111-8111-111111111111"]').uncheck()
+        page.locator('#pj-selection-save').click()
+        expect(gauge).to_have_count(0)
+        page.evaluate("backend.holdMethods=[];release('getProjectCampaignCompletions')");idle()
+        expect(gauge).to_have_count(0)
+
+        reset(setup="""backend.bindings[0].recipientSync={enabled:false,needsOwnerSetup:true,state:'off',
+lastSyncedAt:null,nextRetryAt:null}""")
+        page.locator('#pj-segment').select_option('segment-a')
+        setup_box=page.locator('#pj-recipient-sync-setup')
+        expect(setup_box).to_contain_text('authorizeGoogleAccess')
+        setup_box.get_by_role('button').click()
+        expect(setup_box).to_be_hidden()
+        expect(page.locator('#pj-campaign-rows .pj-recipient-sync').first).to_contain_text('ожидает запуска')
+        assert count('enableColdyRecipientSync')==1
 
         monitored_setup="backend.monitoringIds=Array.from({length:6},(_,i)=>'account-'+i);backend.monitoringConfigured=true;"
 
@@ -221,6 +278,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         campaign_rows=page.locator('#pj-campaign-rows tr')
         search=page.locator('#pj-campaign-search')
         expect(campaign_rows).to_have_count(3)
+        check_completion('#pj-campaign-rows')
         expect(page.locator('[data-project-campaign="pinned"]')).to_be_checked()
         reads=count('getProjectAnalyticsCampaigns')
         find_campaign('Архив');expect(page.locator('#pj-selection-health')).to_contain_text('первые 40')
@@ -290,6 +348,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         expect(sender).to_contain_text('23.11.2026')
         expect(sender).to_contain_text('Дата неизвестна')
         expect(page.locator('#pj-schedule-rows tr')).to_have_count(2)
+        check_completion('#pj-schedule-rows')
         expect(page.locator('#pj-schedule-rows')).not_to_contain_text('Только в другом пуле')
         expect(page.locator('#pj-schedule-rows')).to_contain_text('Пн–Пт · 09:00–18:30')
         expect(page.locator('#pj-schedule-rows')).to_contain_text('Ожидает расписания')
@@ -583,6 +642,15 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.evaluate("backend.segments[0].id='segment-a';backend.segments[0].coldyMailings={linked:1,activeAtBinding:1,previewNames:['Название из обзора сегментов']}")
         page.locator('#br-view-segments').click()
         expect(page.locator('[data-segment="segment-a"]')).to_be_visible()
+        page.evaluate("""backend.bindings[0].recipientSync={enabled:true,state:'error',lastSyncedAt:'2026-11-23T09:00:00Z',nextRetryAt:'2026-11-23T09:15:00Z'}""")
+        page.locator('[data-segment-focus="segment-a/mailings"]').click()
+        check_completion('#br-mailings-services')
+        sync=page.locator('#br-coldy-bindings-list .pj-recipient-sync').first
+        expect(sync).to_contain_text('Ошибка сверки')
+        expect(sync).to_contain_text('23.11.2026')
+        expect(sync).to_contain_text('следующая попытка')
+        expect(page.locator('#br-recipient-sync-setup')).to_be_hidden()
+        page.locator('#br-mailings-back').click()
         page.evaluate("backend.holdMethods=['getProjectAnalyticsCampaigns']")
         page.locator('#br-view-analytics').click()
         expect(page.locator('#pj-analytics-view')).to_be_visible()
