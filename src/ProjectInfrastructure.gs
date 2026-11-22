@@ -1,11 +1,24 @@
 /** One-project sender inventory. Provider reads never create or modify senders. */
 var PROJECT_INFRASTRUCTURE = Object.freeze({ version: 1, batch: 5, maxAccounts: 1000, maxReceipts: 201, cacheMillis: 300000, textLimit: 2000 });
 
-/** Cached metadata only; opening a view does not fan out to the provider. */
+/** Cached metadata by default. Explicit diagnostics return only provider structure and counts. */
 function getProjectInfrastructure_(request) {
   return api_(function () {
-    coldyInput_(request === undefined ? {} : request, []);
+    var input = coldyInput_(request === undefined ? {} : request, ['diagnose']);
+    if (input.diagnose !== undefined && typeof input.diagnose !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный режим диагностики почтовой инфраструктуры.');
     var context = authorize_(), settings = coldySettings_(context), saved = projectInfraRead_(context, settings);
+    if (input.diagnose === true) {
+      var response = coldyApi_(context, 'GET', '/accounts');
+      var arrayLength = function (value) { return Array.isArray(value) ? value.length : null; };
+      var diagnostics = { itemsIsArray: Array.isArray(response.items), itemsLength: arrayLength(response.items),
+        maxSupportedAccounts: PROJECT_INFRASTRUCTURE.maxAccounts,
+        reportedTotal: projectInfraCount_(response.total), hasMore: response.has_more === true,
+        hasContinuation: !!(response.next_cursor || response.nextPageToken),
+        dataArrayLength: arrayLength(response.data), dataItemsLength: arrayLength(response.data && response.data.items),
+        accountsArrayLength: arrayLength(response.accounts), resultsArrayLength: arrayLength(response.results) };
+      projectInfraCurrent_(context, settings.credentialHash);
+      return { diagnostics: diagnostics };
+    }
     projectInfraCurrent_(context, settings.credentialHash);
     return projectInfraPublic_(context, saved);
   });
