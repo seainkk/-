@@ -11,7 +11,12 @@ backend.bindings=[{id:'binding-existing-00000001',segmentId:'segment-a',campaign
 const clone=x=>JSON.parse(JSON.stringify(x));
 function campaigns(id){const rows=[{id:A,name:'Existing campaign',status:'Active'},{id:B,name:'New campaign',status:'Draft'},{id:C,name:'Other campaign',status:'Paused'}];for(const binding of backend.bindings.filter(x=>x.segmentId===id&&x.campaignId===D))rows.push({id:D,name:binding.campaignName,status:'Unknown',missing:true});return rows.map(item=>{const owner=backend.bindings.find(x=>x.campaignId===item.id),own=owner?.segmentId===id;return {...item,selected:own,bindingId:own?owner.id:null,ownerSegmentId:owner?.segmentId||null,ownerSegmentName:owner?.segmentId==='segment-b'?'Segment B':null,selectable:!item.missing&&(!owner||own),available:!item.missing,removable:own,blockedReason:item.missing?'Рассылка удалена в Coldy':owner&&!own?'Уже связана с другим сегментом':''};});}
 function service(id){return {id:'coldy',state:'partial',totals:{sent:100,replies:5,leads:null},campaigns:backend.bindings.filter(x=>x.segmentId===id).map(x=>({id:x.campaignId,name:x.campaignName,status:'Active',sent:x.campaignId===A?100:null,replies:5,leads:null})),generatedAt:'2026-11-22T09:00:00Z'};}
-function infra(){const accounts=backend.infraSynced?Array.from({length:backend.infraContinued?6:5},(_,i)=>({id:'account-'+i,email:backend.accountMarker+i+'@example.test',name:'Sender '+i,provider:'SMTP',status:i===1?'error':'connected',sentTotal:i===0?100:null,sentToday:null,dailyLimit:40,errorCount:null,errors:i===1?[{code:'SMTP',message:'<img src=x onerror=alert(1)> disconnected'}]:[],tags:[],warmup:{status:null,sentToday:null,repliesToday:null},updatedAt:'2026-11-22T09:00:00Z',stale:false})):[];return {state:!backend.configured?'not_configured':!backend.infraSynced?'not_synced':backend.infraContinued?'ready':'partial',configured:backend.configured,connected:backend.connected,accounts,totals:{accounts:accounts.length,sentTotal:null,sentToday:null,dailyLimit:null,errorCount:null,accountsWithErrors:accounts.length?1:0},lastSyncAt:backend.infraSynced?backend.lastSyncAt:null,warnings:[],nextCursor:backend.infraSynced&&!backend.infraContinued?'continue-token-opaque':null,detailProgress:{completed:accounts.length,total:6}};}
+function infra(){if(backend.largeInventory)return largeInfra();const accounts=backend.infraSynced?Array.from({length:backend.infraContinued?6:5},(_,i)=>({id:'account-'+i,email:backend.accountMarker+i+'@example.test',name:'Sender '+i,provider:'SMTP',status:i===1?'error':'connected',sentTotal:i===0?100:null,sentToday:null,dailyLimit:40,errorCount:null,errors:i===1?[{code:'SMTP',message:'<img src=x onerror=alert(1)> disconnected'}]:[],tags:[],warmup:{status:null,sentToday:null,repliesToday:null},updatedAt:'2026-11-22T09:00:00Z',stale:false})):[];return {state:!backend.configured?'not_configured':!backend.infraSynced?'not_synced':backend.infraContinued?'ready':'partial',configured:backend.configured,connected:backend.connected,accounts,totals:{accounts:accounts.length,sentTotal:null,sentToday:null,dailyLimit:null,errorCount:null,accountsWithErrors:accounts.length?1:0},lastSyncAt:backend.infraSynced?backend.lastSyncAt:null,warnings:[],nextCursor:backend.infraSynced&&!backend.infraContinued?'continue-token-opaque':null,detailProgress:{completed:accounts.length,total:6}};}
+function largeInfra(){
+ const total=backend.largeInventory,completed=backend.largeCompleted||0;
+ const accounts=backend.infraSynced?Array.from({length:total},(_,i)=>({id:'account-'+i,email:'large-sender-'+i+'@example.test',name:'Sender '+i,provider:'SMTP',status:i<completed?(i===1?'error':'connected'):null,sentTotal:i===0&&i<completed?100:null,sentToday:null,dailyLimit:i<completed?40:null,errorCount:null,errors:i===1&&i<completed?[{code:'SMTP',message:'Delivery unavailable'}]:[],tags:[],warmup:{status:null,sentToday:null,repliesToday:null},updatedAt:i<completed?'2026-11-22T09:00:00Z':null,stale:i>=completed})):[];
+ return {state:!backend.infraSynced?'not_synced':completed<total?'partial':'ready',configured:true,connected:true,accounts,totals:{accounts:backend.infraSynced?total:null,sentTotal:null,sentToday:null,dailyLimit:null,errorCount:null,accountsWithErrors:completed>1?1:null},lastSyncAt:backend.infraSynced?backend.lastSyncAt:null,warnings:[],nextCursor:backend.infraSynced&&completed<total?'large-cursor-'+completed:null,detailProgress:{completed,total},syncPaused:false,retryAfterMs:0,error:null,countersScope:'organization_accounts'};
+}
 function api(name,p){
  if(name==='getProjectAnalytics')return {state:backend.catalogState||'ready',segments:backend.catalogState?[]:[{id:'segment-a',name:'Segment A'},{id:'segment-b',name:'Segment B'}],coldy:{configured:backend.configured,connected:backend.connected,checkedAt:null}};
  if(name==='getProjectAnalyticsCampaigns')return {state:backend.configured?'ready':'not_configured',configured:backend.configured,connected:backend.connected,segment:{id:p.segmentId,name:p.segmentId==='segment-a'?'Segment A':'Segment B'},bindings:clone(backend.bindings.filter(x=>x.segmentId===p.segmentId)),campaigns:backend.configured?campaigns(p.segmentId):[],generatedAt:'2026-11-22T09:00:00Z',cached:true};
@@ -20,7 +25,7 @@ function api(name,p){
  if(name==='saveColdyBinding'){if(backend.receipts[p.requestId])return clone(backend.receipts[p.requestId]);const existing=backend.bindings.find(x=>x.campaignId===p.campaignId);if(existing&&existing.segmentId!==p.segmentId)throw new Error('[COLDY_CAMPAIGN_BOUND] Bound elsewhere');if(existing&&p.preserveExisting)return backend.receipts[p.requestId]={binding:clone(existing)};const binding={...p,id:'binding-created-0000001',campaignName:'New campaign',revision:1};backend.bindings.push(binding);backend.saveMutations++;const result={binding};backend.receipts[p.requestId]=clone(result);if(backend.failAfterSave){backend.failAfterSave=false;throw new Error('[GOOGLE_ERROR] Ответ потерян');}return result;}
  if(name==='removeColdyBinding'){if(backend.receipts[p.requestId])return clone(backend.receipts[p.requestId]);backend.bindings=backend.bindings.filter(x=>x.id!==p.bindingId);return backend.receipts[p.requestId]={removed:true};}
  if(name==='getProjectInfrastructure'){if(backend.infraErrorDto)return {state:'error',configured:true,connected:true,accounts:[],totals:{accounts:null,sentTotal:null,sentToday:null,errorCount:null,accountsWithErrors:null},lastSyncAt:null,nextCursor:null,error:{code:'COLDY_HTTP',message:'Inventory unavailable'},syncPaused:true};const value=infra();if(backend.cacheStale)value.stale=true;return value;}
- if(name==='refreshProjectInfrastructure'){if(backend.failInfra)throw new Error('[COLDY_HTTP] API temporarily unavailable');backend.infraSynced=true;if(p.cursor&&!backend.sameCursor)backend.infraContinued=true;const value=infra();if(backend.pauseFirst)Object.assign(value,{syncPaused:true,retryAfterMs:15000,error:{code:'COLDY_RATE_LIMIT',message:'Rate limited'}});return value;}
+ if(name==='refreshProjectInfrastructure'){if(backend.failInfra)throw new Error('[COLDY_HTTP] API temporarily unavailable');if(backend.largeInventory){const expected=backend.largeCompleted?'large-cursor-'+backend.largeCompleted:null;if((p.cursor||null)!==expected)throw new Error('Incorrect inventory cursor');backend.largeCompleted=Math.min(backend.largeInventory,(backend.largeCompleted||0)+20);backend.infraSynced=true;return largeInfra();}backend.infraSynced=true;if(p.cursor&&!backend.sameCursor)backend.infraContinued=true;const value=infra();if(backend.pauseFirst)Object.assign(value,{syncPaused:true,retryAfterMs:15000,error:{code:'COLDY_RATE_LIMIT',message:'Rate limited'}});return value;}
  throw new Error('Unexpected RPC '+name);
 }
 window.transport=(name,p,guard)=>{
@@ -173,6 +178,35 @@ def main():
         previous=count('refreshProjectInfrastructure');page.wait_for_timeout(350)
         assert count('refreshProjectInfrastructure')==previous
 
+        # A real-sized inventory arrives as one full list, then details are
+        # completed in batches of 20. Unknown counters must stay unknown while
+        # all 1159 identities remain accessible throughout the finite run.
+        page.goto('about:blank');page.set_content(HTML)
+        page.evaluate("backend.largeInventory=1159;backend.holdMethods=['refreshProjectInfrastructure'];start('infrastructure')")
+        page.wait_for_function("backend.pending.some(x=>x.name==='refreshProjectInfrastructure')")
+        page.evaluate("release('refreshProjectInfrastructure')")
+        page.wait_for_function("backend.pending.some(x=>x.name==='refreshProjectInfrastructure')&&document.querySelectorAll('#pj-account-rows tr').length===1159")
+        totals=page.locator('#pj-infrastructure-totals dd').all_text_contents()
+        assert ''.join(totals[0].split())=='1159' and totals[1:]==['—','—','1']
+        last_account=page.locator('#pj-account-rows tr').last
+        expect(last_account).to_contain_text('large-sender-1158@example.test')
+        assert last_account.locator('td').nth(1).inner_text()=='Неизвестно'
+        assert last_account.locator('td').nth(2).inner_text()=='—'
+        page.evaluate("backend.holdMethods=[];release('refreshProjectInfrastructure')")
+        idle()
+        assert count('refreshProjectInfrastructure')==58,'1159 details finish in 58 finite batches of 20'
+        assert page.evaluate('backend.largeCompleted')==1159
+        assert page.locator('#pj-account-rows tr').count()==1159
+        assert page.evaluate("new Set([...document.querySelectorAll('#pj-account-rows tr')].map(row=>row.dataset.account)).size")==1159
+        assert last_account.locator('td').nth(1).inner_text()=='Подключена'
+        assert last_account.locator('td').nth(2).inner_text()=='—'
+        assert page.locator('#pj-infrastructure-totals dd').all_text_contents()[1:]==['—','—','1']
+        expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
+        assert page.evaluate("backend.calls.every(call=>['getProjectInfrastructure','refreshProjectInfrastructure'].includes(call.name))")
+        assert page.evaluate('backend.maxWrites')==0
+        page.wait_for_timeout(350)
+        assert count('refreshProjectInfrastructure')==58,'Large inventories do not start provider polling'
+
         reset('infrastructure',setup='backend.infraSynced=true;backend.cacheStale=true')
         assert count('refreshProjectInfrastructure')==2,'One stale-cache refresh completes the finite run'
         page.wait_for_timeout(350)
@@ -191,9 +225,10 @@ def main():
         page.goto('about:blank');page.set_content(HTML)
         page.evaluate("backend.holdMethods=['refreshProjectInfrastructure'];start('infrastructure')")
         page.wait_for_function("backend.pending.some(x=>x.name==='refreshProjectInfrastructure')")
-        page.evaluate("RegistryProject.show('analytics',{ready:true,epoch:1});backend.holdMethods=[];release('refreshProjectInfrastructure')")
+        page.evaluate("RegistryProject.show('analytics',{ready:true,epoch:1});backend.backgroundMutations=0;new MutationObserver(()=>backend.backgroundMutations++).observe(document.querySelector('#pj-account-rows'),{childList:true,subtree:true});backend.holdMethods=[];release('refreshProjectInfrastructure')")
         page.wait_for_function('backend.active===0')
         assert count('refreshProjectInfrastructure')==1
+        assert page.evaluate('backend.backgroundMutations')==0,'A late response does not rebuild an offscreen inventory'
         page.evaluate("RegistryProject.show('infrastructure',{ready:true,epoch:1});void RegistryProject.refresh({opening:true})")
         idle();expect(page.locator('#pj-infrastructure-continue')).to_be_visible()
         page.locator('#pj-infrastructure-continue').click();idle()

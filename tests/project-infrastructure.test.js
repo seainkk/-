@@ -76,6 +76,9 @@ function fixture(options = {}) {
     return value;
   };
   vm.runInContext(readFileSync(new URL('../src/ProjectInfrastructure.gs', import.meta.url), 'utf8'), c);
+  // Small boundary/race scenarios explicitly retain five-detail batches. Large
+  // inventory tests below exercise the unchanged production configuration.
+  if (options.detailBatch !== undefined) c.PROJECT_INFRASTRUCTURE = Object.freeze({ ...c.PROJECT_INFRASTRUCTURE, batch: options.detailBatch });
   const f = { c, calls, properties, cache, root, response, coded,
     configure: key => c.configureColdy_({ apiKey: key || KEY }),
     get: () => plain(c.getProjectInfrastructure_({})), refresh: input => plain(c.refreshProjectInfrastructure_(input || {})),
@@ -107,7 +110,7 @@ test('explicit inventory diagnostics expose only bounded shape metadata without 
   }) });
   f.configure(); const properties = [...f.properties];
   const result = plain(f.c.getProjectInfrastructure_({ diagnose: true }));
-  assert.deepEqual(result, { diagnostics: { itemsIsArray: true, itemsLength: 1, maxSupportedAccounts: 1000,
+  assert.deepEqual(result, { diagnostics: { itemsIsArray: true, itemsLength: 1, maxSupportedAccounts: 5000,
     reportedTotal: 7, hasMore: true, hasContinuation: true, dataArrayLength: null, dataItemsLength: 2,
     accountsArrayLength: 1, resultsArrayLength: 1 } });
   assert.deepEqual(f.calls.http, ['/accounts']); assert.deepEqual(f.calls.saves, []);
@@ -133,7 +136,7 @@ test('inventory diagnostics reject stale access or changed credentials after pro
 });
 
 test('first synchronization exposes the complete inventory and a finite first detail batch', () => {
-  const f = fixture({ accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)) });
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)) });
   f.configure();
   const result = f.refresh();
   assert.equal(result.accounts.length, 7);
@@ -157,7 +160,7 @@ test('first synchronization exposes the complete inventory and a finite first de
 });
 
 test('continuation completes remaining details without another inventory request and safely replays an acknowledged cursor', () => {
-  const f = fixture({ accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)) });
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)) });
   f.configure();
   const first = f.refresh(), cursor = first.nextCursor;
   const final = f.refresh({ cursor });
@@ -170,6 +173,100 @@ test('continuation completes remaining details without another inventory request
   assert.deepEqual(f.refresh({ cursor }), final);
   assert.equal(f.calls.http.length, before);
   assert.throws(() => f.refresh({ cursor: 'A'.repeat(43) }), /COLDY_INFRA_CURSOR_STALE/);
+});
+
+test('production batches synchronize all 1159 senders with one inventory read and bounded continuations', () => {
+  const f = fixture({ accounts: Array.from({ length: 1159 }, (_, index) => account(index + 1)) });
+  assert.equal(f.c.PROJECT_INFRASTRUCTURE.batch, 20);
+  assert.equal(f.c.PROJECT_INFRASTRUCTURE.maxAccounts, 5000);
+  assert.equal(f.c.PROJECT_INFRASTRUCTURE.maxReceipts, 1001);
+  f.configure(); let result = f.refresh(), batches = 1;
+  assert.equal(result.accounts.length, 1159); assert.equal(result.totals.accounts, 1159);
+  assert.deepEqual(result.detailProgress, { completed: 20, total: 1159 });
+  assert.equal(f.calls.http.length, 21);
+  const firstCursor = result.nextCursor;
+  while (result.nextCursor) {
+    const previous = result.detailProgress.completed, requests = f.calls.http.length;
+    result = f.refresh({ cursor: result.nextCursor }); batches++;
+    assert.ok(result.detailProgress.completed > previous);
+    assert.ok(result.detailProgress.completed - previous <= 20);
+    assert.ok(f.calls.http.length - requests <= 20);
+    assert.ok(batches <= 58, 'Large inventories must finish within their bounded batch count');
+  }
+  assert.equal(batches, 58); assert.equal(result.state, 'ready');
+  assert.deepEqual(result.detailProgress, { completed: 1159, total: 1159 });
+  assert.equal(result.accounts[1158].status, 'Connected');
+  assert.equal(f.calls.http.filter(path => path === '/accounts').length, 1);
+  const details = f.calls.http.filter(path => path.startsWith('/accounts/'));
+  assert.equal(details.length, 1159); assert.equal(new Set(details).size, 1159);
+  assert.deepEqual(details, Array.from({ length: 1159 }, (_, index) => '/accounts/' + (index + 1)));
+  const requests = f.calls.http.length;
+  assert.deepEqual(f.refresh({ cursor: firstCursor }), result);
+  assert.equal(f.calls.http.length, requests, 'Acknowledged continuation replay never repeats provider reads');
+});
+
+test('the 5000-sender bound accepts a complete inventory and refuses 5001 without replacing it', () => {
+  const f = fixture({ accounts: Array.from({ length: 5000 }, (_, index) => account(index + 1)) });
+  f.configure(); const good = f.refresh();
+  assert.equal(good.accounts.length, 5000); assert.equal(good.totals.accounts, 5000);
+  assert.equal(good.accounts[4999].id, '5000'); assert.equal(good.detailProgress.completed, 20);
+  const requests = f.calls.http.length;
+  f.tick(1); f.setAccounts(Array.from({ length: 5001 }, (_, index) => account(index + 1)));
+  const refused = f.refresh();
+  assert.equal(refused.error.code, 'COLDY_INFRA_INCOMPLETE');
+  assert.equal(refused.accounts.length, 5000); assert.equal(refused.lastSyncAt, good.lastSyncAt);
+  assert.equal(refused.nextCursor, good.nextCursor); assert.equal(refused.detailProgress.completed, 20);
+  assert.equal(f.calls.http.length, requests + 1, 'No detail reads occur for a refused inventory');
+});
+
+test('detail deadlines reset on continuation and a slow first request still advances without skips', () => {
+  for (const [delay, perBatch] of [[7000, 2], [13000, 1]]) {
+    const f = fixture({ accounts: Array.from({ length: 5 }, (_, index) => account(index + 1)),
+      transport: ({ path, defaultResponse, f }) => {
+        const result = defaultResponse(); if (path.startsWith('/accounts/')) f.tick(delay); return result;
+      } });
+    f.configure(); let result = f.refresh();
+    assert.equal(result.detailProgress.completed, perBatch);
+    assert.equal(result.syncPaused, false); assert.equal(result.error, null);
+    while (result.nextCursor) {
+      const previous = result.detailProgress.completed, cursor = result.nextCursor;
+      result = f.refresh({ cursor });
+      assert.equal(result.detailProgress.completed, Math.min(5, previous + perBatch));
+      const requests = f.calls.http.length;
+      assert.deepEqual(f.refresh({ cursor }), result); assert.equal(f.calls.http.length, requests);
+    }
+    assert.equal(result.state, 'ready'); assert.equal(result.detailProgress.completed, 5);
+    assert.deepEqual(f.calls.http, ['/accounts', '/accounts/1', '/accounts/2', '/accounts/3', '/accounts/4', '/accounts/5']);
+  }
+});
+
+test('deadline progress includes a missing sender while rate limits keep their cursor and cooldown', () => {
+  let limited = true;
+  const f = fixture({ accounts: [account(1), account(2), account(3)],
+    transport: ({ path, response, defaultResponse, f }) => {
+      if (!path.startsWith('/accounts/')) return defaultResponse();
+      f.tick(13000);
+      if (path === '/accounts/1') return response({}, 404);
+      if (path === '/accounts/3' && limited) return response({}, 429, { 'Retry-After': '30' });
+      return defaultResponse();
+    } });
+  f.configure(); const first = f.refresh();
+  assert.equal(first.detailProgress.completed, 1); assert.equal(first.syncPaused, false);
+  assert.equal(first.accounts[0].syncError.code, 'COLDY_NOT_FOUND');
+  const second = f.refresh({ cursor: first.nextCursor });
+  assert.equal(second.detailProgress.completed, 2);
+  const paused = f.refresh({ cursor: second.nextCursor });
+  assert.equal(paused.detailProgress.completed, 2); assert.equal(paused.nextCursor, second.nextCursor);
+  assert.equal(paused.syncPaused, true); assert.equal(paused.retryAfterMs, 30000);
+  assert.equal(paused.error.code, 'COLDY_RATE_LIMIT');
+  const requests = f.calls.http.length;
+  f.refresh({ cursor: paused.nextCursor }); assert.equal(f.calls.http.length, requests);
+  f.tick(30001); limited = false;
+  const final = f.refresh({ cursor: paused.nextCursor });
+  assert.equal(final.detailProgress.completed, 3); assert.equal(final.nextCursor, null);
+  assert.equal(final.error, null); assert.equal(final.syncPaused, false);
+  assert.equal(final.state, 'partial', 'The missing first sender remains honestly stale');
+  assert.deepEqual(f.calls.http, ['/accounts', '/accounts/1', '/accounts/2', '/accounts/3', '/accounts/3']);
 });
 
 test('cached reads never access Coldy or rewrite state, including aged data', () => {
@@ -241,7 +338,7 @@ test('inventory errors retain last-good data and its successful timestamp with a
 
 test('rate limits are enforced server-side for initial refresh and cursor refresh without a retry loop', () => {
   let limited = true;
-  const f = fixture({ accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)),
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)),
     transport: ({ path, response, defaultResponse }) => path === '/accounts/2' && limited ? response({}, 429, { 'Retry-After': '30' }) : defaultResponse() });
   f.configure(); const first = f.refresh();
   assert.deepEqual(first.detailProgress, { completed: 1, total: 7 });
@@ -303,7 +400,7 @@ test('provider authentication and owner-consent failures stay explicit without l
 
 test('an initial failure pauses old pending details instead of inviting an automatic continuation loop', () => {
   let failing = false;
-  const f = fixture({ accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)),
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)),
     transport: ({ path, defaultResponse }) => { if (failing && path === '/accounts') throw new Error('Network ' + KEY); return defaultResponse(); } });
   f.configure(); const first = f.refresh(); assert.ok(first.nextCursor);
   f.tick(1); failing = true; const failed = f.refresh();
@@ -332,7 +429,7 @@ test('malformed or incomplete inventory cannot replace the last complete sender 
   for (const malformed of [null, {}, { items: null }, { items: [account(1), account(1)] },
     { items: [account(0)] }, { items: [account(-1)] }, { items: [account('01')] }, { items: [account(Number.MAX_SAFE_INTEGER + 1)] },
     { items: [account(2, { email: 'invalid' })] }, { items: [], next_cursor: 'next' }, { items: [], total: 1 },
-    { items: Array.from({ length: 1001 }, (_, index) => account(index + 1)) }]) {
+    { items: Array.from({ length: 5001 }, (_, index) => account(index + 1)) }]) {
     let bad = false;
     const f = fixture({ transport: ({ path, response, defaultResponse }) => path === '/accounts' && bad ? response(malformed) : defaultResponse() });
     f.configure(); const original = f.refresh(); bad = true;
@@ -345,7 +442,7 @@ test('malformed or incomplete inventory cannot replace the last complete sender 
 });
 
 test('credential rotation and clearing cannot expose another organization cache or cursor', () => {
-  const f = fixture({ accounts: Array.from({ length: 6 }, (_, index) => account(index + 1)) });
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 6 }, (_, index) => account(index + 1)) });
   f.configure(); const old = f.refresh();
   f.configure('second_organization_fixture_secret');
   const fresh = f.get(); assert.equal(fresh.state, 'not_synced'); assert.deepEqual(fresh.accounts, []);
@@ -401,7 +498,7 @@ test('older initial inventory responses cannot overwrite a newer completed synch
 
 test('concurrent identical continuations use their receipt instead of overwriting newer progress', () => {
   let nested = false, cursor;
-  const f = fixture({ accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)), transport: ({ path, defaultResponse, f }) => {
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 7 }, (_, index) => account(index + 1)), transport: ({ path, defaultResponse, f }) => {
     const response = defaultResponse();
     if (path === '/accounts/6' && !nested && cursor) { nested = true; f.refresh({ cursor }); }
     return response;
@@ -413,7 +510,7 @@ test('concurrent identical continuations use their receipt instead of overwritin
 });
 
 test('new inventories invalidate obsolete continuation tokens rather than mixing sender snapshots', () => {
-  const f = fixture({ accounts: Array.from({ length: 6 }, (_, index) => account(index + 1)) }); f.configure();
+  const f = fixture({ detailBatch: 5, accounts: Array.from({ length: 6 }, (_, index) => account(index + 1)) }); f.configure();
   const first = f.refresh(); f.tick(1); f.setAccounts([account(9)]); f.refresh();
   const requests = f.calls.http.length;
   assert.throws(() => f.refresh({ cursor: first.nextCursor }), /COLDY_INFRA_CURSOR_STALE/);

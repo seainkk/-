@@ -1,5 +1,5 @@
 /** One-project sender inventory. Provider reads never create or modify senders. */
-var PROJECT_INFRASTRUCTURE = Object.freeze({ version: 1, batch: 5, maxAccounts: 1000, maxReceipts: 201, cacheMillis: 300000, textLimit: 2000 });
+var PROJECT_INFRASTRUCTURE = Object.freeze({ version: 1, batch: 20, detailBudgetMillis: 12000, maxAccounts: 5000, maxReceipts: 1001, cacheMillis: 300000, textLimit: 2000 });
 
 /** Cached metadata by default. Explicit diagnostics return only provider structure and counts. */
 function getProjectInfrastructure_(request) {
@@ -24,7 +24,7 @@ function getProjectInfrastructure_(request) {
   });
 }
 
-/** One inventory request plus at most five account details; later calls continue. */
+/** One inventory plus a bounded detail batch; the saved cursor continues later. */
 function refreshProjectInfrastructure_(request) {
   return api_(function () {
     var input = coldyInput_(request === undefined ? {} : request, ['cursor']);
@@ -89,11 +89,16 @@ function projectInfraDetails_(context, settings, state) {
   state.lastError = null;
   state.retryAt = 0;
   state.warnings = [];
+  var firstIndex = state.cursorIndex, deadline = Date.now() + PROJECT_INFRASTRUCTURE.detailBudgetMillis;
   var stop = Math.min(state.accounts.length, state.cursorIndex + PROJECT_INFRASTRUCTURE.batch);
   for (; state.cursorIndex < stop; state.cursorIndex++) {
+    // A slow first request may exceed the budget, but must still advance the
+    // cursor. Check only between calls; an in-flight UrlFetch cannot be stopped.
+    if (state.cursorIndex > firstIndex && Date.now() >= deadline) break;
     var item = state.accounts[state.cursorIndex];
     try {
       projectInfraCurrent_(context, settings.credentialHash);
+      if (state.cursorIndex > firstIndex && Date.now() >= deadline) break;
       var detail = coldyApi_(context, 'GET', '/accounts/' + item.id);
       state.accounts[state.cursorIndex] = projectInfraDetail_(item, detail, settings.key);
     } catch (error) {

@@ -176,7 +176,7 @@
     const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';initialSyncAttempted=true;render();notify();
     const seen=new Set();let previous=continuation?(infrastructure?.detailProgress?.completed??-1):-1;
     try{
-      for(let batch=0;batch<201;batch++){
+      for(let batch=0;batch<1001;batch++){
         if(!alive(mark)||sequence!==infraSequence||view!=='infrastructure')break;
         if(cursor&&seen.has(cursor)){infraError='Синхронизация приостановлена: Coldy не подтвердил переход к следующей порции.';break;}
         if(cursor)seen.add(cursor);
@@ -188,7 +188,7 @@
         if(data.syncPaused||data.error||data.state==='error'||data.retryAfterMs>0){infraError=data.error?.message||'Синхронизация приостановлена. Повторите продолжение позже.';break;}
         if(!Number.isFinite(completed)||completed<=previous||seen.has(next)||next===cursor){infraError='Синхронизация приостановлена: новые данные пока не подтверждены.';break;}
         previous=completed;cursor=next;
-        if(batch===200)infraError='Продолжите синхронизацию следующей порции.';
+        if(batch===1000)infraError='Продолжите синхронизацию следующей порции.';
       }
     }
     catch(error){if(alive(mark)&&sequence===infraSequence)infraError=failure(error).message;}
