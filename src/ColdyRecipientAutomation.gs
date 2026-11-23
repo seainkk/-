@@ -120,9 +120,10 @@ function coldyIncomingKinds_(context,project,binding){
   });
 }
 
-function coldyIncomingStep_(context,job,guard,deadline){
+function coldyIncomingStep_(context,job,guard,deadline,writeCheckpoint){
   var b=job.b, mark=job.mark;
-  var state=coldyLoad_(context,'recipientpoll',job.owner)||{};
+  var state=writeCheckpoint||coldyLoad_(context,'recipientpoll',job.owner)||{};
+  if(writeCheckpoint && (state.bindingRevision!==b.revision || !state.scan || state.scan.phase!=='write')) return;
   if(state.bindingRevision!==b.revision) state={bindingRevision:b.revision};
   function updateProgress(){
     var progress=coldyIncomingProgress_(state.scan);
@@ -234,7 +235,7 @@ function coldyIncomingStep_(context,job,guard,deadline){
       if(staged || hadCheckpoint || state.lastIdentity!==fingerprint){state.lastIdentity=fingerprint;save();}
     } else {mark.state='syncing';save();}
   } else mark.state='syncing';
-  if(Date.now()>=deadline||!state.policy||!state.policy.emails.length) return;
+  if(writeCheckpoint||Date.now()>=deadline||!state.policy||!state.policy.emails.length) return;
   var policy=state.policy;
   if(policy.checkedAt && Date.now()-policy.checkedAt<300000 || policy.retryAt>Date.now()) return;
   var result=coldyRecipientSuppression_(context,policy.emails.map(function(email){return {email:email};}),guard,policy.cursor);
@@ -348,12 +349,29 @@ function coldyRecipientTick_(event){
     var credential=settings.credentialHash, pauseKey='COLDY_INCOMING_PAUSE_'+digest_(context.rootId+'|'+credential);
     var sharedPause=coldyGetPause_(context,settings);
     var pausedUntil=Math.max(Number(props.getProperty(pauseKey))||0,sharedPause?Date.now()+sharedPause.retryAfterMs:0);
-    if(pausedUntil>Date.now()){heartbeat('rate_limit',pausedUntil);return;}
-    var bindings=coldyCampaignRegistry_(context).bindings, snapshot=props.getProperties(), jobs=[];
+    var localOnly=pausedUntil>Date.now(), snapshot=props.getProperties(), readyOwners=null;
+    if(localOnly){
+      heartbeat('rate_limit',pausedUntil);
+      // Public progress is only a discovery hint. The scoped private checkpoint is checked again before using it.
+      readyOwners=new Set();
+      Object.keys(snapshot).forEach(function(key){
+        var match=/^COLDY_INCOMING_([A-Za-z0-9_-]{43})$/.exec(key);
+        if(!match) return;
+        var hint;
+        try{hint=JSON.parse(snapshot[key]);}catch(invalid){return;}
+        if(hint && hint.progress && hint.progress.phase==='write' && (!(hint.retryAt>Date.now())||hint.issue==='rate_limit'))
+          readyOwners.add(match[1]);
+      });
+      if(!readyOwners.size) return;
+    }
+    var bindings=coldyCampaignRegistry_(context).bindings, jobs=[];
     bindings.forEach(function(b){
       var project=registrySegmentProject_(context,b.segmentId,snapshot); if(!registryProjectName_(project)) return;
-      var owner=coldyIncomingOwner_(context,credential,project,b), mark=coldyIncomingMark_(props,owner);
-      if(!(mark.retryAt>Date.now())) jobs.push({project:project,b:b,owner:owner,mark:mark});
+      var owner=coldyIncomingOwner_(context,credential,project,b);
+      if(localOnly && !readyOwners.has(owner)) return;
+      var mark=coldyIncomingMark_(props,owner);
+      if(localOnly && (mark.progressRevision!==b.revision || !mark.progress || mark.progress.phase!=='write')) return;
+      if(!(mark.retryAt>Date.now()) || localOnly && mark.issue==='rate_limit') jobs.push({project:project,b:b,owner:owner,mark:mark});
     });
     jobs.sort(function(a,b){return (a.mark.attempt||0)-(b.mark.attempt||0)||a.owner.localeCompare(b.owner);});
     // A slow Drive registry read must not consume every campaign's work window on every tick.
@@ -376,11 +394,17 @@ function coldyRecipientTick_(event){
       }
       try {
         timerGuard();
+        var checkpoint=null;
+        if(localOnly){
+          checkpoint=coldyLoad_(guard(),'recipientpoll',job.owner);
+          if(!checkpoint || checkpoint.bindingRevision!==b.revision || !checkpoint.scan || checkpoint.scan.phase!=='write') continue;
+          guard();
+        }
         mark.retryAt=0;mark.issue=null;mark.state='syncing';mark.attempt=Date.now();
         // A hard Apps Script timeout cannot run finally. Persist the fair-queue position before remote calls.
         props.setProperty('COLDY_INCOMING_'+job.owner,JSON.stringify(mark));
         guard();
-        coldyIncomingStep_(context,job,guard,deadline);
+        coldyIncomingStep_(context,job,guard,deadline,checkpoint);
       } catch(error) {
         if(error.registryCode==='LINK_ACCESS_REQUIRED'||error.registryCode==='LINK_SETUP_REQUIRED') throw error;
         var retry=Number(error.retryAfterMs)||0;
@@ -391,7 +415,7 @@ function coldyRecipientTick_(event){
         }
       }
       timerGuard();props.setProperty('COLDY_INCOMING_'+job.owner,JSON.stringify(mark));
-      if(Number(props.getProperty(pauseKey))>Date.now()) break;
+      if(!localOnly && Number(props.getProperty(pauseKey))>Date.now()) break;
     }
   } catch(error) {
     heartbeat(coldyIncomingIssue_(error));throw error;
