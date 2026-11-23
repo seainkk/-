@@ -297,13 +297,17 @@
     if(Number.isSafeInteger(record?.sent)&&Number.isSafeInteger(record.total))
       block.append(node('small','pj-completion-count','Отправлено '+number(record.sent)+' из '+number(record.total)));
     const date=forecastDate(record?.estimatedDate);
+    const previous=date==='—'&&record?.state==='unknown'?record.previousEstimate:null;
+    const previousDate=forecastDate(previous?.date),previousAt=timestamp(previous?.generatedAt);
     let description;
     if(record?.state==='completed')description='Все письма отправлены';
     else if(date!=='—')description='Ориентировочно '+date;
+    else if(previousDate!=='—')description='Предыдущая оценка '+previousDate+(previousAt?' (расчёт от '+previousAt+' МСК)':'');
     else if(record)description=completionReasons[record.reason]||'Недостаточно данных для расчёта даты.';
     else description=completionMessage||completionData?.message||(completionData&&!completionData.pending?'Для этой рассылки пока нет расчёта.':'Рассчитываем завершение…');
     block.append(node('span','pj-completion-date',description));
-    const at=timestamp(record?.generatedAt||completionData?.generatedAt);
+    if(previousDate!=='—'&&completionReasons[record.reason])block.append(node('small','pj-completion-count',completionReasons[record.reason]));
+    const at=previousDate!=='—'?previousAt:timestamp(record?.generatedAt||completionData?.generatedAt);
     if(record?.reason==='from_tomorrow')block.append(node('small','pj-completion-count','Оценка с завтрашнего дня: остаток на сегодня неизвестен.'));
     if(at)block.title='Расчёт на '+at+' МСК';
     else block.removeAttribute('title');
