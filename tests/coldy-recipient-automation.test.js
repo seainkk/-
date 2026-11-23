@@ -311,3 +311,53 @@ test('a shared Coldy cooldown leaves campaign attempts and checkpoints untouched
   assert.equal(f.data.get(markKey),previous);assert.deepEqual(f.paths,[]);assert.deepEqual(f.saves,[]);
   f.r.coldyCampaignRegistry_=registry;f.r.coldyLoad_=read;f.next();assert.ok(f.paths.length);
 });
+
+test('during a shared GET pause only an authorized saved Email write resumes, without lead or suppression requests',()=>{
+  const f=fixture();f.enable();f.state.counts={[a]:680};
+  const ctx=f.r.authorize_();
+  const owners=f.bindings.map(bind=>f.r.coldyIncomingOwner_(ctx,f.state.credential,f.projects[bind.segmentId],bind));
+  const keys=owners.map(owner=>'COLDY_INCOMING_'+owner);
+  const write=f.r.coldyRecipientSheetWrite_;
+  let slices=0;
+  f.r.coldyRecipientSheetWrite_=(...args)=>{
+    if(args[1].campaignId===a&&++slices===2) f.r.fail_('BUSY');
+    return write(...args);
+  };
+  f.tick();
+  assert.equal(JSON.parse(f.data.get(keys[0])).progress.checked,300);
+  const other=f.data.get(keys[1]), priorRequests=f.paths.length;
+  f.r.coldyGetPause_=()=>({retryAfterMs:300000});
+  f.r.coldyGetBatch_=()=>assert.fail('No Coldy recipient HTTP during the write');
+  f.r.coldyRecipientSuppression_=()=>assert.fail('No Coldy blacklist HTTP during the write');
+  const load=f.r.coldyLoad_;
+  f.r.coldyLoad_=(context,kind,owner)=>{assert.equal(owner,owners[0]);return load(context,kind,owner);};
+  f.next();
+  const rows=f.writes.filter(w=>w.id===a).flatMap(w=>w.rows);
+  assert.equal(rows.length,680);assert.equal(new Set(rows.map(row=>row.id)).size,680);
+  assert.equal(JSON.parse(f.data.get(keys[0])).state,'synced');
+  assert.equal(f.data.get(keys[1]),other);assert.equal(f.paths.length,priorRequests);
+  const marker=f.r.coldyIncomingTimer_(f.props),clock=JSON.parse(f.data.get(f.r.coldyIncomingHeartbeatKey_(marker)));
+  assert.deepEqual([clock.issue,clock.retryAt],['rate_limit',f.state.now+300000]);
+  f.r.coldyCampaignRegistry_=()=>assert.fail('No pending local write: do not discover campaigns again');
+  f.r.coldyLoad_=()=>assert.fail('No pending local write: do not reopen the scan');
+  const oldWrites=f.writes.length;f.next();assert.equal(f.writes.length,oldWrites);
+});
+
+test('a stale write-progress hint cannot start a provider read, revive an old revision, or consume a campaign attempt',()=>{
+  for(const stale of ['read','revision','scope']){
+    const f=fixture();f.enable();const ctx=f.r.authorize_(),bind=f.bindings[0];
+    const original=f.r.coldyIncomingOwner_(ctx,f.state.credential,f.projects[bind.segmentId],bind);
+    const key='COLDY_INCOMING_'+original;
+    const oldMark=JSON.stringify({attempt:10,progress:{phase:'write',checked:300},progressRevision:bind.revision});
+    f.data.set(key,oldMark);
+    if(stale==='scope')f.projects[bind.segmentId]='neosender';
+    f.r.coldyGetPause_=()=>({retryAfterMs:120000});
+    f.r.coldyGetBatch_=f.r.coldyRecipientSuppression_=()=>assert.fail('Never enter provider work from a stale hint');
+    f.r.coldyLoad_=(_context,_kind,owner)=>{
+      assert.notEqual(stale,'scope');assert.equal(owner,original);
+      return {bindingRevision:stale==='revision'?bind.revision-1:bind.revision,scan:{phase:stale==='read'?'read':'write'}};
+    };
+    f.tick();
+    assert.equal(f.data.get(key),oldMark);assert.deepEqual(f.writes,[]);assert.deepEqual(f.saves,[]);
+  }
+});

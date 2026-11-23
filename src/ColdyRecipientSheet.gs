@@ -184,9 +184,15 @@ function coldyRecipientSheetRead_(sheet, width, lastRow, layout, recipients) {
 }
 
 function coldyRecipientSheetRequests_(sheet, width, lastRow, layout, plan) {
-  var id = sheet.getSheetId(), requests = [], maxCols = sheet.getMaxColumns(), maxRows = sheet.getMaxRows();
-  if (width + layout.additions.length > maxCols) requests.push({ appendDimension: { sheetId: id, dimension: 'COLUMNS', length: width + layout.additions.length - maxCols } });
-  if (plan.lastRow > maxRows) requests.push({ appendDimension: { sheetId: id, dimension: 'ROWS', length: plan.lastRow - maxRows } });
+  var id = sheet.getSheetId(), requests = [];
+  if (layout.additions.length) {
+    var neededCols = width + layout.additions.length, maxCols = sheet.getMaxColumns();
+    if (neededCols > maxCols) requests.push({ appendDimension: { sheetId: id, dimension: 'COLUMNS', length: neededCols - maxCols } });
+  }
+  if (plan.lastRow > lastRow) {
+    var maxRows = sheet.getMaxRows();
+    if (plan.lastRow > maxRows) requests.push({ appendDimension: { sheetId: id, dimension: 'ROWS', length: plan.lastRow - maxRows } });
+  }
   if (layout.additions.length) requests.push({ updateCells: { start: { sheetId: id, rowIndex: 0, columnIndex: width }, fields: 'userEnteredValue,note', rows: [{ values: layout.additions.map(function (field) {
     return { userEnteredValue: { stringValue: field.label }, note: field.note };
   }) }] } });
@@ -219,9 +225,9 @@ function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, g
     var state = claim.state;
     if (state.rootId !== context.rootId || state.segmentId !== binding.segmentId || state.role !== 'segment-' + kind || state.targets.emailSheetId !== target.sheetId) fail_('COLDY_TARGET_CHANGED', 'Не удалось подтвердить рабочую вкладку сегмента.');
     claim.importSegmentId = binding.segmentId;
+    var version = coldyRecipientSheetVersion_(context, binding, kind, target, claim.metadata);
     var sheet = gridSheet_(claim.book, target.sheetId), width = sheet.getLastColumn(), lastRow = sheet.getLastRow();
     if (!width || !lastRow || width > COLDY_CAMPAIGNS.maxColumns || lastRow > COLDY_CAMPAIGNS.maxRows) fail_('COLDY_SCHEMA', 'Проверьте размер и заголовки рабочей вкладки Email.');
-    var version = currentVersion();
     var header = sheet.getRange(1, 1, 1, width);
     var headers = header.getDisplayValues()[0], notes = header.getNotes()[0];
     var layout, snapshot;
@@ -252,11 +258,11 @@ function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, g
     }
     locked_(function () {
       verifySnapshot();
-      if (beforeApply) beforeApply(result);
-      if (requests.length) {
+      if (beforeApply) {
+        beforeApply(result);
         if (version !== currentVersion()) fail_('CONFLICT', 'Таблица изменилась до сохранения страницы. Продолжите тот же импорт.');
-        sheetRawBatchWrite_(target.fileId, requests);
       }
+      if (requests.length) sheetRawBatchWrite_(target.fileId, requests);
     });
     // Remember successfully imported recipients so a later manual deletion remains effective.
     if (plan.hashes.length) {

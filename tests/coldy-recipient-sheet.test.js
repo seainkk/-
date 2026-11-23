@@ -138,6 +138,31 @@ test('verifies both the original physical route and a revision change while pers
   assert.equal(f.call.committed,0);
 });
 
+test('existing Coldy updates reuse lease metadata and only query grid bounds for dimensions that grow',()=>{
+  const f=fixture(), sheet=f.env.gridSheet_(), entry=lead('growth@example.test');
+  const calls={rows:0,cols:0,metadata:0}, extensions=[];
+  sheet.getMaxColumns=()=>{calls.cols++;return f.rows[0].length;};
+  sheet.getMaxRows=()=>{calls.rows++;return f.rows.length;};
+  const metadata=f.env.contactSyncMetadata_,write=f.env.sheetRawBatchWrite_;
+  f.env.contactSyncMetadata_=(...args)=>{calls.metadata++;return metadata(...args);};
+  f.env.sheetRawBatchWrite_=(id,requests)=>{
+    extensions.push(...requests.filter(r=>r.appendDimension).map(r=>plain(r.appendDimension)));
+    write(id,requests);
+  };
+  f.run([entry],{before:()=>{}});
+  assert.deepEqual(calls,{rows:1,cols:1,metadata:5});
+  assert.deepEqual(extensions,[
+    {sheetId:target.sheetId,dimension:'COLUMNS',length:f.rows[0].length-5},
+    {sheetId:target.sheetId,dimension:'ROWS',length:1}
+  ]);
+  f.run([lead(entry.email,{sentCount:1,status:'Sent'})],{existingOnly:true});
+  assert.deepEqual(calls,{rows:1,cols:1,metadata:9});
+  assert.equal(f.field(2,'sent'),1);
+  // The manual journal callback can race a sheet edit even on a retry with nothing to write.
+  assert.throws(()=>f.run([lead(entry.email,{sentCount:1,status:'Sent'})],{before:f.change}),/CONFLICT/);
+  assert.equal(f.call.committed,2);
+});
+
 test('recipient reconciliation waits for an unfinished contact job without taking its lease or changing its checkpoint',()=>{
   for(const existingOnly of [true,false]){
     const f=fixture(), entry=lead('waiting@example.test');
