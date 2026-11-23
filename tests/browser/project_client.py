@@ -43,10 +43,10 @@ function api(name,p){
  }
  if(name==='getProjectCampaignCompletions'){
    const report={
-     [A]:{sent:12,remaining:36,total:48,percent:backend.completionPercent??25,estimatedDate:'2026-12-01',state:'estimated',reason:null},
+     [A]:{sent:12,remaining:36,total:48,percent:backend.completionPercent??25,estimatedDate:'2026-12-01',state:'estimated',reason:null,...backend.completionRecord},
      [C]:{sent:1,remaining:4,total:5,percent:20,estimatedDate:null,state:'paused',reason:'paused'}
    };
-   return {generatedAt:'2026-11-22T09:00:00Z',pending:false,retryAfterMs:0,freshForMs:p.preview?backend.completionTtl||0:0,
+   return {generatedAt:'2026-11-22T09:00:00Z',pending:!!backend.completionPending,retryAfterMs:0,freshForMs:p.preview?backend.completionTtl||0:0,
      campaignCompletions:Object.fromEntries(backend.bindings.filter(b=>report[b.campaignId]).map(b=>[b.campaignId,report[b.campaignId]]))};
  }
  if(name==='getProjectAnalytics')return {state:backend.catalogState||'ready',segments:backend.catalogState?[]:[{id:'segment-a',name:'Segment A'},{id:'segment-b',name:'Segment B'}],coldy:{configured:backend.configured,connected:backend.connected,checkedAt:null}};
@@ -164,11 +164,29 @@ def main():
         page.locator('#pj-segment').select_option('segment-a')
         check_completion('#pj-campaign-rows')
         assert count('getProjectCampaignCompletions')==1
-        gauge=page.locator('#pj-campaign-rows [data-completion-campaign="11111111-1111-4111-8111-111111111111"] progress')
+        completion=page.locator('#pj-campaign-rows [data-completion-campaign="11111111-1111-4111-8111-111111111111"]')
+        gauge=completion.get_by_role('progressbar')
         page.evaluate('backend.completionPercent=50')
         expect(gauge).to_have_attribute('value','50')
         page.evaluate('backend.completionPercent=75');page.locator('#pj-analytics-refresh').click()
         expect(gauge).to_have_attribute('value','75');idle()
+        # Fresh progress and a historical ETA have separate timestamps until the next complete calculation arrives.
+        page.evaluate("""backend.completionPending=true;backend.completionRecord={state:'unknown',reason:'incomplete',
+estimatedDate:null,sent:39,remaining:9,total:48,percent:81,generatedAt:'2026-11-23T08:00:00Z',
+previousEstimate:{date:'2026-12-01',generatedAt:'2026-11-22T09:00:00Z'}}""")
+        page.locator('#pj-analytics-refresh').click()
+        date=completion.locator('.pj-completion-date')
+        expect(date).to_contain_text('Предыдущая оценка 01.12.2026')
+        expect(date).to_contain_text('22.11.2026')
+        expect(date).to_contain_text('12:00:00 МСК')
+        expect(completion).to_contain_text('Очередь отправок получена частично.')
+        expect(gauge).to_have_attribute('value','81')
+        page.evaluate("""backend.completionPending=false;backend.completionRecord={state:'estimated',estimatedDate:'2026-12-03',
+generatedAt:'2026-11-23T08:05:00Z',previousEstimate:null}""")
+        expect(date).to_have_text('Ориентировочно 03.12.2026',timeout=8000)
+        expect(completion).not_to_contain_text('Предыдущая оценка')
+        expect(completion).not_to_contain_text('Очередь отправок получена частично.')
+        page.evaluate('delete backend.completionRecord')
         # A late result for the previous project cannot overwrite the new project's percentage.
         page.evaluate("backend.holdMethods=['getProjectCampaignCompletions'];void RegistryProject.refresh({manual:true})")
         page.wait_for_function("backend.pending.some(x=>x.name==='getProjectCampaignCompletions')")

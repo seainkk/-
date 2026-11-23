@@ -42,17 +42,18 @@ function fixture(){
         if (environment.pageFailure?.id===id && path.startsWith('/leads/'))
           return {error:Object.assign(new Error('private@example.test'),environment.pageFailure)};
         if (path.startsWith('/campaigns/')) return {value:{id,status:states[id],
-          is_stop_sending_on_reply:true,is_stop_sending_on_company_reply:false,sequences:[{id:1,delay:0},{id:2,delay:1}]}};
+          is_stop_sending_on_reply:true,is_stop_sending_on_company_reply:false,sequences:[{id:1,delay:0},{id:2,delay:environment.delay??1}]}};
         const offset=Number(path.match(/offset=(\d+)/)[1]),total=environment.totals[id];
         return {value:{offset,total,limit:200,items:Array.from({length:Math.min(200,total-offset)},(_,i)=>({
           id:i+offset+1,campaign_id:id,verification_status:'valid',stop_sending:false,status:'Sent',chosen_sender:1,
-          amount_sequences_sent:1,id_previous_sending_sequence:1,date_last_sequence_send:new Date(Date.now()-2*86400000).toISOString(),email:'private@example.test'
+          amount_sequences_sent:1,id_previous_sending_sequence:1,date_last_sequence_send:environment.lastSentAt,email:'private@example.test'
         }))}};
       });
       if (environment.afterFetch) environment.afterFetch();
       guard();return result;
     }
   });
+  environment.lastSentAt=new Date(Date.now()-2*86400000).toISOString();
   for (const name of ['ProjectForecastDemand','ProjectForecastCalc','ProjectForecast','ProjectCampaignCompletion','ProjectCampaignProgress']){
     vm.runInContext(readFileSync(new URL('../src/'+name+'.gs',import.meta.url),'utf8'),runtime,{filename:name+'.gs'});
   }
@@ -115,7 +116,7 @@ test('transient failures keep the cursor and communicate their distinct causes w
   }
 });
 
-test('an active bound campaign obtains its estimated date from the verified project sender capacity',()=>{
+function activeFixture(){
   const f=fixture();f.states[a]='Active';f.environment.senders=[1];
   const capacity=vm.createContext({Date,Intl});
   vm.runInContext(readFileSync(new URL('../src/ProjectCapacity.gs',import.meta.url),'utf8'),capacity);
@@ -124,11 +125,75 @@ test('an active bound campaign obtains its estimated date from the verified proj
   f.runtime.projectInfraCount_=v=>Number.isSafeInteger(v)&&v>=0?v:null;
   const stamp=new Date().toISOString();
   f.runtime.projectInfraRead_=()=>({});
-  f.runtime.projectInfraPublic_=()=>({monitoring:{accountIds:[1],revision:0},poolOnly:true,
+  const infra={monitoring:{accountIds:[1],revision:0},poolOnly:true,
     accounts:[{id:1,status:'Connected',dailyLimit:8,sentToday:0,updatedAt:stamp,capacity:{state:'busy',campaignIds:[a]}}],
     capacity:{updatedAt:stamp,state:'ready',stale:false,campaigns:[{id:a,status:'Active',allSendersSelected:true,
       schedule:{days:['monday','tuesday','wednesday','thursday','friday','saturday','sunday'],from:'08:00',to:'19:00',
-        gapStartSeconds:60,gapEndSeconds:120,timezone:'Europe/Moscow'}}]}});
+        gapStartSeconds:60,gapEndSeconds:120,timezone:'Europe/Moscow'}}]}};
+  f.runtime.projectInfraPublic_=()=>copy(infra);f.infra=infra;
+  return f;
+}
+
+test('an active bound campaign obtains its estimated date from the verified project sender capacity',()=>{
+  const f=activeFixture();
   const report=f.get().campaignCompletions[a];
   assert.equal(report.percent,50);assert.equal(report.state,'estimated');assert.match(report.estimatedDate,/^\d{4}-\d{2}-\d{2}$/);
+});
+
+function expiredEstimate(f,legacy=false){
+  const ready=f.get().campaignCompletions[a],saved=[...f.stored.values()][0];
+  const generatedAt=new Date(Date.now()-360000).toISOString();
+  saved.generatedAt=generatedAt;saved.report[a].generatedAt=generatedAt;
+  if(legacy)delete saved.report[a].estimateInputs;
+  return {date:ready.estimatedDate,generatedAt};
+}
+
+test('a second campaign waiting for Coldy keeps the first campaign’s verified estimate visibly dated, including legacy snapshots',()=>{
+  for(const legacy of [true,false]){
+    const f=activeFixture(),old=expiredEstimate(f,legacy);
+    assert.deepEqual(f.get({preview:true}).campaignCompletions[a].previousEstimate,old);
+    f.environment.pageFailure={id:b,registryCode:'COLDY_RATE_LIMIT',retryAfterMs:90000};
+    const pending=f.get(),partial=pending.campaignCompletions[a];
+    assert.equal(pending.pending,true);assert.equal(partial.estimatedDate,null);assert.equal(partial.state,'unknown');
+    assert.deepEqual(partial.previousEstimate,old);assert.notEqual(partial.generatedAt,old.generatedAt);
+    assert.deepEqual(f.get({preview:true}).campaignCompletions[a].previousEstimate,old);
+    assert.deepEqual(f.get().campaignCompletions[a].previousEstimate,old);
+    delete f.environment.pageFailure;[...f.stored.values()][0].retryAt=0;
+    f.infra.accounts[0].dailyLimit=0;
+    const final=f.get();assert.equal(final.pending,false);assert.equal(final.campaignCompletions[a].estimatedDate,null);
+    assert.equal(final.campaignCompletions[a].previousEstimate,null);
+  }
+});
+
+test('changed sequence, eligible queue, demand, campaign status or project scope clears a previous estimate immediately',()=>{
+  for(const change of ['sequence','queue','demand','status','scope']){
+    const f=activeFixture();expiredEstimate(f);
+    if(change==='sequence')f.environment.delay=3;
+    if(change==='queue')f.environment.lastSentAt=new Date(Date.now()-5*86400000).toISOString();
+    if(change==='demand')f.environment.totals[a]=2;
+    if(change==='status')f.states[a]='Paused';
+    if(change==='scope'){f.environment.revision++;assert.deepEqual(f.get({preview:true}).campaignCompletions,{});continue;}
+    f.environment.pageFailure={id:b,registryCode:'COLDY_RATE_LIMIT',retryAfterMs:90000};
+    const row=f.get().campaignCompletions[a];assert.equal(row.estimatedDate,null);assert.equal(row.previousEstimate,null,change);
+    if(change==='status')assert.equal(row.state,'paused');
+  }
+});
+
+test('an incomplete sender refresh offers only the original dated estimate and replaces it after a verified refresh',()=>{
+  const f=activeFixture(),old=expiredEstimate(f);
+  f.infra.error={code:'COLDY_NETWORK'};f.infra.lastAttemptAt=new Date().toISOString();f.infra.capacity.stale=true;
+  const wait=f.get();assert.equal(wait.pending,true);assert.ok(wait.retryAfterMs>0);
+  assert.equal(wait.campaignCompletions[a].estimatedDate,null);assert.deepEqual(wait.campaignCompletions[a].previousEstimate,old);
+  [...f.stored.values()][0].retryAt=0;delete f.infra.error;f.infra.capacity.stale=false;
+  const ready=f.get();assert.equal(ready.pending,false);assert.match(ready.campaignCompletions[a].estimatedDate,/^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(ready.campaignCompletions[a].previousEstimate,null);
+});
+
+test('a new sequence observed before a lead-page failure permanently discards the previous estimate',()=>{
+  const f=activeFixture();expiredEstimate(f);f.environment.delay=7;
+  f.environment.pageFailure={id:a,registryCode:'COLDY_RATE_LIMIT',retryAfterMs:90000};
+  assert.equal(f.get().campaignCompletions[a],undefined);
+  const checkpoint=[...f.stored.values()][0];
+  assert.equal(checkpoint.report[a],undefined);
+  assert.equal(f.get({preview:true}).campaignCompletions[a],undefined);
 });

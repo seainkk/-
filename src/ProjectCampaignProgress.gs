@@ -15,19 +15,44 @@ function projectCompletionBindings_(context, observation) {
     .sort(function (a,b) { return a[0].localeCompare(b[0]); });
 }
 
+function projectCompletionQueueHash_(work) {
+  var groups=work.cohorts.map(function (c) {return projectForecastCohortKey_(c)+'|'+c.count;});
+  return digest_(JSON.stringify(groups.sort()));
+}
+
+function projectCompletionPrevious_(item,work) {
+  if (!item) return null;
+  var prior=item.previousEstimate || (item.state==='estimated' && {date:item.estimatedDate,generatedAt:item.generatedAt});
+  if (!prior || !/^\d{4}-\d{2}-\d{2}$/.test(prior.date) || !Number.isFinite(Date.parse(prior.generatedAt))) return null;
+  if (work) {
+    if (work.unavailable || work.campaignStatus && work.campaignStatus!=='Active') return null;
+    var proof=item.estimateInputs, counts=work.completion;
+    if (counts && (counts.issue || counts.sent>item.sent || counts.remaining>item.remaining ||
+        work.complete && (counts.remaining!==item.remaining || counts.sent!==item.sent || counts.remaining+counts.sent!==item.total))) return null;
+    // Legacy estimates still have confirmed counts, but no stored sequence or queue fingerprints.
+    if (proof && (work.sequence && digest_(JSON.stringify(work.sequence))!==proof.sequence ||
+        Number.isSafeInteger(work.total) && work.total!==proof.contacts ||
+        work.complete && projectCompletionQueueHash_(work)!==proof.queue)) return null;
+  }
+  return {date:prior.date,generatedAt:prior.generatedAt};
+}
+
 function projectCompletionPublic_(saved,preview,ids) {
   var campaignCompletions = {};
+  var age = saved && Date.now() - Date.parse(saved.generatedAt);
+  var refreshing = saved && (!!saved.work || age >= COLDY.cacheMillis);
   (ids || []).forEach(function (id) {
     var item = saved && saved.report && saved.report[id];
     if (!item || ['unknown','empty','completed','paused','estimated'].indexOf(item.state) === -1) return;
     var count = function (n) { return Number.isSafeInteger(n) && n >= 0 ? n : null; };
+    var stale=refreshing && item.state==='estimated';
     campaignCompletions[id] = {sent:count(item.sent), remaining:count(item.remaining), total:count(item.total),
-      percent:count(item.percent) !== null && item.percent <= 100 ? item.percent : null, state:item.state,
-      estimatedDate:/^\d{4}-\d{2}-\d{2}$/.test(item.estimatedDate) ? item.estimatedDate : null,
-      reason:typeof item.reason === 'string' && /^[a-z_]{1,45}$/.test(item.reason) ? item.reason : null,
+      percent:count(item.percent) !== null && item.percent <= 100 ? item.percent : null, state:stale?'unknown':item.state,
+      estimatedDate:!refreshing && /^\d{4}-\d{2}-\d{2}$/.test(item.estimatedDate) ? item.estimatedDate : null,
+      previousEstimate:refreshing ? projectCompletionPrevious_(item,saved.work && saved.work[id]) : null,
+      reason:stale?'incomplete':typeof item.reason === 'string' && /^[a-z_]{1,45}$/.test(item.reason) ? item.reason : null,
       generatedAt:item.generatedAt || null};
   });
-  var age = saved && Date.now() - Date.parse(saved.generatedAt);
   return {campaignCompletions:campaignCompletions,generatedAt:saved && saved.generatedAt || null,
     freshForMs:saved && !saved.work && Number.isFinite(age) && age >= 0 ? Math.max(0,COLDY.cacheMillis-age) : 0,
     pending:!preview && !!(saved && saved.work),retryAfterMs:saved ? Math.max(0,(saved.retryAt || 0)-Date.now()) : 0,
@@ -103,6 +128,12 @@ function getProjectCampaignCompletions_(request) {
         state.retryAt = Date.now() + Math.max(15000, Number(error.retryAfterMs) || 60000);
       }
     }
+    // A confirmed change on an unfinished page also invalidates the stored fallback for later retries.
+    ids.forEach(function(id) {
+      var work=state.work[id], prior=state.report[id];
+      if (work && !work.complete && prior && (prior.estimatedDate || prior.previousEstimate) &&
+          !projectCompletionPrevious_(prior,work)) delete state.report[id];
+    });
     var scanned = state.progress.campaignsDone === ids.length;
     if (scanned || state.progress.campaignsDone > before) {
       var infra = {accounts:[],monitoring:{accountIds:[]},capacity:{campaigns:[],stale:true}};
@@ -123,6 +154,8 @@ function getProjectCampaignCompletions_(request) {
             JSON.stringify(infra.monitoring.accountIds) !== JSON.stringify(monitoring.accountIds))
           fail_('COLDY_MONITORING_CHANGED','Выбор почт проекта изменился во время расчёта.');
         if (infra.retryAfterMs > 0) state.retryAt = Math.max(state.retryAt,Date.now() + infra.retryAfterMs);
+        if (!state.retryAt && infra.error && ['BUSY','COLDY_NETWORK','COLDY_RATE_LIMIT','COLDY_UNAVAILABLE','COLDY_CONFLICT'].includes(infra.error.code))
+          state.retryAt=Date.now()+60000;
         waiting = !!state.retryAt || !!infra.nextCursor && !infra.error;
         if (waiting) state.message = 'Обновляем расписания и лимиты почт для оценки даты.';
       }
@@ -131,7 +164,15 @@ function getProjectCampaignCompletions_(request) {
       ids.forEach(function (id) {
         if (state.work[id] && (state.work[id].complete || state.work[id].unavailable) && report[id]) {
           if (state.work[id].unavailable) report[id].reason = state.work[id].reason || 'unavailable';
-          state.report[id] = Object.assign({},report[id],{generatedAt:generated});
+          var row=Object.assign({},report[id],{generatedAt:generated}), work=state.work[id];
+          if (!scanned || waiting) {
+            var previous=projectCompletionPrevious_(state.report[id],work);
+            if (previous) { row.previousEstimate=previous;row.estimateInputs=state.report[id].estimateInputs; }
+            if (row.state==='estimated') {row.state='unknown';row.reason='capacity';row.estimatedDate=null;}
+          } else if (row.state==='estimated') {
+            row.estimateInputs={sequence:digest_(JSON.stringify(work.sequence)),contacts:work.total,queue:projectCompletionQueueHash_(work)};
+          }
+          state.report[id]=row;
         }
       });
       state.generatedAt = generated;
