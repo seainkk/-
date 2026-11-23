@@ -25,11 +25,15 @@ function projectForecastPreviewRange_(archive,day) {
     return result;
   });
   // Yesterday's plan for a whole day cannot stand in for the remaining sends today.
-  return Object.assign({},report,{today:null,days:days,periods:periods,startDate:days[0].date,
+  var aligned = Object.assign({},report,{today:null,days:days,periods:periods,startDate:days[0].date,
     reasons:(report.reasons || []).concat('previous_horizon')});
+  if (Array.isArray(report.campaigns)) aligned.campaigns = report.campaigns.map(function (c) {
+    return Object.assign({},c,{expectedByDay:c.expectedByDay.slice(1).concat(null)});
+  });
+  return aligned;
 }
 
-// Cache only a finished numerical report. Recipient cohorts, provider records,
+// Cache only a finished report with project campaign labels and counts. Recipient cohorts, provider records,
 // per-mailbox metrics and intermediate calculations never enter the cache.
 function projectForecastCachedArchive_(archive) {
   var f = archive.forecast, counts = ['initial','followups','expected','capacity','modeled'];
@@ -45,10 +49,15 @@ function projectForecastCachedArchive_(archive) {
   var queue = {}, fields = ['pendingInitial','pendingFollowups','unresolved','unreadCampaigns'];
   if (!f.queue || !fields.every(function (k) { return count(f.queue[k]); })) return null;
   fields.forEach(function (k) { queue[k] = f.queue[k]; });
-  return {day:archive.day, generatedAt:archive.generatedAt, demandScope:archive.demandScope,
-    forecast:{timezone:'Europe/Moscow', today:f.today && f.today.date === archive.day && counts.every(function(k){return count(f.today[k]);}) ? totals(f.today,{date:f.today.date}) : null,
+  var compact = {timezone:'Europe/Moscow', today:f.today && f.today.date === archive.day && counts.every(function(k){return count(f.today[k]);}) ? totals(f.today,{date:f.today.date}) : null,
       startDate:f.startDate, selectedAccounts:f.selectedAccounts, activeCampaigns:f.activeCampaigns, reasons:[], queue:queue,
-      days:f.days.map(function (r) { return totals(r,{date:r.date}); }),periods:f.periods.map(function (r) { return totals(r,{days:r.days,from:r.from,to:r.to}); })}};
+      days:f.days.map(function (r) { return totals(r,{date:r.date}); }),periods:f.periods.map(function (r) { return totals(r,{days:r.days,from:r.from,to:r.to}); })};
+  if (Array.isArray(f.campaigns)) {
+    if (!f.campaigns.every(function (c) { return c && coldyUuid_(c.id) && typeof c.name === 'string' && typeof c.segmentName === 'string' &&
+      Array.isArray(c.expectedByDay) && c.expectedByDay.length === 8 && c.expectedByDay.every(count); })) return null;
+    compact.campaigns = f.campaigns.map(function (c) {return {id:c.id,name:c.name,segmentName:c.segmentName,expectedByDay:c.expectedByDay};});
+  }
+  return {day:archive.day,generatedAt:archive.generatedAt,demandScope:archive.demandScope,forecast:compact};
 }
 
 // One root lookup and one bounded membership listing cover the four journals,
@@ -374,7 +383,13 @@ function projectForecastCollect_(context, ids, state, guard, withCompletion) {
         if (!detail || !coldyUuid_(detail.id) || detail.id.toLowerCase() !== id || !validStatus)
           fail_('COLDY_FORECAST_CHANGED','Состояние рассылки изменилось. Пересчитываем прогноз по актуальным данным.');
         work = {sequence:projectForecastSequence_(detail)};
-        if (withCompletion) work.campaignStatus = detail.status;
+        if (withCompletion) {
+          work.campaignStatus = detail.status;
+          if (detail.schedule) {
+            work.schedule = projectCapacitySchedule_(detail.schedule,id);
+            work.scheduleCheckedAt=Date.now();
+          }
+        }
         state.work[id] = work;
       }
       // Commit the contiguous prefix only. A retry starts at the first unconfirmed offset.
@@ -384,7 +399,11 @@ function projectForecastCollect_(context, ids, state, guard, withCompletion) {
         var page = projectForecastDemandPage_(id, offset, work.total, work.sequence, result && result.value, withCompletion);
         var next = projectForecastAppendDemand_(work.campaignId ? work : null, page);
         next.sequence = work.sequence;
-        if (withCompletion) next.campaignStatus = work.campaignStatus;
+        if (withCompletion) {
+          next.campaignStatus = work.campaignStatus;
+          next.schedule = work.schedule || null;
+          next.scheduleCheckedAt=work.scheduleCheckedAt || null;
+        }
         state.work[id] = work = next;
         state.progress.contactsRead += page.leadIds.length;
         if (next.complete) state.progress.campaignsDone++;

@@ -776,6 +776,32 @@ test('shared senders stay busy without disclosing foreign or unselected campaign
   assert.ok(!f.calls.http.some(p=>p.startsWith('/campaigns/')));
 });
 
+test('monitored mailboxes expose only bound inactive campaign IDs without making them busy', () => {
+  const draft='ffffffff-ffff-4fff-8fff-ffffffffffff';
+  const f=capacityFixture(({response})=>response({items:[
+    {account_id:1,campaigns:[{id:FINISHED,status:'Completed'},{id:PAUSED,status:'Paused'},
+      {id:draft,status:'Draft'},{id:UNSELECTED,name:'Private external campaign',status:'Draft'}]},
+    {account_id:2,campaigns:[{id:ACTIVE_ONE,name:'Bound active',status:'Active'},{id:PAUSED,status:'Paused'}]},
+    {account_id:4,campaigns:[{id:FINISHED,status:'Completed'}]}
+  ]}));
+  const linked=new Set([ACTIVE_ONE,FINISHED,PAUSED,draft]);
+  f.c.projectCapacityOwners_=(context,ids)=>Object.fromEntries(ids.filter(id=>linked.has(id))
+    .map(id=>[id,{bindingState:'linked',segmentId:'segment_kitchens',segmentProjectId:'numshield'}]));
+  const report=readCapacity(f), [free,busy,unused]=report.accounts;
+  assert.deepEqual(free.capacity.inactiveCampaignIds,[FINISHED,PAUSED,draft]);assert.equal(free.capacity.state,'free');
+  assert.deepEqual(busy.capacity.inactiveCampaignIds,[PAUSED]);assert.deepEqual(busy.capacity.campaignIds,[ACTIVE_ONE]);
+  assert.equal(busy.capacity.state,'busy');assert.deepEqual(unused.capacity.inactiveCampaignIds,[]);
+  assert.deepEqual(report.capacity.campaigns.map(c=>c.id),[ACTIVE_ONE]);
+  assert.deepEqual(f.calls.http.filter(path=>path.startsWith('/campaigns/')),['/campaigns/'+ACTIVE_ONE]);
+  assert.doesNotMatch(JSON.stringify([report,f.calls.saves]),new RegExp(UNSELECTED+'|Private external campaign'));
+  linked.delete(PAUSED);
+  assert.ok(f.get().accounts.every(row=>!row.capacity.inactiveCampaignIds.includes(PAUSED)));
+  delete f.state().capacity.inactiveAssignments;
+  assert.ok(f.get().accounts.every(row=>row.capacity.inactiveCampaignIds===null),'Legacy maps have no inactive evidence');
+  f.state().capacity.inactiveAssignments={'1':[ACTIVE_ONE]};
+  assert.throws(()=>f.get(),/COLDY_STORAGE/,'The same campaign cannot have both statuses in a snapshot');
+});
+
 test('switching project while reading sender assignments or cached inventory denies a mixed snapshot', () => {
   let project='numshield', flipAfterRead=false;
   const f=capacityFixture(({response})=>{project='neosender';return response({items:[]});},{},

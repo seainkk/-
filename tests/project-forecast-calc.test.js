@@ -48,6 +48,18 @@ test('first emails trigger followups on their actual modeled send day plus the n
   assert.equal(r.periods[2].capacity,10);
 });
 
+test('campaign totals come from actual allocations on shared senders and keep unknown separate from zero',()=>{
+  const campaigns=[campaign('k',{name:'Кухни',segmentName:'Компании'}),campaign('l',{name:'ЛПР',segmentName:'Кухни'}),
+    campaign('paused',{status:'Paused'})];
+  const demands={k:demand([lead(25)]),l:demand([lead(25)])};
+  const r=calc([account(1,['k','l'],{dailyLimit:6})],campaigns,demands);
+  assert.deepEqual(r.campaigns.map(c=>[c.name,c.segmentName,c.expectedByDay[1]]),[['Кухни','Компании',3],['ЛПР','Кухни',3]]);
+  [r.today,...r.days].forEach((row,i)=>assert.equal(r.campaigns.reduce((sum,c)=>sum+c.expectedByDay[i],0),row.expected));
+  const partial=calc([account(1,['k']),account(2,['l'])],campaigns,{k:demands.k});
+  assert.deepEqual(partial.campaigns.map(c=>c.expectedByDay[1]),[25,null]);
+  assert.equal(partial.campaigns[1].expectedByDay[0],0,'before the next sending window');
+});
+
 test('open Sunday consumes only the remainder of the current quota; calendar rolls over at Moscow midnight',()=>{
   const a=account(1,['k'],{dailyLimit:4,sentToday:2}), k=campaign('k',{schedule:{days:['sunday',...weekdays],from:'00:00',to:'24:00'}});
   const r=calc([a],[k],{k:demand([lead(5)])},'2026-11-22T20:59:00Z');

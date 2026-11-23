@@ -188,9 +188,9 @@ test('recipient reconciliation waits for an unfinished contact job without takin
 test('an unchanged background batch validates access, lease and version outside the commit lock',()=>{
   const f=fixture(), entry=lead('stable@example.test'), auto={existingOnly:true};
   f.rows.push(['новый',entry.email]);
-  f.run([entry],auto);
+  assert.equal(f.run([entry],auto).unchangedVersion,undefined);
   assert.deepEqual(f.call.leaseChecks,[true]);
-  f.run([entry],auto);
+  assert.ok(f.run([entry],auto).unchangedVersion);
   assert.deepEqual(f.call.leaseChecks,[true,false]);
   let journaled=false;
   f.run([entry],{...auto,before:()=>{journaled=true;}});

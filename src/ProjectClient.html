@@ -8,6 +8,8 @@
   let catalogOptionsKey=null,campaignRowsKey=null,capacityRowsKey=null,capacitySource=null,capacityFilter=null;
   let infrastructure=null,infraLoading=false,infraError='',infraNotice='',infraSequence=0,infraLoadedAt=0,initialSyncAttempted=false;
   let mailboxPicker=null,infraSyncMode='';
+  const expandedSenders=new Set();
+  let senderTimer=null,senderAttempt=0,senderView=null;
   let recipientImport=null;
   let syncSetupBusy=false,syncSetupMessage='';
   let forecastData=null,forecastError='',forecastDays=1,forecastBusy=false,forecastSequence=0;
@@ -31,7 +33,10 @@
   function alive(mark){return ready&&mark.generation===generation&&mark.epoch===accessEpoch;}
   function notify(){try{config?.onStateChange?.();}catch(ignored){}}
   function mutation(details){
-    if(details?.kind==='binding'||details?.kind==='monitoring'){resetForecast(false);resetCompletions();}
+    if(details?.kind==='binding'||details?.kind==='monitoring'){
+      if(details.kind==='binding'){infrastructure=null;infraLoadedAt=0;}
+      senderAttempt=0;resetForecast(false);resetCompletions();paintOpenSenders();queueSenderUpdate(true);
+    }
     try{config?.onMutation?.(details);}catch(ignored){}
   }
   function health(id,message,error=false){const node=$(id);if(!node)return;node.textContent=message||'';node.dataset.error=String(error);}
@@ -78,6 +83,7 @@
     return dashboardNames?.slice(0,10)||[];
   }
   function clear(){
+    expandedSenders.clear();clearTimeout(senderTimer);senderTimer=null;senderAttempt=0;senderView=null;
     resetForecast();
     resetCompletions();
     closeMailboxPicker(true);
@@ -96,7 +102,7 @@
       resetCompletions();
       catalogLoadedAt=0;catalogSequence++;catalogLoading=false;catalogError='';
       for(const context of contexts.values()){context.loadedAt=0;if(context.data){delete context.data.configured;delete context.data.connected;}context.sequence++;context.loading=false;context.metricsLoading=false;context.searching=false;}
-      infraSequence++;infraLoadedAt=0;infraLoading=false;infraError='';
+      infraSequence++;infraLoadedAt=0;infraLoading=false;infraError='';infrastructure=null;senderAttempt=0;
     }
     discardCampaignHints();
     render();notify();
@@ -110,6 +116,11 @@
     if(view!=='analytics'||!ready)closeRecipientImport();
     if(!ready){view=null;if(catalog||infrastructure||contexts.size)clear();}
     render();
+    if(next!==senderView){
+      senderView=next;
+      // The host toggles the segment mailing view immediately after this callback.
+      if(ready)queueMicrotask(()=>queueSenderUpdate(true));
+    }
     if(ready&&(next==='mailings'||view!==previous&&completionCells().length))queueCompletions();
   }
   async function invoke(method,payload,mark,canDispatch){
@@ -277,6 +288,7 @@
     sequence:'Недостаточно сведений о шагах или паузах цепочки.',
     status:'Неизвестно состояние части отправок.',
     capacity:'Недостаточно данных о назначенных ящиках или их лимитах.',
+    no_capacity:'При текущих лимитах или состоянии ящиков оставшиеся письма отправить не получится.',
     schedule:'Недостаточно данных о расписании отправок.',
     shared_capacity:'Неизвестна загрузка общих почтовых ящиков.',
     horizon:'Завершение за пределами периода расчёта.',
@@ -288,27 +300,33 @@
   function paintCompletion(block){
     const record=completionData?.campaignCompletions?.[block.dataset.completionCampaign];
     block.replaceChildren();
+    const date=record?.state==='estimated'?forecastDate(record.estimatedDate):'—';
+    const previous=date==='—'&&record?.state==='unknown'?record.previousEstimate:null;
+    const previousDate=forecastDate(previous?.date);
+    const hasDate=date!=='—'||previousDate!=='—';
+    const previousAt=timestamp(previous?.generatedAt);
+    const notice=completionMessage||completionData?.message;
+    let description;
+    if(record?.state==='completed')description='Все письма отправлены';
+    else if(date!=='—')description='Ориентировочно '+date;
+    else if(previousDate!=='—')description='Предыдущая оценка '+previousDate;
+    else if(record)description=completionReasons[record.reason]||'Пока нет оценки даты завершения.';
+    else description=notice||(completionData&&!completionData.pending?'Для этой рассылки пока нет расчёта.':'Рассчитываем завершение…');
+    block.append(node(hasDate||record?.state==='completed'?'strong':'span','pj-completion-date',description));
+    const note=value=>block.append(node('small','pj-completion-count',value));
+    if(previousDate!=='—'&&previousAt)note('Рассчитано '+previousAt+' МСК');
+    if(hasDate&&(date!=='—'?record.reason:previous.reason)==='observed_pace')note('По фактическому темпу отправок этой рассылки.');
+    if(date!=='—'&&record.reason==='from_tomorrow')note('Расчёт с завтрашнего дня, остаток отправок на сегодня неизвестен.');
+    if(previousDate!=='—'&&completionReasons[record.reason])note(completionReasons[record.reason]);
+    if(record&&notice&&(completionMessage||record.reason==='incomplete'))note(notice);
     const percent=record?.percent;
     if(Number.isFinite(percent)&&percent>=0&&percent<=100){
       const label=number(percent)+'%',line=node('div','pj-completion-line'),bar=node('progress');
       bar.max=100;bar.value=percent;bar.setAttribute('aria-label','Отправка писем по валидным контактам');
       line.append(bar,node('span','',label));block.append(line);
     }
-    if(Number.isSafeInteger(record?.sent)&&Number.isSafeInteger(record.total))
-      block.append(node('small','pj-completion-count','Отправлено '+number(record.sent)+' из '+number(record.total)));
-    const date=forecastDate(record?.estimatedDate);
-    const previous=date==='—'&&record?.state==='unknown'?record.previousEstimate:null;
-    const previousDate=forecastDate(previous?.date),previousAt=timestamp(previous?.generatedAt);
-    let description;
-    if(record?.state==='completed')description='Все письма отправлены';
-    else if(date!=='—')description='Ориентировочно '+date;
-    else if(previousDate!=='—')description='Предыдущая оценка '+previousDate+(previousAt?' (расчёт от '+previousAt+' МСК)':'');
-    else if(record)description=completionReasons[record.reason]||'Недостаточно данных для расчёта даты.';
-    else description=completionMessage||completionData?.message||(completionData&&!completionData.pending?'Для этой рассылки пока нет расчёта.':'Рассчитываем завершение…');
-    block.append(node('span','pj-completion-date',description));
-    if(previousDate!=='—'&&completionReasons[record.reason])block.append(node('small','pj-completion-count',completionReasons[record.reason]));
+    if(Number.isSafeInteger(record?.sent)&&Number.isSafeInteger(record.total))note('Отправлено '+number(record.sent)+' из '+number(record.total));
     const at=previousDate!=='—'?previousAt:timestamp(record?.generatedAt||completionData?.generatedAt);
-    if(record?.reason==='from_tomorrow')block.append(node('small','pj-completion-count','Оценка с завтрашнего дня: остаток на сегодня неизвестен.'));
     if(at)block.title='Расчёт на '+at+' МСК';
     else block.removeAttribute('title');
   }
@@ -336,7 +354,7 @@
     if(!ready||document.hidden||completionBusy||!completionCells().length)return;
     const mark=token(),version=completionVersion;
     const valid=()=>alive(mark)&&version===completionVersion&&!document.hidden&&completionCells().length>0;
-    const paint=()=>completionCells().forEach(paintCompletion);
+    const paint=()=>{completionCells().forEach(paintCompletion);paintOpenSenders();};
     completionBusy=true;
     try{
       if(!completionData){
@@ -369,18 +387,115 @@
     const block=node('div','pj-completion');block.dataset.completionCampaign=String(campaign.id);
     paintCompletion(block);queueCompletions();return block;
   }
+  function openSenderPanels(){
+    return [...document.querySelectorAll('details.pj-campaign-senders[open]')].filter(panel=>!panel.closest('[hidden]'));
+  }
+  function paintOpenSenders(){for(const panel of openSenderPanels())paintCampaignSenders(panel);}
+  function queueSenderUpdate(immediate=false){
+    clearTimeout(senderTimer);senderTimer=null;
+    if(!ready||document.hidden||!openSenderPanels().length)return;
+    const mark=token();
+    senderTimer=setTimeout(async()=>{
+      if(!alive(mark)||document.hidden||!openSenderPanels().length)return;
+      if(!infraLoading&&pollVisible()&&!recentPoll(senderAttempt)){
+        senderAttempt=Date.now();
+        if(!infraLoadedAt||!recentPoll(infraLoadedAt))await loadInfrastructure();
+        if(alive(mark)&&openSenderPanels().length&&pollVisible()&&infrastructure?.monitoring?.accountIds?.length&&
+          (!infrastructure.nextCursor||infrastructure.poolOnly)&&!recentPoll(infraLastLiveAttempt)&&
+          !(infrastructure.retryAfterMs>0&&Date.now()<infraLoadedAt+infrastructure.retryAfterMs)&&
+          (!recentPoll(Date.parse(infrastructure.capacity?.updatedAt))||infrastructure.capacity?.stale||infrastructure.nextCursor)){
+          await syncInfrastructure(!!infrastructure.nextCursor,false,true);
+        }
+      }
+      if(alive(mark)){paintOpenSenders();queueSenderUpdate();}
+    },immediate?0:liveInterval);
+  }
+  function campaignSenderDetails(campaign,segment){
+    const panel=node('details','pj-campaign-senders'),heading=node('summary','','Почты рассылки');
+    const key=JSON.stringify([view,segment,campaign.id]);
+    panel.dataset.campaign=campaign.id;panel.dataset.segment=segment;
+    panel.append(heading,node('div','pj-sender-list'));panel.open=expandedSenders.has(key);
+    panel.addEventListener('toggle',()=>{
+      if(!panel.isConnected||!ready||panel.closest('[hidden]'))return;
+      if(panel.open){expandedSenders.add(key);paintCampaignSenders(panel);}
+      else expandedSenders.delete(key);
+      queueSenderUpdate(panel.open);
+    });
+    return panel;
+  }
+  function paintCampaignSenders(panel){
+    const body=panel.lastElementChild,cap=infrastructure?.capacity,id=panel.dataset.campaign;
+    body.replaceChildren();
+    const note=value=>body.append(node('div','pj-cell-note',value));
+    if(!infraLoadedAt||!cap?.updatedAt){
+      const pending=infrastructure?.configured===false?'Подключите Coldy в настройках проекта.':
+        infrastructure?.state==='no_selection'?'В этом проекте пока нет почт в мониторинге.':
+        infrastructure?.nextCursor&&!infrastructure.poolOnly?'В разделе «Инфраструктура» завершите текущую диагностику ящиков.':
+        'Получаем назначения выбранных почт…';
+      note(infraError||infrastructure?.error?.message||pending);return;
+    }
+    const campaigns=new Map((cap.campaigns||[]).map(c=>[c.id,c]));
+    const active=campaigns.get(id);
+    if(active?.segmentId&&active.segmentId!==panel.dataset.segment){note('Привязка к этому сегменту изменилась.');return;}
+    const all=infrastructure.accounts||[],members=all.filter(a=>a.capacity?.campaignIds?.includes(id)||a.capacity?.inactiveCampaignIds?.includes(id));
+    const outdated=cap.stale||!!infraError||Date.now()-Date.parse(cap.updatedAt)>=300000;
+    const partial=!!infrastructure.monitoring?.missingAccountIds?.length||(!active&&all.some(a=>!Array.isArray(a.capacity?.inactiveCampaignIds)));
+    note((outdated?'Последние известные назначения':'Назначения на')+' '+poolDate(cap.updatedAt));
+    if(infraError)note(infraError);
+    if(!members.length){note(outdated||partial?'Назначения для этой рассылки уточняются.':'Среди почт мониторинга назначений на эту рассылку нет.');return;}
+    function competing(a){return a.capacity.outsideActive||a.capacity.campaignIds.some(other=>other!==id);}
+    const confirmed=members.filter(a=>a.capacity.state==='busy'||a.capacity.state==='free');
+    const shared=confirmed.filter(competing).length;
+    note('Почт в мониторинге: '+number(members.length)+(outdated?'':'. С другими активными рассылками: '+number(shared)+'. Без других активных рассылок: '+number(confirmed.length-shared))+'.');
+    if(active?.allSendersSelected===false)note('Список ограничен почтами мониторинга проекта.');
+    if(partial)note('Часть выбранных почт ещё проверяется.');
+    const list=node('ul');
+    for(const a of members){
+      const state=a.capacity,others=state.campaignIds.filter(other=>other!==id),row=node('li');
+      row.append(node('strong','',a.email||a.name||a.id));
+      if(a.email&&a.name&&a.email!==a.name)row.append(node('span','pj-cell-note',a.name));
+      const detail=value=>row.append(node('span','pj-cell-note',value));
+      if(outdated||state.state==='unknown'){detail('Текущая занятость уточняется.');list.append(row);continue;}
+      if(others.length)detail('Также участвует: '+others.map(other=>campaigns.get(other)?.name).filter(Boolean).join(', ')+'.');
+      if(state.outsideActive)detail('Есть активная рассылка вне мониторинга проекта.');
+      if(state.state==='free')detail('Свободна · активных рассылок нет.');
+      else if(!competing(a))detail('После завершения этой рассылки других активных назначений нет.');
+      if(!state.outsideActive&&state.campaignIds.length){
+        const reports=state.campaignIds.map(key=>completionData?.campaignCompletions?.[key]);
+        const dates=reports.filter(r=>r?.state==='estimated').map(r=>r.estimatedDate);
+        if(dates.length&&reports.every(r=>r?.state==='completed'||r?.state==='estimated')&&dates.every(d=>d>=currentForecastDay()))
+          detail('Ориентир окончания отправок по активным рассылкам: '+forecastDate(dates.sort().pop())+'.');
+      }
+      if(state.idleFrom&&Date.parse(state.idleUntil)>Date.now())detail('Окно без отправок: '+poolDate(state.idleFrom)+' — '+poolDate(state.idleUntil)+'.');
+      if(!a.stale&&!a.syncError&&a.updatedAt){
+        if(a.errors?.length||['failed','error','disabled','paused','disconnected','blocked'].includes(text(a.status).toLowerCase()))detail('Отправка с ящика приостановлена.');
+        else if(a.dailyLimit===0)detail('Дневной лимит — 0.');
+        else if(Number.isFinite(a.dailyLimit)&&Number.isFinite(a.sentToday)&&a.sentToday>=a.dailyLimit&&Number.isFinite(Date.parse(a.updatedAt))&&new Date(Date.parse(a.updatedAt)+10800000).toISOString().slice(0,10)===currentForecastDay())
+          detail('Сегодня лимит писем исчерпан.');
+      }
+      list.append(row);
+    }
+    body.append(list);
+  }
   function recipientSyncText(sync){
     if(!sync||typeof sync.enabled!=='boolean')return '';
     const states={off:'Сверка с листом Email выключена',waiting:sync.lastTickAt?'Сверка Email ожидает очереди':'Ожидаем первый подтверждённый запуск таймера сверки Email',
-      syncing:'Сверка с листом Email выполняется',synced:'Сверка с листом Email включена',retrying:'Сверка Email ожидает продолжения',
+      syncing:'Сверка с листом Email выполняется',synced:'Сверка с листом Email включена',retrying:sync.issue?'Сверка с листом Email отложена':'Сверка Email ожидает продолжения',
       no_target:'Для этой рассылки не выбрана таблица Email',
       error:['rate_limit','busy','contact_job'].includes(sync.issue)?'Сверка с листом Email отложена':'Ошибка сверки с листом Email'};
     const details=[states[sync.state]];
     const issues={rate_limit:'Coldy временно ограничил запросы',connection:'Coldy отклонил запрос доступа',provider:'данные Coldy недоступны',
       target:'не удалось подтвердить таблицу Email',storage:'ошибка чтения или записи журнала',scope:'изменилась область доступа',
       busy:'другая операция заняла очередь',contact_job:'ожидаем окончания обновления контактов этой таблицы',
-      timeout:'истекло время попытки',unknown:'ошибка фоновой обработки'};
-    if(issues[sync.issue])details.push(issues[sync.issue]);
+      sheet_changed:'рабочая таблица изменилась во время сверки',membership_changed:'в Coldy изменился состав получателей рассылки',
+      google_quota:'достигнут лимит запросов Google',google_unavailable:'сервис Google временно недоступен',
+      sheet_unconfirmed:'Google не подтвердил запись на лист Email',sheet_rejected:'Google Таблицы отклонили изменения на листе Email',
+      sheet_schema:'не удалось обновить служебные поля листа Email',
+      google_access:'недостаточно прав Google для сверки',google_setup:'требуемая служба Google отключена',
+      timeout:'истекло время попытки',unknown:'причина сбоя пока неизвестна'};
+    if(sync.enabled&&issues[sync.issue])details.push(issues[sync.issue]);
+    const retry=timestamp(sync.nextRetryAt);
+    if(sync.enabled&&retry)details.push('следующая попытка '+retry+' МСК');
     const progress=sync.progress;
     if(sync.enabled&&progress?.phase==='read'){
       details.push('прочитано адресатов Coldy '+number(progress.read)+' из '+number(progress.total));
@@ -391,12 +506,11 @@
     }
     if(sync.state==='waiting'&&timestamp(sync.lastTickAt))details.push('таймер сработал '+timestamp(sync.lastTickAt)+' МСК');
     if(['syncing','retrying','error'].includes(sync.state)&&timestamp(sync.lastAttemptAt))details.push('попытка '+timestamp(sync.lastAttemptAt)+' МСК');
-    const last=timestamp(sync.lastSyncedAt),retry=timestamp(sync.nextRetryAt);
+    const last=timestamp(sync.lastSyncedAt);
     if(last)details.push('последняя полная сверка '+last+' МСК');
     const suppression=timestamp(sync.lastSuppressionAt);
     if(sync.suppressionPending)details.push('сверка списка «Не отправляем» не завершена'+(suppression?' (последняя проверка '+suppression+' МСК)':''));
     else if(suppression)details.push('список «Не отправляем» проверен '+suppression+' МСК');
-    if(retry)details.push('следующая попытка '+retry+' МСК');
     return details.filter(Boolean).join(' · ');
   }
   function renderRecipientSyncSetup(id,states){
@@ -458,6 +572,7 @@
     else if(period&&forecastBusy&&!forecastError&&!response?.message)message='Обновляем прогноз в фоне.';
     if(restOfDay&&report&&!period&&!forecastError)message='Для остатка сегодняшнего дня нужны свежие счётчики почт.'+(message?' '+message:'');
     health('pj-forecast-health',message,!!forecastError||response?.state==='error');
+    const campaignRows=$('pj-forecast-campaigns');campaignRows.replaceChildren();
     if(!period){$('pj-forecast-totals').replaceChildren();$('pj-forecast-context').textContent='';return;}
     const range=period.from===period.to?forecastDate(period.from):forecastDate(period.from)+' – '+forecastDate(period.to);
     const context=[range+' · МСК'+(restOfDay?' · до конца дня':''),'выбранных ящиков '+number(report.selectedAccounts),'активных рассылок '+number(report.activeCampaigns)];
@@ -467,6 +582,17 @@
     const hasScenario=item=>item.expected===null&&Number.isFinite(item.modeled);
     if(hasScenario(period))totals.push(['По разобранной части (сценарий)',period.modeled]);
     metrics('pj-forecast-totals',totals);
+    for(const campaign of report.campaigns||[]){
+      const amounts=campaign.expectedByDay?.slice(restOfDay?0:1,restOfDay?1:1+forecastDays);
+      const known=amounts?.length===(restOfDay?1:forecastDays)&&amounts.every(n=>Number.isSafeInteger(n)&&n>=0);
+      const row=node('tr'),name=node('th','',campaign.name||campaign.id);name.scope='row';
+      row.append(name,node('td','',campaign.segmentName||'—'),node('td','pj-number',known?number(amounts.reduce((sum,n)=>sum+n,0)):'Уточняется'));
+      campaignRows.append(row);
+    }
+    if(!campaignRows.childElementCount){
+      const cell=campaignRows.insertRow().insertCell();cell.colSpan=3;
+      cell.textContent=Array.isArray(report.campaigns)?'У выбранных ящиков нет активных рассылок проекта.':'Разбивка по рассылкам появится при следующем расчёте.';
+    }
     if(report.queue&&(generatedAt||response?.progress?.contactsRead>0)){
       const q=report.queue,parts=['первого письма ждут '+number(q.pendingInitial),'повторного — '+number(q.pendingFollowups)];
       if(q.unresolved>0)parts.push('неизвестен отправитель или следующий шаг у '+number(q.unresolved));
@@ -741,16 +867,23 @@
     if(!data.monitoring?.accountIds?.length)return true;
     return !data.stale&&!data.capacity?.stale&&Date.now()-Date.parse(data.capacity?.updatedAt)<300000;
   }
+  function infrastructureReadFailed(error){
+    const problem=failure(error);infraError=problem.message;
+    if(/^(LINK_|OUTSIDE_|ACCESS_|COLDY_(AUTH|FORBIDDEN|CREDENTIAL_CHANGED|MONITORING_CHANGED|SCOPE_CHANGED)|SOURCE_CHANGED)/.test(problem.code)){
+      infrastructure=null;infraLoadedAt=0;
+    }
+    paintOpenSenders();return problem;
+  }
   async function loadInfrastructure(){
     if(!ready||infraLoading||mailboxPicker?.open)return;
     const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';infraNotice='';render();notify();
     let initial=false,continuation=false;
-    try{const data=await invoke('getProjectInfrastructure',{},mark);if(!alive(mark)||sequence!==infraSequence||!data)return;infrastructure=data;infraLoadedAt=Date.now();
+    try{const data=await invoke('getProjectInfrastructure',{},mark);if(!alive(mark)||sequence!==infraSequence||!data)return;infrastructure=data;infraLoadedAt=Date.now();paintOpenSenders();
       continuation=!!(data.nextCursor&&data.poolOnly);
       initial=data.configured===true&&data.monitoring?.accountIds?.length>0&&!initialSyncAttempted&&!data.syncPaused&&!(data.retryAfterMs>0)&&
         (continuation||!data.nextCursor&&!data.error&&(data.stale===true||data.capacity?.stale===true||!recentPoll(Date.parse(data.capacity?.updatedAt))));
-      if(initial)initialSyncAttempted=true;
-    }catch(error){if(alive(mark)&&sequence===infraSequence)infraError=failure(error).message;}
+      if(initial&&view==='infrastructure')initialSyncAttempted=true;
+    }catch(error){if(alive(mark)&&sequence===infraSequence)infrastructureReadFailed(error);}
     finally{if(alive(mark)&&sequence===infraSequence){infraLoading=false;render();notify();}}
     if(initial&&alive(mark)&&view==='infrastructure'&&pollVisible())await syncInfrastructure(continuation,false,true);
   }
@@ -760,7 +893,7 @@
     if(continuation&&!cursor)return;
     const mark=token(),sequence=++infraSequence;infraLoading=true;infraSyncMode=diagnostics?'diagnostics':'pool';infraError='';infraNotice='';initialSyncAttempted=true;
     if(!diagnostics)infraLastLiveAttempt=Date.now();
-    const visible=()=>alive(mark)&&sequence===infraSequence&&view==='infrastructure'&&(!automatic||pollVisible());
+    const visible=()=>alive(mark)&&sequence===infraSequence&&(view==='infrastructure'||automatic&&openSenderPanels().length>0)&&(!automatic||pollVisible());
     render();notify();
     const seen=new Set();let reloadCursor=false,previous=continuation?((infrastructure?.syncProgress||infrastructure?.detailProgress)?.completed??-1):-1;
     try{
@@ -770,16 +903,16 @@
         if(cursor)seen.add(cursor);
         const data=await invoke('refreshProjectInfrastructure',cursor?{cursor}:diagnostics?{}:{includeCapacity:true,...(automatic?{live:true}:{})},mark,visible);
         if(!alive(mark)||sequence!==infraSequence||!data)return;
-        infrastructure=data;infraLoadedAt=Date.now();render();
+        infrastructure=data;infraLoadedAt=Date.now();render();paintOpenSenders();
         const next=data.nextCursor,completed=(data.syncProgress||data.detailProgress)?.completed;
-        if(!next||view!=='infrastructure')break;
+        if(!next||!visible())break;
         if(data.syncPaused||data.error||data.state==='error'||data.retryAfterMs>0){infraError=data.error?.message||'Синхронизация приостановлена. Повторите продолжение позже.';break;}
         if(!Number.isFinite(completed)||completed<=previous||seen.has(next)||next===cursor){infraError='Синхронизация приостановлена: новые данные пока не подтверждены.';break;}
         previous=completed;cursor=next;
         if(batch===1000)infraError='Продолжите синхронизацию следующей порции.';
       }
     }
-    catch(error){if(alive(mark)&&sequence===infraSequence){const parsed=failure(error);infraError=parsed.message;reloadCursor=automatic&&parsed.code==='COLDY_INFRA_CURSOR_STALE';}}
+    catch(error){if(alive(mark)&&sequence===infraSequence){const parsed=infrastructureReadFailed(error);reloadCursor=automatic&&parsed.code==='COLDY_INFRA_CURSOR_STALE';}}
     finally{if(alive(mark)&&sequence===infraSequence){infraLoading=false;render();notify();}}
     if(reloadCursor&&visible())await loadInfrastructure();
   }
@@ -968,6 +1101,7 @@
       if(campaign.selected&&sync)name.append(node('span','pj-cell-note pj-recipient-sync',sync));
       if(binding?.autoUpload)name.append(node('span','pj-cell-note','Для этой связи включена автозагрузка контактов.'));
       if(binding&&campaign.selected&&!campaign.missing){
+        name.append(campaignSenderDetails(campaign,segmentId));
         const action=node('button','pj-jump','Перенести адресатов в Email');
         action.type='button';action.dataset.recipientBinding=binding.id;action.setAttribute('aria-haspopup','dialog');
         action.disabled=context.loading||!!context.operation||hasDraft||!!recipientImport?.running;
@@ -1168,6 +1302,7 @@
       forecastDays=Number(button.dataset.forecastDays);renderForecast();
     });
     document.addEventListener('visibilitychange',()=>{
+      queueSenderUpdate(!document.hidden);
       if(document.hidden)pauseForecast();
       else{
         if(forecastVisible())void readForecast(!forecastData||forecastData.pending);
@@ -1215,6 +1350,6 @@
     $('pj-mailbox-save').addEventListener('click',()=>saveMailboxSelection());$('pj-mailbox-retry').addEventListener('click',()=>saveMailboxSelection(true));
     $('pj-mailbox-reload').addEventListener('click',()=>loadMailboxSelection());
   }
-  window.RegistryProject={configure,show,refresh,lock,invalidate,confirmConnection,hasPending,isLoading,isEditing,campaignCompletion,recipientSyncText,renderRecipientSyncSetup};
+  window.RegistryProject={configure,show,refresh,lock,invalidate,confirmConnection,hasPending,isLoading,isEditing,campaignCompletion,campaignSenderDetails,recipientSyncText,renderRecipientSyncSetup};
 })();
 </script>

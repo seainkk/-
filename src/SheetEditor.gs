@@ -355,14 +355,15 @@ function sheetRawServiceReason_(error) {
   var joined = labels.join('|'), message = typeof data.message === 'string' ? data.message.slice(0, 4096) : (error && typeof error.message === 'string' ? error.message.slice(0, 4096) : '');
   if (/SERVICE_DISABLED|API_DISABLED|accessNotConfigured/i.test(joined) || /has not been used|api[^.]*is disabled|service[^.]*disabled/i.test(message)) reason = 'SERVICE_DISABLED';
   else if (/ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficientPermissions|insufficientAuthenticationScopes/i.test(joined) || /insufficient authentication scopes|required permissions|authorization is required|not authorized to call/i.test(message)) reason = 'INSUFFICIENT_SCOPES';
-  else if (/RATE_LIMIT|QUOTA_EXCEEDED|rateLimitExceeded|dailyLimitExceeded/i.test(joined) || code === 429) reason = 'RATE_LIMITED';
+  else if (/RATE_LIMIT|QUOTA_EXCEEDED|RESOURCE_EXHAUSTED|rateLimitExceeded|dailyLimitExceeded/i.test(joined) || code === 429 ||
+    /service invoked too many times|rate limit exceeded|quota exceeded|too many scripts running|service using too much computer time|слишком много (?:раз|запросов)|превышена квота/i.test(message)) reason = 'RATE_LIMITED';
   else if (/invalid[^.]{0,120}field|unknown name|cannot find field|field mask/i.test(message)) reason = 'INVALID_FIELD_MASK';
   else if (/beyond (?:max|the)|exceeds grid limits|out of bounds/i.test(message)) reason = 'GRID_BOUNDS';
   else if (code === 400 || /INVALID_ARGUMENT/i.test(joined)) reason = 'INVALID_ARGUMENT';
   else if (code === 403 || /PERMISSION_DENIED|forbidden|accessDenied/i.test(joined) || /caller does not have permission|permission denied|do not have permission/i.test(message)) reason = 'PERMISSION_DENIED';
   else if (code === 401) reason = 'AUTH_REQUIRED';
   else if (code === 404) reason = 'NOT_FOUND';
-  else if (code >= 500) reason = 'GOOGLE_UNAVAILABLE';
+  else if (code >= 500 || /service .*timed out|service unavailable|temporarily unavailable|internal (?:server )?error|внутренняя ошибка сервера/i.test(message)) reason = 'GOOGLE_UNAVAILABLE';
   else reason = 'ADVANCED_SERVICE_ERROR';
   return (Number.isInteger(code) && code >= 100 && code <= 599 ? 'HTTP ' + code + ', ' : '') + reason;
 }

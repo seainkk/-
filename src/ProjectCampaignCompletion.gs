@@ -68,6 +68,90 @@ function projectCampaignCompletions_(infrastructure, demands, nowMs) {
   return reports;
 }
 
+function projectCampaignSchedule_(source,demand,now) {
+  if (source.schedule) return source.schedule;
+  // A directly verified detail can fill a pending schedule, but cannot override a later provider result.
+  if (!demand.schedule || !Number.isFinite(demand.scheduleCheckedAt) || now-demand.scheduleCheckedAt>COLDY.cacheMillis ||
+      source.scheduleState==='error' || Date.parse(source.scheduleUpdatedAt)>=demand.scheduleCheckedAt) return null;
+  return demand.schedule;
+}
+
+function projectCampaignHardStop_(campaign) {
+  var steps=campaign.sequence && campaign.sequence.steps;
+  if (campaign.dailyLimit===0 || campaign.allSelected && campaign.owners.length &&
+      campaign.owners.every(function (a) { return a.blocked || a.limit===0; })) return true;
+  return Array.isArray(steps) && (campaign.demand.cohorts || []).some(function (group) {
+    if (!group.completionValid || group.disposition!=='eligible') return false;
+    var index=group.sentSteps;
+    if (index==null && group.previousStepId!=null) {
+      index=steps.findIndex(function (s) { return s.id===group.previousStepId; })+1;
+      if (!index) return false;
+    }
+    if (index==null || index>=steps.length) return false;
+    var owner=campaign.assigned.get(String(group.senderId));
+    return !!owner && (owner.blocked || owner.limit===0) || index===0 && campaign.firstDailyLimit===0 ||
+      (index>0 || steps.length>1) && campaign.followupDailyLimit===0;
+  });
+}
+
+/** Count only observed last sends. A recipient's earlier steps have no individual timestamps. */
+function projectCampaignObservedRate_(campaign,today) {
+  var day=86400000, start=today-14*day;
+  var windows=projectForecastWindows_(campaign.schedule,start,today,new Map());
+  if (!windows) return 0;
+  var totals=windows.map(function () { return 0; });
+  campaign.demand.cohorts.forEach(function (group) {
+    if (!group.completionValid || !campaign.assigned.has(String(group.senderId)) || !group.lastSentAt ||
+        !(group.sentSteps>0 || group.previousStepId>0)) return;
+    var at=Date.parse(group.lastSentAt), index=Math.floor((at-start)/day);
+    if (index>=0 && index<totals.length && windows[index].some(function (w) { return w[0]<=at && at<w[1]; }))
+      totals[index]+=group.count;
+  });
+  var samples=0, sends=0, openDays=0, idle=0;
+  totals.forEach(function (count,i) {
+    if (count) { samples++; sends+=count; idle=0; }
+    else if (windows[i].length) idle++;
+    if (samples && windows[i].length) openDays++;
+  });
+  return samples>=2 && idle<2 ? Math.floor(sends/openDays) : 0;
+}
+
+/** Replay the campaign's queue at its measured whole-campaign pace when full quota modeling is unavailable. */
+function projectCampaignObservedFinish_(campaign,row,now,today,horizon,budget) {
+  if (!campaign.demand.complete || !campaign.windows || campaign.gap===null || !campaign.owners.length) return;
+  var pace=projectCampaignObservedRate_(campaign,today);
+  if (!pace) return;
+  // The measured throughput already reflects other recipients and campaigns competing for these slots.
+  var demand=Object.assign({},campaign.demand,{cohorts:campaign.demand.cohorts.filter(function (g) { return g.completionValid; })});
+  var trial=Object.assign({},campaign,{demand:demand,queues:new Map(),reasons:new Set(),trackRemaining:row.remaining,
+    completion:{},dailyLimit:Math.min(pace,campaign.dailyLimit===null ? pace : campaign.dailyLimit)});
+  projectForecastLoadDemand_(trial,now,{unresolved:0,pendingInitial:0,pendingFollowups:0,unreadCampaigns:0});
+  if (trial.reasons.size) return;
+  var remaining=0;
+  trial.queues.forEach(function (queues) {
+    queues.forEach(function (heap) { heap.forEach(function (g) {
+      if (g.completionValid) remaining+=g.count*(trial.sequence.steps.length-g.index);
+    }); });
+  });
+  if (remaining!==row.remaining) return;
+  var accounts=campaign.owners.filter(function (a) { return !a.blocked && a.limit!==0; }).map(function (a) {
+    return {id:a.id,campaigns:[trial],nextAt:now,limit:a.limit};
+  });
+  if (!accounts.length) return;
+  // The observed pace describes complete sending days. Start with the next full day.
+  var day=86400000, pool={accounts:accounts};
+  budget.tracking=1; budget.deferredToday=true;
+  for (var index=1; index<horizon && budget.tracking; index++) {
+    var start=today+index*day;
+    trial.used=[0,0];
+    accounts.forEach(function (a) { a.remaining=a.limit===null ? pace : Math.min(pace,a.limit); });
+    if (!projectForecastSimulateDay_(pool,index,start,start+day,{expected:null},budget)) return;
+  }
+  if (trial.completion.estimatedDate) {
+    row.state='estimated'; row.reason='observed_pace'; row.estimatedDate=trial.completion.estimatedDate;
+  }
+}
+
 /** Simulate each connected mailbox pool once. Eligible leads of every competing campaign consume slots. */
 function projectCampaignEstimatePool_(pool,reports,now,today,horizonDays,budget) {
   var targets = pool.campaigns.filter(function (c) {
