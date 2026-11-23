@@ -1057,6 +1057,7 @@
           const tr=document.createElement('tr');
           for(const value of [campaign.name,mailingMetric(campaign.sent,true),mailingMetric(campaign.replies,true),mailingMetric(campaign.leads,true)]){const td=document.createElement('td');td.textContent=String(value??'—');tr.append(td);}
           if(coldy){const cell=tr.insertCell(),completion=window.RegistryProject?.campaignCompletion?.(campaign);if(completion)cell.append(completion);}
+          if(coldy&&window.RegistryProject?.campaignSenderDetails)tr.cells[0].append(window.RegistryProject.campaignSenderDetails(campaign,mailingSegmentId));
           body.append(tr);
         }
       }else{const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=columns.length;td.className='br-muted';td.textContent=connected?'Пока нет кампаний.':'Кампании появятся после подключения сервиса.';tr.append(td);body.append(tr);}

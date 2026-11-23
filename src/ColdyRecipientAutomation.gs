@@ -47,8 +47,10 @@ function coldyIncomingOwner_(context,credential,project,binding) {
   return digest_(JSON.stringify([context.rootId,credential,project,binding.segmentId,binding.id,binding.campaignId]));
 }
 
-function coldyIncomingMark_(properties,owner){
-  return JSON.parse(properties.getProperty('COLDY_INCOMING_'+owner)||'{}');
+function coldyIncomingMark_(properties,owner,revision){
+  var mark=JSON.parse(properties.getProperty('COLDY_INCOMING_'+owner)||'{}');
+  var savedRevision=mark.bindingRevision==null?mark.progressRevision:mark.bindingRevision;
+  return savedRevision!=null && savedRevision!==revision?{}:mark;
 }
 
 function coldyIncomingHeartbeatKey_(marker){
@@ -60,14 +62,42 @@ function coldyIncomingIssue_(error){
   var code=error && error.registryCode;
   if(code==='COLDY_RATE_LIMIT')return 'rate_limit';
   if(['COLDY_AUTH','COLDY_FORBIDDEN','COLDY_KEY_REQUIRED'].includes(code))return 'connection';
-  if(['COLDY_NETWORK','COLDY_PROVIDER','COLDY_UNAVAILABLE','COLDY_RESPONSE','COLDY_NOT_FOUND'].includes(code))return 'provider';
-  if(['COLDY_TARGET_CHANGED','COLDY_TARGETS_REQUIRED','SEGMENT_TARGETS_REQUIRED','NOT_FOUND'].includes(code))return 'target';
-  if(['COLDY_STORAGE','COLDY_STORAGE_UNCERTAIN','COLDY_STORAGE_LIMIT','PROJECT_STORAGE'].includes(code))return 'storage';
+  if(['COLDY_NETWORK','COLDY_PROVIDER','COLDY_UNAVAILABLE','COLDY_CONFLICT','COLDY_RESPONSE','COLDY_NOT_FOUND'].includes(code))return 'provider';
+  if(code==='COLDY_RECIPIENT_LIST_CHANGED')return 'membership_changed';
+  if(['COLDY_TARGET_CHANGED','COLDY_TARGETS_REQUIRED','SEGMENT_TARGETS_REQUIRED','SEGMENT_MASTER_CHANGED',
+      'CONTACT_SYNC_NOT_ENROLLED','GRID_SHEET_MISSING','NOT_FOUND'].includes(code))return 'target';
+  if(['COLDY_STORAGE','COLDY_STORAGE_UNCERTAIN','COLDY_STORAGE_LIMIT','PROJECT_STORAGE','CONTACT_STORAGE_MISSING',
+      'CONTACT_STORAGE_UNCERTAIN','CONTACT_STORAGE_DAMAGED'].includes(code))return 'storage';
   if(['OUTSIDE_REGISTRY','OUTSIDE_PROJECT','COLDY_SCOPE_CHANGED','COLDY_BINDING_CHANGED','COLDY_CREDENTIAL_CHANGED'].includes(code))return 'scope';
   if(code==='CONTACT_SYNC_JOB_ACTIVE')return 'contact_job';
-  if(code==='BUSY')return 'busy';
+  if(code==='BUSY'||code==='CONTACT_SYNC_LEASE_LOST')return 'busy';
   if(code==='COLDY_RECIPIENT_LEASE_EXPIRED')return 'timeout';
+  if(code==='CONFLICT')return 'sheet_changed';
+  if(code==='COLDY_SCHEMA'||code==='CONTACT_SCHEMA_CHANGED')return 'sheet_schema';
+  if(code==='GRID_READ_ONLY'||code==='DRIVE_AUTH_REQUIRED')return 'google_access';
+  if(code==='DRIVE_SETUP_REQUIRED')return 'google_setup';
+  if(code==='GRID_ACCESS_UNAVAILABLE')return 'google_unavailable';
+  if(!code||code==='SHEETS_RAW_UNCERTAIN'){
+    var reason=code ? error.sheetRawDiagnostic||'' : sheetRawServiceReason_(error);
+    if(/RATE_LIMITED$/.test(reason))return 'google_quota';
+    if(/GOOGLE_UNAVAILABLE$/.test(reason))return 'google_unavailable';
+    if(/SERVICE_DISABLED$|ADVANCED_SERVICE_UNAVAILABLE$/.test(reason))return 'google_setup';
+    if(/INSUFFICIENT_SCOPES$|PERMISSION_DENIED$|AUTH_REQUIRED$/.test(reason))return 'google_access';
+    if(/NOT_FOUND$/.test(reason))return 'target';
+    if(code && /GRID_BOUNDS$/.test(reason))return 'sheet_schema';
+    if(code && /INVALID_FIELD_MASK$|INVALID_ARGUMENT$/.test(reason))return 'sheet_rejected';
+    if(code)return 'sheet_unconfirmed';
+    // Native Apps Script exceptions often carry no structured Google error fields.
+    var message=String(error&&error.message||'').slice(0,4096);
+    if(/exceeded maximum execution time/i.test(message))return 'timeout';
+  }
   return 'unknown';
+}
+
+function coldyIncomingRetrying_(issue,code){
+  return ['rate_limit','busy','contact_job','timeout','sheet_changed','membership_changed',
+    'google_quota','google_unavailable','sheet_unconfirmed'].includes(issue) ||
+    ['COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_CONFLICT'].includes(code);
 }
 
 // Mirror only confirmed cursors. The private scan itself contains email addresses and lead records.
@@ -92,14 +122,15 @@ function coldyIncomingDecorate_(context,bindings,rows){
   }
   var byId=new Map((rows||[]).map(function(row){return [row.id,row];}));
   bindings.forEach(function(b){
-    var mark=coldyIncomingMark_(context.properties,coldyIncomingOwner_(context,credential,project,b));
+    var mark=coldyIncomingMark_(context.properties,coldyIncomingOwner_(context,credential,project,b),b.revision);
     var state=mark.state||'waiting',retryAt=Math.max(mark.retryAt||0,clock.retryAt||0);
+    var clockIssue=clock.retryAt && clock.retryAt<=Date.now()?null:clock.issue;
     if(state==='syncing' && mark.attempt+COLDY_INCOMING.leaseMillis<Date.now())state='retrying';
     var status={enabled:timer.enabled,needsOwnerSetup:timer.needsOwnerSetup,state:timer.enabled?state:'off',
       lastSyncedAt:mark.lastSyncedAt||null,lastSuppressionAt:mark.lastSuppressionAt||null,suppressionPending:mark.suppressionPending===true,
       lastTickAt:clock.at||null,lastAttemptAt:mark.attempt?new Date(mark.attempt).toISOString():null,
       progress:timer.enabled&&mark.progressRevision===b.revision?mark.progress||null:null,
-      issue:mark.issue||clock.issue||null,nextRetryAt:retryAt>Date.now()?new Date(retryAt).toISOString():null};
+      issue:mark.issue||clockIssue||null,nextRetryAt:retryAt>Date.now()?new Date(retryAt).toISOString():null};
     b.recipientSync=status;
     if(byId.has(b.campaignId)) byId.get(b.campaignId).recipientSync=status;
   });
@@ -195,7 +226,7 @@ function coldyIncomingStep_(context,job,guard,deadline,writeCheckpoint){
       return state.policy.checkedAt?Object.assign({},row,{blacklisted:false}):row;
     });
     var fingerprint=digest_(JSON.stringify([scan.campaignStatus,scan.campaignName,rows]));
-    if(scan.fingerprint && scan.fingerprint!==fingerprint){scan.targetIndex=0;scan.position=0;delete scan.startVersion;}
+    if(scan.fingerprint && scan.fingerprint!==fingerprint){scan.targetIndex=0;scan.position=0;delete scan.startVersion;delete scan.wroteChanges;}
     scan.fingerprint=fingerprint;
     state.checked=state.checked||{};
     while(scan.targetIndex<scan.kinds.length && Date.now()<deadline){
@@ -214,25 +245,28 @@ function coldyIncomingStep_(context,job,guard,deadline,writeCheckpoint){
       if(batch.length){
         var before=scan.position===0?0:scan.matched;
         var receipt=coldyRecipientSheetWrite_(context,binding,kind,target,batch,guard,null,{existingOnly:true});
+        if(!receipt.unchangedVersion)scan.wroteChanges=true;
         // A partial checkpoint created before matched counts existed can only report how many were checked.
         scan.matched=Number.isSafeInteger(before)&&Number.isSafeInteger(receipt.existing)?before+receipt.existing:null;
       }
       scan.position+=batch.length;
       if(scan.position>=rows.length){
-        var after=coldyRecipientSheetVersion_(guard(),b,kind,target,contactSyncMetadata_(target.fileId));
-        // If the sheet changed while reconciling, ask for one clean pass before allowing a range-read skip.
-        if(after===scan.startVersion) state.checked[kind]={fileId:target.fileId,sheetId:target.sheetId,version:after,fingerprint:fingerprint};
+        // The sheet writer verified this precise version under its lease for a no-op batch.
+        // A changed sheet must get a clean pass before subsequent cycles can skip its ranges.
+        var confirmed=batch.length?receipt.unchangedVersion:observed;
+        if(!scan.wroteChanges && confirmed===scan.startVersion) state.checked[kind]={fileId:target.fileId,sheetId:target.sheetId,version:confirmed,fingerprint:fingerprint};
         else delete state.checked[kind];
-        scan.targetIndex++;scan.position=0;delete scan.startVersion;
+        scan.targetIndex++;scan.position=0;delete scan.startVersion;delete scan.wroteChanges;
+        if(scan.targetIndex<scan.kinds.length && Date.now()<deadline)save();
       } else save();
     }
     if(scan.targetIndex===scan.kinds.length){
       delete state.scan;
+      // On an unchanged cycle neither the private snapshot nor any sheet needs to be rewritten.
+      if(staged || hadCheckpoint || state.lastIdentity!==fingerprint){state.lastIdentity=fingerprint;save();}
       if(!scan.kinds.length) mark.state='no_target';
       else if(scan.unavailable){mark.state='error';mark.issue='target';}
       else {mark.lastSyncedAt=new Date().toISOString();mark.state='synced';}
-      // On an unchanged cycle neither the private snapshot nor any sheet needs to be rewritten.
-      if(staged || hadCheckpoint || state.lastIdentity!==fingerprint){state.lastIdentity=fingerprint;save();}
     } else {mark.state='syncing';save();}
   } else mark.state='syncing';
   if(writeCheckpoint||Date.now()>=deadline||!state.policy||!state.policy.emails.length) return;
@@ -369,7 +403,7 @@ function coldyRecipientTick_(event){
       var project=registrySegmentProject_(context,b.segmentId,snapshot); if(!registryProjectName_(project)) return;
       var owner=coldyIncomingOwner_(context,credential,project,b);
       if(localOnly && !readyOwners.has(owner)) return;
-      var mark=coldyIncomingMark_(props,owner);
+      var mark=coldyIncomingMark_(props,owner,b.revision);
       if(localOnly && (mark.progressRevision!==b.revision || !mark.progress || mark.progress.phase!=='write')) return;
       if(!(mark.retryAt>Date.now()) || localOnly && mark.issue==='rate_limit') jobs.push({project:project,b:b,owner:owner,mark:mark});
     });
@@ -400,7 +434,7 @@ function coldyRecipientTick_(event){
           if(!checkpoint || checkpoint.bindingRevision!==b.revision || !checkpoint.scan || checkpoint.scan.phase!=='write') continue;
           guard();
         }
-        mark.retryAt=0;mark.issue=null;mark.state='syncing';mark.attempt=Date.now();
+        mark.retryAt=0;mark.issue=null;mark.state='syncing';mark.attempt=Date.now();mark.bindingRevision=b.revision;
         // A hard Apps Script timeout cannot run finally. Persist the fair-queue position before remote calls.
         props.setProperty('COLDY_INCOMING_'+job.owner,JSON.stringify(mark));
         guard();
@@ -408,7 +442,9 @@ function coldyRecipientTick_(event){
       } catch(error) {
         if(error.registryCode==='LINK_ACCESS_REQUIRED'||error.registryCode==='LINK_SETUP_REQUIRED') throw error;
         var retry=Number(error.retryAfterMs)||0;
-        mark.state='error';mark.issue=coldyIncomingIssue_(error);mark.retryAt=Date.now()+Math.max(60000,retry,error.registryCode==='COLDY_NOT_FOUND'?900000:0);
+        mark.issue=coldyIncomingIssue_(error);
+        mark.state=coldyIncomingRetrying_(mark.issue,error.registryCode)?'retrying':'error';
+        mark.retryAt=Date.now()+Math.max(60000,retry,error.registryCode==='COLDY_NOT_FOUND'?900000:0,mark.issue==='google_quota'?300000:0);
         if(error.registryCode==='COLDY_RATE_LIMIT'||error.coldyReadLimited){
           var pauseUntil=Date.now()+Math.max(60000,retry);
           props.setProperty(pauseKey,String(pauseUntil));heartbeat('rate_limit',pauseUntil);

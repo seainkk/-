@@ -34,6 +34,7 @@ api.getProjectSendingForecast=(payload,project)=>{
     expected:partial?null:n*5,modeled:partial?n*4:null,capacity:n*9}));
   return {state:firstPage?'loading':partial?'partial':'ready',pending:firstPage,generatedAt:firstPage?null:'2026-11-22T08:00:00Z',
     forecast:{today:{date:'2026-11-22',expected:3,initial:2,followups:1,capacity:4},days,periods,startDate:days[0].date,timezone:'Europe/Moscow',selectedAccounts:project==='neosender'?9:2,activeCampaigns:1,
+    campaigns:[{id:'test',name:project==='neosender'?'Нео · пример':'Кухни · пример',segmentName:'Демонстрационный сегмент',expectedByDay:[3,...Array(7).fill(partial?null:5)]}],
     queue:{pendingInitial:51,pendingFollowups:12,unresolved:partial?2:0,unreadCampaigns:partial?1:0},
     reasons:partial?['unknown_sender']:[]}};
 };
@@ -59,25 +60,32 @@ def main():
         view.locator('summary').click()
         totals=view.locator('#pj-forecast-totals dd')
         expect(totals).to_have_text(['41','1','40','90'])
+        attribution=view.locator('#pj-forecast-campaigns')
+        expect(attribution).to_contain_text('при следующем расчёте')
         expect(view.locator('#pj-forecast-health')).to_contain_text('последний расчёт')
         page.wait_for_function("backend.pending.some(job=>job.method==='getProjectSendingForecast')")
         page.evaluate("backend.holdMethods=[];releaseRpc('getProjectSendingForecast')")
         expect(totals).to_have_text(['5','2','3','9'])
+        expect(attribution.locator('tr')).to_have_text('Кухни · примерДемонстрационный сегмент5')
         view.get_by_role('button',name='Сегодня').click()
         expect(totals).to_have_text(['3','2','1','4'])
+        expect(attribution.locator('td').last).to_have_text('3')
         expect(view.locator('#pj-forecast-context')).to_contain_text('22.11.2026 · МСК · до конца дня')
         expect(view.locator('#pj-forecast-daily')).to_be_hidden()
         expect(view.locator('#pj-forecast-queue')).to_contain_text('первого письма ждут 51, повторного — 12')
         view.get_by_role('button',name='3 дня').click()
         expect(totals).to_have_text(['15','6','9','27'])
+        expect(attribution.locator('td').last).to_have_text('15')
         expect(view.locator('#pj-forecast-rows tr')).to_have_count(3)
         view.get_by_role('button',name='Неделя').click()
         expect(totals).to_have_text(['35','14','21','63'])
+        expect(attribution.locator('td').last).to_have_text('35')
         expect(view.locator('#pj-forecast-rows tr')).to_have_count(7)
         expect(view.locator('#pj-forecast-context')).to_contain_text('23.11.2026 – 29.11.2026')
         assert page.evaluate('forecastCalls')==1
         page.evaluate("forecastState='partial';tick(61000)")
         expect(totals).to_have_text(['—','—','—','63','28'])
+        expect(attribution).to_contain_text('Уточняется')
         expect(view.locator('#pj-forecast-scenario-column')).to_be_visible()
         expect(view.locator('#pj-forecast-rows tr td:last-child')).to_have_text(['4','4','—','4','4','4','4'])
         expect(view.locator('#pj-forecast-queue')).to_contain_text('неизвестен отправитель или следующий шаг у 2')
@@ -129,6 +137,8 @@ def main():
         expect(view.locator('#pj-forecast-report')).to_be_hidden()
         view.locator('summary').click()
         expect(view.locator('#pj-forecast-context')).to_contain_text('выбранных ящиков 9')
+        expect(attribution).to_contain_text('Нео · пример')
+        expect(attribution).not_to_contain_text('Кухни')
         expect(view.locator('#pj-forecast-context')).not_to_contain_text('выбранных ящиков 2')
         expect(view.get_by_role('button',name='Завтра')).to_have_attribute('aria-pressed','true')
         # A panel left open overnight also preloads the newly aligned calendar range.

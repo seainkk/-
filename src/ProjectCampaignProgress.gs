@@ -20,21 +20,41 @@ function projectCompletionQueueHash_(work) {
   return digest_(JSON.stringify(groups.sort()));
 }
 
+function projectCompletionResources_(infra,id,work) {
+  var cap=infra.capacity || {};
+  if (!cap.updatedAt || cap.stale || cap.state==='unknown' || infra.monitoring.accountIds.length!==infra.accounts.length ||
+      infra.accounts.some(function (a) { return !a.capacity || a.capacity.state==='unknown'; })) return null;
+  var source=cap.campaigns.find(function (c) { return c.id===id; });
+  var members=infra.accounts.filter(function (a) {
+    return a.capacity && (a.capacity.campaignIds || []).indexOf(id)>=0;
+  }).map(function (a) { return [String(a.id),!!a.capacity.outsideActive,a.capacity.campaignIds.slice().sort()]; });
+  members.sort(function (a,b) { return a[0].localeCompare(b[0]); });
+  var schedule=source && projectCampaignSchedule_(source,work,Date.now());
+  return {assigned:members.length,pool:digest_(JSON.stringify([source && source.allSendersSelected,members])),
+    schedule:schedule && digest_(JSON.stringify(schedule))};
+}
+
 function projectCompletionPrevious_(item,work) {
   if (!item) return null;
-  var prior=item.previousEstimate || (item.state==='estimated' && {date:item.estimatedDate,generatedAt:item.generatedAt});
+  var prior=item.previousEstimate || (item.state==='estimated' && {date:item.estimatedDate,generatedAt:item.generatedAt,reason:item.reason});
   if (!prior || !/^\d{4}-\d{2}-\d{2}$/.test(prior.date) || !Number.isFinite(Date.parse(prior.generatedAt))) return null;
+  var now=Date.now();
+  if (now-Date.parse(prior.generatedAt)>7*86400000 || prior.date<new Date(now+10800000).toISOString().slice(0,10)) return null;
   if (work) {
     if (work.unavailable || work.campaignStatus && work.campaignStatus!=='Active') return null;
     var proof=item.estimateInputs, counts=work.completion;
-    if (counts && (counts.issue || counts.sent>item.sent || counts.remaining>item.remaining ||
-        work.complete && (counts.remaining!==item.remaining || counts.sent!==item.sent || counts.remaining+counts.sent!==item.total))) return null;
-    // Legacy estimates still have confirmed counts, but no stored sequence or queue fingerprints.
+    // Progress may move forward within the same proven roster, assignments and valid-email plan.
+    var advanced=counts && work.complete && proof && proof.members && proof.members===work.memberHash &&
+      counts.sent>proof.sent && counts.sent>=item.sent && counts.remaining+counts.sent===item.total;
+    if (counts && (counts.issue || counts.remaining>item.remaining || !advanced && (counts.sent>item.sent ||
+        work.complete && (counts.remaining!==item.remaining || counts.sent!==item.sent)))) return null;
     if (proof && (work.sequence && digest_(JSON.stringify(work.sequence))!==proof.sequence ||
         Number.isSafeInteger(work.total) && work.total!==proof.contacts ||
-        work.complete && projectCompletionQueueHash_(work)!==proof.queue)) return null;
+        work.complete && (proof.members && proof.members!==work.memberHash || !advanced && projectCompletionQueueHash_(work)!==proof.queue))) return null;
   }
-  return {date:prior.date,generatedAt:prior.generatedAt};
+  var result={date:prior.date,generatedAt:prior.generatedAt};
+  if (prior.reason==='observed_pace') result.reason=prior.reason;
+  return result;
 }
 
 function projectCompletionPublic_(saved,preview,ids) {
@@ -49,7 +69,7 @@ function projectCompletionPublic_(saved,preview,ids) {
     campaignCompletions[id] = {sent:count(item.sent), remaining:count(item.remaining), total:count(item.total),
       percent:count(item.percent) !== null && item.percent <= 100 ? item.percent : null, state:stale?'unknown':item.state,
       estimatedDate:!refreshing && /^\d{4}-\d{2}-\d{2}$/.test(item.estimatedDate) ? item.estimatedDate : null,
-      previousEstimate:refreshing ? projectCompletionPrevious_(item,saved.work && saved.work[id]) : null,
+      previousEstimate:refreshing || item.state==='unknown' ? projectCompletionPrevious_(item,saved.work && saved.work[id]) : null,
       reason:stale?'incomplete':typeof item.reason === 'string' && /^[a-z_]{1,45}$/.test(item.reason) ? item.reason : null,
       generatedAt:item.generatedAt || null};
   });
@@ -132,7 +152,14 @@ function getProjectCampaignCompletions_(request) {
     ids.forEach(function(id) {
       var work=state.work[id], prior=state.report[id];
       if (work && !work.complete && prior && (prior.estimatedDate || prior.previousEstimate) &&
-          !projectCompletionPrevious_(prior,work)) delete state.report[id];
+          !projectCompletionPrevious_(prior,work)) {
+        // A partial count can overtake yesterday's total sent before the full roster hash is available.
+        // Suppress it in previews but retain the proof until the remaining pages can confirm the roster.
+        var proof=prior.estimateInputs;
+        if (!(proof && proof.members && work.completion && !work.completion.issue && work.completion.sent>prior.sent &&
+            work.completion.remaining<=prior.remaining && work.campaignStatus==='Active' && work.total===proof.contacts &&
+            digest_(JSON.stringify(work.sequence))===proof.sequence)) delete state.report[id];
+      }
     });
     var scanned = state.progress.campaignsDone === ids.length;
     if (scanned || state.progress.campaignsDone > before) {
@@ -165,12 +192,22 @@ function getProjectCampaignCompletions_(request) {
         if (state.work[id] && (state.work[id].complete || state.work[id].unavailable) && report[id]) {
           if (state.work[id].unavailable) report[id].reason = state.work[id].reason || 'unavailable';
           var row=Object.assign({},report[id],{generatedAt:generated}), work=state.work[id];
-          if (!scanned || waiting) {
-            var previous=projectCompletionPrevious_(state.report[id],work);
-            if (previous) { row.previousEstimate=previous;row.estimateInputs=state.report[id].estimateInputs; }
-            if (row.state==='estimated') {row.state='unknown';row.reason='capacity';row.estimatedDate=null;}
+          if ((!scanned || waiting) && row.state==='estimated') {
+            row.state='unknown';row.reason='capacity';row.estimatedDate=null;
+          }
+          var resources=projectCompletionResources_(infra,id,work);
+          if (row.state==='unknown' && ['capacity','shared_capacity','schedule'].indexOf(row.reason)>=0) {
+            var prior=state.report[id], inputs=prior && prior.estimateInputs, previous=projectCompletionPrevious_(prior,work);
+            if (previous && (!resources || resources.assigned && (!inputs || (!inputs.pool || resources.pool===inputs.pool) &&
+                (!inputs.schedule || !resources.schedule || inputs.schedule===resources.schedule)))) {
+              row.previousEstimate=previous;row.estimateInputs=inputs;
+              if (inputs && inputs.members && work.complete && work.completion.sent>inputs.sent) {
+                row.estimateInputs=Object.assign({},inputs,{queue:projectCompletionQueueHash_(work),sent:work.completion.sent});
+              }
+            }
           } else if (row.state==='estimated') {
-            row.estimateInputs={sequence:digest_(JSON.stringify(work.sequence)),contacts:work.total,queue:projectCompletionQueueHash_(work)};
+            row.estimateInputs={sequence:digest_(JSON.stringify(work.sequence)),contacts:work.total,queue:projectCompletionQueueHash_(work),
+              members:work.memberHash,sent:row.sent,pool:resources && resources.pool,schedule:resources && resources.schedule};
           }
           state.report[id]=row;
         }

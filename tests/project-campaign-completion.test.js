@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 
 const context = vm.createContext({
-  Date, Intl,
+  Date, Intl,COLDY:{cacheMillis:300000},
   coldyUuid_: value => /^[a-f0-9-]{36}$/.test(value),
   fail_(code) { throw new Error(code); },
   digest_: value => createHash('sha256').update(value).digest('hex')
@@ -81,4 +81,39 @@ test('zero eligible messages have no percentage and an outstanding send can neve
   const done=calculate({[a]:recipients(a,[sentOne],[0])})[a];
   assert.equal(done.percent,100);
   assert.equal(done.remaining,0);
+});
+
+test('two recent observed working days estimate a finish without a quota and keep actual limits and pauses authoritative',()=>{
+  const thursday={...sentOne,date_last_sequence_send:'2026-11-19T09:00:00Z'};
+  const recipientsList=[thursday,sentOne,sentOne,sentOne,{},{},{}];
+  const d=recipients(a,recipientsList,[0]);
+  const measured=calculate({[a]:d},null)[a];
+  assert.deepEqual([measured.sent,measured.total,measured.reason,measured.estimatedDate],[4,7,'observed_pace','2026-11-24']);
+  assert.equal(calculate({[a]:d},8)[a].estimatedDate,'2026-11-23');
+  assert.equal(calculate({[a]:d},1)[a].estimatedDate,'2026-11-25');
+  assert.equal(calculate({[a]:d},0)[a].reason,'no_capacity');
+  assert.equal(calculate({[a]:{...d,campaignStatus:'Paused'}},null)[a].estimatedDate,null);
+  assert.equal(calculate({[a]:recipients(a,[sentOne,sentOne,{}],[0])},null)[a].estimatedDate,null);
+  assert.equal(calculate({[a]:recipients(a,[
+    {...sentOne,date_last_sequence_send:'2026-11-16T09:00:00Z'},
+    {...sentOne,date_last_sequence_send:'2026-11-17T09:00:00Z'},{}],[0])},null)[a].estimatedDate,null);
+  const delayed=calculate({[a]:recipients(a,recipientsList,[0,9])},null)[a];
+  assert.equal(delayed.reason,'observed_pace');
+  assert.ok(delayed.estimatedDate>='2026-12-02');
+});
+
+test('a recent campaign detail fills a pending schedule and yields to a subsequent confirmed removal',()=>{
+  const observed=Date.parse(now);
+  const schedule={timezone:'Europe/Moscow',days:weekdays,from:'09:00',to:'18:00',gapStartSeconds:0,gapEndSeconds:0};
+  const demand={schedule,scheduleCheckedAt:observed};
+  assert.equal(context.projectCampaignSchedule_({scheduleState:'pending'},demand,observed),schedule);
+  assert.equal(context.projectCampaignSchedule_({scheduleState:'unavailable',scheduleUpdatedAt:now},demand,observed),null);
+  assert.equal(context.projectCampaignSchedule_({scheduleState:'error'},demand,observed),null);
+  assert.equal(context.projectCampaignSchedule_({scheduleState:'pending'},demand,observed+300001),null);
+});
+
+test('a recipient that already received the final step does not need a sender assignment to forecast the outstanding queue',()=>{
+  const d=recipients(a,[{...sentOne,chosen_sender:undefined},{}],[0]);
+  const row=calculate({[a]:d},2)[a];
+  assert.deepEqual([row.sent,row.remaining,row.estimatedDate],[1,1,'2026-11-23']);
 });

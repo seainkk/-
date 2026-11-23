@@ -45,7 +45,7 @@ function fixture(){
     coldyRecipientSheetWrite_:(_c,bind,kind,target,rows,guard,_before,opts)=>{
       guard();assert.equal(opts.existingOnly,true);assert.equal(projects[bind.segmentId],r.SHARED_REQUEST_SCOPE_.projectId);
       writes.push({id:bind.campaignId,kind,target:copy(target),rows:copy(rows)});
-      return {processed:rows.length,existing:rows.length};
+      return {processed:rows.length,existing:rows.length,unchangedVersion:versions[kind]};
     },
     coldyGetBatch_:(_c,list,guard)=>{
       guard();const results=list.map(path=>{
@@ -61,7 +61,7 @@ function fixture(){
       });state.afterRead?.();guard();return results;
     }
   });
-  for(const name of ['ColdyRecipientData','ColdyRecipientAutomation']){
+  for(const name of ['SheetEditor','ColdyRecipientData','ColdyRecipientAutomation']){
     vm.runInContext(readFileSync(new URL('../src/'+name+'.gs',import.meta.url),'utf8'),r,{filename:name+'.gs'});
   }
   r.coldyRecipientHistoricalBlocks_=()=>[];
@@ -224,6 +224,69 @@ test('a busy sheet retains only its confirmed checked and matched counts, scoped
   assert.equal(status().progress,null,'A newly configured binding cannot publish the prior snapshot');
   f.state.counts[a]=1;f.next();
   assert.equal(status().state,'synced');assert.equal(status().progress,null);
+});
+
+test('the last confirmed Companies batch survives a failure opening LPR, without repeating any address',()=>{
+  const f=fixture();f.bindings.splice(1);const binding=f.bindings[0];
+  binding.includeLpr=true;f.state.counts={[a]:2315};f.enable();
+  const version=f.r.coldyRecipientSheetVersion_;
+  let unavailable=true;
+  f.r.coldyRecipientSheetVersion_=(...args)=>{
+    if(args[2]==='lpr' && unavailable)throw Error('Service Spreadsheets timed out while accessing document private-id');
+    return version(...args);
+  };
+  const status=()=>{f.r.coldyIncomingDecorate_(f.r.authorize_(),[binding],[]);return binding.recipientSync;};
+  for(let i=0;i<6 && !status().issue;i++)f.next();
+  const stalled=status();
+  assert.deepEqual(copy(stalled.progress),{phase:'write',kind:'lpr',checked:0,matched:0,total:2315});
+  assert.equal(stalled.state,'retrying');assert.equal(stalled.issue,'google_unavailable');assert.ok(stalled.nextRetryAt);
+  assert.ok(!JSON.stringify(stalled).includes('private-id'));
+  unavailable=false;f.next();assert.equal(status().state,'synced');
+  for(const kind of ['companies','lpr']){
+    const ids=f.writes.filter(w=>w.kind===kind).flatMap(w=>w.rows.map(row=>row.id));
+    assert.equal(ids.length,2315);assert.equal(new Set(ids).size,2315);
+  }
+});
+
+test('a temporary or permanent Google failure shows its allowlisted reason and advances only an acknowledged batch',()=>{
+  const failureCases=[
+    [new Error('Service invoked too many times in a short time: Drive. secret@example.test'),'google_quota',true],
+    [{registryCode:'CONTACT_SYNC_LEASE_LOST'},'busy',true],
+    [{registryCode:'CONFLICT'},'sheet_changed',true],
+    [{registryCode:'COLDY_SCHEMA'},'sheet_schema',false],
+    [{registryCode:'CONTACT_SYNC_NOT_ENROLLED'},'target',false],
+    [{registryCode:'SHEETS_RAW_UNCERTAIN',sheetRawDiagnostic:'HTTP 403, PERMISSION_DENIED'},'google_access',false],
+    [{registryCode:'SHEETS_RAW_UNCERTAIN',sheetRawDiagnostic:'HTTP 400, INVALID_ARGUMENT'},'sheet_rejected',false],
+    [{registryCode:'SHEETS_RAW_UNCERTAIN',sheetRawDiagnostic:'INCOMPLETE_ACKNOWLEDGEMENT'},'sheet_unconfirmed',true],
+    [new Error('Unexpected secret@example.test'),'unknown',false]
+  ];
+  for(const [error,issue,retrying] of failureCases){
+    const f=fixture();f.bindings.splice(1);f.enable();
+    const binding=f.bindings[0],write=f.r.coldyRecipientSheetWrite_;
+    f.r.coldyRecipientSheetWrite_=()=>{throw error;};f.tick();
+    f.r.coldyIncomingDecorate_(f.r.authorize_(),[binding],[]);
+    const status=binding.recipientSync;assert.equal(status.issue,issue);
+    assert.equal(status.state,retrying?'retrying':'error');
+    assert.equal(status.progress.checked,0);assert.equal(status.lastSyncedAt,null);
+    assert.ok(!JSON.stringify(status).includes('secret@'));assert.ok(status.nextRetryAt);
+    f.r.coldyRecipientSheetWrite_=write;f.state.now=Date.parse(status.nextRetryAt);f.tick();
+    f.r.coldyIncomingDecorate_(f.r.authorize_(),[binding],[]);
+    assert.equal(binding.recipientSync.state,'synced');assert.equal(binding.recipientSync.issue,null);
+  }
+});
+
+test('a changed binding and an expired shared throttle do not show an obsolete failure or delay its next attempt',()=>{
+  const f=fixture();f.bindings.splice(1);f.enable();
+  const binding=f.bindings[0],context=f.r.authorize_();
+  f.state.failure={id:a,code:'COLDY_NOT_FOUND'};f.tick();
+  const status=()=>{f.r.coldyIncomingDecorate_(context,[binding],[]);return binding.recipientSync;};
+  assert.equal(status().state,'error');assert.ok(status().nextRetryAt);
+  const timer=f.r.coldyIncomingTimer_(f.props),key=f.r.coldyIncomingHeartbeatKey_(timer);
+  const clock=JSON.parse(f.props.getProperty(key));
+  Object.assign(clock,{issue:'rate_limit',retryAt:f.state.now-1000});f.props.setProperty(key,JSON.stringify(clock));
+  binding.revision++;delete f.state.failure;
+  assert.deepEqual([status().state,status().issue,status().progress,status().nextRetryAt],['waiting',null,null,null]);
+  f.next();assert.equal(status().state,'synced');
 });
 
 test('a throttled first lead page retains the confirmed campaign detail and completes a short campaign on its retry',()=>{

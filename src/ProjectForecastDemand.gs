@@ -82,6 +82,7 @@ function projectForecastDemandPage_(campaignId,offset,expectedTotal,sequence,pag
     fail_('COLDY_FORECAST_CHANGED', 'Список адресатов изменился во время расчёта. Обновите прогноз.');
   }
   var ids = new Set(), byCohort = new Map(), completion = withCompletion ? projectCampaignProgressCounts_() : null;
+  var members = [];
   page.items.forEach(function (lead) {
     if (!lead || !Number.isSafeInteger(lead.id) || lead.id < 1 || ids.has(lead.id) ||
         !coldyUuid_(lead.campaign_id) || lead.campaign_id.toLowerCase() !== campaignId) {
@@ -92,6 +93,7 @@ function projectForecastDemandPage_(campaignId,offset,expectedTotal,sequence,pag
     if (completion) {
       projectCampaignCountLead_(completion,lead,sequence);
       if (lead.verification_status === 'valid' && cohort.disposition !== 'stopped') cohort.completionValid = true;
+      members.push([lead.id,lead.verification_status,cohort.disposition,cohort.senderId]);
     }
     var key = projectForecastCohortKey_(cohort);
     if (!byCohort.has(key)) { cohort.count = 0; byCohort.set(key,cohort); }
@@ -100,7 +102,10 @@ function projectForecastDemandPage_(campaignId,offset,expectedTotal,sequence,pag
   var next = offset + page.items.length;
   var result = { campaignId: campaignId, offset: offset, nextOffset: next < page.total ? next : null, total: page.total,
     leadIds: Array.from(ids), cohorts: Array.from(byCohort.values()) };
-  if (completion) result.completion = completion;
+  if (completion) {
+    result.completion = completion;
+    result.memberHash = digest_(JSON.stringify(members.sort(function (a,b) { return a[0]-b[0]; })));
+  }
   return result;
 }
 
@@ -128,6 +133,10 @@ function projectForecastAppendDemand_(work,page) {
   }
   var result = { campaignId: page.campaignId, total: page.total, processed: processed, nextOffset: page.nextOffset, complete: complete,
     cohorts: Array.from(groups.values()), seenIds: complete ? [] : Array.from(ids), lastPageOffset: page.offset, lastPageHash: hash };
-  if (page.completion) result.completion = projectCampaignMergeCounts_(work, page.completion);
+  if (page.completion) {
+    result.completion = projectCampaignMergeCounts_(work, page.completion);
+    if (page.memberHash && (!work || work.memberHash))
+      result.memberHash = digest_(JSON.stringify([work && work.memberHash || null,page.memberHash]));
+  }
   return result;
 }

@@ -27,8 +27,9 @@ function poolData(accounts){
   const busy=item.id==='account-0',unknown=item.id==='account-2'||backend.uncertainCapacity;
   item.capacity={state:unknown?'unknown':busy?'busy':'free',campaignIds:busy?[A,B]:[],availableAt:null,
    idleFrom:busy&&!unknown?'2026-11-23T15:30:00.000Z':null,idleUntil:busy&&!unknown?'2026-11-24T06:00:00.000Z':null};
+  if(backend.senderAssignments)item.capacity=backend.senderAssignments[item.id];
  }
- return {state:backend.uncertainCapacity?'partial':'ready',stale:!!backend.uncertainCapacity,updatedAt:backend.lastSyncAt,campaigns:campaignList};
+ return {state:backend.uncertainCapacity?'partial':'ready',stale:!!backend.uncertainCapacity,updatedAt:backend.lastSyncAt,campaigns:backend.poolCampaigns||campaignList};
 }
 function infra(){
  const total=backend.monitoringIds.length,completed=backend.detailIds.length,poolOnly=backend.syncMode==='pool';
@@ -177,15 +178,22 @@ previousEstimate:{date:'2026-12-01',generatedAt:'2026-11-22T09:00:00Z'}}""")
         page.locator('#pj-analytics-refresh').click()
         date=completion.locator('.pj-completion-date')
         expect(date).to_contain_text('Предыдущая оценка 01.12.2026')
-        expect(date).to_contain_text('22.11.2026')
-        expect(date).to_contain_text('12:00:00 МСК')
+        expect(completion).to_contain_text('Рассчитано 22.11.2026, 12:00:00 МСК')
         expect(completion).to_contain_text('Очередь отправок получена частично.')
         expect(gauge).to_have_attribute('value','81')
-        page.evaluate("""backend.completionPending=false;backend.completionRecord={state:'estimated',estimatedDate:'2026-12-03',
+        page.evaluate("""backend.completionPending=false;backend.completionRecord={state:'estimated',reason:'observed_pace',estimatedDate:'2026-12-03',
 generatedAt:'2026-11-23T08:05:00Z',previousEstimate:null}""")
         expect(date).to_have_text('Ориентировочно 03.12.2026',timeout=8000)
+        expect(completion.locator('strong').first).to_have_text('Ориентировочно 03.12.2026')
+        expect(completion).to_contain_text('По фактическому темпу отправок этой рассылки.')
+        expect(completion).not_to_contain_text('Недостаточно данных')
         expect(completion).not_to_contain_text('Предыдущая оценка')
         expect(completion).not_to_contain_text('Очередь отправок получена частично.')
+        page.evaluate("""backend.completionRecord={state:'unknown',reason:'no_capacity',estimatedDate:null}""")
+        page.locator('#pj-analytics-refresh').click()
+        expect(date).to_contain_text('оставшиеся письма отправить не получится')
+        expect(completion).not_to_contain_text('03.12.2026')
+        idle()
         page.evaluate('delete backend.completionRecord')
         # A late result for the previous project cannot overwrite the new project's percentage.
         page.evaluate("backend.holdMethods=['getProjectCampaignCompletions'];void RegistryProject.refresh({manual:true})")
@@ -222,11 +230,62 @@ progress:{phase:'read',read:400,total:1267}}""")
         expect(read_progress).to_contain_text('Сверка с листом Email отложена')
         expect(read_progress).to_contain_text('Coldy временно ограничил запросы')
         expect(read_progress).to_contain_text('прочитано адресатов Coldy 400 из 1 267')
-        for issue in ('connection','storage'):
+        for issue in ('connection','storage','sheet_schema','google_access','google_setup','unknown'):
             message=page.evaluate("issue=>RegistryProject.recipientSyncText({enabled:true,state:'error',issue})",issue)
             assert 'Ошибка сверки с листом Email' in message
+            assert 'отложена' not in message
+        assert 'причина сбоя пока неизвестна' in message
+        for issue,label in [('sheet_changed','таблица изменилась'),('membership_changed','состав получателей'),
+                            ('google_quota','лимит запросов Google'),('google_unavailable','временно недоступен'),
+                            ('sheet_unconfirmed','не подтвердил запись')]:
+            message=page.evaluate("""issue=>RegistryProject.recipientSyncText({enabled:true,state:'retrying',issue,
+nextRetryAt:'2026-11-23T09:15:00Z',progress:{phase:'write',kind:'companies',checked:2100,matched:2100,total:2315}})""",issue)
+            assert label in message and 'отложена' in message and 'следующая попытка 23.11.2026, 12:15:00 МСК' in message
+            assert 'лист Email таблицы «Компании»' in message
 
         monitored_setup="backend.monitoringIds=Array.from({length:6},(_,i)=>'account-'+i);backend.monitoringConfigured=true;"
+
+        # The selected segment lists only its campaign's senders, including inactive assignments.
+        reset(setup="""backend.infraSynced=true;backend.lastSyncAt=new Date().toISOString();
+backend.monitoringIds=['account-0','account-1','account-2','account-3'];backend.monitoringConfigured=true;
+backend.bindings.find(b=>b.campaignId===C).segmentId='segment-a';
+backend.poolCampaigns=[{id:A,name:'Основная',segmentId:'segment-a'},{id:B,name:'Веб-студии',segmentId:'segment-b'}];
+backend.senderAssignments={
+ 'account-0':{state:'busy',campaignIds:[A],inactiveCampaignIds:[]},
+ 'account-1':{state:'busy',campaignIds:[A,B],inactiveCampaignIds:[]},
+ 'account-2':{state:'busy',campaignIds:[A],inactiveCampaignIds:[],outsideActive:true},
+ 'account-3':{state:'free',campaignIds:[],inactiveCampaignIds:[C]}}""")
+        page.locator('#pj-segment').select_option('segment-a');idle()
+        active_senders=page.locator('#pj-campaign-rows details[data-campaign="11111111-1111-4111-8111-111111111111"]')
+        paused_senders=page.locator('#pj-campaign-rows details[data-campaign="33333333-3333-4333-8333-333333333333"]')
+        active_senders.get_by_text('Почты рассылки').click()
+        expect(active_senders.locator('li')).to_have_count(3)
+        expect(active_senders).to_contain_text('С другими активными рассылками: 2. Без других активных рассылок: 1')
+        expect(active_senders.locator('li').filter(has_text='sender0@example.test')).to_contain_text('других активных назначений нет')
+        expect(active_senders.locator('li').filter(has_text='sender1@example.test')).to_contain_text('Также участвует: Веб-студии')
+        external=active_senders.locator('li').filter(has_text='sender2@example.test')
+        expect(external).to_contain_text('Есть активная рассылка вне мониторинга проекта')
+        expect(external).not_to_contain_text('Ориентир окончания')
+        paused_senders.get_by_text('Почты рассылки').click()
+        expect(paused_senders.locator('li')).to_have_count(1)
+        expect(paused_senders.locator('li')).to_contain_text('sender3@example.test')
+        expect(paused_senders.locator('li')).to_contain_text('Свободна')
+        assert count('getProjectInfrastructure')==1
+
+        # A different project must load its own assignments. An old map may show names but cannot prove current availability.
+        page.evaluate("""backend.accountMarker='new-scope';backend.uncertainCapacity=true;
+backend.holdMethods=['getProjectInfrastructure'];RegistryProject.show('analytics',{ready:true,epoch:2});
+void RegistryProject.refresh({opening:true})""")
+        page.locator('#pj-segment').select_option('segment-a');idle()
+        assert not active_senders.evaluate('el=>el.open')
+        active_senders.get_by_text('Почты рассылки').click()
+        page.wait_for_function("backend.pending.some(x=>x.name==='getProjectInfrastructure')")
+        expect(active_senders).not_to_contain_text('sender0@example.test')
+        page.evaluate("backend.holdMethods=[];release('getProjectInfrastructure')")
+        expect(active_senders).to_contain_text('Последние известные назначения')
+        expect(active_senders.locator('li').filter(has_text='new-scope0@example.test')).to_contain_text('Текущая занятость уточняется')
+        expect(active_senders).not_to_contain_text('Без других активных рассылок')
+        expect(active_senders).not_to_contain_text('других активных назначений нет')
 
         def reset_monitored(setup=''):
             reset('infrastructure',setup=monitored_setup+setup)

@@ -30,25 +30,47 @@ function projectCapacityValidate_(saved) {
     if (!/^[1-9]\d*$/.test(id) || !Array.isArray(links) || links.length > ids.size ||
         new Set(links).size !== links.length || links.some(function (key) { return !ids.has(key); })) invalid();
   });
+  var inactive = cap.inactiveAssignments;
+  if (inactive !== undefined) {
+    if (!inactive || typeof inactive !== 'object' || Array.isArray(inactive)) invalid();
+    var count = 0;
+    Object.keys(inactive).forEach(function (id) {
+      var links = inactive[id];
+      if (!Array.isArray(cap.assignments[id]) || !Array.isArray(links) || (count += links.length) > 100000 ||
+          new Set(links).size !== links.length || links.some(function (key) {
+            return !coldyUuid_(key) || key !== key.toLowerCase() || ids.has(key);
+          })) invalid();
+    });
+  }
 }
 
 /** Keep only current project bindings. A flag preserves occupancy without storing other campaign names or IDs. */
 function projectCapacitySelected_(context, capacity, observation) {
-  var owners = projectCapacityOwners_(context, capacity.campaigns.map(function (item) { return item.id; }), observation);
+  var candidates = new Set(capacity.campaigns.map(function (item) { return item.id; }));
+  Object.values(capacity.inactiveAssignments || {}).forEach(function (links) {
+    links.forEach(function (id) { candidates.add(id); });
+  });
+  var owners = projectCapacityOwners_(context, Array.from(candidates), observation);
   var project = typeof registryProjectId_ === 'function' ? registryProjectId_() : 'numshield';
-  var visible = new Set(capacity.campaigns.filter(function (item) {
-    var owner = owners[item.id];
+  function visible(id) {
+    var owner = owners[id];
     return owner && owner.bindingState === 'linked' && owner.segmentProjectId === project;
-  }).map(function (item) { return item.id; }));
-  var outside = Object.assign({}, capacity.outsideActive), assignments = {};
+  }
+  var outside = Object.assign({}, capacity.outsideActive), assignments = {}, inactive = {};
   Object.keys(capacity.assignments).forEach(function (id) {
     var ids = capacity.assignments[id];
-    assignments[id] = ids.filter(function (uuid) { return visible.has(uuid); });
+    assignments[id] = ids.filter(visible);
     if (ids.length !== assignments[id].length) outside[id] = true;
+    var other = capacity.inactiveAssignments && capacity.inactiveAssignments[id];
+    if (other) {
+      var linked = other.filter(visible);
+      if (linked.length) inactive[id] = linked;
+    }
   });
-  return { owners:owners, capacity:Object.assign({}, capacity, {
-    assignments:assignments, outsideActive:outside, campaigns:capacity.campaigns.filter(function (item) { return visible.has(item.id); })
-  }) };
+  var scoped = Object.assign({}, capacity, {assignments:assignments, outsideActive:outside,
+    campaigns:capacity.campaigns.filter(function (item) { return visible(item.id); })});
+  if (capacity.inactiveAssignments) scoped.inactiveAssignments = inactive;
+  return {owners:owners, capacity:scoped};
 }
 
 function projectCapacityMappings_(response, selected, key, receivedAt) {
@@ -57,7 +79,7 @@ function projectCapacityMappings_(response, selected, key, receivedAt) {
       response.total != null && response.total !== response.items.length) {
     fail_('COLDY_INFRA_INCOMPLETE', 'Coldy не подтвердил полный список назначений почт.');
   }
-  var accounts = Object.create(null), used = new Set(), campaigns = new Map(), statuses = new Map(), links = 0;
+  var accounts = Object.create(null), inactive = Object.create(null), used = new Set(), campaigns = new Map(), statuses = new Map(), links = 0;
   selected.forEach(function (id) { accounts[id] = []; });
   response.items.forEach(function (item) {
     var id = projectInfraId_(item && item.account_id);
@@ -72,9 +94,14 @@ function projectCapacityMappings_(response, selected, key, receivedAt) {
       if (seen.has(campaignId) || statuses.has(campaignId) && statuses.get(campaignId) !== campaign.status)
         fail_('COLDY_RESPONSE', 'Coldy вернул противоречивые назначения одной рассылки.');
       seen.add(campaignId); statuses.set(campaignId, campaign.status);
-      if (campaign.status !== 'Active') return;
+      if (++links > 100000) fail_('COLDY_INFRA_INCOMPLETE', 'Карта назначений рассылок слишком велика.');
+      if (campaign.status !== 'Active') {
+        if (!inactive[id]) inactive[id] = [];
+        inactive[id].push(campaignId);
+        return;
+      }
       var name = projectInfraText_(campaign.name, key, 1000);
-      if (!name || ++links > 100000) fail_('COLDY_INFRA_INCOMPLETE', 'Карта активных рассылок неполна или слишком велика.');
+      if (!name) fail_('COLDY_INFRA_INCOMPLETE', 'Карта активных рассылок неполна.');
       accounts[id].push(campaignId);
       if (!campaigns.has(campaignId)) campaigns.set(campaignId, { id: campaignId, name: name, status: 'Active', waitSchedule: null, schedule: null });
     });
@@ -89,7 +116,7 @@ function projectCapacityMappings_(response, selected, key, receivedAt) {
       if (campaign) campaign.allSendersSelected = false;
     });
   });
-  return { assignments: accounts, campaigns: Array.from(campaigns.values()), updatedAt: receivedAt || new Date().toISOString(), stale: false };
+  return { assignments: accounts, inactiveAssignments: inactive, campaigns: Array.from(campaigns.values()), updatedAt: receivedAt || new Date().toISOString(), stale: false };
 }
 
 function projectCapacitySchedule_(value, campaignId) {
@@ -284,7 +311,8 @@ function projectCapacityPublic_(context, settings, saved, result) {
     var ids = cap && cap.assignments[account.id], outside = !!(cap && cap.outsideActive[account.id]);
     var state = stale || !Array.isArray(ids) ? 'unknown' : ids.length || outside ? 'busy' :
       saved.selectedOnly && (!account.updatedAt || account.stale || account.syncError) ? 'unknown' : 'free';
-    var value = { state: state, campaignIds: ids || [], outsideActive:outside, availableAt: null, idleFrom: null, idleUntil: null };
+    var value = { state: state, campaignIds: ids || [], inactiveCampaignIds:ids && cap.inactiveAssignments ? cap.inactiveAssignments[account.id] || [] : null,
+      outsideActive:outside, availableAt: null, idleFrom: null, idleUntil: null };
     if (state === 'busy' && !outside) {
       var key = ids.slice().sort().join('|');
       if (!idle.has(key)) idle.set(key, projectCapacityIdle_(ids.map(function (id) { return byId.get(id).schedule; }), now, zones));

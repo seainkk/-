@@ -254,6 +254,7 @@ function coldyRecipientSheetWrite_(context, binding, kind, target, recipients, g
     }
     if (existingOnly && !requests.length && !beforeApply) {
       verifySnapshot();
+      result.unchangedVersion = version;
       return result;
     }
     locked_(function () {

@@ -17,16 +17,17 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
   for (var i = 0; i < 8; i++) rows.push({date:date(today + i * day), initial:0, followups:0, expected:0, capacity:0,modeled:0});
   (membership.campaigns || []).forEach(function (source) {
     if (String(source.status).toLowerCase() !== 'active' || campaigns.has(source.id)) return;
-    var demand = demands && demands[source.id] || {}, schedule = source.schedule;
+    var demand = demands && demands[source.id] || {}, schedule = completionReports ? projectCampaignSchedule_(source,demand,now) : source.schedule;
     if (completionReports && demand.complete && demand.campaignStatus && String(demand.campaignStatus).toLowerCase() !== 'active') {
       inactive.add(source.id); return;
     }
     var windows = projectForecastWindows_(schedule, today, horizon, zones);
     var slow = schedule && projectInfraCount_(schedule.gapEndSeconds), fast = schedule && projectInfraCount_(schedule.gapStartSeconds);
     var gap = fast != null && slow != null && slow >= fast ? (fast + slow) * 500 : null;
-    campaigns.set(source.id, {id:source.id, demand:demand, sequence:demand.sequence, allSelected:demand.allSendersSelected === true || source.allSendersSelected === true,
+    campaigns.set(source.id, {id:source.id, name:source.name, segmentName:source.segmentName, expectedByDay:Array(8).fill(0),
+      demand:demand, sequence:demand.sequence, allSelected:demand.allSendersSelected === true || source.allSendersSelected === true,
       dailyLimit:projectInfraCount_(demand.dailyLimit), firstDailyLimit:projectInfraCount_(demand.firstDailyLimit), followupDailyLimit:projectInfraCount_(demand.followupDailyLimit),
-      owners:[], senderSelection:selection, assigned:new Map(), windows:windows, minGap:fast, gap:gap, reasons:new Set(), queues:new Map(), used:[0,0]});
+      owners:[], senderSelection:selection, assigned:new Map(), schedule:schedule, windows:windows, minGap:fast, gap:gap, reasons:new Set(), queues:new Map(), used:[0,0]});
   });
   selection.forEach(function (id) {
     var source = observed.get(id);
@@ -69,7 +70,16 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
   });
   var budget = {sends:0, limit:50000};
   if (completionReports) {
+    campaigns.forEach(function (c) {
+      var row=completionReports[c.id];
+      if (row && row.reason==='capacity' && projectCampaignHardStop_(c)) row.reason='no_capacity';
+    });
     components.forEach(function (pool) { projectCampaignEstimatePool_(pool,completionReports,now,today,horizonDays,budget); });
+    campaigns.forEach(function (c) {
+      var row=completionReports[c.id];
+      if (row && ['capacity','shared_capacity'].indexOf(row.reason)>=0)
+        projectCampaignObservedFinish_(c,row,now,today,horizonDays,budget);
+    });
     return;
   }
   components.forEach(function (pool) {
@@ -89,7 +99,11 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
     var value = period.reduce(function (v, row) { return v + row[key]; }, 0);
     return Number.isSafeInteger(value) ? value : null;
   }
-  return {timezone:zone, today:rows[0], startDate:days[0].date, selectedAccounts:selection.size, activeCampaigns:campaigns.size, days:days,queue:queue,
+  var breakdown = Array.from(campaigns.values()).map(function (c) {
+    return {id:c.id, name:c.name || '', segmentName:c.segmentName || '',
+      expectedByDay:mappingUnknown || missing ? Array(8).fill(null) : c.expectedByDay};
+  });
+  return {timezone:zone, today:rows[0], startDate:days[0].date, selectedAccounts:selection.size, activeCampaigns:campaigns.size, campaigns:breakdown, days:days,queue:queue,
     periods:[1,3,7].map(function (length) {
       var period = days.slice(0,length);
       var modeled = sum(period,'modeled');
@@ -166,6 +180,10 @@ function projectForecastLoadDemand_(c, now, queue) {
     var assigned = g.senderId == null ? null : String(g.senderId), count = projectInfraCount_(g.count);
     function unknown(reason) { c.reasons.add(reason); queue.unresolved += count || 0; }
     if (count === 0 || g.disposition === 'stopped') return;
+    // A completed recipient consumes no future slots, even when Coldy omits its former sender.
+    if (count!==null && sequence && sequence.known && Array.isArray(steps) && steps.length &&
+        (g.sentSteps===steps.length && (g.previousStepId==null || g.previousStepId===steps[steps.length-1].id) ||
+         g.sentSteps==null && g.previousStepId===steps[steps.length-1].id)) return;
     if (assigned !== null) {
       var owner = c.assigned.get(assigned);
       if (!owner && c.senderSelection.has(assigned)) { unknown('unknown_sender'); return; }
@@ -254,6 +272,7 @@ function projectForecastPool_(pool, rows, reasons, now, today, day, budget, queu
       reasons.add('model_limit'); uncertain = cannotModel = true;
     }
     if (!cannotModel && measured) { daily.modeled += estimate.expected; daily.modeledEvidence = true; }
+    pool.campaigns.forEach(function (c) { c.expectedByDay[index] = uncertain ? null : c.used[0] + c.used[1]; });
     if (uncertain) daily.expected = daily.initial = daily.followups = null;
     else if (daily.expected !== null) {
       daily.expected += estimate.expected; daily.initial += estimate.initial; daily.followups += estimate.followups;
@@ -294,7 +313,7 @@ function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
           if (at > event.time) { earliest = Math.min(earliest,at); return; }
           var rank = kind === (firstFirst ? 0 : 1) ? 0 : 1;
           if (!best || rank < best.rank || rank === best.rank && (group.time < best.group.time ||
-              budget.tracking && group.time === best.group.time && (c.lastAllocation || 0) < (best.c.lastAllocation || 0)))
+              group.time === best.group.time && (c.lastAllocation || 0) < (best.c.lastAllocation || 0)))
             best = {c:c,heap:heap,group:group,kind:kind,rank:rank};
         });
       });
@@ -306,14 +325,13 @@ function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
     if (++budget.sends > budget.limit) return false;
     var c = best.c, group = best.group, next = group.index + 1;
     if (--group.count === 0) projectForecastPop_(best.heap);
-    c.used[best.kind]++; a.remaining--;
+    c.used[best.kind]++; a.remaining--; c.lastAllocation = budget.sends;
     if (daily.expected !== null) { daily.expected++; if (best.kind) daily.followups++; else daily.initial++; }
     if (next < c.sequence.steps.length) {
       var due = event.time + c.sequence.steps[next].delayDays * 86400000;
       projectForecastPush_(projectForecastQueue_(c,a.id)[1],{time:due,count:1,index:next,completionValid:group.completionValid});
     }
     if (budget.tracking) {
-      c.lastAllocation = budget.sends;
       if (c.trackRemaining > 0 && group.completionValid && --c.trackRemaining === 0) {
         c.completion.state = 'estimated'; c.completion.reason = budget.deferredToday ? 'from_tomorrow' : null;
         c.completion.estimatedDate = new Date(event.time + 10800000).toISOString().slice(0,10);

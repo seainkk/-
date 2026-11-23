@@ -46,7 +46,8 @@ function fixture(){
         const offset=Number(path.match(/offset=(\d+)/)[1]),total=environment.totals[id];
         return {value:{offset,total,limit:200,items:Array.from({length:Math.min(200,total-offset)},(_,i)=>({
           id:i+offset+1,campaign_id:id,verification_status:'valid',stop_sending:false,status:'Sent',chosen_sender:1,
-          amount_sequences_sent:1,id_previous_sending_sequence:1,date_last_sequence_send:environment.lastSentAt,email:'private@example.test'
+          amount_sequences_sent:1,id_previous_sending_sequence:1,date_last_sequence_send:environment.lastSentAt,email:'private@example.test',
+          ...environment.lead?.(id,offset+i)
         }))}};
       });
       if (environment.afterFetch) environment.afterFetch();
@@ -196,4 +197,31 @@ test('a new sequence observed before a lead-page failure permanently discards th
   const checkpoint=[...f.stored.values()][0];
   assert.equal(checkpoint.report[a],undefined);
   assert.equal(f.get({preview:true}).campaignCompletions[a],undefined);
+});
+
+test('118 to 159 of the same 354 messages keeps an explicitly historical ETA when a sender quota is missing',()=>{
+  const f=activeFixture();f.environment.totals[a]=177;
+  let delivered=118;
+  f.environment.lead=(id,i)=>id===a && i>=delivered ?
+    {status:'Not contacted',amount_sequences_sent:0,id_previous_sending_sequence:0,date_last_sequence_send:null}:{};
+  const old=expiredEstimate(f);
+  delivered=159;f.infra.accounts[0].dailyLimit=null;
+  const result=f.get(), row=result.campaignCompletions[a];
+  assert.equal(result.pending,false);assert.deepEqual([row.sent,row.total,row.percent],[159,354,45]);
+  assert.equal(row.state,'unknown');assert.equal(row.estimatedDate,null);assert.deepEqual(row.previousEstimate,old);
+  assert.deepEqual(f.get({preview:true}).campaignCompletions[a].previousEstimate,old);
+  const saved=[...f.stored.values()][0];saved.generatedAt=new Date(Date.now()-360000).toISOString();
+  f.infra.accounts[0].dailyLimit=0;
+  const stopped=f.get().campaignCompletions[a];assert.equal(stopped.reason,'no_capacity');assert.equal(stopped.previousEstimate,null);
+});
+
+test('replaced recipients with identical aggregate counts and changed sender assignments invalidate historical dates',()=>{
+  for(const change of ['roster','mapping']){
+    const f=activeFixture();expiredEstimate(f);f.infra.accounts[0].dailyLimit=null;
+    if(change==='roster')f.environment.lead=()=>({id:995});
+    if(change==='mapping')f.infra.accounts[0].capacity.campaignIds=[];
+    const row=f.get().campaignCompletions[a];
+    assert.equal(row.previousEstimate,null,change);
+    assert.equal(row.estimatedDate,null,change);
+  }
 });
