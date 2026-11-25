@@ -115,7 +115,7 @@ function coldyRecipientSheetPlan_(binding, kind, recipients, existing, known, la
       var oldStatus = cell('workflow'), workflow = String(oldStatus.value || '').trim().toLowerCase();
       if (item.suppressionOnly && existingOnly) {
         if (!cell('receipt').formula) put('receipt','Не отправляем · чёрный список Coldy; загрузка не подтверждена');
-        if (!oldStatus.formula && ['', 'новый', 'в рассылке'].indexOf(workflow) >= 0) put('workflow','фильтр');
+        if (!oldStatus.formula && (!workflow || contactMailingStatusIsNew_(workflow) || workflow === 'в рассылке')) put('workflow','фильтр');
         return;
       }
       var observed = Object.assign({}, item);
@@ -135,7 +135,7 @@ function coldyRecipientSheetPlan_(binding, kind, recipients, existing, known, la
       if (manualStop || existingOnly && item.blacklisted == null && cell('status').value === 'Не отправляем') facts.status = 'Не отправляем';
       var blocked = observed.bounced === true || facts.status === 'Не отправляем';
       var desired = blocked ? 'фильтр' : 'в рассылке';
-      if (!oldStatus.formula && (!workflow || workflow === 'новый' || blocked && workflow === 'в рассылке')) put('workflow', desired);
+      if (!oldStatus.formula && (!workflow || contactMailingStatusIsNew_(workflow) || blocked && workflow === 'в рассылке')) put('workflow', desired);
       else if (!existingOnly && blocked && !pvExcludedStatus_(workflow, true)) fail_('COLDY_SCHEMA', 'В строке ' + row + ' проверьте рабочий статус перед записью запрета на отправку.');
       if (!existingOnly && positions.owner >= 0 && !cell('owner').value && !cell('owner').formula) {
         var display = kind === 'companies' ? item.company : [item.firstName, item.lastName].filter(Boolean).join(' ');

@@ -35,8 +35,9 @@
     const pending=hasPending(),loading=current.loading||current.transition,error=current.error,readonly=current.book?.canEdit!==true||!!current.preview,status=$('rg-grid-status');
     status.dataset.state=error?(error.code==='GRID_CONFLICT'?'conflict':'error'):pending?'saving':loading?'loading':'saved';
     status.textContent=error?(error.code==='GRID_CONFLICT'?'Конфликт изменений':'Изменения не подтверждены'):pending?'Сохраняем…':current.preview?'Последние данные · сверяем с Google Таблицей…':loading?'Загружаем ячейки…':readonly?'Только просмотр':'Все изменения сохранены';
-    $('rg-grid-new-contacts').disabled=readonly||current.contactBusy||current.validationBusy||current.transition||!current.book||current.workspace?.canSync===false;
-    $('rg-grid-new-contacts').textContent=current.contactBusy?'Проверяем новые…':'Проверить новые контакты';
+    $('rg-grid-new-contacts').disabled=readonly||current.contactBusy||current.validationBusy||current.bulk?.preparing||current.transition||!current.book||current.workspace?.canSync===false;
+    $('rg-grid-new-contacts').textContent=current.contactBusy?'Распределяем…':'Распределить контакты';
+    $('rg-grid-bulk-open').disabled=readonly||current.contactBusy||current.validationBusy||current.bulk?.preparing||current.validationOpening||current.transition;
     $('rg-grid-contact-retry').disabled=current.contactBusy;
     $('rg-grid-readonly').hidden=!current.book||current.book.canEdit===true;
     $('rg-grid-error').hidden=!error;$('rg-grid-error-text').textContent=error?error.message+(current.dirty.size||dirtyEditor()?' Несохранённые значения остаются в редакторе.':' Перечитайте текущее состояние таблицы.'):'';$('rg-grid-discard').textContent=current.failed?.kind==='append'?'Проверить текущее состояние таблицы':'Отменить несохранённые правки и перечитать';
@@ -178,9 +179,9 @@
       // Sync has durably recorded unchecked rows for manual confirmation. Reusing that receipt
       // avoids a second full provider scan while the extraction button is busy.
       try{const queued=data?.validation;current.validation=queued&&typeof queued.configured==='boolean'&&typeof queued.enabled==='boolean'?queued:await rpc(current,'getValidationState',{id:current.id});if(!alive(current))return;current.validationMessage=null;if(current.validation.configured===false)completionMessage+=' Для API-проверки подключите Promouser в разделе «Валидация».';else if(current.validation.enabled===true&&current.validation.state==='pending')completionMessage+=' Предпросмотр и ручной запуск новых проверок — в разделе «Валидация».';if(current.validation.enabled===true&&validationPollDelay(current.validation,Date.now())!==null){$('rg-grid-validation').hidden=false;if(!current.providerSettings)$('rg-grid-provider-settings').open=false;$('rg-grid-provider-form').inert=!current.providerSettings;}renderValidation(current);scheduleValidationPoll(current);}catch(error){if(alive(current)){current.validationMessage=gridFailure(error).message;renderValidation(current);}}
-      if(!alive(current))return;contactProgress(current,'Контакты сохранены. Обновляем листы…');current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];await refreshBook(current);if(alive(current))await loadWindow(current.window.row,current.window.column);if(alive(current))contactProgress(current,completionMessage);
+      if(!alive(current))return;contactProgress(current,'Контакты сохранены. Обновляем листы…');current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];await refreshBook(current);if(alive(current))await loadWindow(current.window.row,current.window.column);if(alive(current))contactProgress(current,completionMessage);return true;
 
-    }catch(error){if(alive(current)){const failure=gridFailure(error);if(['CONTACT_SOURCE_CHANGED','CONTACT_SYNC_JOB_MISSING','SEGMENT_PREVIEW_CHANGED','SEGMENT_PREVIEW_EXPIRED','SEGMENT_JOB_MISSING','SEGMENT_JOB_EXPIRED'].includes(failure.code)){current.contactStep=null;current.workspace=null;}current.contactFailed=!!current.contactStep;contactProgress(current,failure.message+(current.contactFailed?' Продолжение использует тот же запрос и не создаёт повторную проверку.':' Нажмите «Проверить новые контакты», чтобы перечитать данные.'),true);}}
+    }catch(error){if(alive(current)){const failure=gridFailure(error);if(['CONTACT_SOURCE_CHANGED','CONTACT_SYNC_JOB_MISSING','SEGMENT_PREVIEW_CHANGED','SEGMENT_PREVIEW_EXPIRED','SEGMENT_JOB_MISSING','SEGMENT_JOB_EXPIRED'].includes(failure.code)){current.contactStep=null;current.workspace=null;}current.contactFailed=!!current.contactStep;contactProgress(current,failure.message+(current.contactFailed?' Продолжение использует тот же запрос и не создаёт повторную проверку.':' Нажмите «Распределить контакты», чтобы перечитать данные.'),true);}}
     finally{if(alive(current)){current.contactBusy=false;current.transition=false;notify(current);if(current.contactDirty&&!current.contactFailed)scheduleContactSync(current,(current.workspace?.sourceSheetIds||[])[0]);}}
   }
   function validationTime(value){if(typeof value==='number')return value<1e12?value*1000:value;const parsed=Date.parse(String(value||''));return Number.isFinite(parsed)?parsed:0;}
@@ -192,7 +193,9 @@
     $('rg-grid-service-settings').disabled=!!current.validationOpening||hasPending();$('rg-grid-provider-save').disabled=current.validationBusy||current.contactBusy;update();$('rg-grid-provider-balance').disabled=current.validationBusy||current.contactBusy||!current.providerSettings?.configured;renderColdyValidation(current);
   }
   async function openValidation(){
-    const current=session;if(!current||current.validationBusy||current.contactBusy)return;commitEditor();$('rg-grid-validation').hidden=false;renderValidation(current);if(current.validationOpening)return;current.validationOpening=true;const opening=++current.validationOpenEpoch,isOpening=()=>alive(current)&&opening===current.validationOpenEpoch&&!$('rg-grid-validation').hidden;$('rg-grid-provider-form').inert=true;
+    const current=session;if(!current||current.validationBusy||current.contactBusy||current.bulk?.preparing)return;
+    if(current.bulk?.items.some(item=>item.payload&&!item.done))return openBulkValidation();
+    current.bulk=null;commitEditor();$('rg-grid-validation').hidden=false;renderValidation(current);if(current.validationOpening)return;current.validationOpening=true;const opening=++current.validationOpenEpoch,isOpening=()=>alive(current)&&opening===current.validationOpenEpoch&&!$('rg-grid-validation').hidden;$('rg-grid-provider-form').inert=true;
     try{
       if(!current.openSettings)try{const settings=await rpc(current,'getPromouserSettings',{},isOpening);if(!isOpening())return;current.providerSettings=settings;$('rg-grid-provider-configured').textContent=settings.configured?'Ключ уже подключён. Новый ввод заменит его.':'API-ключ ещё не подключён.';$('rg-grid-provider-enabled').checked=settings.enabled===true;$('rg-grid-provider-limit').value=String(settings.autoPayLimitUsd||0);}catch(error){if(isOpening())$('rg-grid-provider-message').textContent=gridFailure(error).message;}finally{if(isOpening())$('rg-grid-provider-form').inert=false;}
       if(!isOpening())return;try{const validation=await rpc(current,'getValidationState',{id:current.id},isOpening);if(!isOpening())return;current.validation=validation;current.validationMessage=null;renderValidation(current);scheduleValidationPoll(current);}catch(error){if(isOpening()){current.validationMessage=gridFailure(error).message;renderValidation(current);}}
@@ -222,7 +225,11 @@
     validationCountList('rg-grid-coldy-counts',preview?.counts,[['Новые','new'],['Уже проверены','checked'],['Из кеша','cached'],['Уже проверяются','inProgress'],['Некорректные','invalid']]);$('rg-grid-coldy-counts').hidden=!preview;
     const sample=$('rg-grid-coldy-sample');sample.replaceChildren();for(const email of preview?.sample||[]){const li=document.createElement('li');li.textContent=String(email);sample.append(li);}
     const list=$('rg-grid-coldy-jobs');list.replaceChildren();for(const job of data?.jobs||[]){const box=document.createElement('div');box.className='rg-grid-validation-job';const title=document.createElement('strong');title.textContent='Email · '+String(job.state||'Проверка');const info=document.createElement('span');info.textContent='Контактов: '+(Array.isArray(job.contacts)?job.contacts.length:String(job.contacts??'—'))+' · Зарезервировано кредитов: '+String(job.reservedCredits??'—')+' · Списано: '+String(job.chargedCredits??'—');box.append(title,info);if(job.progress!==undefined){const progress=document.createElement('span');progress.textContent=typeof job.progress==='object'?String(job.progress?.label||JSON.stringify(job.progress)):String(job.progress);box.append(progress);}list.append(box);}
-    $('rg-grid-pv-email-section').hidden=data?.preferred===true;
+    $('rg-grid-pv-email-section').hidden=!!current.bulk||data?.preferred===true;
+    $('rg-grid-coldy-section').hidden=!!current.bulk;$('rg-grid-phone-section').hidden=!!current.bulk;
+    $('rg-grid-validation-intro').hidden=!!current.bulk;
+    $('rg-grid-order-history').hidden=!!current.bulk;
+    renderBulkValidation(current);
     $('rg-grid-pv-email-preview').disabled=readonly||busy||!!current.pvEmailStep||data?.preferred===true;$('rg-grid-pv-email-start').disabled=readonly||busy||current.pvEmailPreview?.canStart!==true||!!current.pvEmailStep||data?.preferred===true;$('rg-grid-pv-email-retry').hidden=!current.pvEmailFailed;$('rg-grid-pv-email-retry').disabled=readonly||busy;
     $('rg-grid-pv-email-message').textContent=current.pvEmailMessage||(current.pvEmailPreview?(current.pvEmailPreview.canStart?'Предпросмотр готов. Можно запустить проверку.':'Новых адресов для проверки нет.'):'Новые email отправляются только после ручного запуска.');
     validationCountList('rg-grid-pv-email-counts',current.pvEmailPreview?.counts,[['Новые','new'],['Уже проверены','checked'],['Из кеша','cached'],['Уже проверяются','inProgress'],['Некорректные','invalid']]);$('rg-grid-pv-email-counts').hidden=!current.pvEmailPreview;
@@ -276,6 +283,130 @@
     const current=session;if(!current||current.book?.canEdit!==true||current.validationBusy||current.contactBusy||current.validationOpening)return;if(!retry){if(!current.phonePreview?.canStart)return;current.phoneStep={id:current.id,previewToken:current.phonePreview.previewToken,requestId:requestId()};}if(!current.phoneStep)return;current.validationBusy=true;current.phoneFailed=false;current.phoneMessage='Запускаем подтверждённую проверку телефонов…';renderValidation(current);
     try{await flush(current);const data=await rpc(current,'startPhoneValidation',current.phoneStep);if(alive(current)){current.validation=data;current.phonePreview=null;current.phoneStep=null;current.phoneMessage='Запуск подтверждён. Стоимость и ход заказов — ниже.';current.validationMessage=null;}}
     catch(error){if(alive(current)){const problem=gridFailure(error);current.phoneMessage=problem.message;current.phoneFailed=true;if(problem.code==='PV_PREVIEW_STALE'){current.phonePreview=null;current.phoneStep=null;current.phoneFailed=false;}}}finally{if(alive(current)){current.validationBusy=false;renderValidation(current);scheduleValidationPoll(current);}}
+  }
+  function renderBulkValidation(current){
+    const batch=current.bulk,box=$('rg-grid-bulk');
+    box.hidden=!batch;
+    const counts=$('rg-grid-bulk-counts');counts.replaceChildren();
+    if(!batch)return;
+    const pending=batch.items.filter(item=>item.payload&&!item.done);
+    const ready=batch.items.filter(item=>!item.done&&!item.stale&&item.preview?.canStart);
+    const locked=batch.preparing||current.validationBusy||current.contactBusy;
+    for(const item of batch.items){
+      const group=document.createElement('div'),label=document.createElement('dt'),value=document.createElement('dd');
+      label.textContent=item.label;
+      const count=item.preview?.plannedCount??item.preview?.counts?.new;
+      value.textContent=Number.isSafeInteger(count)?String(count):'—';
+      if(item.done)value.textContent+=' · запуск подтверждён';
+      else if(item.error)value.textContent+=' · '+item.error;
+      else if(item.preview&&!item.preview.canStart&&count>0)value.textContent+=' · проверьте подключение в настройках';
+      group.append(label,value);counts.append(group);
+    }
+    $('rg-grid-bulk-message').textContent=batch.message||(!ready.length&&!pending.length?'Новых контактов, доступных для запуска, нет.':'');
+    const coldy=ready.some(item=>item.kind==='coldy');
+    const promo=ready.filter(item=>item.kind!=='coldy');
+    const limits=[...new Set(promo.map(item=>item.preview.autoPayLimitUsd??current.validation?.autoPayLimitUsd))];
+    const pricing=[];
+    for(const limit of limits)pricing.push(limit===0?'Promouser покажет стоимость заказа для подтверждения оплаты.':
+      Number.isFinite(limit)?'Promouser автоматически оплачивает каждый заказ до '+limit+' USD. Заказы дороже требуют подтверждения.':
+      'Оплата заказов Promouser зависит от установленного лимита в настройках.');
+    if(coldy)pricing.push('Точный расход кредитов Coldy станет известен после запуска.');
+    $('rg-grid-bulk-cost').textContent=pricing.join(' ');
+    $('rg-grid-bulk-credit-label').hidden=!coldy||!!pending.length;
+    $('rg-grid-bulk-credit').disabled=locked||!coldy||!!pending.length;
+    const start=$('rg-grid-bulk-start');
+    start.textContent=pending.length?'Продолжить тот же запуск':'Запустить валидацию';
+    start.hidden=!batch.preparing&&!pending.length&&!ready.length;
+    start.disabled=locked||batch.previewError||(!pending.length&&(!ready.length||coldy&&!$('rg-grid-bulk-credit').checked));
+    $('rg-grid-bulk-refresh').hidden=locked||!!pending.length;
+  }
+  async function openBulkValidation(){
+    const current=session;
+    if(!alive(current)||current.book?.canEdit!==true||current.contactBusy||current.validationBusy||current.validationOpening||current.transition||current.bulk?.preparing)return;
+    $('rg-grid-validation').hidden=false;
+    if(current.bulk?.items.some(item=>item.payload&&!item.done)){renderValidation(current);return;}
+    if([current.coldyStep,current.pvEmailStep,current.phoneStep].some(Boolean)){await openValidation();return;}
+    const batch={items:[],preparing:true,message:'Готовим список новых контактов…'};
+    current.bulk=batch;current.lastValidationPreview=null;
+    const opening=++current.validationOpenEpoch;
+    const visible=()=>alive(current)&&current.bulk===batch&&current.validationOpenEpoch===opening&&!$('rg-grid-validation').hidden;
+    $('rg-grid-bulk-credit').checked=false;renderValidation(current);$('rg-grid-validation-close').focus({preventScroll:true});
+    try{
+      await flush(current);
+      const workspace=await rpc(current,'getContactWorkspace',{id:current.id,prepareNewContactStatuses:true},visible);
+      if(!workspace||!visible())return;
+      current.workspace=workspace;current.workspaceLoaded=true;
+      if(workspace.enrolled===false||workspace.targets?.emailSheetId==null||workspace.targets?.phoneSheetId==null||current.contactDirty){
+        batch.message='Распределяем контакты по вкладкам…';renderBulkValidation(current);
+        if(!await runContactSync())throw new Error(current.contactMessage||'Не удалось подготовить контактные вкладки.');
+        if(!visible())return;
+      }
+      current.validationBusy=true;
+      batch.message='Считаем Email и телефоны…';renderValidation(current);
+      const coldy=await rpc(current,'getColdyValidationState',{id:current.id},visible);
+      if(!visible())return;
+      if(typeof coldy?.preferred!=='boolean')throw new Error('Не удалось определить сервис проверки Email. Обновите список.');
+      current.coldyValidation=coldy;
+      batch.items=[
+        coldy.preferred?{label:'Email · Coldy',kind:'coldy',previewMethod:'previewColdyValidation',startMethod:'startColdyValidation'}:
+          {label:'Email · Promouser',kind:'email',previewMethod:'previewPromouserValidation',startMethod:'startPromouserValidation'},
+        {label:'Телефоны · Promouser',kind:'phone',previewMethod:'previewPhoneValidation',startMethod:'startPhoneValidation'}
+      ];
+      for(const item of batch.items){
+        const payload={id:current.id,newContactsOnly:true};
+        if(item.kind==='email')payload.kind='email';
+        item.preview=await rpc(current,item.previewMethod,payload,visible);
+        if(!visible())return;
+        renderBulkValidation(current);
+      }
+      batch.message='';
+    }catch(error){if(visible()){batch.previewError=true;batch.message=gridFailure(error).message;}}
+    finally{if(alive(current)){
+      batch.preparing=false;current.validationBusy=false;renderValidation(current);
+      scheduleValidationPoll(current);scheduleColdyValidationPoll(current);
+    }}
+  }
+  async function startBulkValidation(){
+    const current=session,batch=current?.bulk;
+    if(!batch||batch.preparing||batch.previewError||current.book?.canEdit!==true||current.validationBusy||current.contactBusy||current.transition||!validationVisible(current))return;
+    const pending=batch.items.filter(item=>item.payload&&!item.done);
+    if(!pending.length){
+      const eligible=batch.items.filter(item=>item.preview?.canStart&&!item.done&&!item.stale);
+      if(!eligible.length||eligible.some(item=>item.kind==='coldy')&&!$('rg-grid-bulk-credit').checked)return;
+      for(const item of eligible){
+        item.payload={id:current.id,previewToken:item.preview.previewToken,requestId:requestId()};
+        if(item.kind==='email')item.payload.kind='email';
+        if(item.kind==='coldy')item.payload.acceptValidationCredits=true;
+        pending.push(item);
+      }
+    }
+    const opening=current.validationOpenEpoch;
+    const visible=()=>alive(current)&&current.bulk===batch&&current.validationOpenEpoch===opening&&validationVisible(current);
+    current.validationBusy=true;batch.message='Запускаем подтверждённые проверки…';
+    $('rg-grid-bulk-credit').checked=false;renderValidation(current);
+    try{
+      await flush(current);
+      for(const item of pending){
+        if(!visible())break;
+        try{
+          const result=await rpc(current,item.startMethod,item.payload,visible);
+          if(!alive(current)||!result)break;
+          if(item.kind==='coldy')current.coldyValidation=result;else current.validation=result;
+          item.done=true;item.error='';current.validationMessage=null;
+        }catch(error){
+          const problem=gridFailure(error);item.error=problem.message;
+          if(['PV_PREVIEW_STALE','PV_PROVIDER_CHANGED','COLDY_PREVIEW_CHANGED','COLDY_PREVIEW_EXPIRED','COLDY_NOTHING_NEW','COLDY_PROVIDER_CHANGED'].includes(problem.code)){
+            item.payload=null;item.stale=true;
+          }
+          break;
+        }
+      }
+      if(alive(current))batch.message=batch.items.some(item=>item.payload&&!item.done)?'Можно продолжить неподтверждённую часть тем же запросом.':
+        batch.items.some(item=>item.stale)?'Список изменился. Обновите предпросмотр.':'Запуск подтверждён. Ход проверок доступен в разделе «Валидация».';
+    }catch(error){if(alive(current))batch.message=gridFailure(error).message;}
+    finally{if(alive(current)){
+      current.validationBusy=false;renderValidation(current);scheduleValidationPoll(current);scheduleColdyValidationPoll(current);
+    }}
   }
   function selectedCell(){return document.getElementById('rg-cell-'+session?.active.row+'-'+session?.active.column);}
   function revealActive(){const cell=selectedCell(),view=$('rg-grid-viewport');if(!cell)return;const a=cell.getBoundingClientRect(),b=view.getBoundingClientRect();if(a.top<b.top+ROW_HEIGHT)view.scrollTop-=b.top+ROW_HEIGHT-a.top;else if(a.bottom>b.bottom)view.scrollTop+=a.bottom-b.bottom;if(a.left<b.left+ROW_GUTTER)view.scrollLeft-=b.left+ROW_GUTTER-a.left;else if(a.right>b.right)view.scrollLeft+=a.right-b.right;}
@@ -371,7 +502,8 @@
         current[kind+'Preview']=null;current[kind+'Message']=null;current.lastValidationPreview=null;
         $('rg-grid-coldy-credit-consent').checked=false;renderValidation(current);return;
       }
-      $('rg-grid-validation-close').click();$('rg-grid-validation-open').focus();return;
+      const opener=current.bulk?'rg-grid-bulk-open':'rg-grid-validation-open';
+      $('rg-grid-validation-close').click();$(opener).focus();return;
     }
     close();
   }
@@ -381,6 +513,8 @@
     const current={epoch:++generation,id:String(options.id),transport:options.transport,onClose:options.onClose,bodyOverflow:document.body.style.overflow,returnFocus:document.activeElement,book:null,sheetId:null,cache:new Map(),committed:new Map(),dirty:new Map(),queue:[],failed:null,inFlight:null,error:null,waiters:[],rpcTail:Promise.resolve(),active:{row:1,column:1},selection:{r1:1,c1:1,r2:1,c2:1},window:{row:1,column:1},loadSequence:0,editSequence:0,undo:[],redo:[],loading:true,transition:false,formulaFocused:false,formulaDirty:false,workspace:null,workspaceLoaded:false,contactBusy:false,contactFailed:false,contactDirty:false,contactStep:null,contactTimer:null,validation:null,validationTimer:null,validationBusy:false,validationOpenEpoch:0,payRequests:new Map(),coldyValidation:null,coldyValidationTimer:null,coldyPreview:null,coldyStep:null,coldyFailed:false,phonePreview:null,phoneStep:null,phoneFailed:false,pvEmailPreview:null,pvEmailStep:null,pvEmailFailed:false};session=current;panel.hidden=false;document.body.style.overflow='hidden';$('rg-grid-title').textContent='Открываем таблицу…';$('rg-grid-editor').hidden=true;hint('Двойной щелчок или F2 — изменить ячейку. Enter — подтвердить, Esc — отменить ввод.');notify(current);
     current.liveCheckedAt=Date.now();current.sheetPreviews=new Map();current.sheetChange=0;current.switchingSheet=false;current.preview=null;
     current.openSettings=options.openSettings;
+    $('rg-grid-bulk-counts').replaceChildren();$('rg-grid-bulk-message').textContent='';$('rg-grid-bulk-cost').textContent='';
+    $('rg-grid-bulk').hidden=true;$('rg-grid-bulk-credit').checked=false;
     $('rg-grid-provider-settings').hidden=!!current.openSettings;
     $('rg-grid-service-settings').hidden=!current.openSettings;
     current.onScopeError=options.onScopeError;
@@ -390,7 +524,8 @@
       if(alive(current)&&data?.initialRange&&String(data.initialRange.sheetId)===String(current.sheetId)){
         mergeRange(current,data.initialRange);current.loading=false;draw();$('rg-grid-viewport').focus({preventScroll:true});
       }else if(alive(current))await loadWindow(1,1,{focus:true});
-      if(alive(current)&&data?.canEdit===true&&data.needsMailingStatus===true)prepareGridMailingStatus(current);
+      if(alive(current)&&data?.canEdit===true&&data.needsMailingStatus===true&&options.validateNew!==true)prepareGridMailingStatus(current);
+      if(alive(current)&&data?.canEdit===true&&options.validateNew===true)await openBulkValidation();
       return alive(current);
     }catch(error){if(alive(current)){current.loading=false;setError(error,current);}return false;}
   }
@@ -406,7 +541,7 @@
         $('rg-grid-coldy-credit-consent').checked=false;
         const opening=current.validationOpenEpoch;
         void Promise.resolve(pendingWrite).then(()=>{
-          if(validationVisible(current)&&current.validationOpenEpoch===opening&&!hasPending())return openValidation();
+          if(validationVisible(current)&&current.validationOpenEpoch===opening&&!hasPending())return current.bulk?openBulkValidation():openValidation();
         }).finally(()=>{
           if(validationVisible(current)&&document.activeElement===document.body)$('rg-grid-service-settings').focus();
         });
@@ -415,6 +550,10 @@
     if(current.openSettings(resume)){current.settingsShown=true;scheduleValidationPoll(current);scheduleColdyValidationPoll(current);}
   });
   document.addEventListener('visibilitychange',()=>{if(session){scheduleValidationPoll(session);scheduleColdyValidationPoll(session);}});
+  $('rg-grid-bulk-open').addEventListener('click',openBulkValidation);
+  $('rg-grid-bulk-refresh').addEventListener('click',openBulkValidation);
+  $('rg-grid-bulk-credit').addEventListener('change',()=>{if(session)renderBulkValidation(session);});
+  $('rg-grid-bulk-start').addEventListener('click',startBulkValidation);
   for(const [id,kind] of [['rg-grid-pv-email-preview','pvEmail'],['rg-grid-phone-preview','phone'],['rg-grid-coldy-preview','coldy']]){
     $(id).addEventListener('click',()=>{if(session)session.lastValidationPreview=kind;});
   }

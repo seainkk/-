@@ -8,13 +8,16 @@ var COLDY_VALIDATION = Object.freeze({
 
 function previewColdyValidation_(request) {
   return api_(function () {
-    var input = cvInput_(request, ['id']), scope = gridFile_(id_(input.id), true);
+    var input = cvInput_(request, ['id','newContactsOnly']), scope = gridFile_(id_(input.id), true);
+    var onlyNew = pvNewOnlyOption_(input.newContactsOnly);
     return locked_(function () {
       var fresh = gridFile_(input.id, true, scope.context.rootId), state = cvState_(fresh.context, input.id, true);
-      var scan = cvScan_(fresh.context, state, false), settings = coldySettings_(fresh.context);
-      state.preview = { token: pvUuid_(), fingerprint: cvFingerprint_(state, scan, settings), credentialHash: settings.credentialHash || '', expiresAt: Date.now() + COLDY_VALIDATION.previewMillis };
+      var settings = coldySettings_(fresh.context);
+      if (onlyNew && !cvPreferred_(fresh.context,settings)) fail_('COLDY_PROVIDER_CHANGED','Для новых email выбран другой валидатор. Обновите предпросмотр.');
+      var scan = cvScan_(fresh.context, state, false, onlyNew);
+      state.preview = { token: pvUuid_(), newContactsOnly:onlyNew, fingerprint: cvFingerprint_(state, scan, settings), credentialHash: settings.credentialHash || '', expiresAt: Date.now() + COLDY_VALIDATION.previewMillis };
       cvSave_(fresh.context, state);
-      return { id: input.id, previewToken: state.preview.token, counts: scan.counts, sample: scan.contacts.slice(0, 10).map(function (c) { return c.value; }), canStart: !!settings.configured && scan.contacts.length > 0, warnings: [COLDY_VALIDATION.creditWarning] };
+      return { id: input.id, previewToken: state.preview.token, counts: scan.counts, sample: scan.contacts.slice(0, 10).map(function (c) { return c.value; }), plannedCount:scan.contacts.length, canStart: !!settings.configured && scan.contacts.length > 0, warnings: [COLDY_VALIDATION.creditWarning] };
     });
   });
 }
@@ -34,10 +37,11 @@ function startColdyValidation_(request) {
       if (!settings.configured) fail_('COLDY_KEY_REQUIRED', 'Сначала подключите API-ключ Coldy.');
       var preview = state.preview;
       if (!preview || preview.token !== input.previewToken || preview.expiresAt <= Date.now()) fail_('COLDY_PREVIEW_EXPIRED', 'Обновите предпросмотр новых email перед проверкой.');
-      var scan = cvScan_(fresh.context, state, true);
+      if (preview.newContactsOnly && !cvPreferred_(fresh.context,settings)) fail_('COLDY_PROVIDER_CHANGED','Для новых email выбран другой валидатор. Обновите предпросмотр.');
+      var scan = cvScan_(fresh.context, state, true, preview.newContactsOnly);
       if (preview.fingerprint !== cvFingerprint_(state, scan, settings)) fail_('COLDY_PREVIEW_CHANGED', 'Новые контакты или настройки изменились. Обновите предпросмотр.');
       if (!scan.contacts.length) fail_('COLDY_NOTHING_NEW', 'Новых email для платной проверки нет.');
-      cvAddJobs_(state, scan.contacts, settings, input.requestId, 'manual');
+      cvAddJobs_(state, scan.contacts, settings, input.requestId, 'manual',preview.newContactsOnly);
       state.requests.push({ requestId: input.requestId, previewToken: input.previewToken, at: pvNow_() });
       state.requests = state.requests.slice(-200); delete state.preview;
       cvLocal_(fresh.context, state, scan); cvSave_(fresh.context, state);
@@ -124,7 +128,7 @@ function cvRows_(context, state, ensure) {
 }
 
 /** All callers hold the same script lock as Promouser when reading/reserving the shared cache. */
-function cvScan_(context, state, ensure) {
+function cvScan_(context, state, ensure, onlyNew) {
   var rows = cvRows_(context, state, ensure), cache = pvCache_(context, true), map = pvCacheRead_(cache), completed = Object.create(null), jobs = Object.create(null), seen = Object.create(null);
   state.jobs.forEach(function (job) { if (job.state !== 'cancelled') job.contacts.forEach(function (c) { jobs[c.key] = job; }); });
   rows.forEach(function (row) {
@@ -135,6 +139,7 @@ function cvScan_(context, state, ensure) {
       if (result) { result.validator = cvCell_(row, 'Валидатор') || result.validator || (result.orderId ? 'promouser' : ''); result.verificationBatchId = cvCell_(row, 'Проверка Coldy'); pvCachePut_(context, cache, map, row.key, 'email', result); }
     }
   });
+  if (onlyNew) rows = pvNewContactRows_(rows,'email');
   var counts = { new: 0, checked: 0, cached: 0, inProgress: 0, invalid: 0 }, contacts = [];
   rows.forEach(function (row) {
     if (row.invalid) { counts.invalid++; return; }
@@ -153,12 +158,12 @@ function cvScan_(context, state, ensure) {
 function cvFingerprint_(state, scan, settings) { return digest_(JSON.stringify([state.rootId, state.fileId, state.targets, settings.credentialHash || '', scan.contacts.map(function (c) { return c.key; })])); }
 function cvCell_(row, header) { var col = row.map[pvHeader_(header)]; return col === undefined ? '' : String(row.values[col] || ''); }
 
-function cvAddJobs_(state, contacts, settings, requestId, consent) {
+function cvAddJobs_(state, contacts, settings, requestId, consent, onlyNew) {
   for (var i = 0; i < contacts.length; i += COLDY_VALIDATION.batchSize) {
     var part = contacts.slice(i, i + COLDY_VALIDATION.batchSize), jobId = 'cv-' + digest_(JSON.stringify([state.rootId, state.fileId, settings.credentialHash, requestId, part.map(function (c) { return c.key; })]));
     if (state.jobs.some(function (j) { return j.jobId === jobId; })) continue;
     if (state.jobs.length >= COLDY_VALIDATION.maxJobs) fail_('COLDY_VALIDATION_LIMIT', 'Журнал проверки заполнен. Сначала завершите существующие задания.');
-    state.jobs.push({ jobId: jobId, contacts: part, credentialHash: settings.credentialHash, idempotencyKey: 'registry-email-' + digest_(JSON.stringify([state.rootId, state.fileId, jobId, settings.credentialHash, part.map(function (c) { return c.value; })])), consent: consent, state: 'queued', createdAt: pvNow_(), batchId: '', attempts: 0, nextActionAt: 0, reservedCredits: null, chargedCredits: null, progress: 0 });
+    state.jobs.push({ jobId: jobId, contacts: part, newContactsOnly:onlyNew === true, credentialHash: settings.credentialHash, idempotencyKey: 'registry-email-' + digest_(JSON.stringify([state.rootId, state.fileId, jobId, settings.credentialHash, part.map(function (c) { return c.value; })])), consent: consent, state: 'queued', createdAt: pvNow_(), batchId: '', attempts: 0, nextActionAt: 0, reservedCredits: null, chargedCredits: null, progress: 0 });
   }
 }
 
@@ -244,10 +249,10 @@ function cvAdvance_(context, fileId) {
     if (job.credentialHash !== settings.credentialHash) { job.state = 'credential_changed'; cvSave_(fresh.context, state); return { state: state }; }
     var action = job.batchId ? job.state === 'results_pending' ? 'results' : 'status' : 'create';
     if (action === 'create') {
-      var live = Object.create(null); scan.rows.forEach(function (r) { if (r.value && (!r.completed || r.changed)) live[r.key] = true; });
       var checked = job.contacts.filter(function (c) { return scan.cacheMap[c.key] && scan.cacheMap[c.key].result; });
       if (!job.dispatched && checked.length === job.contacts.length) { job.state = 'complete_shared'; job.resultCount = job.contacts.length; cvSave_(fresh.context, state); return { state: state }; }
-      if (checked.length || job.contacts.some(function (c) { return !live[c.key]; })) {
+      if (checked.length || job.newContactsOnly && !cvPreferred_(fresh.context,settings) ||
+          !pvContactsStillPresent_(scan.rows,job.contacts,job.newContactsOnly && 'email')) {
         job.state = job.dispatched ? 'needs_review' : 'cancelled';
         if (!job.dispatched) { pvCacheRelease_(scan.cache, scan.cacheMap, job.contacts, fileId, job.jobId); pvCacheFlush_(fresh.context, scan.cache); }
         cvSave_(fresh.context, state); return { state: state };
@@ -275,7 +280,13 @@ function cvAdvance_(context, fileId) {
     delete state.lease;
     var currentSettings = coldySettings_(fresh.context);
     if (!currentSettings.configured || currentSettings.credentialHash !== job.credentialHash) { job.state = 'credential_changed'; cvSave_(fresh.context, state); return cvPublic_(fresh.context, state); }
-    if (failure) cvFailure_(job, claim.action, failure);
+    if (claim.action === 'create' && job.newContactsOnly && job.attempts === 1 && failure &&
+        ['COLDY_CONTACT_CHANGED','COLDY_PROVIDER_CHANGED'].indexOf(failure.registryCode) >= 0) {
+      // The first pre-dispatch guard rejected this order before the provider received the POST.
+      var cache = pvCache_(fresh.context,true), map = pvCacheRead_(cache);
+      pvCacheRelease_(cache,map,job.contacts,fileId,job.jobId); pvCacheFlush_(fresh.context,cache);
+      job.state = 'cancelled'; job.lastError = failure.registryCode;
+    } else if (failure) cvFailure_(job, claim.action, failure);
     else {
       try { cvAccept_(fresh.context, state, job, claim.action, response); }
       catch (error) { if (error && error.registryCode === 'COLDY_VALIDATION_RESPONSE') cvFailure_(job, claim.action, error); else throw error; }
@@ -293,9 +304,10 @@ function cvGuardDispatch_(context, fileId, claim) {
   var job = state.jobs.filter(function (j) { return j.jobId === claim.job.jobId; })[0];
   if (!job || !job.dispatch || job.dispatch.token !== claim.token) fail_('COLDY_VALIDATION_LEASE', 'Шаг проверки изменился.');
   if (claim.action === 'create') {
-    var rows = cvRows_(fresh.context, state, false), live = Object.create(null);
-    rows.forEach(function (r) { if (r.value && (!r.completed || r.changed)) live[r.key] = true; });
-    if (job.contacts.some(function (c) { return !live[c.key]; })) fail_('COLDY_CONTACT_CHANGED', 'Контакты изменились перед отправкой. Обновите предпросмотр.');
+    if (job.newContactsOnly && !cvPreferred_(fresh.context,coldySettings_(fresh.context)))
+      fail_('COLDY_PROVIDER_CHANGED','Для новых email выбран другой валидатор.');
+    var rows = cvRows_(fresh.context, state, false);
+    if (!pvContactsStillPresent_(rows,job.contacts,job.newContactsOnly && 'email')) fail_('COLDY_CONTACT_CHANGED', 'Контакты изменились перед отправкой. Обновите предпросмотр.');
   }
 }
 
@@ -337,7 +349,7 @@ function cvResults_(context, state, job, response) {
 
 function cvFailure_(job, action, error) {
   var code = error && error.registryCode || 'COLDY_NETWORK'; job.lastError = code; job.failures = (job.failures || 0) + 1;
-  var terminal = ['COLDY_CREDENTIAL_CHANGED', 'COLDY_KEY_REQUIRED', 'COLDY_AUTH', 'COLDY_FORBIDDEN', 'COLDY_NOT_FOUND', 'COLDY_PROVIDER', 'INVALID_REQUEST', 'COLDY_CONTACT_CHANGED', 'COLDY_VALIDATION_LEASE'].indexOf(code) !== -1 || action === 'create' && code === 'COLDY_CONFLICT';
+  var terminal = ['COLDY_CREDENTIAL_CHANGED', 'COLDY_KEY_REQUIRED', 'COLDY_AUTH', 'COLDY_FORBIDDEN', 'COLDY_NOT_FOUND', 'COLDY_PROVIDER', 'INVALID_REQUEST', 'COLDY_CONTACT_CHANGED', 'COLDY_PROVIDER_CHANGED', 'COLDY_VALIDATION_LEASE'].indexOf(code) !== -1 || action === 'create' && code === 'COLDY_CONFLICT';
   job.state = code === 'COLDY_CREDENTIAL_CHANGED' || code === 'COLDY_KEY_REQUIRED' ? 'credential_changed' : terminal || job.failures >= COLDY_VALIDATION.maxAttempts ? 'needs_review' : action === 'create' ? 'creation_uncertain' : job.dispatch.previous;
   var retry = Number(error && error.retryAfterMs); if (!Number.isFinite(retry) || retry < 0) retry = 0;
   job.nextActionAt = Date.now() + Math.max(COLDY_VALIDATION.pollMillis * Math.min(8, Math.pow(2, job.failures - 1)), Math.min(retry, 24 * 60 * 60 * 1000));

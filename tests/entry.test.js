@@ -68,7 +68,7 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
     }
     return node;
   }
-  const ids = Object.fromEntries(['entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host','entry-preview','entry-preview-list','entry-preview-time'].map(id => [id, element()]));
+  const ids = Object.fromEntries(['entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host','entry-preview','entry-preview-list','entry-preview-time','entry-validation-access','entry-private-link'].map(id => [id, element()]));
   const body = element('body');
   const document = {
     body, getElementById: id => ids[id],
@@ -103,6 +103,32 @@ test('missing, malformed and query-only credentials never create a Google iframe
   }
   const queryOnly = fixture({ path: '/-/?access_key=' + KEY, hash: '' });
   assert.equal(queryOnly.currentFrame(), undefined);
+});
+
+test('a worksheet opens only its preview after a valid private link and authenticated frame readiness', () => {
+  const f=fixture({path:'/-/?validate=workbook_123456',hash:''}), field=f.ids['entry-private-link'];
+  assert.equal(f.ids['entry-validation-access'].hidden,false);
+  const submit=f.ids['entry-validation-access'].listeners.get('submit');
+  field.value='https://another.example/-/#access_key='+KEY;submit({preventDefault(){}});
+  assert.equal(f.window.location.hash,'');assert.equal(f.currentFrame(),undefined);
+  field.value='https://seainkk.github.io/-/#access_key='+KEY;submit({preventDefault(){}});f.event('hashchange');
+  assert.equal(field.value,'');assert.ok(f.currentFrame());assert.equal(f.sent.length,0);
+  const calls=[],app=f.app();app.postMessage=(data,origin)=>calls.push({data,origin});
+  f.ready(app,'https://other.example'); f.ready({parent:f.window,postMessage:() => assert.fail('foreign window received a worksheet selection')});
+  assert.equal(calls.length,0);assert.equal(f.body.dataset.state,'loading');
+  f.ready(app);f.ready(app);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[{data:{type:'bases-registry-open-validation',id:'workbook_123456'},origin:GOOGLE_ORIGIN}]);
+});
+
+test('an invalid worksheet identifier leaves the service at its normal entry', () => {
+  for (const target of ['short', 'not%2Fa%2Fworkbook', 'x'.repeat(201)]) {
+    const path = '/-/?validate=' + target, locked = fixture({path, hash:''});
+    assert.equal(locked.ids['entry-validation-access'].hidden, true);
+    assert.equal(locked.currentFrame(), undefined);
+    const signed = fixture({path});
+    signed.ready();
+    assert.equal(signed.sent.some(message => message.type === 'bases-registry-open-validation'), false);
+  }
 });
 
 test('repeat entry decrypts only dated names for this link before Google responds, and revocation clears them', async () => {

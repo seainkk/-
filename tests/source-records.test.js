@@ -13,6 +13,12 @@ function fixture(rows, contacts = {}, options = {}) {
 const email = (...emails) => ({ emails });
 const phone = (...phones) => ({ phones });
 
+test('numbered and qualified name components combine in surname, given name, patronymic order',()=>{
+  const r=fixture([['Фамилия ЛПР 1','Имя ЛПР 1','Отчество ЛПР 1','Contact Given Name 2','Contact Family Name 2','Contact Middle Name 2'],
+    ['Смирнова','Анна','Викторовна','John','Smith','Henry']],{},{section:'lpr'});
+  assert.deepEqual(r.records[0].people.map(person=>person.name),['Смирнова Анна Викторовна','Smith John Henry']);
+});
+
 test('a sole named manager and generic position become one person with both source columns', () => {
   const r = fixture([['Компания', 'Руководитель (ФИО)', 'Должность', 'Почта основная'], ['Альфа', 'Иванов Иван Иванович', 'Генеральный директор', 'ivan@example.test']],
     { '2:4': email('ivan@example.test') }, { section: 'lpr' });

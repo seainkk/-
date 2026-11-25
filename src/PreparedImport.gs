@@ -8,7 +8,7 @@ var PREPARED_IMPORT = Object.freeze({
 
 function stagePreparedUpload_(form) {
   return api_(function () {
-    var context = authorize_(), input = importInput_(form, ['name', 'section', 'status', 'requestId', 'file', 'flow']);
+    var context = authorize_(), input = importInput_(form, ['name', 'section', 'routeMode', 'status', 'requestId', 'file', 'flow']);
     if (input.flow !== undefined && input.flow !== 'prepared') fail_('INVALID_REQUEST', 'Неизвестный способ подготовки.');
     var common = preparedCommon_(input), blob = input.file;
     if (!blob || typeof blob.getBytes !== 'function' || typeof blob.getName !== 'function' || typeof blob.setContentType !== 'function') fail_('INVALID_UPLOAD', 'Выберите файл базы.');
@@ -52,9 +52,12 @@ function stagePreparedUpload_(form) {
 
 function stagePreparedBaseLink_(request) {
   return api_(function () {
-    var context = authorize_(), input = importInput_(request, ['url', 'name', 'section', 'status', 'requestId']);
-    var common = preparedCommon_(input), link = importSheetLink_(input.url);
-    var original = preparedOriginal_(context, link);
+    var context = authorize_(), input = importInput_(request, ['url', 'name', 'section', 'routeMode', 'status', 'requestId']);
+    var link = importSheetLink_(input.url), original = preparedOriginal_(context, link);
+    var useOriginalName = input.routeMode === 'auto' && (input.name === undefined || input.name === '');
+    if (useOriginalName) input.name = String(original.name || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 100);
+    var common = preparedCommon_(input);
+    if (useOriginalName) common.useOriginalName = true;
     common.origin = { id: link.id, name: String(original.name).slice(0, 512) };
     common.kind = 'link'; common.original = link;
     common.sourceFingerprint = link.id + '|' + link.resourceKey;
@@ -123,7 +126,8 @@ function previewPreparedBase_(request) {
 function preparedDestination_(value, draft) {
   if (value === undefined || value === null) return null;
   var route = importInput_(value, ['kind', 'segmentId', 'name', 'category']);
-  if (draft.status !== 'ready' || route.kind !== draft.section || ['companies', 'lpr'].indexOf(route.kind) < 0) fail_('INVALID_REQUEST', 'Назначение должно соответствовать типу готовой базы.');
+  var expectedKind = draft.routeMode === 'auto' ? 'auto' : draft.section;
+  if (draft.status !== 'ready' || route.kind !== expectedKind || ['auto', 'companies', 'lpr'].indexOf(route.kind) < 0) fail_('INVALID_REQUEST', 'Назначение должно соответствовать типу готовой базы.');
   if (route.segmentId !== undefined) {
     if (typeof route.name !== 'string' || !route.name.trim()) fail_('INVALID_NAME', 'Укажите название выбранного сегмента.');
     return { segmentId: id_(route.segmentId), name: route.name.trim().slice(0, 200), kind: route.kind };
@@ -225,7 +229,12 @@ function preparedCommon_(input) {
   if (section !== 'companies' && section !== 'lpr') fail_('INVALID_CONTENTS', 'Выберите раздел «Компании» или «ЛПР».');
   if (SOURCE_BASES_SCHEMA.statuses.indexOf(input.status) === -1) fail_('INVALID_STATUS', 'Выберите статус базы.');
   preparedRequestId_(input.requestId);
-  return { name: itemName_(input.name), section: section, status: input.status, requestId: input.requestId };
+  var common = { name: itemName_(input.name), section: section, status: input.status, requestId: input.requestId };
+  if (input.routeMode !== undefined) {
+    if (input.routeMode !== 'auto' || input.status !== 'ready') fail_('INVALID_REQUEST', 'Автоматическое распределение доступно для готовой базы.');
+    common.routeMode = 'auto';
+  }
+  return common;
 }
 
 function preparedRequestId_(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(value)) fail_('INVALID_REQUEST', 'Отсутствует идентификатор запроса подготовки.'); return value; }
@@ -236,7 +245,9 @@ function preparedKey_(draftId) { return 'PREPARED_DRAFT_' + preparedDraftId_(dra
 
 function preparedAllocate_(context, common) {
   var draftId = digest_(sourceImportProjectKey_(context.rootId + '|' + context.email + '|prepared|' + common.kind + '|' + common.requestId)).slice(0, 36);
-  var fingerprint = digest_(JSON.stringify([context.rootId, common.kind, common.name, common.section, common.status, common.sourceFingerprint]));
+  var parameters = [context.rootId, common.kind, common.useOriginalName ? null : common.name, common.section, common.status, common.sourceFingerprint];
+  if (common.routeMode) parameters.push(common.routeMode);
+  var fingerprint = digest_(JSON.stringify(parameters));
   return locked_(function () {
     var current = authorize_();
     if (current.rootId !== context.rootId) fail_('SOURCE_CHANGED', 'Корневая папка изменилась. Повторите запрос.');
@@ -253,6 +264,7 @@ function preparedAllocate_(context, common) {
     }
     var draft = { version: 1, draftId: draftId, rootId: current.rootId, folderId: folder.getId(), fingerprint: fingerprint, kind: common.kind, original: common.original || null, name: common.name, section: common.section, status: common.status, state: 'staged', phase: '', stageFileId: '', stageAttempted: false, outputId: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + PREPARED_IMPORT.ttlMillis).toISOString() };
     draft.projectId = sourceImportProjectId_();
+    if (common.routeMode) draft.routeMode = common.routeMode;
     if (common.origin) draft.origin = common.origin;
     // A pruned completed receipt must never create a second result.
     var earlier = preparedFindArtifact_(current, draft, 'output');
@@ -395,6 +407,7 @@ function preparedStageResponse_(context, draft) {
   var file = preparedDraftFile_(context, draft), book = SpreadsheetApp.openById(file.id);
   var options = typeof preparedDataReadWorkbook_ === 'function' ? preparedWorkbookSourceOptions_(context, draft, book) : {};
   var sheets = book.getSheets().filter(function (sheet) { var id = sheet.getSheetId(); return (!options.sourceSheetIds || options.sourceSheetIds.indexOf(id) >= 0) && (options.managedSheetIds || []).indexOf(id) < 0; }).map(function (sheet) { return { id: sheet.getSheetId(), name: sheet.getName(), rows: sheet.getLastRow(), columns: sheet.getLastColumn() }; });
+  if (options.sheetRoutes) sheets.forEach(function (sheet) { sheet.section = options.sheetRoutes[sheet.id]; });
   if (!sheets.length) fail_('INVALID_SOURCE', 'В исходной книге нет листов.');
   var selection = typeof preparedWorkbookSelection_ === 'function' ? preparedWorkbookSelection_(book, options, draft.sourceSheetIds) : sheets.map(function (sheet) { return sheet.id; });
   var selectedSheetId = Number.isSafeInteger(draft.sheetId) && selection.indexOf(draft.sheetId) >= 0 ? draft.sheetId : selection[0];
@@ -630,6 +643,9 @@ function preparedPublish_(context, draft, plan, metadata) {
       draft.publishAttempted = true; preparedSave_(current, draft);
       var tags = preparedTags_(draft, 'output'); tags.registryPreparedVersion = String(plan.version); tags.registryPreparedSourceSheetId = String(draft.sheetId); tags.registryPreparedOriginalSheetId = String(draft.originalSheetId); tags.registryPreparedSection = draft.section;
       if (plan.version === 2) { tags.registryContactEmailSheetId = String(draft.emailSheetId); tags.registryContactPhoneSheetId = String(draft.phoneSheetId); }
+      if (draft.routeMode === 'auto') {
+        Object.assign(tags, preparedRouteTags_(plan.sources, draft.copiedSheetIds));
+      }
       try { Drive.Files.update({ appProperties: tags }, file.id, null, { addParents: preparation.binding.source.id, removeParents: draft.folderId, fields: PREPARED_IMPORT.fields, supportsAllDrives: true }); }
       catch (error) { var recovered = preparedOutput_(current, draft, true); if ((recovered.parents || []).indexOf(preparation.binding.source.id) === -1) fail_('CREATION_UNCERTAIN', 'Google не подтвердил публикацию. Продолжите тот же запрос.'); }
     }
@@ -637,7 +653,8 @@ function preparedPublish_(context, draft, plan, metadata) {
     var descriptor = { id: file.id, name: file.name, fileName: file.name, mimeType: file.mimeType, format: 'Google Таблицы', url: spreadsheetUrl_(file.id) };
     var options;
     if (!draft.metadataCommitted && record && record.revision === 1 && record.baseType === 'general' && record.status === 'collection' && record.formatCheck === 'unchecked') options = { expectedRevision: 1 };
-    registerImportedSourceBase_(current, preparation.storage, preparation.database, descriptor, [draft.section], draft.status, options);
+    var contents = draft.routeMode === 'auto' ? sourceBaseContents_(Array.from(new Set(plan.sources.map(function (source) { return source.source.section; })))) : [draft.section];
+    registerImportedSourceBase_(current, preparation.storage, preparation.database, descriptor, contents, draft.status, options);
     if (draft.origin) {
       var selected = plan.sources || (plan.source ? [plan.source] : []);
       var names = selected.map(function (entry) { return (entry.source || entry).name; }).filter(Boolean);

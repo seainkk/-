@@ -15,7 +15,8 @@
     <button id="rg-grid-add-rows" class="rg-grid-button" type="button">＋ 100 строк</button>
     <button id="rg-grid-add-columns" class="rg-grid-button" type="button">＋ Столбец</button>
     <span class="rg-grid-toolbar-divider" aria-hidden="true"></span>
-    <button id="rg-grid-new-contacts" class="rg-grid-button rg-grid-contact-button" type="button" disabled>Проверить новые контакты</button>
+    <button id="rg-grid-new-contacts" class="rg-grid-button" type="button" disabled>Распределить контакты</button>
+    <button id="rg-grid-bulk-open" class="rg-grid-button rg-grid-contact-button" type="button" disabled>Проверить новые контакты</button>
     <button id="rg-grid-validation-open" class="rg-grid-button" type="button">Валидация</button>
     <span id="rg-grid-readonly" class="rg-grid-readonly" hidden>Только просмотр</span>
   </div>
@@ -29,7 +30,15 @@
   <div id="rg-grid-contact-progress" class="rg-grid-contact-progress" role="status" aria-live="polite" hidden><span id="rg-grid-contact-message"></span><button id="rg-grid-contact-retry" class="rg-grid-button" type="button" hidden>Продолжить тот же запрос</button></div>
   <aside id="rg-grid-validation" class="rg-grid-validation" aria-labelledby="rg-grid-validation-title" hidden>
     <div class="rg-grid-validation-heading"><h2 id="rg-grid-validation-title">Проверка новых контактов</h2><button id="rg-grid-validation-close" class="rg-grid-button" type="button" aria-label="Скрыть валидацию">✕</button></div>
-    <p class="rg-grid-validation-note">Проверяются только контакты без результата. Уже проверенные email и телефоны, включая невалидные, остаются без изменений.</p>
+    <p class="rg-grid-validation-note" id="rg-grid-validation-intro">Проверяются только контакты без результата. Уже проверенные email и телефоны, включая невалидные, остаются без изменений.</p>
+    <section id="rg-grid-bulk" class="rg-grid-validation-section" hidden>
+      <p class="rg-grid-validation-note">В проверку входят Email и телефоны со статусом «Новый контакт» без завершённой валидации.</p>
+      <dl id="rg-grid-bulk-counts" class="rg-grid-validation-counts" aria-label="Контакты для валидации"></dl>
+      <p id="rg-grid-bulk-message" role="status" aria-live="polite"></p>
+      <p id="rg-grid-bulk-cost" class="rg-grid-validation-note"></p>
+      <label id="rg-grid-bulk-credit-label" class="rg-grid-provider-choice" hidden><input id="rg-grid-bulk-credit" type="checkbox">Разрешаю списать кредиты Coldy за показанные Email</label>
+      <div class="rg-grid-validation-actions"><button id="rg-grid-bulk-start" class="rg-grid-button" type="button" disabled>Запустить валидацию</button><button id="rg-grid-bulk-refresh" class="rg-grid-button" type="button" hidden>Обновить список</button></div>
+    </section>
     <section id="rg-grid-pv-email-section" class="rg-grid-validation-section" aria-labelledby="rg-grid-pv-email-title">
       <h3 id="rg-grid-pv-email-title">Email · Promouser</h3>
       <p class="rg-grid-validation-note">Этот вариант используется, когда в настройках выбран Promouser. Сначала покажем новые email; запуск и оплата — после вашего подтверждения.</p>
@@ -49,7 +58,7 @@
       <div class="rg-grid-validation-actions"><button id="rg-grid-coldy-start" class="rg-grid-button" type="button" disabled>Запустить проверку email</button><button id="rg-grid-coldy-refresh" class="rg-grid-button" type="button">Обновить статус Coldy</button><button id="rg-grid-coldy-retry" class="rg-grid-button" type="button" hidden>Продолжить тот же запрос</button></div>
       <div id="rg-grid-coldy-jobs"></div>
     </section>
-    <section class="rg-grid-validation-section" aria-labelledby="rg-grid-phone-title">
+    <section id="rg-grid-phone-section" class="rg-grid-validation-section" aria-labelledby="rg-grid-phone-title">
       <h3 id="rg-grid-phone-title">Телефоны / Telegram · Promouser</h3>
       <button id="rg-grid-phone-preview" class="rg-grid-button" type="button">Предпросмотр новых телефонов</button>
       <p id="rg-grid-phone-message" role="status" aria-live="polite"></p>
@@ -57,10 +66,12 @@
       <p class="rg-grid-validation-note">Запуск создаёт проверку показанных новых номеров. Заказы до установленного лимита Promouser оплачиваются автоматически; текущий согласованный лимит — 5 USD за заказ. Более дорогие заказы ждут подтверждения.</p>
       <div class="rg-grid-validation-actions"><button id="rg-grid-phone-start" class="rg-grid-button" type="button" disabled>Запустить проверку телефонов</button><button id="rg-grid-phone-retry" class="rg-grid-button" type="button" hidden>Продолжить тот же запрос</button></div>
     </section>
-    <h3>Заказы Promouser</h3>
-    <p id="rg-grid-validation-summary" role="status" aria-live="polite"></p>
-    <div id="rg-grid-validation-jobs"></div>
-    <p id="rg-grid-validation-warnings" class="rg-grid-validation-note"></p>
+    <div id="rg-grid-order-history">
+      <h3>Заказы Promouser</h3>
+      <p id="rg-grid-validation-summary" role="status" aria-live="polite"></p>
+      <div id="rg-grid-validation-jobs"></div>
+      <p id="rg-grid-validation-warnings" class="rg-grid-validation-note"></p>
+    </div>
     <button type="button" id="rg-grid-service-settings" class="rg-grid-button" aria-haspopup="dialog" hidden>Настройки сервиса</button>
     <details id="rg-grid-provider-settings"><summary>Подключение Promouser</summary>
       <p id="rg-grid-provider-configured" class="rg-grid-validation-note"></p>

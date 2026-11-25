@@ -56,15 +56,17 @@ function getValidationState_(request) {
 /** Local-only preview. No provider requests, contact edits or payment consent. */
 function previewPromouserValidation_(request) {
   return api_(function () {
-    var input = pvInput_(request, ['id', 'kind']), kind = pvValidationKind_(input.kind), scope = gridFile_(id_(input.id), true);
+    var input = pvInput_(request, ['id', 'kind','newContactsOnly']), kind = pvValidationKind_(input.kind), scope = gridFile_(id_(input.id), true);
+    var onlyNew = pvNewOnlyOption_(input.newContactsOnly);
     return locked_(function () {
       var fresh = gridFile_(input.id, true, scope.context.rootId), state = pvLedger_(fresh.context, input.id, true);
       pvUpdateTargets_(state, {});
-      var snapshot = pvPreviewSnapshot_(fresh.context, state, kind), token = pvUuid_();
-      var preview = { token: token, kind: kind, rootId: fresh.context.rootId, fileId: input.id, sourceHash: snapshot.sourceHash, keys: snapshot.keys, credentialHash: pvSettings_(fresh.context).key ? digest_(pvSettings_(fresh.context).key) : '', createdAt: Date.now(), expiresAt: Date.now() + PROMOUSER.previewMillis };
+      var snapshot = pvPreviewSnapshot_(fresh.context, state, kind, onlyNew), token = pvUuid_();
+      var settings = pvSettings_(fresh.context);
+      var preview = { token: token, kind: kind, newContactsOnly:onlyNew, rootId: fresh.context.rootId, fileId: input.id, sourceHash: snapshot.sourceHash, keys: snapshot.keys, credentialHash: settings.key ? digest_(settings.key) : '', autoPayLimitUsd:settings.autoPayLimitUsd, createdAt: Date.now(), expiresAt: Date.now() + PROMOUSER.previewMillis };
       state.validationPreviews = (state.validationPreviews || []).filter(function (item) { return item.expiresAt > Date.now(); }).slice(-9).concat([preview]);
       pvSave_(fresh.context, state);
-      return { previewToken: token, kind: kind, counts: snapshot.counts, sample: snapshot.sample, canStart: snapshot.canStart };
+      return { previewToken: token, kind: kind, counts: snapshot.counts, sample: snapshot.sample, plannedCount:snapshot.keys.length, autoPayLimitUsd:settings.autoPayLimitUsd, canStart: snapshot.canStart };
     });
   });
 }
@@ -73,26 +75,31 @@ function startPromouserValidation_(request) {
   return api_(function () {
     var input = pvInput_(request, ['id', 'kind', 'previewToken', 'requestId']), kind = pvValidationKind_(input.kind); pvRequestId_(input.requestId);
     var scope = gridFile_(id_(input.id), true);
-    var recovered = locked_(function () {
+    var newContactKind, recovered = locked_(function () {
       var state = pvLedger_(scope.context, input.id, false), preview = pvFindPreview_(state, input.previewToken, kind, input.requestId);
       if (preview.started) return pvPublic_(scope.context, state);
       pvCheckPreview_(scope.context, state, preview, kind);
+      if (preview.newContactsOnly) newContactKind = kind;
       return null;
     });
     if (recovered) return recovered;
     // Queueing may apply existing cached results, but cannot approve any job.
-    queueWorkbookValidation_(scope.context, input.id, {});
+    queueWorkbookValidation_(scope.context, input.id, {newContactKind:newContactKind});
     return locked_(function () {
       var fresh = gridFile_(input.id, true, scope.context.rootId), state = pvLedger_(fresh.context, input.id, false), preview = pvFindPreview_(state, input.previewToken, kind, input.requestId);
       if (preview.started) return pvPublic_(fresh.context, state);
       pvCheckPreview_(fresh.context, state, preview, kind);
       var allowed = Object.create(null); preview.keys.forEach(function (key) { allowed[key] = true; });
-      var approved = [];
+      var approved = [], approvedKeys = new Set();
       state.jobs.forEach(function (job) {
         if (job.kind !== kind || job.manualStartApproved || job.paid || pvJobFinished_(job.state) || !job.contacts.length || !job.contacts.every(function (contact) { return allowed[contact.key]; })) return;
         if (['queued', 'waiting_shared', 'awaiting_quote', 'awaiting_payment'].indexOf(job.state) === -1) return;
-        job.manualStartApproved = true; job.startApproval = { method: 'preview', requestId: input.requestId, previewToken: preview.token, at: Date.now() }; approved.push(job.jobId);
+        job.manualStartApproved = true; job.newContactsOnly = preview.newContactsOnly === true;
+        if (job.newContactsOnly) job.approvedAutoPayLimitUsd = preview.autoPayLimitUsd;
+        job.startApproval = { method: 'preview', requestId: input.requestId, previewToken: preview.token, at: Date.now() }; approved.push(job.jobId);
+        job.contacts.forEach(function (contact) { approvedKeys.add(contact.key); });
       });
+      if (preview.newContactsOnly && (!approved.length || approvedKeys.size !== preview.keys.length)) fail_('PV_PREVIEW_STALE','Состав заказов изменился. Обновите предпросмотр новых контактов.');
       preview.started = { requestId: input.requestId, jobIds: approved, at: Date.now() };
       state.validationStarts = (state.validationStarts || []).slice(-99).concat([{ requestId: input.requestId, previewToken: preview.token, kind: kind }]);
       pvSave_(fresh.context, state);
@@ -101,16 +108,37 @@ function startPromouserValidation_(request) {
   });
 }
 
-function previewPhoneValidation_(request) { var input = pvInput_(request, ['id']); return previewPromouserValidation_({ id: input.id, kind: 'telegram' }); }
+function previewPhoneValidation_(request) { var input = pvInput_(request, ['id','newContactsOnly']); return previewPromouserValidation_({ id: input.id, kind: 'telegram', newContactsOnly:input.newContactsOnly }); }
 function startPhoneValidation_(request) { var input = pvInput_(request, ['id', 'previewToken', 'requestId']); return startPromouserValidation_({ id: input.id, kind: 'telegram', previewToken: input.previewToken, requestId: input.requestId }); }
 
 function pvValidationKind_(value) { if (value !== 'email' && value !== 'telegram') fail_('INVALID_REQUEST', 'Выберите проверку email или телефонов Telegram.'); return value; }
+function pvNewOnlyOption_(value) {
+  if (value !== undefined && typeof value !== 'boolean') fail_('INVALID_REQUEST','Некорректный отбор по статусу контакта.');
+  return value === true;
+}
+
+/** A duplicate with a different work status keeps the entire address/number out of a new-only order. */
+function pvNewContactRows_(rows, kind) {
+  var blocked = new Set();
+  rows.forEach(function (row) {
+    if ((row.kind === 'email' ? 'email' : 'telegram') !== kind) return;
+    var marked = false;
+    CONTACT_MAILING_STATUS.headers.forEach(function (header) {
+      var column = row.map[pvHeader_(header)];
+      if (column === undefined) return;
+      marked = true;
+      if (!contactMailingStatusIsNew_(row.values[column])) blocked.add(row.key);
+    });
+    if (!marked) blocked.add(row.key);
+  });
+  return rows.filter(function (row) { return (row.kind === 'email' ? 'email' : 'telegram') === kind && !blocked.has(row.key); });
+}
 function pvEmailPreferred_(context) { return typeof emailValidationProvider_ === 'function' ? emailValidationProvider_(context) : 'promouser'; }
-function pvCancelUnsent_(context, state, cache, map, rows) {
+function pvCancelUnsent_(context, state, cache, map, rows, kind) {
   if (state.lease && state.lease.until > Date.now()) return false;
   var coldEmail = pvEmailPreferred_(context) !== 'promouser', changed = false;
   state.jobs.forEach(function (job) {
-    if (job.state !== 'queued' || job.orderId) return;
+    if (job.state !== 'queued' || job.orderId || kind && job.kind !== kind) return;
     var obsolete = rows && !job.manualStartApproved && !pvContactsStillPresent_(rows, job.contacts);
     if (!(job.kind === 'email' && coldEmail) && !obsolete) return;
     job.state = 'cancelled'; job.message = obsolete ? 'Контакты изменились до запуска. Подготовлена новая очередь.' : 'Для новых email выбран другой валидатор.';
@@ -125,6 +153,7 @@ function pvFindPreview_(state, token, kind, requestId) {
   var preview = state && (state.validationPreviews || []).filter(function (item) { return item.token === token && item.kind === kind; })[0];
   if (!preview && prior) return { started: { requestId: requestId } };
   if (!preview) fail_('PV_PREVIEW_STALE', 'Обновите предпросмотр перед запуском проверки.');
+  if (preview.newContactsOnly && preview.started && preview.started.requestId !== requestId) fail_('PV_PREVIEW_STALE','Этот предпросмотр уже использован в другом запуске.');
   return preview;
 }
 function pvCheckPreview_(context, state, preview, kind) {
@@ -132,11 +161,14 @@ function pvCheckPreview_(context, state, preview, kind) {
   var settings = pvSettings_(context); pvRequireKey_(settings);
   if (!settings.enabled) fail_('PV_PAUSED', 'Включите подключение Promouser перед запуском проверки.');
   if (preview.credentialHash !== digest_(settings.key)) fail_('PV_PREVIEW_STALE', 'Подключение изменилось. Обновите предпросмотр.');
+  if (preview.newContactsOnly && preview.autoPayLimitUsd !== settings.autoPayLimitUsd) fail_('PV_PREVIEW_STALE','Изменился лимит оплаты. Обновите предпросмотр.');
   if (kind === 'email' && pvEmailPreferred_(context) !== 'promouser') fail_('PV_PROVIDER_CHANGED', 'Для новых email выбран другой валидатор.');
-  if (pvPreviewSnapshot_(context, state, kind).sourceHash !== preview.sourceHash) fail_('PV_PREVIEW_STALE', 'Контакты или вкладки изменились. Обновите предпросмотр.');
+  var current = pvPreviewSnapshot_(context, state, kind, preview.newContactsOnly);
+  if (current.sourceHash !== preview.sourceHash || preview.newContactsOnly && JSON.stringify(current.keys) !== JSON.stringify(preview.keys)) fail_('PV_PREVIEW_STALE', 'Контакты или вкладки изменились. Обновите предпросмотр.');
 }
-function pvPreviewSnapshot_(context, state, kind) {
-  var targets = pvTargets_(context, state, false), cache = pvCache_(context, false), cacheMap = pvCacheRead_(cache), seen = Object.create(null), completed = Object.create(null), pending = Object.create(null), counts = { new: 0, checked: 0, cached: 0, inProgress: 0, unknownCountry: 0, telegramWithoutPhone: 0, invalid: 0 }, keys = [], sample = [], source = [];
+function pvPreviewSnapshot_(context, state, kind, onlyNew) {
+  var targets = pvTargets_(context, state, false,onlyNew), cache = pvCache_(context, false), cacheMap = pvCacheRead_(cache), seen = Object.create(null), completed = Object.create(null), pending = Object.create(null), counts = { new: 0, checked: 0, cached: 0, inProgress: 0, unknownCountry: 0, telegramWithoutPhone: 0, invalid: 0 }, keys = [], sample = [], source = [];
+  if (onlyNew) targets.rows = pvNewContactRows_(targets.rows,kind);
   state.jobs.forEach(function (job) { if (job.state !== 'cancelled') job.contacts.forEach(function (contact) { pending[contact.key] = job; }); });
   targets.rows.forEach(function (row) { if (row.completed && !row.changed && !row.invalid) completed[row.key] = true; });
   targets.rows.forEach(function (row) {
@@ -153,8 +185,12 @@ function pvPreviewSnapshot_(context, state, kind) {
     var job = pending[row.key], reserved = cacheMap[row.key] && cacheMap[row.key].pending;
     if (job && (job.manualStartApproved || job.orderId || job.state !== 'queued') || reserved) counts.inProgress++; else counts.new++;
     var ownReservation = reserved && job && reserved.fileId === state.fileId && reserved.jobId === job.jobId;
-    if ((!job || !job.manualStartApproved && !job.paid && !pvJobFinished_(job.state)) && (!reserved || ownReservation)) keys.push(row.key);
-    if (sample.length < 8) sample.push(kind === 'email' ? { email: row.value } : { phone: row.value, country: row.country });
+    var available = !job || !job.manualStartApproved && !job.paid &&
+      (onlyNew ? job.state === 'queued' && !job.orderId : !pvJobFinished_(job.state));
+    if (available && (!reserved || ownReservation)) {
+      keys.push(row.key);
+      if (sample.length < 8) sample.push(kind === 'email' ? { email: row.value } : { phone: row.value, country: row.country });
+    }
   });
   keys.sort();
   var settings = pvSettings_(context);
@@ -167,9 +203,11 @@ function queueWorkbookValidation_(context, fileId, options) {
   return locked_(function () {
     var fresh = gridFile_(fileId, true, scope.context.rootId), state = pvLedger_(fresh.context, fileId, true);
     pvUpdateTargets_(state, options || {});
-    var targets = pvTargets_(fresh.context, state, true), cache = pvCache_(fresh.context, true), cacheMap = pvCacheRead_(cache);
+    var kind = options && options.newContactKind;
+    var targets = pvTargets_(fresh.context, state, true,kind), cache = pvCache_(fresh.context, true), cacheMap = pvCacheRead_(cache);
+    if (kind) targets.rows = pvNewContactRows_(targets.rows,kind);
     var existing = Object.create(null), pending = Object.create(null), collected = Object.create(null), updates = [], settings = pvSettings_(fresh.context);
-    pvCancelUnsent_(fresh.context, state, cache, cacheMap, targets.rows);
+    pvCancelUnsent_(fresh.context, state, cache, cacheMap, targets.rows,kind);
     state.jobs.forEach(function (job) {
       if (job.state !== 'cancelled') job.contacts.forEach(function (contact) { pending[contact.key] = true; });
     });
@@ -216,8 +254,8 @@ function queueWorkbookValidation_(context, fileId, options) {
     });
     updates.forEach(function (update) { if (update.result && cacheMap[update.row.key] && cacheMap[update.row.key].result) update.result = cacheMap[update.row.key].result; });
     updates = updates.filter(function (update) { return pvNeedsUpdate_(update.row, update); });
-    state.pendingApplications = Math.max(0, updates.length - PROMOUSER.applyRows);
-    state.manualReviewCount = targets.rows.filter(function (row) { return (!row.completed || row.changed) && (row.kind === 'telegram_username' || row.kind === 'telegram' && !row.country); }).length;
+    state.pendingApplications = Math.max(kind && state.pendingApplications || 0, updates.length - PROMOUSER.applyRows);
+    if (kind !== 'email') state.manualReviewCount = targets.rows.filter(function (row) { return (!row.completed || row.changed) && (row.kind === 'telegram_username' || row.kind === 'telegram' && !row.country); }).length;
     pvCacheFlush_(fresh.context, cache); pvApply_(fresh.context, state, updates.slice(0, PROMOUSER.applyRows));
     state.queuedAt = pvNow_(); pvSave_(fresh.context, state);
     return pvPublic_(fresh.context, state);
@@ -301,8 +339,8 @@ function pvAdvance_(context, fileId, intent) {
     var job = pvChoose_(state, settings, intent, Date.now());
     pvSave_(fresh.context, state);
     if (!job) return { state: state };
-    var before = pvTargets_(fresh.context, state, false);
-    if ((job.state === 'queued' || job.state === 'awaiting_payment') && !pvContactsStillPresent_(before.rows, job.contacts)) {
+    var before = pvTargets_(fresh.context, state, false,job.newContactsOnly);
+    if ((job.state === 'queued' || job.state === 'awaiting_payment') && !pvContactsStillPresent_(before.rows, job.contacts, job.newContactsOnly && job.kind)) {
       job.state = 'cancelled'; job.message = 'Контакты изменились до отправки или оплаты. Повторите проверку новых контактов.';
       pvCacheRelease_(cache, cacheMap, job.contacts, state.fileId, job.jobId); pvCacheFlush_(fresh.context, cache);
       pvSave_(fresh.context, state); return { state: state };
@@ -354,6 +392,12 @@ function pvAdvance_(context, fileId, intent) {
     if (claim.action === 'create' && !claim.job.manualStartApproved) fail_('PV_MANUAL_START_REQUIRED', 'Запустите проверку после предпросмотра контактов.');
     var current = pvLedger_(context, fileId, false), currentJob = current && current.jobs.filter(function (item) { return item.jobId === claim.job.jobId; })[0];
     if (!pvLeaseMatches_(current, currentJob, claim.token)) fail_('PV_UNCERTAIN', 'Срок выполнения запроса истёк. Повторное создание или списание отключено.');
+    if (claim.job.newContactsOnly && claim.action === 'pay' && !pvHasConsent_(currentJob,Date.now()) &&
+        !pvAutoPay_(Object.assign({},currentJob,{state:'awaiting_payment'}),dispatchSettings))
+      fail_('PV_PAYMENT_LIMIT_CHANGED','Оплата требует подтверждения стоимости заказа.');
+    if (claim.job.newContactsOnly && (claim.action === 'create' || claim.action === 'pay') &&
+        !pvContactsStillPresent_(pvTargets_(context,current,false,true).rows,claim.job.contacts,claim.job.kind))
+      fail_('PV_CONTACT_CHANGED','Статус контактов изменился. Обновите предпросмотр.');
     settings = dispatchSettings;
     if (claim.action === 'create') response = pvCreateOrder_(settings, claim.job);
     else if (claim.action === 'pay') response = pvApi_(settings, 'pay', { order_id: claim.job.orderId });
@@ -375,11 +419,14 @@ function pvAdvance_(context, fileId, intent) {
       job.state = claim.action === 'create' ? 'creation_uncertain' : (claim.action === 'pay' ? 'payment_uncertain' : claim.job.dispatch.previous);
       if (failure.registryCode === 'PV_PAUSED') job.state = claim.job.dispatch.previous;
       if (failure.registryCode === 'PV_CREDENTIAL_CHANGED') job.state = 'credential_changed';
-      if (failure.registryCode === 'PV_PROVIDER_CHANGED' && claim.action === 'create') {
+      var changedBeforeSend = failure.registryCode === 'PV_CONTACT_CHANGED' ||
+        claim.job.newContactsOnly && failure.registryCode === 'PV_PREVIEW_STALE' && ['create','pay'].indexOf(claim.action) >= 0;
+      if (changedBeforeSend || failure.registryCode === 'PV_PROVIDER_CHANGED' && claim.action === 'create') {
         job.state = 'cancelled'; var cache = pvCache_(fresh.context, true), map = pvCacheRead_(cache); pvCacheRelease_(cache, map, job.contacts, state.fileId, job.jobId); pvCacheFlush_(fresh.context, cache);
       }
       if (claim.action === 'pay' && failure.registryCode === 'PV_FUNDS') { job.state = 'awaiting_payment'; job.blockAutoPay = true; }
-      job.message = pvFailureMessage_(failure.registryCode);
+      if (failure.registryCode === 'PV_PAYMENT_LIMIT_CHANGED') job.state='awaiting_payment';
+      job.message = changedBeforeSend || failure.registryCode === 'PV_PAYMENT_LIMIT_CHANGED' ? failure.message : pvFailureMessage_(failure.registryCode);
       job.lastError = failure.registryCode;
     } else pvAccept_(fresh.context, state, job, claim.action, response);
     pvSave_(fresh.context, state);
@@ -465,7 +512,7 @@ function pvAccept_(context, state, job, action, response) {
     item.orderId = job.orderId; item.checkedAt = pvNow_();
     pvCachePut_(context, cache, cacheMap, key, job.kind, item);
   });
-  var current = pvTargets_(context, state, false);
+  var current = pvTargets_(context, state, false,job.newContactsOnly);
   current.rows.forEach(function (row) {
     if ((!row.completed || row.changed) && allowed[row.key] && cacheMap[row.key] && cacheMap[row.key].result) updates.push({ row: row, result: cacheMap[row.key].result });
   });
@@ -478,9 +525,14 @@ function pvAccept_(context, state, job, action, response) {
   job.parseWarnings = parsed.warnings;
 }
 
-function pvTargets_(context, state, ensure) {
+function pvTargets_(context, state, ensure, verifyTargets) {
   gridFile_(state.fileId, !!ensure, context.rootId);
   var book = SpreadsheetApp.openById(state.fileId), targets = state.targets || {}, sheets = book.getSheets();
+  if (verifyTargets) {
+    var current = getContactWorkspace_({id:state.fileId}).targets;
+    if (!current || current.emailSheetId !== targets.emailSheetId || current.phoneSheetId !== targets.phoneSheetId)
+      fail_('PV_PREVIEW_STALE','Управляемые вкладки контактов изменились. Обновите предпросмотр.');
+  }
   function byId(value) { return sheets.filter(function (sheet) { return String(sheet.getSheetId()) === String(value); })[0]; }
   var email = byId(targets.emailSheetId), phone = byId(targets.phoneSheetId);
   if (!email || !phone || email.getSheetId() === phone.getSheetId()) fail_('PV_TARGETS_REQUIRED', 'Сначала распределите контакты на вкладки Email и Телефоны.');
@@ -941,9 +993,20 @@ function pvAutomaticHint_(state, settings) {
 }
 function pvNextAt_(job) { return Math.max((job.lastRequestAt || 0) + PROMOUSER.orderDelay, (job.lastStatusAt || 0) + PROMOUSER.statusDelay); }
 function pvJobFinished_(state) { return ['complete', 'complete_shared', 'result_review', 'cancelled', 'creation_uncertain', 'credential_changed', 'result_error'].indexOf(state) !== -1; }
-function pvContactsStillPresent_(rows, contacts) { var keys = Object.create(null); rows.forEach(function (row) { if (!row.completed || row.changed) keys[row.key] = true; }); return contacts.every(function (contact) { return keys[contact.key]; }); }
+function pvContactsStillPresent_(rows, contacts, newContactKind) {
+  if (newContactKind) rows = pvNewContactRows_(rows,newContactKind);
+  var pending = new Set(), completed = new Set();
+  rows.forEach(function (row) {
+    if (row.completed && !row.changed) completed.add(row.key);
+    else if (!row.invalid) pending.add(row.key);
+  });
+  return contacts.every(function (contact) { return pending.has(contact.key) && !completed.has(contact.key); });
+}
 function pvNeedsManualStart_(job) { return !job.manualStartApproved && !job.paid && ['queued', 'waiting_shared', 'awaiting_quote', 'awaiting_payment'].indexOf(job.state) !== -1; }
-function pvAutoPay_(job, settings) { return job.manualStartApproved === true && !job.blockAutoPay && settings.autoPayLimitUsd > 0 && job.cost !== null && job.cost <= settings.autoPayLimitUsd && job.state === 'awaiting_payment'; }
+function pvAutoPay_(job, settings) {
+  var limit = job.newContactsOnly ? Math.min(settings.autoPayLimitUsd, job.approvedAutoPayLimitUsd) : settings.autoPayLimitUsd;
+  return job.manualStartApproved === true && !job.blockAutoPay && limit > 0 && job.cost !== null && job.cost <= limit && job.state === 'awaiting_payment';
+}
 function pvPendingStatus_(value) { return ['Ожидает проверки', 'Проверяется', 'Нужна оплата', 'Ошибка подключения', 'Проверка не подтверждена', 'Нужен телефон', 'Уточните страну или номер'].indexOf(String(value).trim()) !== -1; }
 function pvFailureMessage_(code) { var messages = { PV_PAUSED: 'Проверка Promouser отключена. Запрос не отправлен.', PV_CREDENTIAL_CHANGED: 'Ключ Promouser изменился. Старый заказ приостановлен.', PV_FUNDS: 'Недостаточно средств в Promouser.', PV_AUTH: 'API-ключ Promouser отклонён.', PV_IP_DENIED: 'Promouser не разрешил доступ с текущего IP.', PV_RATE_LIMIT: 'Достигнут лимит частоты запросов. Обновите позже.', PV_OWNER_AUTH_REQUIRED: 'Владельцу Apps Script нужно разрешить внешние запросы.', PV_RESULT_FORMAT: 'Не удалось прочитать формат результата.', PV_RESULT_DOWNLOAD: 'Результат ещё не скачан. Обновите позже.', PV_NOT_PAYABLE: 'Заказ ещё не готов к оплате.' }; return messages[code] || 'Нет подтверждения ответа Promouser. Заказ сохранён; повторное создание или списание отключено.'; }
 function pvBinding_(note) { var pattern = new RegExp('(?:^|\\n)' + PROMOUSER.bindingPrefix + '([A-Za-z0-9_-]{43})(?=\\n|$)'), match = String(note || '').match(pattern); return match ? match[1] : ''; }

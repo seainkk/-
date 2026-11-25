@@ -25,8 +25,8 @@ function legacyContactHistoryPick_(row, columns, names) {
 }
 function legacyContactHistoryVerdict_(value) {
   var text = legacyContactHistoryText_(value).toLowerCase();
-  if (/^(?:valid|deliverable|ok|good|true|yes|да|валиден|валидный|действителен)$/.test(text)) return 'Валиден';
-  if (/^(?:invalid|undeliverable|bad|not.?exist|false|no|нет|невалиден|невалидный|не.?существует)$/.test(text)) return 'Невалиден';
+  if (/^(?:valid|deliverable|ok|good|true|yes|да|валиден|валидн(?:а|ая|ый)|действителен)$/.test(text)) return 'Валиден';
+  if (/^(?:invalid|undeliverable|bad|not.?exist|false|no|нет|невалиден|невалидн(?:а|ая|ый)|не.?существует)$/.test(text)) return 'Невалиден';
   if (/^(?:risky|catch.?all|accept.?all|disposable|рискованный)$/.test(text)) return 'Рискованный';
   if (/^(?:unknown|неизвестно|неизвестен|неизвестный|unverifiable)$/.test(text)) return 'Неизвестно';
   return '';
@@ -39,18 +39,19 @@ function legacyContactHistoryCompleted_(value) {
 function legacyContactHistoryWork_(value) {
   var text = legacyContactHistoryText_(value), key = text.toLowerCase().replace(/ё/g, 'е');
   if (!text) return '';
-  if (/фильтр|нецелев|не\s*совпал|не\s*актуал|не\s*подтвержден|дубль|исключ|невалид|отпис|блокиров|срок\s*>\s*30/.test(key)) return text;
+  if (/фильтр|нецелев|не\s*совпал|не\s*актуал|не\s*подтвержден|не\s+отправл(?:яем|ять)|дубль|исключ|невалид|отпис|блокиров|срок\s*>\s*30/.test(key)) return text;
   if (/^(?:рассылка|в\s+рассылке|отправлен[оыа]?|sent|запущен[аоы]?|in\s+campaign|replied|ответил[аи]?|в\s+плане.*)$/.test(key)) return text;
   return '';
 }
 
-function legacyContactHistoryColumns_(headers) {
+function legacyContactHistoryColumns_(headers, pairedEmail) {
   var result = { columns: Object.create(null), email: [], phone: [], work: [], validation: [], history: false };
   var validationNames = ['Валидация', 'Результат валидации', 'Результат проверки', 'Статус email', 'email_status', 'validation', 'Validation result'].map(legacyContactHistoryKey_);
   var historyNames = validationNames.concat(['Дата проверки', 'checked_at', 'validation_date', 'ID_TG', 'Telegram ID', 'Nickname_TG', 'TG username', 'Telegram username', 'Active_days_ago', 'days_offline', 'Как давно был в сети'].map(legacyContactHistoryKey_));
   headers.forEach(function (header, index) {
     var key = legacyContactHistoryKey_(header); if (!key) return;
     if (result.columns[key] === undefined) result.columns[key] = index;
+    if (key==='исходныйстолбецemail') return;
     var meta = /валидац|validation|статус|status|провер|дата|date|count|колво|количество|провайдер|provider|ник|nickname|idtg|telegramid|active|days|давно|строк|источник/.test(key) || /^(?:почт|телефонов|номеров|контактов)на(?:компанию|организацию|человека|лпр)$/.test(key);
     if (!meta && /email|почт|емейл/.test(key)) result.email.push(index);
     if (!meta && (/телефон|phone|mobile|мобильн|^тел|^доптел|numbertg/.test(key)) && !/телеграм|telegram/.test(key)) result.phone.push(index);
@@ -59,6 +60,13 @@ function legacyContactHistoryColumns_(headers) {
     if (historyNames.indexOf(key) >= 0) result.history = true;
   });
   result.history = result.history || result.work.length > 0;
+  result.emailChecks = [];
+  if (pairedEmail) headers.forEach(function (header, index) {
+    var label = legacyContactHistoryKey_(header), match = label.match(/^(.+?)(?:рез|результат)(?:валидации|проверки)$/);
+    if (!match) return;
+    var columns = result.email.filter(function (column) { return legacyContactHistoryKey_(headers[column]) === match[1]; });
+    if (columns.length === 1) { result.emailChecks.push({ contact: columns[0], result: index }); result.history = true; }
+  });
   return result;
 }
 
@@ -90,7 +98,7 @@ function legacyContactHistoryCollect_(modelOrModels) {
   leaves.filter(Boolean).forEach(function (model) {
     var source = model.source || {}, headers = source.headers || [], rows = model.sourceDisplayValues || model.sourceValues || [];
     if (source.hasHeader === false || !headers.length || !rows.length) return;
-    var schema = legacyContactHistoryColumns_(headers), columns = schema.columns, emailColumns = schema.email, phoneColumns = schema.phone, workColumns = schema.work;
+    var schema = legacyContactHistoryColumns_(headers, model.pairedEmail), columns = schema.columns, emailColumns = schema.email, phoneColumns = schema.phone, workColumns = schema.work;
     var first = Number.isSafeInteger(source.headerIndex) ? source.headerIndex + 1 : 1;
     rows.slice(first).forEach(function (row, offset) {
       var absolute = first + offset + 1, emails = [], phones = [];
@@ -122,6 +130,19 @@ function legacyContactHistoryCollect_(modelOrModels) {
       var allowEmailHistory = model.historyChannel !== 'telegram', allowPhoneHistory = model.historyChannel !== 'email';
       var provider = legacyContactHistoryPick_(row, columns, ['Провайдер', 'provider']);
       var evidence = { sheetId: source.sheetId, sheetName: source.name || source.sheetName || '', row: absolute };
+      schema.emailChecks.forEach(function (pair) {
+        var raw = legacyContactHistoryText_(row[pair.result]);
+        if (!legacyContactHistoryCompleted_(raw) || /^(?:[-–—]|n\/a|нет данных|без проверки|не проверяли)$/i.test(raw)) return;
+        var parsed = model.cellContacts && model.cellContacts[absolute + ':' + (pair.contact + 1)];
+        var values = parsed && parsed.emails || (String(row[pair.contact] || '').match(/[^\s,;<>]+@[^\s,;<>]+\.[^\s,;<>]+/g) || []);
+        var addresses = Array.from(new Set(values.map(legacyContactHistoryEmail_).filter(Boolean)));
+        var bound = (model.pairedBindings || {})[absolute + ':' + pair.result];
+        addresses.forEach(function (email) {
+          if (bound && !legacyContactHistoryBindingAllows_({ cellValidationBindings: { [absolute]: [bound] } }, absolute, 'email', email)) return;
+          var status = addresses.length === 1 ? legacyContactHistoryVerdict_(raw) : '';
+          legacyContactHistoryAdd_(result, 'email', email, { status: status || LEGACY_CONTACT_HISTORY.reviewStatus, raw: raw, checkedAt: '', provider: '' }, [], evidence);
+        });
+      });
       emails.forEach(function (email) {
         if (!allowEmailHistory) return;
         if (!legacyContactHistoryBindingAllows_(model, absolute, 'email', email)) return;
@@ -214,7 +235,7 @@ function legacyContactHistoryEnrich_(model, historyMap) {
       var fields = legacyContactHistoryFields_(old);
       Object.keys(fields).forEach(function (header) { var index = map[legacyContactHistoryKey_(header)]; if (index !== undefined) row[index] = fields[header]; });
       var mailingColumn = originalHeaders.indexOf('Статус рассылки');
-      if (mailingColumn !== -1 && (!row[mailingColumn] || row[mailingColumn] === CONTACT_MAILING_STATUS.initial)) {
+      if (mailingColumn !== -1 && (!row[mailingColumn] || contactMailingStatusIsNew_(row[mailingColumn]))) {
         row[mailingColumn] = contactMailingStatusFromHistory_(old.work);
       }
       enriched++; return row;
@@ -276,19 +297,19 @@ function legacyContactHistoryReadWorkbook_(book, fileId, section, guard, selecte
     if (cached) {
       values = cached.sourceDisplayValues || cached.sourceValues || [];
       if (!legacyContactHistoryRectangle_(values, height, width)) legacyContactHistoryReadFail_('Выбранный исходный лист изменился во время чтения истории.');
-      reserve(height, width, true); source = Object.assign({}, cached.source); schema = legacyContactHistoryColumns_(source.headers || []);
+      reserve(height, width, true); source = Object.assign({}, cached.source); schema = legacyContactHistoryColumns_(source.headers || [], options.pairedEmail);
     } else {
       var probe = display(sheet, 1, Math.min(10, height), width), header = legacyContactHistoryReadHeader_(probe, section);
       source = { sheetId: id, name: name, headers: header.header, hasHeader: header.hasHeader, headerIndex: header.index, rowCount: height, columnCount: width };
-      schema = legacyContactHistoryColumns_(source.headers);
+      schema = legacyContactHistoryColumns_(source.headers, options.pairedEmail);
       if (!source.hasHeader || !schema.history || !schema.email.length && !schema.phone.length) { signatures.push([id, name, height, width, 'no_contact_history', probe]); return; }
       values = probe.slice();
       var chunk = Math.max(1, Math.floor(limits.chunkCells / width));
       for (var first = probe.length + 1; first <= height; first += chunk) values = values.concat(display(sheet, first, Math.min(chunk, height - first + 1), width));
     }
     if (source.hasHeader === false || !schema.history || !cached && !schema.email.length && !schema.phone.length) { signatures.push([id, name, height, width, 'selected_no_contact_history', cached && cached.fingerprint || '']); return; }
-    var bindings = Object.create(null), firstData = Number.isSafeInteger(source.headerIndex) ? source.headerIndex + 2 : 2;
-    schema.validation.forEach(function (column) {
+    var bindings = Object.create(null), pairedBindings = Object.create(null), firstData = Number.isSafeInteger(source.headerIndex) ? source.headerIndex + 2 : 2;
+    schema.validation.concat(schema.emailChecks.map(function (pair) { return pair.result; })).forEach(function (column) {
       var chunk = Math.max(1, Math.floor(limits.chunkCells));
       for (var first = firstData; first <= height; first += chunk) {
         check(); var count = Math.min(chunk, height - first + 1); reserve(count, 1, false);
@@ -298,14 +319,19 @@ function legacyContactHistoryReadWorkbook_(book, fileId, section, guard, selecte
         if (!legacyContactHistoryRectangle_(notes, count, 1)) legacyContactHistoryReadFail_('Google вернул неполные отметки прежних проверок.');
         notes.forEach(function (row, index) {
           var note = String(row[0] || ''), binding = typeof pvBinding_ === 'function' ? pvBinding_(note) : legacyContactHistoryReadBinding_(note);
-          if (binding) { var at = first + index; if (!bindings[at]) bindings[at] = []; if (bindings[at].indexOf(binding) < 0) bindings[at].push(binding); }
+          if (binding) {
+            var at = first + index;
+            if (schema.validation.indexOf(column) < 0) pairedBindings[at + ':' + column] = binding;
+            else { if (!bindings[at]) bindings[at] = []; if (bindings[at].indexOf(binding) < 0) bindings[at].push(binding); }
+          }
         });
       }
     });
-    var leaf = { source: source, sourceDisplayValues: values, cellContacts: cached && cached.cellContacts || null, cellValidationBindings: bindings, preserveAmbiguousHistory: true, historyChannel: legacyContactHistoryChannel_(source, schema) };
+    var leaf = { source: source, sourceDisplayValues: values, cellContacts: cached && cached.cellContacts || null, cellValidationBindings: bindings, pairedBindings: pairedBindings, pairedEmail: options.pairedEmail, preserveAmbiguousHistory: true, historyChannel: legacyContactHistoryChannel_(source, schema) };
     legacyContactHistoryReadValidate_(leaf, schema);
     leaves.push(leaf);
     signatures.push([id, name, height, width, source.headerIndex, source.headers, values, bindings]);
+    if (schema.emailChecks.length) signatures.push(pairedBindings);
   });
   check(); var history = legacyContactHistoryCollect_(leaves); check();
   return { history: history, fingerprint: digest_(JSON.stringify({ version: 1, fileId: fileId, leaves: signatures })), warnings: warnings, complete: true, cellsRead: cellsRead };

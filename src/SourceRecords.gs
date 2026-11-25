@@ -53,6 +53,9 @@ function sourceRecordsBuild_(displayRows, options) {
   var personIdColumns = [];
   header.forEach(function (label, index) { if (/^(?:idлпр|идлпр|идентификаторлпр|personid)$/.test(sourceRecordsKey_(label))) personIdColumns.push(index); });
   var columns = sourceRecordsColumns_(header, options.section), contacts = options.cellContacts || Object.create(null), warnings = [], records = [];
+  if (options.companyOnly) columns = columns.map(function (column) {
+    return column.person || column.summary ? { ignored: true } : column;
+  });
   var companyContext = options.mixedCompanyContext && columns.some(function (column) { return ['name', 'inn', 'ogrn', 'id'].indexOf(column.company) !== -1; });
   var directoryColumns = sourceRecordsDirectoryColumns_(header, columns);
   var warn = function (message) { if (warnings.indexOf(message) === -1) warnings.push(message); };
@@ -105,6 +108,7 @@ function sourceRecordsBuild_(displayRows, options) {
       if (descriptor.ignored) continue;
       if (!sourceRecordsHasContacts_(values)) continue;
       var cellRef = sourceRecordsRef_(source, columnIndex + 1);
+      cellRef.columnHeader = hasHeader ? String(header[columnIndex] || '') : '';
       sourceRecordsAddContacts_(record.provenance, null, values, cellRef);
       if (descriptor.general) target = null;
       else if (descriptor.number && groups['number:' + descriptor.number]) target = groups['number:' + descriptor.number];
@@ -144,6 +148,7 @@ function sourceRecordsBuild_(displayRows, options) {
         sourceRecordsAddContacts_(null, record.general, group.contacts, null);
       }
       var identities = names.length ? names.map(function (name) { return { name: name, role: roles.join('; ') }; }) : roles.length > 1 ? roles.map(function (role) { return { name: '', role: role }; }) : [{ name: '', role: roles[0] || '' }];
+      if (!names.length && options.section === 'lpr') warn('У части ЛПР не найдено имя. Их контакты и должности сохранены. Для заполнения имени укажите в исходнике ФИО или отдельные столбцы имени и фамилии.');
       identities.forEach(function (identity) {
         var person = { name: identity.name, role: identity.role, emails: groupAmbiguous ? [] : group.contacts.emails.slice(), phones: groupAmbiguous ? [] : group.contacts.phones.slice(), telegrams: groupAmbiguous ? [] : group.contacts.telegrams.slice(), source: Object.assign({}, source, { group: group.key, columns: group.columns.slice().sort(function (a, b) { return a - b; }) }), provenance: { name: group.nameRefs.slice(), role: group.roleRefs.slice(), emails: groupAmbiguous ? {} : group.provenance.emails, phones: groupAmbiguous ? {} : group.provenance.phones, telegrams: groupAmbiguous ? {} : group.provenance.telegrams } };
         if (groupAmbiguous) person.ambiguous = true;
@@ -197,8 +202,10 @@ function sourceRecordsMergeGenericPerson_(groups, columns, rowContacts) {
 
 function sourceRecordsColumns_(headers, section) {
   return headers.map(function (label) {
-    var key = sourceRecordsKey_(label), result = { label: String(label || ''), key: key, person: false, kind: '', group: '', number: '' };
-    var companyAliases = { id: ['companyid', 'idкомпании', 'идкомпании', 'companykey'], inn: ['инн', 'иннкомпании', 'иннюрлица', 'иннорганизации', 'inn', 'companyinn'], ogrn: ['огрн', 'огрнип', 'ogrn', 'ogrnip', 'companyogrn'], registration: ['инногрн', 'огрнинн'], name: ['название', 'названия', 'названиекомпании', 'названиякомпаний', 'названиеорганизации', 'названиеюрлица', 'компания', 'компании', 'фирма', 'company', 'companyname', 'companytitle', 'organization', 'organizationname', 'organisation', 'организация', 'наименование', 'наименованиеорганизации', 'наименованиекомпании', 'наименованиеюрлица', 'юрлицо'], website: ['сайт', 'сайты', 'сайткомпании', 'сайтыкомпании', 'сайтизисходногосписка', 'website', 'websites', 'site', 'sites', 'companywebsite', 'домен', 'domain'], city: ['город', 'city', 'городкомпании', 'городрегистрации', 'городстрана', 'населенныйпункт', 'населенныепункты'] };
+    var key = sourceRecordsKey_(label);
+    if (/^доп(?:олнительный)?тел(?:ефон)?непроверялина(?:тг|телеграм)$/.test(key)) key = 'дополнительныйтелефон';
+    var result = { label: String(label || ''), key: key, person: false, kind: '', group: '', number: '' };
+    var companyAliases = { id: ['companyid', 'idкомпании', 'идкомпании', 'companykey'], inn: ['инн', 'иннкомпании', 'иннюрлица', 'иннорганизации', 'inn', 'companyinn'], ogrn: ['огрн', 'огрнип', 'ogrn', 'ogrnip', 'companyogrn'], registration: ['инногрн', 'огрнинн'], name: ['название', 'названия', 'названиекомпании', 'названиекомпания', 'названиякомпаний', 'названиеорганизации', 'названиеюрлица', 'компания', 'компании', 'фирма', 'company', 'companyname', 'companytitle', 'organization', 'organizationname', 'organisation', 'организация', 'наименование', 'наименованиеорганизации', 'наименованиекомпании', 'наименованиеюрлица', 'юрлицо'], website: ['сайт', 'сайты', 'сайткомпании', 'сайтыкомпании', 'сайтизисходногосписка', 'web', 'вебсайт', 'website', 'websites', 'site', 'sites', 'companywebsite', 'домен', 'domain'], city: ['город', 'city', 'городкомпании', 'городрегистрации', 'городстрана', 'населенныйпункт', 'населенныепункты'] };
     Object.keys(companyAliases).forEach(function (kind) { if (companyAliases[kind].indexOf(key) !== -1) result.company = kind; });
     if (key === 'name' && section !== 'lpr') result.company = 'name';
     if (result.company) { result.general = true; return result; }
@@ -210,9 +217,15 @@ function sourceRecordsColumns_(headers, section) {
     var isContact = /email|почт|телефон|phone|mobile|телеграм|telegram|^tg\d*$/.test(key), number = (key.match(/(?:^|[^0-9])(\d+)$/) || [])[1] || '';
     var role = sourceRecordsRole_(key), nameKey = key.replace(/\d+$/, ''), personal = /фио|фамилияимяотчество|полноеимя|fullname|personname|contactname|контактноелицо|лпр|директор|руководител|маркетолог|менеджер|специалист|закупщик|бухгалтер|собственник|владелец|учредител|director|manager|ceo|decisionmaker/.test(key);
     result.general = (/компании|emailадреса|мобильныетелефоны|городскиетелефоны|общ(?:ий|ая|ие|ее)|general|corporate|корпоративн/.test(key) || (isContact && !!role.key)) && !personal;
-    var part = /^(?:имя|firstname)\d*$/.test(key) ? 'first' : /^(?:фамилия|lastname|surname)\d*$/.test(key) ? 'last' : /^(?:отчество|patronymic)\d*$/.test(key) ? 'middle' : '';
+    // CRM exports often qualify each component with the person or role (e.g. «Фамилия ЛПР»).
+    var component = nameKey.replace(/^(?:contact|person|lead|лпр)/,'').replace(/(?:контакта|контактноголица|сотрудника|лпр|руководителя|директора|маркетолога)$/,'');
+    var part = /^(?:имя|firstname|givenname|forename)$/.test(component) ? 'first' :
+      /^(?:фамилия|lastname|surname|familyname)$/.test(component) ? 'last' :
+      /^(?:отчество|patronymic|middlename)$/.test(component) ? 'middle' : '';
+    var full = /^(?:фамилияи?имя(?:и?отчество)?|имяи?фамилия|contactperson|contactfullname|фи)$/.test(component) ||
+      /^(?:contactperson|контактноелицо|имяконтактноголица|personfullname)$/.test(nameKey);
     var roleField = /^(?:должность|позиция|position|jobtitle)/.test(key) || /(?:должность|jobtitle)$/.test(nameKey) || (section === 'lpr' && /^title\d*$/.test(key));
-    if (part || roleField || (!isContact && personal) || (section === 'lpr' && /^name\d*$/.test(key))) {
+    if (part || full || roleField || (!isContact && personal) || (section === 'lpr' && /^name\d*$/.test(key))) {
       result.person = true; result.kind = part || (roleField ? 'role' : 'name');
       result.group = number ? 'number:' + number : role.key ? 'role:' + role.key : 'default'; result.number = number; result.defaultRole = role.label;
     } else if (isContact && !result.general && (personal || /личн|персональн|person|private/.test(key))) {
@@ -331,5 +344,6 @@ function sourceRecordsCleanName_(value, contacts) {
   var text = String(value || '');
   contacts.emails.forEach(function (email) { text = text.split(email).join(''); });
   text = text.replace(/(?:https?:\/\/|mailto:|tel:|tg:\/\/)[^\s<>]+/gi, '').replace(/[^\s,;<>]+@[^\s,;<>]+/g, '').replace(/(^|\s)@[a-z0-9_]+/gi, '$1').replace(/\+?\d[\d() .-]{5,}\d/g, '');
-  return text.replace(/^[\s,–—-]+|[\s,–—-]+$/g, '').replace(/[ \t]+/g, ' ').trim();
+  text = text.replace(/^[\s,–—-]+|[\s,–—-]+$/g, '').replace(/[ \t]+/g, ' ').trim();
+  return /^(?:нет(?: данных)?|не указан[оа]?|неизвест(?:но|ен|на)|н\/?д|n\/?a|unknown|null)$/i.test(text) ? '' : text;
 }
