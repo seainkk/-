@@ -107,7 +107,7 @@ function previewPreparedBase_(request) {
           email: { headers: model.emailHeaders || model.email.headers, rows: model.emailRows || model.email.rows },
           phone: { headers: model.phoneHeaders || model.phone.headers, rows: model.phoneRows || model.phone.rows },
           formulas: (model.formulaSnapshots || []).map(preparedEncodeFormula_),
-          sourceValueSignature: digest_(JSON.stringify(model.sourceValues || [])),
+          sourceValueSignature: preparedFrozenSourceSignature_(model),
           copySignature: preparedCopySignature_(model.sourceValues || [], model.formulaSnapshots || [])
         };
         var text = JSON.stringify(plan), role = 'plan_' + token.slice(0, 30), artifact = preparedFindArtifact_(context, draft, role);
@@ -645,6 +645,7 @@ function preparedPublish_(context, draft, plan, metadata) {
       if (plan.version === 2) { tags.registryContactEmailSheetId = String(draft.emailSheetId); tags.registryContactPhoneSheetId = String(draft.phoneSheetId); }
       if (draft.routeMode === 'auto') {
         Object.assign(tags, preparedRouteTags_(plan.sources, draft.copiedSheetIds));
+        if (draft.mainTelegramHistory) tags.registryMainTelegramHistory = '1';
       }
       try { Drive.Files.update({ appProperties: tags }, file.id, null, { addParents: preparation.binding.source.id, removeParents: draft.folderId, fields: PREPARED_IMPORT.fields, supportsAllDrives: true }); }
       catch (error) { var recovered = preparedOutput_(current, draft, true); if ((recovered.parents || []).indexOf(preparation.binding.source.id) === -1) fail_('CREATION_UNCERTAIN', 'Google не подтвердил публикацию. Продолжите тот же запрос.'); }
@@ -692,7 +693,22 @@ function preparedProcessing_(draft, plan) {
   return { state: 'processing', draftId: draft.draftId, jobId: draft.draftId, progress: { stage: draft.phase, completed: completed, total: plan.email.rows.length + plan.phone.rows.length, label: labels[draft.phase] || 'Готовим базу…' } };
 }
 
-function preparedEncodeFormula_(cell) { var value = cell.value; return { row: cell.row, column: cell.column, value: cell.valueType === 'date' ? { preparedDate: String(value) } : Object.prototype.toString.call(value) === '[object Date]' ? { preparedDate: value.toISOString() } : value, link: cell.link || '' }; }
+function preparedFrozenSourceSignature_(model) {
+  var values = (model.sourceValues || []).slice(), changedRows = new Set();
+  (model.formulaSnapshots || []).forEach(function (cell) {
+    if (!cell.literalPhoneText) return;
+    var index = cell.row - 1;
+    if (!changedRows.has(index)) { values[index] = values[index].slice(); changedRows.add(index); }
+    values[index][cell.column - 1] = cell.literalPhoneText;
+  });
+  return digest_(JSON.stringify(values));
+}
+
+function preparedEncodeFormula_(cell) {
+  if (cell.literalPhoneText) return {row: cell.row, column: cell.column, value: cell.literalPhoneText, link: ''};
+  var value = cell.value;
+  return { row: cell.row, column: cell.column, value: cell.valueType === 'date' ? { preparedDate: String(value) } : Object.prototype.toString.call(value) === '[object Date]' ? { preparedDate: value.toISOString() } : value, link: cell.link || '' };
+}
 function preparedDecodeValue_(value) { return value && typeof value === 'object' && typeof value.preparedDate === 'string' ? new Date(value.preparedDate) : value; }
 function preparedCopySignature_(values, formulas) { var ignored = Object.create(null); formulas.forEach(function (cell) { ignored[cell.row + ':' + cell.column] = true; }); return digest_(JSON.stringify(values.map(function (row, r) { return row.map(function (value, c) { return ignored[(r + 1) + ':' + (c + 1)] ? { formula: true } : value; }); }))); }
 function preparedCopyMatches_(sheet, plan) { var rows = plan.source.rowCount, columns = plan.source.columnCount; if (sheet.getLastRow() !== rows || sheet.getLastColumn() !== columns) return false; var values = rows && columns ? sheet.getRange(1, 1, rows, columns).getValues() : []; return preparedCopySignature_(values, plan.formulas || []) === plan.copySignature; }

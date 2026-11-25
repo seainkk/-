@@ -53,7 +53,7 @@ function workingSelectionStatus_(value) {
 function contactMailingStatusFromHistory_(history) {
   var statuses = (Array.isArray(history) ? history : String(history || '').split(';')).map(function (value) {
     var status = String(value || '').trim().toLowerCase();
-    if (/^(?:рассылка|в рассылке|запущен[аоы]?|отправлен[аоы]?|sent|in campaign|replied|ответил[аи]?)$/.test(status)) return 'в рассылке';
+    if (/^(?:рассылка|в рассылке(?: нса)?|запущен[аоы]?|отправлен[аоы]?|sent|in campaign|replied|ответил[аи]?)$/.test(status)) return 'в рассылке';
     if (/фильтр|нецелев|не\s*совпал|не\s*актуал|не\s*подтвержден|не\s+отправл(?:яем|ять)|дубль|исключ|невалид|отпис|блокиров|срок\s*>\s*30/.test(status) || status === 'в плане запис книжка') return 'фильтр';
     return '';
   }).filter(Boolean);

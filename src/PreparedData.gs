@@ -51,7 +51,8 @@ function preparedDataRead_(sheet, sourceId, section, options) {
       for (var x = 0; x < readableWidth; x++) {
         var apiLinks = richApi && richApi.links[y][x];
         var cellLinks = Array.isArray(apiLinks) ? apiLinks : preparedDataRichLinks_(rich && rich[y][x], shown[y][x]);
-        var literalLink = preparedDataFormulaLink_(expression[y][x]);
+        var formulaError = !!expression[y][x] && preparedDataIsParseError_(shown[y][x]);
+        var literalLink = formulaError ? '' : preparedDataFormulaLink_(expression[y][x]);
         if (literalLink && cellLinks.every(function (link) { return link.url !== literalLink; })) cellLinks.push({ start: 0, end: String(shown[y][x] || '').length, url: literalLink });
         if (cellLinks.length) links.push({ row: absoluteRow, column: x + 1, text: String(shown[y][x] || ''), runs: cellLinks });
         if (expression[y][x]) {
@@ -59,7 +60,7 @@ function preparedDataRead_(sheet, sourceId, section, options) {
           if (Object.prototype.toString.call(raw[y][x]) === '[object Date]') { snapshot.valueType = 'date'; snapshot.value = raw[y][x].toISOString(); }
           if (cellLinks.length) { snapshot.link = cellLinks[0].url; snapshot.links = cellLinks; }
           formulaSnapshots.push(snapshot);
-          if (/^\s*=\s*(?:HYPERLINK|ГИПЕРССЫЛКА)\s*\(/i.test(expression[y][x]) && !cellLinks.length) unresolvedLinks.push({ row: absoluteRow, column: x + 1, formula: expression[y][x], display: String(shown[y][x] || ''), snapshot: snapshot });
+          if (!formulaError && /^\s*=\s*(?:HYPERLINK|ГИПЕРССЫЛКА)\s*\(/i.test(expression[y][x]) && !cellLinks.length) unresolvedLinks.push({ row: absoluteRow, column: x + 1, formula: expression[y][x], display: String(shown[y][x] || ''), snapshot: snapshot });
         }
       }
     }
@@ -102,7 +103,11 @@ function preparedDataRead_(sheet, sourceId, section, options) {
   if (!hasHeader && lastRow) warn('Заголовки не определены однозначно. Контакты распознаются по содержимому ячеек, первая строка сохранена как данные.');
   if (mapping.ambiguous.length) warn('Неоднозначные поля идентификаторов не считаются контактами: ' + mapping.ambiguous.join(', ') + '. Исходные значения сохранены.');
   mapping.cellPolicies = Array.from({ length: readableWidth }, function (_, index) { var label = hasHeader ? String(header[index] || '') : ''; return { excluded: preparedDataExcludedColumn_(label), email: mapping.emailColumns.some(function (column) { return column.index === index; }), phone: mapping.phoneColumns.some(function (column) { return column.index === index; }), telegram: mapping.telegramColumns.some(function (column) { return column.index === index; }) }; });
-  var linkIndex = Object.create(null);
+  var telegramHistory = options.mainTelegram && hasHeader && typeof legacyMainTelegramColumns_ === 'function' && legacyMainTelegramColumns_(header);
+  if (telegramHistory) ['found', 'nickname', 'id', 'days', 'campaign'].forEach(function (field) {
+    var index = telegramHistory[field]; if (index >= 0) mapping.cellPolicies[index].excluded = true;
+  });
+  var linkIndex = Object.create(null), literalPhoneCells = new Map();
   links.forEach(function (cell) { linkIndex[cell.row + ':' + cell.column] = cell.runs; });
   for (var index = firstData; index < displays.length; index++) {
     if (index % 250 === 0 && Date.now() >= deadline) { complete = false; warn('Не удалось полностью распознать данные за отведённое время. Частичный результат нельзя использовать для создания базы.'); break; }
@@ -129,7 +134,8 @@ function preparedDataRead_(sheet, sourceId, section, options) {
       var descriptor = (mapping.recordColumns || [])[columnIndex];
       if (companyOnly && descriptor && (descriptor.person || descriptor.summary)) continue;
       var rawValue = values[index] && values[index][columnIndex], text = String(cells[columnIndex] || '');
-      var entry = preparedDataCellContacts_(text, rawValue, label, linkIndex[key] || [], mapping, columnIndex);
+      var entry = preparedDataCellContacts_(text, rawValue, label, linkIndex[key] || [], mapping, columnIndex, formulas[index][columnIndex]);
+      if (entry.literalPhoneText) literalPhoneCells.set(key, entry.literalPhoneText);
       if (entry.emails.length || entry.phones.length || entry.telegrams.length) cellContacts[key] = entry;
       if (entry.unparsed) unparsed++;
       var source = { fileId: sourceId, sheetId: sheetId, sheetName: sheetName, row: index + 1, column: columnIndex + 1, columnHeader:label };
@@ -157,6 +163,12 @@ function preparedDataRead_(sheet, sourceId, section, options) {
   if (Date.now() >= deadline) { complete = false; warn('Нормализация строк превысила время полного чтения. Частичные результаты нельзя применять автоматически.'); }
   if (!normalized.emailRows.length && !normalized.phoneRows.length && sourceRows) warn('В исходнике не найдены однозначные email, телефоны или Telegram. Исходные строки и данные компаний/ЛПР сохранены; неизвестные значения не выдаются за контакты.');
   if (normalized.partial) { complete = false; warn('В исходнике слишком много контактов для одного полного предпросмотра. Разделите исходный лист.'); }
+  if (literalPhoneCells.size) {
+    formulaSnapshots.forEach(function (cell) {
+      var literal = literalPhoneCells.get(cell.row + ':' + cell.column);
+      if (literal) cell.literalPhoneText = literal;
+    });
+  }
   if (unparsed) warn('В контактных полях есть значения, которые не удалось распознать (' + unparsed + '). Они сохранены в исходном листе; валидация контактов сейчас не выполняется.');
   if (normalized.companyUnknown) warn('У части строк не определена компания (' + normalized.companyUnknown + '). Контакты сохранены с отметкой для ручной проверки.');
   if (normalized.unknownPhones) warn('Часть номеров не имеет однозначного международного формата или типа. Они сохранены без предположения о стране и требуют дальнейшей обработки.');
@@ -165,7 +177,7 @@ function preparedDataRead_(sheet, sourceId, section, options) {
   var source = { id: sheetId, sheetId: sheetId, name: sheetName, section: section, effectiveSection: section, headers: header, hasHeader: hasHeader, headerIndex: detected.index, rowCount: lastRow, columnCount: width, sample: displays.slice(firstData, firstData + limits.sampleRows) };
   var email = { headers: PREPARED_DATA_HEADERS.email.concat(CONTACT_MAILING_STATUS.header, 'Исходный столбец email'), rows: normalized.emailRows, sample: normalized.emailRows.slice(0, limits.sampleRows) };
   var phone = { headers: PREPARED_DATA_HEADERS.phone.concat(CONTACT_MAILING_STATUS.header), rows: normalized.phoneRows, sample: normalized.phoneRows.slice(0, limits.sampleRows) };
-  var fingerprint = preparedDataDigest_(JSON.stringify({ version: 2, sourceId: sourceId, section: section, headerIndex: detected.index, hasHeader: hasHeader, sheetId: sheetId, sheetName: sheetName, rows: lastRow, columns: width, values: values, display: displays, formulas: formulas, links: links }));
+  var fingerprint = preparedDataDigest_(JSON.stringify({ version: 2, literalPhoneVersion: literalPhoneCells.size ? 1 : undefined, sourceId: sourceId, section: section, headerIndex: detected.index, hasHeader: hasHeader, sheetId: sheetId, sheetName: sheetName, rows: lastRow, columns: width, values: values, display: displays, formulas: formulas, links: links }));
   var legacyFingerprint = preparedDataDigest_(JSON.stringify({ version: 1, sourceId: sourceId, section: requestedSection, sheetId: sheetId, sheetName: sheetName, rows: lastRow, columns: width, values: values, display: displays, formulas: formulas, links: links }));
   return { complete: complete, canConfirm: complete && lastRow > 0 && width > 0, section: section, effectiveSection: section, fingerprint: fingerprint, legacyFingerprint: legacyFingerprint, sourceHash: fingerprint, counts: counts, source: source, sourceRows: lastRow, sourceCols: width, sourceValues: values, sourceDisplayValues: displays, sourceLinks: links, sourceFormulas: formulas, formulas: formulas, formulaSnapshots: formulaSnapshots, email: email, phone: phone, emailHeaders: email.headers, emailRows: email.rows, phoneHeaders: phone.headers, phoneRows: phone.rows, warnings: warnings, cellsRead: cellsRead, records: records, observations: observed, mapping: mapping, cellContacts: cellContacts, contactIndex: normalized.contactIndex,
     previewSheets: [{ name: 'Исходная база', headers: header, sample: source.sample, rowCount: lastRow }, { name: 'Email', headers: email.headers, sample: email.sample, rowCount: email.rows.length + 1 }, { name: 'Телефоны', headers: phone.headers, sample: phone.sample, rowCount: phone.rows.length + 1 }] };
@@ -271,7 +283,28 @@ function preparedDataStrongPhones_(display, raw, telegramColumn) {
   if (!strong) return [];
   return preparedDataPhones_(text).filter(function (phone) { return /^\+\d{8,15}$/.test(phone.value); });
 }
-function preparedDataCellContacts_(display, raw, label, links, mapping, index) {
+function preparedDataIsParseError_(display) { return display === '#ERROR!' || display === '#ОШИБКА!'; }
+
+/** A leading plus sometimes makes Sheets treat an imported list of phones as a formula. */
+function preparedDataLiteralPhoneList_(text) {
+  if (!text || text[0] !== '+' || /[^+\d(), \u00a0-]/.test(text)) return null;
+  var tokens = text.replace(/\u00a0/g, ' ').split(','), phones = [], incomplete = false;
+  for (var index = 0; index < tokens.length; index++) {
+    var token = tokens[index].trim(), international = token[0] === '+';
+    if (/^\d{1,3}(?:-\d{2}){3,}$/.test(token)) { incomplete = true; continue; }
+    if (international) {
+      // A dash is allowed only in a conventional subscriber group, never between arbitrary operands.
+      if (!/^\+[1-9]\d{7,14}$/.test(token) &&
+          !/^\+[1-9]\d{0,2}(?: +\d{3} +| *\(\d{3,5}\) *)\d{1,3}-\d{2}-\d{2}$/.test(token)) return null;
+    } else if (!/^\d{1,3}-\d{2}-\d{2}$/.test(token)) return null;
+    var phone = preparedDataPhone_(token, international);
+    if (!phone || token.indexOf('+7') === 0 && phone.value.length !== 12) return null;
+    phones.push(phone);
+  }
+  return phones.length ? {phones: phones, incomplete: incomplete} : null;
+}
+
+function preparedDataCellContacts_(display, raw, label, links, mapping, index, formula) {
   var result = { emails: [], phones: [], telegrams: [], unparsed: false };
   if (!String(display || '').trim() && !links.length) return result;
   var policy = mapping.cellPolicies && mapping.cellPolicies[index];
@@ -279,6 +312,22 @@ function preparedDataCellContacts_(display, raw, label, links, mapping, index) {
   var emailColumn = policy ? policy.email : mapping.emailColumns.some(function (column) { return column.index === index; });
   var phoneColumn = policy ? policy.phone : mapping.phoneColumns.some(function (column) { return column.index === index; });
   var telegramColumn = policy ? policy.telegram : mapping.telegramColumns.some(function (column) { return column.index === index; });
+  var parseError = !!formula && preparedDataIsParseError_(display);
+  if (phoneColumn && !emailColumn && !telegramColumn) {
+    var literal = parseError && formula.indexOf('=+') === 0 ? formula.slice(1) : '';
+    // The prepared copy stores the original list as plain text. Keep ambiguous
+    // local-number chains out of the next segment import as well.
+    var plainList = !formula && display[0] === '+' && display.indexOf(',') >= 0;
+    var parsed = (literal || plainList) && preparedDataLiteralPhoneList_(literal || display);
+    if (parsed) {
+      result.phones = parsed.phones;
+      result.phones.forEach(function (phone) { phone.origin = 'Столбец «' + label + '»'; });
+      result.unparsed = parsed.incomplete;
+      if (literal) result.literalPhoneText = literal;
+      return result;
+    }
+  }
+  if (parseError) { result.unparsed = !!(phoneColumn || emailColumn || telegramColumn); return result; }
   var urls = /[.:/]/.test(String(display)) || links.length ? preparedDataTextUrls_(display) : [];
   links.forEach(function (link) { if (urls.indexOf(link.url) < 0) urls.push(link.url); });
   result.emails = String(display).indexOf('@') >= 0 ? preparedDataEmails_(display) : [];
@@ -657,7 +706,7 @@ function preparedDataReadWorkbook_(book, fileId, section, options) {
     if (!complete && models.length < index) return;
     if (index >= 100 || Date.now() >= deadline || cells + height * width > PREPARED_DATA_LIMITS.maxCells || physicalRows + height > PREPARED_DATA_LIMITS.maxRows) { complete = false; warn('Книга превышает общий лимит полного чтения по листам, строкам, ячейкам или времени. Частичные списки нельзя использовать автоматически.'); return; }
     var routeKind = options.sheetRoutes && options.sheetRoutes[sheet.getSheetId()];
-    var model = preparedDataRead_(sheet, fileId, routeKind || section, { guard: guard, deadline: deadline, resolveLinkReference: resolveReference, routeKind: routeKind, sectionExplicit: routeKind ? true : options.sectionExplicit, segmentMasterChannels: options.segmentMasterChannels, segmentMasterRequired: options.segmentMasterRequired });
+    var model = preparedDataRead_(sheet, fileId, routeKind || section, { guard: guard, deadline: deadline, resolveLinkReference: resolveReference, routeKind: routeKind, mainTelegram: options.mainTelegram, sectionExplicit: routeKind ? true : options.sectionExplicit, segmentMasterChannels: options.segmentMasterChannels, segmentMasterRequired: options.segmentMasterRequired });
     models.push(model); cells += model.cellsRead; physicalRows += height;
     observations = observations.concat(model.observations || []); records = records.concat(model.records || []);
     var descriptor = sourceSheets[sourceSheets.length - 1]; descriptor.hasHeader = model.source.hasHeader; descriptor.headerIndex = model.source.headerIndex; descriptor.headers = model.source.headers; descriptor.section = model.section; descriptor.effectiveSection = model.section;

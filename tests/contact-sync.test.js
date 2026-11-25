@@ -267,6 +267,16 @@ test('new email and phone headers link to the same public preview and do not dup
   }
 });
 
+test('contact sync appends literal phone-list errors from an owned source only once', () => {
+  const f = fixture({realExtractor:true, rows:[['Компания','Рабочий телефон (компания)'], ['Фабрика','#ERROR!']]});
+  f.book.tabs[0].formulas['2:2'] = '=+7 (999) 123-45-67, 312-22-11, 12-34-56-78-90-12-34';
+  assert.equal(f.finish('sync_literal_phone_lists').counts.addedPhone, 2);
+  const [headers,...contacts] = f.target('phone').data;
+  assert.deepEqual(contacts.map(row => row[headers.indexOf('Телефон')]).sort(), ['+79991234567','3122211']);
+  assert.equal(f.finish('sync_after_literal_phones').counts.addedPhone, 0);
+  assert.equal(f.book.tabs[0].data[1][1], '#ERROR!'); assert.equal(f.calls.provider.length, 0);
+});
+
 test('enrollment replaces a copied workbook link and preserves a manual formula at the other action heading', () => {
   const action = 'Проверить новые контакты', prefix = 'https://seainkk.github.io/-/?validate=';
   const f = fixture({legacy:true, emailRows:[[...EMAIL, action]], phoneRows:[[...PHONE, action]]});
@@ -549,6 +559,60 @@ test('a previous contact job finishes before the segment takes its own snapshot'
     ['previous_contact_request', 'complete'], ['next_segment_request', 'complete']
   ]);
   assert.equal(f.calls.provider.length, 1);
+});
+
+test('a literal master email receiving its own mailto decoration after target writes completes the same segment receipt', () => {
+  const f = fixture({realExtractor:true, rows:[['Компания','Email','Телефон'],['Компания','one@example.test','+79991110001']]});
+  f.context.enrollContactWorkbook_(f.scope, FILE, {sourceSheetIds:[0], role:'segment-companies', section:'companies', segmentId:SOURCES});
+  const complete = f.context.contactSyncComplete_;
+  let changed = false;
+  f.context.contactSyncComplete_ = (claim, plan) => {
+    if (!changed) {
+      const original = claim.state.job.sourceFingerprint;
+      f.book.tabs[0].links['2:2'] = 'mailto:one@example.test';
+      assert.notEqual(f.context.contactSyncStableModel_(claim).model.fingerprint, original);
+      changed = true;
+    }
+    return complete(claim, plan);
+  };
+  const step = () => f.context.contactSyncSegmentImportStep_(FILE, 'companies', SOURCES, 'literally_the_same_master');
+  let done = false;
+  for (let i = 0; i < 10 && !done; i++) done = step();
+  assert.ok(done && changed); assert.equal(f.state().dirty, false);
+  assert.equal(f.target('email').getLastRow(), 2); assert.equal(f.target('phone').getLastRow(), 2);
+  assert.ok(step()); assert.equal(f.state().receipts.length, 1);
+});
+
+test('a new hidden hyperlink or a changed source formula invalidates a segment master snapshot', () => {
+  for (const change of [
+    f => { f.book.tabs[0].links['2:2'] = 'mailto:other@example.test'; },
+    f => { f.book.tabs[0].formulas['2:2'] = '="one@example.test"'; }
+  ]) {
+    const f = fixture({realExtractor:true, rows:[['Компания','Email'],['Одна','one@example.test']]});
+    f.context.enrollContactWorkbook_(f.scope, FILE, {sourceSheetIds:[0], role:'segment-companies', section:'companies', segmentId:SOURCES});
+    const complete = f.context.contactSyncComplete_;
+    f.context.contactSyncComplete_ = (claim, plan) => { change(f); return complete(claim, plan); };
+    assert.throws(() => {
+      for (let i=0; i<10; i++) f.context.contactSyncSegmentImportStep_(FILE, 'companies', SOURCES, 'changed_hidden_source');
+    }, /CONTACT_SOURCE_CHANGED/);
+    assert.equal(f.state().receipts.length, 0);
+  }
+});
+
+test('workbook version churn at the final segment contact step waits then finishes the original request', () => {
+  const f = fixture(), complete = f.context.contactSyncComplete_;
+  f.context.enrollContactWorkbook_(f.scope, FILE, {sourceSheetIds:[0], role:'segment-companies', section:'companies', segmentId:SOURCES});
+  f.context.contactSyncComplete_ = (claim, plan) => {
+    f.context.contactSyncComplete_ = complete;
+    f.options.onModel = () => { const file=f.resources.get(FILE); file.version=String(Number(file.version)+1); };
+    return complete(claim, plan);
+  };
+  const step = () => f.context.contactSyncSegmentImportStep_(FILE, 'companies', SOURCES, 'version_churn_original_request');
+  for (let i=0; i<10 && f.state().job?.phase!=='complete'; i++) assert.equal(step(),false);
+  assert.equal(f.state().job.phase,'complete'); assert.equal(f.state().receipts.length,0);
+  f.options.onModel = null;
+  assert.ok(step()); assert.ok(step()); assert.equal(f.state().receipts.length,1);
+  assert.equal(f.target('email').getLastRow(),2);
 });
 
 test('a concurrent edit to the master cannot publish a completed import contact receipt', () => {

@@ -44,7 +44,40 @@ function legacyContactHistoryWork_(value) {
   return '';
 }
 
-function legacyContactHistoryColumns_(headers, pairedEmail) {
+/** This export explicitly binds the Telegram check and campaign flag to the
+ * primary phone. Other phones or email addresses in the row have no such evidence. */
+function legacyMainTelegramColumns_(headers) {
+  var keys = headers.map(legacyContactHistoryKey_);
+  if (keys.indexOf('основнойтелефон') < 0 || keys.indexOf('естьтг') < 0) return null;
+  var labels = { phone: 'основнойтелефон', found: 'естьтг', nickname: 'тгник', id: 'тгid', days: 'activedaysago', campaign: 'врассылкенса' }, columns = {};
+  Object.keys(labels).forEach(function (field) {
+    var key = labels[field], first = keys.indexOf(key);
+    if (first >= 0 && first !== keys.lastIndexOf(key)) legacyContactHistoryReadFail_('В исходном листе несколько одинаковых заголовков Telegram. Проверьте связь результата с основным телефоном.');
+    columns[field] = first;
+  });
+  return columns;
+}
+
+function legacyMainTelegramRow_(row, columns) {
+  var phone = legacyContactHistoryPhone_(row[columns.phone]);
+  if (!phone) return null;
+  var flag = legacyContactHistoryText_(row[columns.found]), id = legacyContactHistoryText_(row[columns.id]), nickname = legacyContactHistoryText_(row[columns.nickname]);
+  var rawDays = legacyContactHistoryText_(row[columns.days]), days = legacyContactHistoryDays_(rawDays);
+  var campaign = legacyContactHistoryText_(row[columns.campaign]), active = /^да$/i.test(campaign);
+  var positive = /^(?:да|yes|true|1)$/i.test(flag), negative = /^(?:нет|no|false|0)$/i.test(flag), hasId = /^[1-9]\d*$/.test(id);
+  if (!positive && !negative && !hasId && days === null && !nickname && !campaign) return null;
+  var found = positive || hasId;
+  var conflict = negative && (hasId || days !== null || !!nickname || active);
+  var status = conflict ? LEGACY_CONTACT_HISTORY.reviewStatus : negative ? 'Telegram не найден' : !found ? (days !== null || nickname ? LEGACY_CONTACT_HISTORY.reviewStatus : '') :
+    days === null ? 'Telegram найден' : days <= 30 ? 'Telegram: активен' : 'Telegram: более 30 дней офлайн';
+  return { phone: phone, work: active ? ['В рассылке НСА'] : [], validation: {
+    status: status, idTg: hasId ? id : '', nickname: nickname, days: days, checkedAt: '', provider: '', sourceTelegram: true, campaignSource: campaign,
+    eligible: conflict ? null : negative ? false : found && days !== null ? days <= 30 : null,
+    raw: JSON.stringify({ 'Есть ТГ': flag, 'ТГ Ник': nickname, 'ТГ ID': id, 'Active_days_ago': rawDays, 'В рассылке НСА': campaign })
+  } };
+}
+
+function legacyContactHistoryColumns_(headers, pairedEmail, mainTelegram) {
   var result = { columns: Object.create(null), email: [], phone: [], work: [], validation: [], history: false };
   var validationNames = ['Валидация', 'Результат валидации', 'Результат проверки', 'Статус email', 'email_status', 'validation', 'Validation result'].map(legacyContactHistoryKey_);
   var historyNames = validationNames.concat(['Дата проверки', 'checked_at', 'validation_date', 'ID_TG', 'Telegram ID', 'Nickname_TG', 'TG username', 'Telegram username', 'Active_days_ago', 'days_offline', 'Как давно был в сети'].map(legacyContactHistoryKey_));
@@ -60,6 +93,10 @@ function legacyContactHistoryColumns_(headers, pairedEmail) {
     if (historyNames.indexOf(key) >= 0) result.history = true;
   });
   result.history = result.history || result.work.length > 0;
+  if (mainTelegram) {
+    result.mainTelegram = legacyMainTelegramColumns_(headers);
+    if (result.mainTelegram) result.history = true;
+  }
   result.emailChecks = [];
   if (pairedEmail) headers.forEach(function (header, index) {
     var label = legacyContactHistoryKey_(header), match = label.match(/^(.+?)(?:рез|результат)(?:валидации|проверки)$/);
@@ -98,7 +135,7 @@ function legacyContactHistoryCollect_(modelOrModels) {
   leaves.filter(Boolean).forEach(function (model) {
     var source = model.source || {}, headers = source.headers || [], rows = model.sourceDisplayValues || model.sourceValues || [];
     if (source.hasHeader === false || !headers.length || !rows.length) return;
-    var schema = legacyContactHistoryColumns_(headers, model.pairedEmail), columns = schema.columns, emailColumns = schema.email, phoneColumns = schema.phone, workColumns = schema.work;
+    var schema = legacyContactHistoryColumns_(headers, model.pairedEmail, model.mainTelegram), columns = schema.columns, emailColumns = schema.email, phoneColumns = schema.phone, workColumns = schema.work;
     var first = Number.isSafeInteger(source.headerIndex) ? source.headerIndex + 1 : 1;
     rows.slice(first).forEach(function (row, offset) {
       var absolute = first + offset + 1, emails = [], phones = [];
@@ -154,6 +191,8 @@ function legacyContactHistoryCollect_(modelOrModels) {
       var days = legacyContactHistoryDays_(legacyContactHistoryPick_(row, columns, ['Active_days_ago', 'days_offline', 'Как давно был в сети']));
       var hasId = /^[1-9]\d*$/.test(idTg), explicitNo = /^(?:нет|no|false|not\s*found|не\s*найден(?:о)?)$/i.test(idTg);
       var tgIndex = columns[legacyContactHistoryKey_('ID_TG')]; if (tgIndex === undefined) tgIndex = columns[legacyContactHistoryKey_('Telegram ID')];
+      var main = schema.mainTelegram && legacyMainTelegramRow_(row, schema.mainTelegram);
+      if (schema.mainTelegram) { hasId = false; explicitNo = false; days = null; }
       // Reports commonly contain personal and company numbers together. The
       // report's adjacent phone is authoritative; additional numbers stay new.
       var paired = '';
@@ -174,6 +213,10 @@ function legacyContactHistoryCollect_(modelOrModels) {
         if (!validation && genericPhoneCompletion && phones.length > 1 && model.preserveAmbiguousHistory === true) validation = { status: LEGACY_CONTACT_HISTORY.reviewStatus, checkedAt: date, raw: rawResult || rawEmail, provider: '', idTg: '', nickname: '', days: null, eligible: null };
         if (!validation && !paired && phones.length > 1 && (hasId || explicitNo || days !== null) && model.preserveAmbiguousHistory === true) validation = { status: LEGACY_CONTACT_HISTORY.reviewStatus, raw: 'Неоднозначная прежняя проверка нескольких телефонов.', checkedAt: date, provider: '', idTg: '', nickname: '', days: null, eligible: null };
         var phoneWorks = allowPhoneHistory ? works : [];
+        if (allowPhoneHistory && main && phone === main.phone) {
+          validation = main.validation;
+          phoneWorks = phoneWorks.concat(main.work);
+        }
         if (validation || phoneWorks.length) legacyContactHistoryAdd_(result, 'telegram', phone, validation, phoneWorks, evidence);
       });
     });
@@ -185,6 +228,10 @@ function legacyContactHistoryAdd_(map, kind, contact, validation, work, source) 
   var key = kind + ':' + contact, entry = map[key];
   if (!entry) entry = map[key] = { kind: kind, contact: contact, validation: null, work: [], evidence: [], conflict: false };
   if (validation) {
+    if (validation.sourceTelegram) {
+      if (!entry.campaignSources) entry.campaignSources = [];
+      if (validation.campaignSource && entry.campaignSources.indexOf(validation.campaignSource) < 0) entry.campaignSources.push(validation.campaignSource);
+    }
     if (!entry.validation) entry.validation = validation;
     else {
       var before = entry.validation;
@@ -200,10 +247,18 @@ function legacyContactHistoryAdd_(map, kind, contact, validation, work, source) 
 
 /** Finished row status blocks new paid checks, including ambiguous old reports. */
 function legacyContactHistoryFields_(entry) {
-  var validation = entry.validation || {}, review = entry.conflict || entry.work.length > 0;
-  var raw = 'legacy-history:v1:' + JSON.stringify({ validation: validation.raw || validation.status || '', work: entry.work, conflict: entry.conflict, source: entry.evidence });
+  var validation = entry.validation || {}, review = entry.conflict || entry.work.some(function (value) { return !validation.sourceTelegram || value !== 'В рассылке НСА'; });
+  var snapshot = validation.sourceTelegram || entry.campaignSources ? { primaryTelegram: true } : {};
+  Object.assign(snapshot, { validation: validation.raw || validation.status || '', work: entry.work, conflict: entry.conflict, source: entry.evidence });
+  var originalWork = entry.work;
+  if (snapshot.primaryTelegram) {
+    var campaigns = entry.campaignSources || (validation.campaignSource ? [validation.campaignSource] : []);
+    originalWork = entry.work.filter(function (value) { return value !== 'В рассылке НСА'; }).concat(campaigns);
+    snapshot.campaigns = campaigns;
+  }
+  var raw = 'legacy-history:v1:' + JSON.stringify(snapshot);
   var fields = { 'Валидация': review ? LEGACY_CONTACT_HISTORY.reviewStatus : validation.status,
-    'Дата проверки': validation.checkedAt || '', 'Результат проверки': raw, 'Статус из источника': entry.work.join('; ') };
+    'Дата проверки': validation.checkedAt || '', 'Результат проверки': raw, 'Статус из источника': originalWork.join('; ') };
   if (entry.kind === 'email') { fields['Провайдер'] = validation.provider || ''; fields['Валидатор'] = 'источник'; }
   else {
     fields.ID_TG = validation.idTg || ''; fields.Nickname_TG = validation.nickname || '';
@@ -297,11 +352,11 @@ function legacyContactHistoryReadWorkbook_(book, fileId, section, guard, selecte
     if (cached) {
       values = cached.sourceDisplayValues || cached.sourceValues || [];
       if (!legacyContactHistoryRectangle_(values, height, width)) legacyContactHistoryReadFail_('Выбранный исходный лист изменился во время чтения истории.');
-      reserve(height, width, true); source = Object.assign({}, cached.source); schema = legacyContactHistoryColumns_(source.headers || [], options.pairedEmail);
+      reserve(height, width, true); source = Object.assign({}, cached.source); schema = legacyContactHistoryColumns_(source.headers || [], options.pairedEmail, options.mainTelegram);
     } else {
       var probe = display(sheet, 1, Math.min(10, height), width), header = legacyContactHistoryReadHeader_(probe, section);
       source = { sheetId: id, name: name, headers: header.header, hasHeader: header.hasHeader, headerIndex: header.index, rowCount: height, columnCount: width };
-      schema = legacyContactHistoryColumns_(source.headers, options.pairedEmail);
+      schema = legacyContactHistoryColumns_(source.headers, options.pairedEmail, options.mainTelegram);
       if (!source.hasHeader || !schema.history || !schema.email.length && !schema.phone.length) { signatures.push([id, name, height, width, 'no_contact_history', probe]); return; }
       values = probe.slice();
       var chunk = Math.max(1, Math.floor(limits.chunkCells / width));
@@ -327,7 +382,7 @@ function legacyContactHistoryReadWorkbook_(book, fileId, section, guard, selecte
         });
       }
     });
-    var leaf = { source: source, sourceDisplayValues: values, cellContacts: cached && cached.cellContacts || null, cellValidationBindings: bindings, pairedBindings: pairedBindings, pairedEmail: options.pairedEmail, preserveAmbiguousHistory: true, historyChannel: legacyContactHistoryChannel_(source, schema) };
+    var leaf = { source: source, sourceDisplayValues: values, cellContacts: cached && cached.cellContacts || null, cellValidationBindings: bindings, pairedBindings: pairedBindings, pairedEmail: options.pairedEmail, mainTelegram: options.mainTelegram, preserveAmbiguousHistory: true, historyChannel: legacyContactHistoryChannel_(source, schema) };
     legacyContactHistoryReadValidate_(leaf, schema);
     leaves.push(leaf);
     signatures.push([id, name, height, width, source.headerIndex, source.headers, values, bindings]);
@@ -358,7 +413,7 @@ function legacyContactHistoryReadValidate_(model, schema) {
     var rawValidation = legacyContactHistoryPick_(row, schema.columns, ['Валидация', 'Результат валидации', 'Результат проверки', 'Статус email', 'email_status', 'validation', 'Validation result']);
     var verdict = legacyContactHistoryCompleted_(rawValidation);
     var id = legacyContactHistoryPick_(row, schema.columns, ['ID_TG', 'Telegram ID']), days = legacyContactHistoryDays_(legacyContactHistoryPick_(row, schema.columns, ['Active_days_ago', 'days_offline', 'Как давно был в сети']));
-    var telegram = /^[1-9]\d*$/.test(id) || /^(?:нет|no|false|not\s*found|не\s*найден(?:о)?)$/i.test(id) || days !== null;
+    var telegram = !schema.mainTelegram && (/^[1-9]\d*$/.test(id) || /^(?:нет|no|false|not\s*found|не\s*найден(?:о)?)$/i.test(id) || days !== null);
     function meaningful(value) { return !/^(?:\s*|нет|не найден[оы]?|не указан[оы]?|—|-|n\/a|no|0)$/i.test(String(value || '').trim()); }
     if (model.historyChannel !== 'telegram' && (work || verdict)) schema.email.forEach(function (column) {
       if (!meaningful(row[column])) return;

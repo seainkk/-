@@ -91,7 +91,7 @@ function fixture(options = {}) {
     resources.get(id).version++;
     if (writeFailure && (!writeFailure.id || id === writeFailure.id) && firstRow > 1) { writeFailure = null; throw context.registryError_('SHEETS_RAW_UNCERTAIN', 'Reply lost after apply'); }
   };
-  for (const name of ['ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs', 'SegmentRecords.gs', 'SegmentImports.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
+  for (const name of ['ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs', 'LegacyContactHistory.gs', 'SegmentRecords.gs', 'SegmentImports.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   const preview = () => context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [SOURCE] });
   const start = (shown, requestId = 'segment-normalize-request-001') => context.importSegmentRecords_({ segmentId: SEGMENT, planToken: shown.planToken, requestId });
   const next = state => context.continueSegmentRecords_({ segmentId: SEGMENT, jobId: state.jobId, requestId: state.requestId });
@@ -146,6 +146,48 @@ test('automatic mixed import writes only company-leaf companies and person-leaf 
   assert.equal(person[personHead.indexOf('ID компании')],company[companyHead.indexOf('ID компании')]);
   assert.equal(f.finish(f.start(show)).state,'complete');
   const repeat=selected(); assert.equal(repeat.counts.peopleAdded,0); assert.equal(repeat.counts.companiesAdded,0);
+});
+
+test('re-importing the same raw LPR sheet fills accepted primary phone history with no master additions or paid checks', () => {
+  const f = fixture({rows:[
+    ['ИНН','Название (компания)','ФИО','Основной телефон','Есть ТГ','ТГ Ник','ТГ ID ','Active_days_ago','В рассылке НСА','Доп. тел. (не проверяли на тг)','Почта основная'],
+    ['7707083893','Компания Пример','Анна Иванова','+79991110001',1,'sample_user','123456789',3,'да','+79991110002','person@example.test'],
+    ['7707083893','Компания Пример','Антон Петров','+79991110003',0,'','','','','',''],
+    ['7707083893','Компания Пример','Ирина Котова','нет данных',0,'','','','','',''],
+    ['7707083893','Компания Пример','Иван Орлов','+79991110004',1,'','','','добавление в контакты','',''],
+    ['7707083893','Компания Пример','Ольга Емельянова','+79991110005',1,'','','','Отправлено','','']
+  ]});
+  f.sourceSheet.setName('ЛПР');
+  f.sourceBook.insertSheet('Компании').state.rows.push(['ИНН','Название'],['7707083893','Компания Пример']);
+  const ready=f.context.segmentRecordsReadySources_;
+  const preview=()=>f.context.previewSegmentRecords_({segmentId:SEGMENT, sourceIds:[SOURCE], targetKind:'auto'});
+  f.context.segmentRecordsReadySources_=(...args)=>ready(...args).map(binding=>{delete binding.mainTelegramHistory;return binding;});
+  const old=preview(); assert.equal(old.counts.peopleAdded,5);
+  const oldPlan=f.context.segmentRecordsLoadPreview_(f.config,old.planToken,SEGMENT);
+  assert.equal(oldPlan.workingHistory,undefined);
+  f.finish(f.start(old,'previous-import-00001'));
+  f.context.segmentRecordsReadySources_=ready;
+  let installed;
+  f.context.contactSyncInstallWorkingHistory_=(_file,kind,_segment,rows)=>{ if(kind==='lpr') installed=plain(rows); return true; };
+  f.context.queueWorkbookValidation_=()=>assert.fail('The segment import must never queue a paid validation');
+  const updated=preview(); assert.equal(updated.counts.peopleAdded,0); assert.equal(updated.counts.companiesAdded,0);
+  const plan=f.context.segmentRecordsLoadPreview_(f.config,updated.planToken,SEGMENT);
+  assert.deepEqual(Object.keys(plan.workingHistory.lpr).sort(),['phone:79991110001','phone:79991110003','phone:79991110004','phone:79991110005']);
+  assert.equal(plan.workingHistory.companies,undefined);
+  const evidence=plan.workingHistory.lpr['phone:79991110001'][0];
+  assert.equal(evidence.source,SOURCE); assert.equal(evidence.sheet,f.sourceSheet.getSheetId()); assert.equal(evidence.refs,'2');
+  assert.equal(evidence.fields['Валидация'],'Telegram: активен'); assert.equal(evidence.fields['Статус'],'в рассылке');
+  assert.equal(evidence.fields['Nickname_TG'],'sample_user'); assert.equal(evidence.fields['ID_TG'],'123456789'); assert.equal(evidence.fields['Active_days_ago'],'3');
+  assert.equal(plan.workingHistory.lpr['phone:79991110003'][0].fields['Валидация'],'Telegram не найден');
+  [['phone:79991110004','добавление в контакты'],['phone:79991110005','Отправлено']].forEach(([key,note])=>{
+    const materialized=f.context.contactSyncWorkingFields_(plan.workingHistory.lpr[key]);
+    assert.equal(materialized['Статус из источника'],note);
+    assert.equal(materialized['Статус рассылки'],'Новый контакт');
+    assert.equal(materialized['Валидация'],'Telegram найден');
+    assert.ok(materialized['История контакта'].includes(note));
+  });
+  assert.equal(f.finish(f.start(updated,'phone-history-retry-00001')).state,'complete');
+  assert.deepEqual(installed,plain(plan.workingHistory.lpr)); assert.equal(f.master('lpr').state.rows.length,6);
 });
 
 test('a mixed selection honours the registered type of a separate single-sheet source with ambiguous headers', () => {
@@ -225,6 +267,23 @@ test('a shared address retains only company or LPR source columns accepted by ea
   assert.equal(f.finish(f.start(shown)).state, 'complete');
   assert.deepEqual(f.calls.origins.map(group => group[key]).sort(),
     [plan.emailOrigins.lpr[key], plan.emailOrigins.companies[key]].sort());
+});
+
+test('reimporting a raw segment source after a phone-list parse error fills its existing company once', () => {
+  const rows = [['Названия', 'ИНН', 'Рабочий телефон (компания)'], ['Фабрика', '7707083893', '#ERROR!']];
+  const f = fixture({rows});
+  const show = () => f.context.previewSegmentRecords_({segmentId:SEGMENT, sourceIds:[SOURCE], targetKind:'companies'});
+  f.finish(f.start(show(), 'first_segment_without_phone'));
+  f.sourceSheet.state.formulas['2:3'] = '=+7 (999) 123-45-67, 312-22-11, 12-34-56-78-90-12-34';
+  const update = show();
+  assert.equal(update.counts.companiesAdded, 0); assert.equal(update.counts.peopleAdded, 0);
+  assert.equal(update.counts.companiesUpdated, 1);
+  f.finish(f.start(update, 'repair_segment_company_phone'));
+  const [header, row] = f.master('companies').state.rows, phones = row[header.indexOf('Телефон')];
+  assert.match(phones, /\+79991234567/); assert.match(phones, /3122211/); assert.doesNotMatch(phones, /12345678901234/);
+  const repeat = show();
+  assert.equal(repeat.counts.companiesAdded + repeat.counts.companiesUpdated, 0);
+  assert.equal(f.sourceSheet.state.rows[1][2], '#ERROR!'); assert.match(f.sourceSheet.state.formulas['2:3'], /^=\+/);
 });
 
 test('a segment import waits for contact receipts and reuses the same per-book request after a lost reply', () => {

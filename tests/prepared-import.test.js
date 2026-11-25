@@ -878,6 +878,23 @@ test('V2 freezes Date, numeric and literal linked formula snapshots on every ori
   assert.ok(f.calls.writes.some(call => call.sheet === second.getSheetId() && call.raw && call.links?.[0]?.[0] === 'mailto:person@example.test'));
 });
 
+test('prepared output freezes a misread phone list as text and reimports it without changing the original formula', () => {
+  const f = workbookReader(fixture()), source = f.books.get(ORIGINAL).tabs[0];
+  const list = '+7 (999) 123-45-67, 312-22-11, 12-34-56-78-90-12-34';
+  source.state.data.splice(0, Infinity, ['Названия', 'Рабочий телефон (компания)', 'Примечание'], ['Фабрика', '#ERROR!', '#ERROR!']);
+  source.state.formulaMap['2:2'] = '=' + list; source.state.formulaMap['2:3'] = '=SUM(A2:B2)';
+  const draft = f.stage(), preview = selectedPreview(f, draft, [0]);
+  assert.equal(preview.counts.phones, 2);
+  const output = f.books.get(f.finish(draft, preview).file.id), master = output.getSheetByName('Исходная база');
+  const phones = output.getSheetByName('Телефоны и Telegram').state.data, index = phones[0].indexOf('Телефон');
+  assert.deepEqual(phones.slice(1).map(row => row[index]).sort(), ['+79991234567','3122211']);
+  assert.equal(master.state.data[1][1], list); assert.equal(master.state.data[1][2], '#ERROR!');
+  assert.equal(master.state.formulaMap['2:2'], undefined); assert.equal(master.state.formulaMap['2:3'], undefined);
+  assert.equal(source.state.data[1][1], '#ERROR!'); assert.equal(source.state.formulaMap['2:2'], '=' + list);
+  const reread = f.context.preparedDataRead_(master, output.getId(), 'companies', {});
+  assert.deepEqual(plain(reread.records[0].general.phones).sort(), ['+79991234567','3122211']);
+});
+
 test('V2 preserves empty sibling originals and keeps the single-source three-tab convention', () => {
   const f = workbookReader(fixture()), empty = f.books.get(ORIGINAL).insertSheet('Пустой лист');
   const result = f.finish(f.stage()), output = f.books.get(result.file.id);
@@ -1030,8 +1047,8 @@ test('automatic direct preparation publishes one mixed source with separate cont
     ['Название', 'ИНН', 'Имя', 'Фамилия', 'Должность', 'Рабочий телефон (компания)', 'Рабочий email'],
     ['Компания Пример', '7707083893', 'Игнат', 'Петров', 'Директор', '+79991110001', 'work@example.test']);
   person.state.data.splice(0, person.state.data.length,
-    ['Название (компания)', 'ИНН', 'Фамилия', 'Имя', 'Отчество', 'Основной телефон', 'Доп. тел. (не проверяли на тг)', 'Почта основная', 'Почта основная рез. валидации', 'Доп. почта', 'Доп. почта рез. валидации'],
-    ['Компания Пример', '7707083893', 'Иванова', 'Анна', 'Петровна', '+79991110002', '+79991110003', 'anna@example.test', 'valid', 'extra@example.test', 'invalid']);
+    ['Название (компания)', 'ИНН', 'Фамилия', 'Имя', 'Отчество', 'Основной телефон', 'Есть ТГ', 'ТГ Ник','ТГ ID ', 'Active_days_ago','В рассылке НСА','Доп. тел. (не проверяли на тг)', 'Почта основная', 'Почта основная рез. валидации', 'Доп. почта', 'Доп. почта рез. валидации'],
+    ['Компания Пример', '7707083893', 'Иванова', 'Анна', 'Петровна', '+79991110002', '1','@sample_person', '123456789', '11','да','+79991110003', 'anna@example.test', 'valid', 'extra@example.test', 'invalid']);
   book.insertSheet('Сводка').state.data.push(['Компания', 'Email'], ['Исключить', 'summary@example.test']);
   book.insertSheet('Email').state.data.push(['Компания', 'Email'], ['Отчёт', 'report@example.test']);
   book.insertSheet('Прочее').state.data.push(['Документ'], ['Договор']);
@@ -1041,6 +1058,7 @@ test('automatic direct preparation publishes one mixed source with separate cont
   const shown = f.preview(draft), destination = {name:'Пример', category:'clients', kind:'auto'};
   assert.equal(shown.counts.companyRows, 1); assert.equal(shown.counts.personRows, 1);
   assert.equal(shown.counts.emails, 3); assert.equal(shown.counts.phones, 3);
+  assert.equal(shown.counts.telegrams, 0);
   assert.deepEqual(shown.sourceSheets.map(leaf => leaf.section), ['companies', 'lpr']);
   assert.throws(() => f.confirm(draft, shown, { destination:{...destination, kind:'companies'} }), /INVALID_REQUEST/);
   let state = f.confirm(draft, shown, {destination});
@@ -1053,6 +1071,13 @@ test('automatic direct preparation publishes one mixed source with separate cont
   const value = (email,label) => rows.find(row=>row[headers.indexOf('Email')]===email)[headers.indexOf(label)];
   assert.equal(value('anna@example.test','Валидация'),'Валиден');
   assert.equal(value('extra@example.test','Валидация'),'Невалиден');
+  const [phoneHeaders,...phones]=output.getSheetByName('Телефоны и Telegram').state.data;
+  const phoneValue=(phone,label)=>phones.find(row=>row[phoneHeaders.indexOf('Телефон')]===phone)[phoneHeaders.indexOf(label)];
+  assert.equal(phoneValue('+79991110002','Статус рассылки'),'в рассылке');
+  assert.equal(phoneValue('+79991110002','Валидация'),'Telegram: активен');
+  assert.equal(phoneValue('+79991110002','Nickname_TG'),'@sample_person');
+  assert.equal(phoneValue('+79991110003','Валидация'),'');
+  assert.equal(value('anna@example.test','Статус рассылки'),'Новый контакт');
   assert.deepEqual(f.confirm(draft, shown, {destination}).file, state.file);
 });
 

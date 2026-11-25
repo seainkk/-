@@ -125,7 +125,7 @@ function segmentRecordsReadySources_(context, sources, targetKind) {
     var binding = { id: entry.id, expectedRevision: source.record.revision, section: source.contents.length === 1 ? source.contents[0] : targetKind || 'companies', sheetIds: entry.sheetIds, sheetOptions: entry.sheetOptions || null, mode: 'registry', workingSelectionVersion: 1 };
     if (targetKind === 'lpr' && source.contents.length > 1) binding.mixedSource = true;
     if (targetKind === 'auto') {
-      binding.autoRoute = true; binding.section = source.contents[0];
+      binding.autoRoute = true; binding.mainTelegramHistory = true; binding.section = source.contents[0];
       if (sources.length > 1 && source.contents.length === 1) binding.singleSection = source.contents[0];
     }
     return binding;
@@ -305,12 +305,14 @@ function segmentRecordsModelFingerprint_(model, tags, sheetId, mode, markerColum
 function segmentRecordsReadSource_(context, binding, targets) {
   for (var attempt = 0; attempt < 2; attempt++) {
     var before = segmentRecordsSourceMetadata_(context, binding, targets), tags = before.appProperties || {}, book = SpreadsheetApp.openById(binding.id), sheets = segmentRecordsSourceSheets_(book, binding, tags), records = [], warnings = [], models = [], mainModel = null;
+    var rawPhones = {};
     sheets.forEach(function (sheet) {
       var selection = (binding.sheetOptions || []).filter(function (entry) { return entry.sheetId === sheet.getSheetId(); })[0] || {}, options = { guard: function () { segmentRecordsSourceMetadata_(context, binding, targets); }, sectionExplicit: selection.section !== undefined || binding.mode === 'segment' };
       if (binding.autoRoute) {
         options.routeKind = selection.section || preparedAutoRoute_(sheet, tags) || (sheets.length === 1 && binding.singleSection);
         if (!options.routeKind) return;
         options.sectionExplicit = true;
+        options.mainTelegram = binding.mainTelegramHistory === true;
       }
       if (binding.mode === 'segment') { options.segmentMasterChannels = true; options.segmentMasterRequired = true; }
       if (binding.mixedSource && !options.sectionExplicit) options.mixedCompanyContext = preparedDataSection_(sheet.getName(), 'companies', {}) === 'companies';
@@ -319,6 +321,9 @@ function segmentRecordsReadSource_(context, binding, targets) {
       if (sheets.length === 1) mainModel = model;
       if (!model.complete || model.canConfirm === false) fail_('SOURCE_PARSE_INCOMPLETE', 'Исходный лист прочитан не полностью. Частичный перенос не выполняется.');
       if (!Array.isArray(model.records)) fail_('SOURCE_PARSE_UNAVAILABLE', 'Для единого формата нужен обновлённый распознаватель компаний и ЛПР.');
+      if (options.mainTelegram && options.routeKind === 'lpr') {
+        segmentMainTelegramEvidence_(rawPhones, model);
+      }
       model.records.forEach(function (record) {
         record.sourceBookName = before.name || '';
         if (binding.autoRoute) record.routeKind = options.routeKind;
@@ -338,6 +343,8 @@ function segmentRecordsReadSource_(context, binding, targets) {
     if (selection) {
       if (!selection.managed && (sheets.length !== 1 || sheets[0].getSheetId() !== selection.sourceSheetIds[0])) fail_('SOURCE_CHANGED', 'Изменился исходный лист готовой выборки.');
       history = segmentSelectionContacts_(book, selection, records, function () { segmentRecordsSourceMetadata_(context, binding, targets); }, mainModel);
+    } else if (Object.keys(rawPhones).length) {
+      history = { roles: { lpr: rawPhones }, fingerprint: digest_(JSON.stringify(rawPhones)) };
     }
     var after = segmentRecordsSourceMetadata_(context, binding, targets);
     if (!before.version || !after.version || String(before.version) === String(after.version)) {
@@ -347,6 +354,23 @@ function segmentRecordsReadSource_(context, binding, targets) {
     }
   }
   fail_('SOURCE_CHANGED', 'Исходная база меняется во время чтения. Повторите предпросмотр.');
+}
+
+/** Read the channel-specific history of raw workbooks that have no managed reports.
+ * Accept only a primary phone actually owned by a normalized person in the same row. */
+function segmentMainTelegramEvidence_(history, model) {
+  if (!model.source.hasHeader) return;
+  var columns = legacyMainTelegramColumns_(model.source.headers);
+  if (!columns) return;
+  model.records.forEach(function (record) {
+    var ref = record.source, main = legacyMainTelegramRow_(model.sourceDisplayValues[ref.row - 1], columns);
+    if (!main || !record.people.some(function (person) { return person.phones.indexOf(main.phone) >= 0; })) return;
+    var key = contactSyncKey_('phone', main.phone), rows = history[key] || (history[key] = []);
+    var origin = { sheetId: ref.sheetId, sheetName: ref.sheetName, row: ref.row };
+    var fields = legacyContactHistoryFields_({kind:'telegram', validation:main.validation, work:main.work, evidence:[origin]});
+    if (main.work.length) fields['Статус'] = 'в рассылке';
+    rows.push({ source:ref.fileId, sourceSheet:ref.sheetId, sheet:ref.sheetId, row:ref.row, refs:String(ref.row), fields:fields });
+  });
 }
 
 function segmentRecordsCollect_(context, bindings) {
@@ -414,7 +438,7 @@ function segmentSelectionContacts_(book, selection, records, guard, mainModel) {
         if (!value || !key) fail_('SOURCE_CHANGED', 'В отчёте выборки есть строка без однозначного контакта. Проверьте строку ' + (start + index) + ' на листе «' + sheet.getName() + '».');
         var refText = String(line[col(['Строки в Лист1', 'Исходные строки'])] || '').trim();
         var fields = {};
-        ['Статус', 'Комментарий', 'Компания', 'ID компании', 'Связанные ID компаний', 'Валидация', 'Дата проверки', 'Результат проверки', 'Валидатор', 'Провайдер', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Статус из источника'].forEach(function (label) {
+        ['Статус', 'Комментарий', 'Компания', 'ID компании', 'Связанные ID компаний', 'Валидация', 'Дата проверки', 'Результат проверки', 'Валидатор', 'Провайдер', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Для Telegram', 'Статус из источника'].forEach(function (label) {
           var column = label === 'Статус' ? col(['Статус рассылки', 'Статус']) : label === 'Компания' ? col(['Компания', 'Компания / ЛПР']) : col([label]);
           if (column >= 0 && line[column] !== '') fields[label] = String(line[column]);
         });
