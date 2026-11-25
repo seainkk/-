@@ -277,6 +277,45 @@ test('contact sync appends literal phone-list errors from an owned source only o
   assert.equal(f.book.tabs[0].data[1][1], '#ERROR!'); assert.equal(f.calls.provider.length, 0);
 });
 
+test('local five- and six-digit subscribers keep leading zeroes and all company owners on repeated contact sync', () => {
+  const f = fixture({realExtractor:true, rows:[
+    ['ID компании','Компания','Телефон'],
+    ['C-' + 'a'.repeat(24),'Альфа','0-12-34; 56-78-90; +79991234567'],
+    ['C-' + 'b'.repeat(24),'Бета','01234']
+  ]});
+  f.context.enrollContactWorkbook_(f.scope,FILE,{sourceSheetIds:[0],role:'segment-companies',section:'companies',segmentId:SOURCES});
+  assert.equal(f.finish('short_company_numbers').counts.addedPhone, 3);
+  const [headers, ...rows] = f.target('phone').data, index = label => headers.indexOf(label);
+  const find = value => rows.find(row => row[index('Телефон')] === value);
+  const shared = find('01234');
+  assert.equal(shared[index('Тип контакта')], 'Местный телефон');
+  assert.equal(find('567890')[index('Тип контакта')], 'Местный телефон'); assert.equal(find('+79991234567')[index('Тип контакта')], 'Телефон');
+  assert.equal(shared[index('Проверить принадлежность')], 'Да'); assert.equal(shared[index('ID компании')], '');
+  assert.match(shared[index('Компания / ЛПР')], /Альфа/); assert.match(shared[index('Компания / ЛПР')], /Бета/);
+  assert.equal(shared[index('Статус рассылки')], 'Новый контакт');
+  assert.equal(f.finish('repeat_short_company_numbers').counts.addedPhone, 0);
+  assert.equal(f.context.contactSyncKey_('phone','+01234'), '');
+  assert.equal(f.context.contactSyncKey_('phone','12.12.22'), '');
+});
+
+test('a curated phone report can carry a local subscriber into a segment without a country or a provider check', () => {
+  const f = fixture({realExtractor:true, phoneName:'Мобильные телефоны',
+    rows:[['Названия','Мобильные телефоны'], ['Фабрика','01-23-45']],
+    emailRows:[['Статус','Комментарий','Почт на компанию','Строки в Лист1','Компания','Email','Валидация','Провайдер','Сайты']],
+    phoneRows:[['Статус','Строки в Лист1','Компания','Мобильный телефон','ID_TG','Nickname_TG','Active_days_ago','Сайты'],
+      ['Нецелевой','2','Фабрика','01-23-45','','','','']]
+  });
+  for (const name of ['SegmentImports.gs','Promouser.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'),f.context);
+  f.context.segmentFindSheet_ = (book,id) => book.tabs.find(tab => tab.getSheetId() === id);
+  const selection = f.context.workingSelectionTargets_(f.book.tabs);
+  const model = f.context.preparedDataReadWorkbook_(f.book,FILE,'companies',{sourceSheetIds:[0],guard(){}});
+  const evidence = f.context.segmentSelectionContacts_(f.book,selection,model.records,() => {},model.models[0]);
+  assert.deepEqual(plain(model.records[0].general.phones), ['012345']);
+  const key = f.context.contactSyncKey_('phone', '012345');
+  assert.equal(evidence.roles.companies[key][0].fields['Статус'], 'Нецелевой');
+  assert.equal(f.calls.provider.length, 0);
+});
+
 test('enrollment replaces a copied workbook link and preserves a manual formula at the other action heading', () => {
   const action = 'Проверить новые контакты', prefix = 'https://seainkk.github.io/-/?validate=';
   const f = fixture({legacy:true, emailRows:[[...EMAIL, action]], phoneRows:[[...PHONE, action]]});

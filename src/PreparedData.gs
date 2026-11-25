@@ -647,7 +647,8 @@ function preparedDataAggregate_(observations, sourceId, warn, options) {
     contactIndex.push({ type: kind, value: record.value, sourceRefs: refs, owners: Object.keys(record.owners), needsReview: review });
     if (kind === 'email') return [record.value, context, sources, review ? 'Да' : '', CONTACT_MAILING_STATUS.initial,
       preparedDataFit_(preparedEmailSourceColumns_(refs),warn)];
-    return [kind === 'phone' ? record.value : '', context, Object.keys(record.origins).join('; '), sources, review ? 'Да' : '', kind === 'telegram' ? record.value : '', kind === 'telegram' ? 'Telegram' : 'Телефон', CONTACT_MAILING_STATUS.initial];
+    var contactType = kind === 'telegram' ? 'Telegram' : contactLocalPhone_(record.value) ? 'Местный телефон' : 'Телефон';
+    return [kind === 'phone' ? record.value : '', context, Object.keys(record.origins).join('; '), sources, review ? 'Да' : '', kind === 'telegram' ? record.value : '', contactType, CONTACT_MAILING_STATUS.initial];
   }); };
   var emailRows = rows('email'), onlyPhones = rows('phone'), telegramRows = rows('telegram');
   return { emailRows: emailRows, phoneRows: onlyPhones.concat(telegramRows), telegramRows: telegramRows, phoneCount: onlyPhones.length, telegrams: telegramRows.length, companies: Object.keys(resolved.owners).length, companyUnknown: resolved.unresolvedRows, sharedEmails: sharedEmails, sharedPhones: sharedPhones, sharedTelegrams: sharedTelegrams, mobiles: mobiles, unknownPhones: unknownPhones, partial: partial, contactIndex: contactIndex };

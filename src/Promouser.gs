@@ -177,7 +177,11 @@ function pvPreviewSnapshot_(context, state, kind, onlyNew) {
     var own = Object.create(null); ignored.forEach(function (header) { if (row.map[pvHeader_(header)] !== undefined) own[row.map[pvHeader_(header)]] = true; });
     source.push([row.sheetId, row.row, row.key, row.value, row.country, !!row.invalid, row.values.filter(function (_, index) { return !own[index]; }), String(row.note || '').split('\n').filter(function (line) { return line.indexOf(PROMOUSER.bindingPrefix) !== 0; }).join('\n')]);
     if (seen[row.key]) return; seen[row.key] = true;
-    if (row.invalid) { counts.invalid++; return; }
+    if (row.invalid) {
+      if (kind === 'telegram' && contactLocalPhone_(row.value)) counts.unknownCountry++;
+      else counts.invalid++;
+      return;
+    }
     if (completed[row.key]) { counts.checked++; return; }
     if (cacheMap[row.key] && cacheMap[row.key].result) { counts.cached++; return; }
     if (row.kind === 'telegram_username') { counts.telegramWithoutPhone++; return; }
