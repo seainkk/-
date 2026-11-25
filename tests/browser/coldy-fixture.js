@@ -141,7 +141,7 @@
       return { id: p.id, previewToken: 'phone-preview-1',
         counts: { new: 2, checked: 2, cached: 1, inProgress: 1, unknownCountry: 1, telegramWithoutPhone: 1, invalid: 1 },
         sample: [{ phone: '+14155550101', country: 'US' }, { phone: '+79990000001', country: 'RU' }],
-        canStart: state.canValidatePhones !== false, warnings: [] };
+        plannedCount:state.phonePlanned??2,autoPayLimitUsd:5,canStart:state.phonePlanned!==0&&state.canValidatePhones !== false, warnings: [] };
     },
     startPhoneValidation(p) {
       const previous = requestReceipt(p);

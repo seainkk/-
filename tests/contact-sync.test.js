@@ -36,10 +36,10 @@ function fixture(options = {}) {
     }
   };
   function makeSheet(id, name, rows) {
-    const data = rows.map(row => row.slice()), formulas = {}, validations = {};
+    const data = rows.map(row => row.slice()), formulas = {}, validations = {}, links = {};
     let maxRows = options.gridRows || Math.max(1000, rows.length), maxColumns = Math.max(26, ...rows.map(line => line.length));
     const api = {
-      data, formulas, validations, getSheetId: () => id, getName: () => name, getParent: () => book,
+      data, formulas, validations, links, getSheetId: () => id, getName: () => name, getParent: () => book,
       getLastRow() { for (let y = data.length - 1; y >= 0; y--) if (data[y]?.some(v => v !== '' && v !== null && v !== undefined)) return y + 1; return 0; },
       getLastColumn() { return Math.max(0, ...data.map(row => { for (let x = row.length - 1; x >= 0; x--) if (row[x] !== '' && row[x] !== null && row[x] !== undefined) return x + 1; return 0; })); },
       getMaxRows: () => maxRows, getMaxColumns: () => maxColumns,
@@ -58,7 +58,10 @@ function fixture(options = {}) {
           getNotes: () => Array.from({ length: height }, () => Array(width).fill('')),
           getDataValidations: () => Array.from({ length: height }, (_, y) => [validations[(row + y) + ':' + column] || null]),
           setDataValidations: rules => rules.forEach((line, y) => { validations[(row + y) + ':' + column] = line[0]; }),
-          getRichTextValues: () => Array.from({ length: height }, () => Array(width).fill(null))
+          getRichTextValues: () => Array.from({ length: height }, (_, y) => Array.from({ length: width }, (_, x) => {
+            const uri = links[(row + y) + ':' + (column + x)];
+            return uri ? {getLinkUrl: () => uri, getRuns: () => []} : null;
+          }))
         };
       }
     };
@@ -143,12 +146,12 @@ function fixture(options = {}) {
       return plain(item);
     }
   } };
-  context.sheetWriteRawStrings_ = (id, sheetId, row, column, values, mask) => {
+  context.sheetWriteRawStrings_ = (id, sheetId, row, column, values, mask, links) => {
     assert.equal(id, FILE); assert.equal(options.revoked, undefined);
     const s = book.tabs.find(t => t.getSheetId() === sheetId); assert.ok(s);
     if (values.length * values[0].length > 50000) throw Error('RAW cell bound');
     const isBody = row > 1;
-    calls.raw.push({ id, sheetId, row, column, values: plain(values), mask: mask ? plain(mask) : null });
+    calls.raw.push({ id, sheetId, row, column, values: plain(values), mask: mask ? plain(mask) : null, links: links ? plain(links) : null });
     if (isBody && options.writeFault === 'before') { options.writeFault = null; throw Error('write reply lost before apply'); }
     for (let y = 0; y < values.length; y++) {
       while (s.data.length < row + y) s.data.push([]);
@@ -156,6 +159,8 @@ function fixture(options = {}) {
         if (mask && !mask[y][x]) continue;
         assert.equal(typeof values[y][x], 'string');
         s.data[row + y - 1][column + x - 1] = values[y][x]; delete s.formulas[(row + y) + ':' + (column + x)];
+        const key = (row + y) + ':' + (column + x);
+        if (links?.[y][x]) s.links[key] = links[y][x]; else delete s.links[key];
       }
     }
     resources.get(FILE).version = String(Number(resources.get(FILE).version) + 1);
@@ -247,6 +252,86 @@ test('curated records carry every owner decision into the segment and a replay p
   assert.equal(dst.finish('working_history_repeat_1234').counts.addedEmail, 0);
 });
 
+test('new email and phone headers link to the same public preview and do not duplicate the action on resync', () => {
+  const f = fixture(), action = 'Проверить новые контакты';
+  f.finish('new_book_preview_headers');
+  f.finish('new_book_preview_headers_replay');
+  for (const channel of ['email', 'phone']) {
+    const tab = f.target(channel);
+    const headers = tab.data[0], position = headers.indexOf(action);
+    assert.ok(position >= 0); assert.equal(position, headers.lastIndexOf(action));
+    const writes = f.calls.raw.filter(write => write.sheetId === tab.getSheetId() && write.row === 1 && write.values[0].includes(action));
+    assert.equal(writes.length, 1);
+    const link = writes[0].links[0][position + 1 - writes[0].column];
+    assert.equal(link, 'https://seainkk.github.io/-/?validate=' + FILE);
+  }
+});
+
+test('enrollment replaces a copied workbook link and preserves a manual formula at the other action heading', () => {
+  const action = 'Проверить новые контакты', prefix = 'https://seainkk.github.io/-/?validate=';
+  const f = fixture({legacy:true, emailRows:[[...EMAIL, action]], phoneRows:[[...PHONE, action]]});
+  const email = f.book.tabs[1], phone = f.book.tabs[2], emailColumn = EMAIL.length + 1, phoneColumn = PHONE.length + 1;
+  email.links['1:' + emailColumn] = prefix + 'previous_company_book';
+  phone.formulas['1:' + phoneColumn] = '="Проверить новые контакты"';
+  f.finish('template_native_actions');
+  assert.equal(email.links['1:' + emailColumn], prefix + FILE);
+  assert.equal(email.data[0].filter(name => name === action).length, 1);
+  assert.equal(phone.formulas['1:' + phoneColumn], '="Проверить новые контакты"');
+  const alternate = phone.data[0].indexOf(action + ' (2)') + 1;
+  assert.ok(alternate > 0); assert.equal(phone.links['1:' + alternate], prefix + FILE);
+});
+
+test('a segment import upgrades a legacy validation heading once per channel without restoring one the team removed', () => {
+  const f = fixture(), action = 'Проверить новые контакты';
+  f.context.enrollContactWorkbook_(f.scope, FILE, {sourceSheetIds:[0], role:'segment-companies', section:'companies', segmentId:SOURCES});
+  const prior = f.state(), email = f.target('email'), phone = f.target('phone');
+  for (const sheet of [email, phone]) {
+    const position = sheet.data[0].indexOf(action);
+    assert.ok(position >= 0); sheet.data[0][position] = ''; delete sheet.links['1:' + (position + 1)];
+  }
+  delete prior.schemas.phone.validationLinkVersion;
+  f.saveState(prior);
+  const writes = f.calls.raw.length, reads = f.calls.reads.length;
+  f.invoke('getContactWorkspace_', {id:FILE});
+  assert.equal(f.calls.raw.length, writes); assert.equal(f.calls.reads.length, reads);
+  const complete = request => {
+    for (let i = 0; i < 12; i++) if (f.context.contactSyncSegmentImportStep_(FILE, 'companies', SOURCES, request)) return;
+    assert.fail('segment contact sync did not finish');
+  };
+  complete('upgrade_old_contact_targets');
+  const phonePosition = phone.data[0].indexOf(action);
+  assert.ok(phonePosition >= 0); assert.equal(phone.links['1:' + (phonePosition + 1)], 'https://seainkk.github.io/-/?validate=' + FILE);
+  assert.equal(f.state().schemas.phone.validationLinkVersion, 1);
+  assert.equal(email.data[0].includes(action), false);
+  phone.data[0][phonePosition] = ''; delete phone.links['1:' + (phonePosition + 1)];
+  complete('sync_after_removing_link');
+  assert.equal(phone.data[0].includes(action), false);
+  assert.equal(email.data[0].includes(action), false);
+});
+
+test('segment source columns append and deduplicate while manual history and formula cells survive repeated imports', () => {
+  const f = fixture({realExtractor:true, rows:[
+    ['ID компании', 'Компания', 'Email'], ['C-' + 'a'.repeat(24), 'Компания', 'a@example.test; b@example.test']
+  ]});
+  vm.runInContext(readFileSync(new URL('../src/SegmentImports.gs', import.meta.url), 'utf8'), f.context);
+  f.context.enrollContactWorkbook_(f.scope, FILE, {sourceSheetIds:[0], role:'segment-companies', section:'companies', segmentId:SOURCES});
+  const a = 'email:a@example.test', b = 'email:b@example.test';
+  const first = 'База 1 / Контакты · B — Почта', second = 'База 2 / Компании · C — Email';
+  const install = origins => f.context.contactSyncInstallWorkingHistory_(FILE, 'companies', SOURCES, {}, false, origins);
+  install({[a]:first, [b]:first});
+  f.finish('first_segment_source_columns');
+  const tab = f.target('email'), [header, rowA, rowB] = tab.data, column = header.indexOf('Исходный столбец email');
+  assert.equal(rowA[column], first); assert.equal(rowB[column], first);
+  const status = header.indexOf('Статус рассылки'), validation = header.indexOf('Валидация');
+  rowA[status] = 'фильтр'; rowA[validation] = 'ручное решение'; rowA[column] = 'Добавлено вручную\n' + first;
+  rowB[column] = 'Значение из формулы'; tab.formulas['3:' + (column + 1)] = '=A10';
+  install({[a]:second,[b]:second}); install({[a]:second,[b]:second});
+  assert.deepEqual(rowA[column].split('\n'), ['Добавлено вручную', first, second]);
+  assert.equal(rowA[status], 'фильтр'); assert.equal(rowA[validation], 'ручное решение');
+  assert.equal(rowB[column], 'Значение из формулы'); assert.equal(tab.formulas['3:' + (column + 1)], '=A10');
+  assert.equal(tab.data.length, 3); assert.equal(f.calls.provider.length, 0);
+});
+
 test('company and LPR masters keep original directory values out of the three verified working channels', () => {
   for (const role of ['segment-companies', 'segment-lpr']) {
     const headers = ['ID компании', 'Компания', 'Источники', 'Статус', 'Email', 'Телефон', 'Telegram', 'Telegram для контактов', 'Email-адреса', 'Городские телефоны', 'WhatsApp'];
@@ -316,7 +401,7 @@ test('a completed selection keeps its row filtering and existing phone and email
     assert.equal(f.target(kind).data.length, 3);
     assert.equal(added[headers.indexOf(key)], value);
     assert.equal(added[headers.indexOf('ID компании')], companyId);
-    assert.equal(added[headers.indexOf('Статус')], 'новый');
+    assert.equal(added[headers.indexOf('Статус')], 'Новый контакт');
   }
 });
 
@@ -332,9 +417,9 @@ test('source changes append only new contacts while existing validation, campaig
   assert.equal(f.target('phone').data[0][5], 'Статус рассылки');
   assert.equal(f.target('phone').data[0][6], 'Telegram');
   assert.equal(f.target('phone').data[0][7], 'Тип контакта');
-  assert.equal(f.target('phone').data.find(row => row[0] === '+79990000002')[5], 'новый');
-  assert.equal(f.target('email').data.find(row => row[0] === 'new@example.test')[5], 'новый');
-  assert.equal(f.target('phone').data.find(row => row[6] === '@new_person')[5], 'новый');
+  assert.equal(f.target('phone').data.find(row => row[0] === '+79990000002')[5], 'Новый контакт');
+  assert.equal(f.target('email').data.find(row => row[0] === 'new@example.test')[5], 'Новый контакт');
+  assert.equal(f.target('phone').data.find(row => row[6] === '@new_person')[5], 'Новый контакт');
 });
 
 test('opting in while opening managed legacy contact tabs fills only blank statuses without provider work', () => {
@@ -356,13 +441,13 @@ test('opting in while opening managed legacy contact tabs fills only blank statu
   assert.equal(email.data[2][4], 'фильтр');
   assert.equal(email.data[2][5], 'Фильтр');
   assert.equal(email.formulas['4:5'], '=""');
-  assert.equal(email.data[4][4], 'новый');
+  assert.equal(email.data[4][4], 'Новый контакт');
   assert.equal(email.data[5][4], undefined);
   assert.deepEqual(phone.data[0].slice(5), ['Рассылка', 'Статус рассылки']);
-  assert.deepEqual(phone.data[1].slice(5), ['Кампания Б', 'новый']);
+  assert.deepEqual(phone.data[1].slice(5), ['Кампания Б', 'Новый контакт']);
   assert.equal(email.validations['2:5'], customRule);
   assert.equal(email.validations['4:5'], null);
-  assert.deepEqual(email.validations['3:5'], { values: ['новый', 'в рассылке', 'фильтр'], dropdown: true, allowInvalid: false });
+  assert.deepEqual(email.validations['3:5'], { values: ['Новый контакт', 'в рассылке', 'фильтр'], dropdown: true, allowInvalid: false });
   assert.equal(f.calls.provider.length, 0);
   const writes = f.calls.raw.length;
   assert.equal(f.invoke('getContactWorkspace_', { id: FILE, prepareMailingStatus: true }).mailingStatusChanged, false);
@@ -376,6 +461,40 @@ test('opening an unenrolled legacy workbook creates no contact status columns or
   assert.equal(r.enrolled, false);
   assert.deepEqual(f.calls.mutations, []);
   assert.deepEqual(f.calls.raw, []);
+});
+
+test('manual rows on enrolled email and phone tabs get the same default before preview or sync without reopening old decisions', () => {
+  const f = fixture({ realExtractor:true });
+  f.finish();
+  const email = f.target('email'), phone = f.target('phone');
+  const makeRow = (sheet,fields) => sheet.data[0].map(label => fields[label] || '');
+  email.data.push(makeRow(email,{Email:'manual@example.test'}), makeRow(email,{Email:'excluded@example.test','Статус рассылки':'фильтр'}),
+    makeRow(email,{Email:'checked@example.test','Валидация':'Валиден'}),makeRow(email,{Email:'older@example.test','Статус рассылки':'новый'}));
+  phone.data.push(makeRow(phone,{'Телефон':'+79997654321'}));
+  const status = sheet => sheet.data[0].indexOf('Статус рассылки');
+  const first = f.invoke('getContactWorkspace_',{id:FILE,prepareNewContactStatuses:true});
+  assert.equal(first.mailingStatusChanged,true);
+  assert.deepEqual(email.data.slice(-4).map(row=>row[status(email)]),['Новый контакт','фильтр','','новый']);
+  assert.equal(phone.data.at(-1)[status(phone)],'Новый контакт');
+  assert.equal(f.invoke('getContactWorkspace_',{id:FILE,prepareNewContactStatuses:true}).mailingStatusChanged,false);
+  email.data.push(makeRow(email,{Email:'second@example.test'}));
+  f.finish('sync_after_manual_row');
+  assert.equal(email.data.find(row=>row.includes('second@example.test'))[status(email)],'Новый контакт');
+  assert.equal(f.calls.provider.length,0);
+});
+
+test('a strict legacy dropdown accepts the new default on appended rows and preserves a custom rule',()=>{
+  const f=fixture({nativeDropdown:true,realExtractor:true});f.finish();
+  f.context.SpreadsheetApp.DataValidationCriteria={VALUE_IN_LIST:'list'};
+  const email=f.target('email'), column=email.data[0].indexOf('Статус рассылки')+1,start=email.data.length+1;
+  const old={getCriteriaType:()=>'list',getAllowInvalid:()=>false,getHelpText:()=>'',
+    getCriteriaValues:()=>[['новый','в рассылке','фильтр'],true]};
+  const custom={...old,getHelpText:()=>'Личный список'};
+  email.validations[start+':'+column]=old;email.validations[(start+1)+':'+column]=custom;
+  f.editSource([['new@example.test','','']]);f.finish('legacy_rule_append_1234');
+  assert.equal(email.data[start-1][column-1],'Новый контакт');
+  assert.deepEqual(email.validations[start+':'+column].values,['Новый контакт','в рассылке','фильтр']);
+  assert.equal(email.validations[(start+1)+':'+column],custom);
 });
 
 test('a repeated request is a pure receipt replay and a fresh scan adds no duplicates', () => {
@@ -412,7 +531,7 @@ test('segment contact materialization resumes committed batches without validati
   for (const [kind, label] of [['email', 'Email'], ['phone', 'Телефон']]) {
     const [headers, ...contacts] = f.target(kind).data;
     assert.equal(contacts.length, 1001); assert.equal(new Set(contacts.map(row => row[headers.indexOf(label)])).size, 1001);
-    assert.ok(contacts.every(row => row[headers.indexOf('Статус рассылки')] === 'новый'));
+    assert.ok(contacts.every(row => row[headers.indexOf('Статус рассылки')] === 'Новый контакт'));
   }
   const writes = f.calls.raw.length; assert.equal(step(), true); assert.equal(f.calls.raw.length, writes);
 });

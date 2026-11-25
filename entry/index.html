@@ -16,6 +16,9 @@
     @media(max-width:640px){.entry-bar{padding:6px 12px;gap:8px}.entry-brand{font-size:12px;gap:6px;letter-spacing:-.35px}.entry-mark{width:14px;height:14px}.entry-card{margin:38px 16px;padding:28px 24px;border-radius:26px}.entry-card h1{font-size:29px;letter-spacing:-.8px}.entry-card p{font-size:15px;line-height:1.55}.entry-card button{padding:12px 20px;min-height:44px}.entry-spinner{margin-bottom:20px}}
     @media(max-width:359px){.entry-bar{padding-inline:10px;gap:6px}.entry-card{margin-inline:12px;padding:25px 21px}.entry-card h1{font-size:27px}}
     @media(prefers-reduced-motion:reduce){.entry-spinner{animation:none}button{transition:none}}
+    #entry-validation-access{margin:12px 0}
+    #entry-validation-access label{display:block;font-weight:600}
+    #entry-validation-access input{display:block;box-sizing:border-box;width:100%;margin:6px 0 14px;padding:9px;border:1px solid var(--line);border-radius:8px;font:inherit}
   </style>
 </head>
 <body data-state="locked">
@@ -25,6 +28,11 @@
     <h1 id="entry-title">Для входа нужна закрытая ссылка</h1>
     <p id="entry-message">Откройте полную ссылку, которую вам передал владелец сервиса.</p>
     <button id="entry-retry" type="button" hidden>Повторить подключение</button>
+    <form id="entry-validation-access" hidden>
+      <label for="entry-private-link">Закрытая ссылка на сервис</label>
+      <input id="entry-private-link" type="password" autocomplete="off" required>
+      <button type="submit">Открыть проверку контактов</button>
+    </form>
     <noscript><p>Для работы сервиса включите JavaScript в браузере.</p></noscript>
   </main>
   <section id="entry-preview" aria-labelledby="entry-preview-title" hidden>
@@ -38,6 +46,9 @@
     'use strict';
     const GOOGLE_APP_URL='https://script.google.com/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec';
     const $=(id)=>document.getElementById(id);
+    const target=new URL(window.location.href).searchParams.get('validate');
+    const validationFile=target&&/^[A-Za-z0-9_-]{10,200}$/.test(target)?target:null;
+    let validationOpened=false;
     let accessKey=null,currentFrame=null,loadingTimer=null,ready=false;
     let appWindow=null,appOrigin='',canBack=false,backArmed=false,releasingBack=false;
     const catalogSlot='outreach.catalog.v1',catalogLifetime=86400000;
@@ -131,6 +142,7 @@
       try{appWindow.postMessage({type:'bases-registry-back'},appOrigin);}catch(error){/* A detached frame cannot accept a back action. */}
     }
     function clearFrame(releaseBack=false){
+      validationOpened=false;
       catalogWrite++;deviceKey=null;catalogReceived=false;clearPreview();
       canBack=false;appWindow=null;appOrigin='';
       if(releaseBack)syncBackEntry();else{backArmed=false;releasingBack=false;}
@@ -139,7 +151,14 @@
     function showState(state,title,message,retry){document.body.dataset.state=state;$('entry-preview').hidden=true;$('entry-card').hidden=false;$('entry-title').textContent=title;$('entry-message').textContent=message;$('entry-spinner').hidden=state!=='loading';$('entry-retry').hidden=!retry;}
     function openEntry(){
       const key=keyFromHash(window.location.hash);clearFrame(!!key&&key===accessKey);accessKey=key;
-      if(!accessKey){showState('locked','Для входа нужна закрытая ссылка','Откройте полную ссылку, которую вам передал владелец сервиса.',false);return;}
+      $('entry-validation-access').hidden=true;
+      if(!accessKey){
+        if(validationFile){
+          showState('locked','Проверить новые контакты','Для доступа к выбранной таблице вставьте обычную закрытую ссылку вашей команды.',false);
+          $('entry-validation-access').hidden=false;
+        }else showState('locked','Для входа нужна закрытая ссылка','Откройте полную ссылку, которую вам передал владелец сервиса.',false);
+        return;
+      }
       if(!('credentialless' in HTMLIFrameElement.prototype)){showState('unsupported','Откройте сервис в актуальном Chrome или Edge','Для открытия без переключения Google-аккаунтов нужен браузер, поддерживающий изолированное подключение сервиса. Скопируйте эту же ссылку в актуальный Chrome или Edge.',false);return;}
       showState('loading','Открываем сервис…','Проверяем закрытую ссылку.',false);
       const frame=document.createElement('iframe');
@@ -162,6 +181,9 @@
         appWindow=event.source;appOrigin=event.origin;
         if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-preview').hidden=true;$('entry-frame-host').hidden=false;
         if(event.data.catalogPending)sendSavedCatalog();
+        if(validationFile&&!validationOpened){
+          validationOpened=true;appWindow.postMessage({type:'bases-registry-open-validation',id:validationFile},appOrigin);
+        }
       }else if(ready&&event.data.type==='bases-registry-catalog'){
         void rememberCatalog(event.data);
       }else if(ready&&event.data.type==='bases-registry-navigation'&&typeof event.data.canBack==='boolean'){
@@ -171,7 +193,18 @@
       }else if(event.data.type==='bases-registry-locked'){
         try{window.localStorage.removeItem(catalogSlot);}catch(ignored){}
         clearFrame(true);showState('locked','Нужна действующая закрытая ссылка','Ссылка недействительна или больше не активна. Получите полную закрытую ссылку у владельца сервиса.',false);
+        $('entry-validation-access').hidden=!validationFile;
       }
+    });
+    $('entry-validation-access').addEventListener('submit',event=>{
+      event.preventDefault();
+      const field=$('entry-private-link');let key=null;
+      try{const url=new URL(field.value.trim());
+        if(url.origin===window.location.origin&&url.pathname===window.location.pathname&&!url.username&&!url.password)key=keyFromHash(url.hash);
+      }catch(ignored){}
+      field.value='';
+      if(!validationFile||!key){$('entry-message').textContent='Вставьте полную закрытую ссылку на этот сервис.';return;}
+      window.location.hash='access_key='+key;
     });
     $('entry-retry').addEventListener('click',openEntry);window.addEventListener('hashchange',openEntry);window.addEventListener('popstate',popEntry);
     window.addEventListener('pointerup',syncBackEntry);window.addEventListener('keyup',syncBackEntry);

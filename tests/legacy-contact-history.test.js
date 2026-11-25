@@ -25,6 +25,14 @@ test('known source mailing history initializes the working status and preserves 
   assert.equal(c.contactMailingStatusFromHistory_('Рассылка; Нецелевой'), 'фильтр');
   assert.equal(c.contactMailingStatusFromHistory_('Рассылка'), 'в рассылке');
   assert.equal(c.contactMailingStatusFromHistory_('В плане запис книжка'), 'фильтр');
+  assert.equal(c.contactMailingStatusFromHistory_(c.legacyContactHistoryWork_('Не отправляем')), 'фильтр');
+  assert.equal(c.contactMailingStatusFromHistory_(c.legacyContactHistoryWork_('Отписался')), 'фильтр');
+  assert.ok(c.contactMailingStatusIsNew_(' Новый контакт '));
+  assert.ok(c.contactMailingStatusIsNew_('НОВЫЙ'));
+  assert.equal(c.contactMailingStatusIsNew_(''),false);
+  assert.equal(c.contactMailingStatusIsNew_('В рассылке'),false);
+  assert.equal(c.workingSelectionStatus_('НОВЫЙ КОНТАКТ'),'Новый контакт');
+  assert.equal(c.contactMailingStatusFromHistory_('Новый контакт; Не отправляем'),'фильтр');
 });
 
 test('legacy source validation preserves all completed email verdicts and real mailbox providers', () => {

@@ -85,6 +85,7 @@ function preparedDataRead_(sheet, sourceId, section, options) {
     if (typeof sourceRecordsColumns_ === 'function') detected.mapping.recordColumns = sourceRecordsColumns_(options.hasHeader ? labels : [], section);
   }
   var header = detected.header, mapping = detected.mapping;
+  var companyOnly = options.routeKind === 'companies';
   var workChannels = null;
   if (options.segmentMasterChannels === true) {
     var normalizedHeaders = header.map(function (label) { return String(label || '').trim().toLowerCase(); });
@@ -125,11 +126,13 @@ function preparedDataRead_(sheet, sourceId, section, options) {
     for (var columnIndex = 0; columnIndex < cells.length; columnIndex++) {
       var label = hasHeader ? String(header[columnIndex] || '') : '', key = (index + 1) + ':' + (columnIndex + 1);
       if (workChannels && !workChannels.has(columnIndex)) continue;
+      var descriptor = (mapping.recordColumns || [])[columnIndex];
+      if (companyOnly && descriptor && (descriptor.person || descriptor.summary)) continue;
       var rawValue = values[index] && values[index][columnIndex], text = String(cells[columnIndex] || '');
       var entry = preparedDataCellContacts_(text, rawValue, label, linkIndex[key] || [], mapping, columnIndex);
       if (entry.emails.length || entry.phones.length || entry.telegrams.length) cellContacts[key] = entry;
       if (entry.unparsed) unparsed++;
-      var source = { fileId: sourceId, sheetId: sheetId, sheetName: sheetName, row: index + 1, column: columnIndex + 1 };
+      var source = { fileId: sourceId, sheetId: sheetId, sheetName: sheetName, row: index + 1, column: columnIndex + 1, columnHeader:label };
       var personal = preparedDataPersonalColumn_(label, section) && person.name;
       entry.emails.forEach(function (email) {
         observation.emails.push(email); observation.contexts['email:' + email] = personal ? personalContext : context;
@@ -146,7 +149,7 @@ function preparedDataRead_(sheet, sourceId, section, options) {
     }
     observed.push(observation);
   }
-  var recordsResult = typeof sourceRecordsBuild_ === 'function' ? sourceRecordsBuild_(displays, { fileId: sourceId, sheetId: sheetId, sheetName: sheetName, section: section, mixedCompanyContext: options.mixedCompanyContext, headerIndex: detected.index, hasHeader: hasHeader, header: header, rawRows: values, cellContacts: cellContacts }) : { records: [], warnings: [] };
+  var recordsResult = typeof sourceRecordsBuild_ === 'function' ? sourceRecordsBuild_(displays, { fileId: sourceId, sheetId: sheetId, sheetName: sheetName, section: section, companyOnly: companyOnly, mixedCompanyContext: options.mixedCompanyContext, headerIndex: detected.index, hasHeader: hasHeader, header: header, rawRows: values, cellContacts: cellContacts }) : { records: [], warnings: [] };
   (recordsResult.warnings || []).forEach(warn);
   var records = recordsResult.records || [];
   if (records.length) preparedDataApplyRecordContexts_(observed, records);
@@ -160,7 +163,7 @@ function preparedDataRead_(sheet, sourceId, section, options) {
   guard();
   var counts = { sourceRows: sourceRows, companies: normalized.companies, companyUnknown: normalized.companyUnknown, emails: normalized.emailRows.length, phones: normalized.phoneCount, mobiles: normalized.mobiles, sharedEmails: normalized.sharedEmails, sharedPhones: normalized.sharedPhones, telegrams: normalized.telegrams, sharedTelegrams: normalized.sharedTelegrams };
   var source = { id: sheetId, sheetId: sheetId, name: sheetName, section: section, effectiveSection: section, headers: header, hasHeader: hasHeader, headerIndex: detected.index, rowCount: lastRow, columnCount: width, sample: displays.slice(firstData, firstData + limits.sampleRows) };
-  var email = { headers: PREPARED_DATA_HEADERS.email.concat(CONTACT_MAILING_STATUS.header), rows: normalized.emailRows, sample: normalized.emailRows.slice(0, limits.sampleRows) };
+  var email = { headers: PREPARED_DATA_HEADERS.email.concat(CONTACT_MAILING_STATUS.header, 'Исходный столбец email'), rows: normalized.emailRows, sample: normalized.emailRows.slice(0, limits.sampleRows) };
   var phone = { headers: PREPARED_DATA_HEADERS.phone.concat(CONTACT_MAILING_STATUS.header), rows: normalized.phoneRows, sample: normalized.phoneRows.slice(0, limits.sampleRows) };
   var fingerprint = preparedDataDigest_(JSON.stringify({ version: 2, sourceId: sourceId, section: section, headerIndex: detected.index, hasHeader: hasHeader, sheetId: sheetId, sheetName: sheetName, rows: lastRow, columns: width, values: values, display: displays, formulas: formulas, links: links }));
   var legacyFingerprint = preparedDataDigest_(JSON.stringify({ version: 1, sourceId: sourceId, section: requestedSection, sheetId: sheetId, sheetName: sheetName, rows: lastRow, columns: width, values: values, display: displays, formulas: formulas, links: links }));
@@ -180,6 +183,48 @@ function preparedDataSection_(sheetName, fallback, options) {
   if (personal && !company) return 'lpr';
   if (company && !personal) return 'companies';
   return selected;
+}
+
+/** Routes belong to original sheet IDs. Derived contact reports and summaries
+ * cannot become sources through a coincidental person or company header. */
+function preparedRouteTags_(sources, sheetIds) {
+  var tags = {};
+  // Up to twenty Sheets GIDs fit in two private Drive properties. Each entry
+  // is at most seven base-36 digits with its route and separator.
+  sources.forEach(function (entry, index) {
+    var key = 'registryRoutes' + Math.floor(index / 10), id = sheetIds[index].toString(36);
+    tags[key] = (tags[key] ? tags[key] + ',' : '') + (entry.source.section === 'lpr' ? 'p' : 'c') + id;
+  });
+  return tags;
+}
+
+function preparedSavedRoute_(tags, sheetId) {
+  if (!tags || !tags.registryRoutes0) return '';
+  var suffix = sheetId.toString(36), items = (tags.registryRoutes0 + ',' + (tags.registryRoutes1 || '')).split(',');
+  if (items.indexOf('c' + suffix) >= 0) return 'companies';
+  return items.indexOf('p' + suffix) >= 0 ? 'lpr' : '';
+}
+
+function preparedAutoRoute_(sheet, tags) {
+  var saved = preparedSavedRoute_(tags, sheet.getSheetId());
+  if (saved) return saved;
+  var height = sheet.getLastRow(), width = sheet.getLastColumn();
+  if (!width || !height) return '';
+  var title = sheet.getName(), words = title.toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  if (/(?:^| )(?:e ?mails?|почты|телефоны|телефонов|telegram|телеграм|валидация|рассылки|отправки|результаты|статистика|отчет\S*|свод\S*|инструк\S*|архив\S*|аналитик\S*|dashboard|summary|archive|statistics|readme)(?: |$)/u.test(words)) return '';
+  var byName = preparedDataSection_(title, 'companies', {});
+  if (byName === preparedDataSection_(title, 'lpr', {})) return byName;
+  var rows = sheet.getRange(1, 1, Math.min(20, height), Math.min(width, PREPARED_DATA_LIMITS.maxColumns)).getDisplayValues();
+  var detected = preparedDataHeader_(rows, rows, [], 'companies'), columns = detected.mapping.recordColumns || [];
+  if (!detected.hasHeader) return '';
+  var headers = detected.header.map(sourceRecordsKey_);
+  if (headers.some(function (key) { return /^(?:строкивлист1|исходныестроки|исходныйстолбецemail|почтнакомпанию|idtg|active.?days.?ago)$/.test(key); })) return '';
+  var identifiers = columns.filter(function (column) { return ['id', 'name', 'inn', 'ogrn'].indexOf(column.company) >= 0; });
+  var company = identifiers.length > 0;
+  var person = columns.some(function (column) { return column.person && ['name', 'first', 'last', 'middle'].indexOf(column.kind) >= 0; });
+  if (person && (!company || headers.some(function (key) { return /^(?:idлпр|personid|фиолпр)$/.test(key); }))) return 'lpr';
+  var companyEvidence = identifiers.length > 1 || columns.some(function (column) { return column.kind === 'contact' || column.company === 'website'; });
+  return company && companyEvidence && !person ? 'companies' : '';
 }
 
 function preparedDataRectangle_(rows, height, width) { return Array.isArray(rows) && rows.length === height && rows.every(function (row) { return Array.isArray(row) && row.length === width; }); }
@@ -208,6 +253,8 @@ function preparedDataHeader_(rows, rawRows, links, section) {
 function preparedDataColumn_(column) { var label = ''; for (var value = column; value; value = Math.floor((value - 1) / 26)) label = String.fromCharCode(65 + (value - 1) % 26) + label; return label; }
 function preparedDataExcludedColumn_(label) {
   var key = contactPreviewHeader_(label);
+  if (/^доп(?:олнительный)?тел(?:ефон)?непроверялина(?:тг|телеграм)$/.test(key)) return false;
+  if (key==='исходныйстолбецemail') return true;
   return /валид|результат|статус|отправител|sender|провер|колво|количество|дубль|повтор|кампан|рассылк|reply/.test(key) || /^(?:переносвлпр|перенесеновлпр|добавленовлпр|idлпр|идлпр|идентификаторлпр)$/.test(key) || /^(?:id|ид)(?:$|[a-zа-я])|(?:id|ид)$/.test(key) || /^(?:инн|inn|огрн|огрнип|ogrn|ogrnip|кпп|окпо|бик|счет|расчетныйсчет|индекс|дата|датасоздания|датарождения|date|birthdate|count|companyid|personid)/.test(key);
 }
 function preparedDataDateLike_(value) {
@@ -283,6 +330,7 @@ function preparedDataMapping_(headers) {
   var existing = contactPreviewMapping_(headers), result = { companyColumns: existing.companyColumns, emailColumns: [], phoneColumns: [], personColumns: [], telegramColumns: [], ambiguous: [] };
   headers.forEach(function (label, index) {
     var key = contactPreviewHeader_(String(label || '').replace(/\([^)]*не\s+провер[^)]*\)/gi, ''));
+    if (key==='исходныйстолбецemail') return;
     if (/^(?:фио\d*|фамилияимяотчество|руководитель\d*|фиоруководителя|имя|фамилия|отчество|должность\d*|директор|генеральныйдиректор|владелец|собственник|ceo)$/.test(key) || /^(?:фио|должность)(?:лпр|маркетолога|руководителя)$/.test(key) || /^лпр(?:маркетинг|маркетолог|продажи|закупки)?$/.test(key)) result.personColumns.push({ index: index, label: String(label || ''), kind: /должност/.test(key) ? 'role' : key });
     if (['наименование','наименованиеорганизации','юридическоенаименование','названиеорганизации','организация','работодатель','предприятие','фирма','названиефирмы'].indexOf(key) >= 0 && !result.companyColumns.some(function (column) { return column.index === index; })) result.companyColumns.push({ index: index, label: String(label || ''), kind: 'name' });
     if (/telegram|телеграм/.test(key) || /^(?:tg|тг)\d*$/.test(key)) result.telegramColumns.push({ index: index, label: String(label || '') });
@@ -290,7 +338,7 @@ function preparedDataMapping_(headers) {
     if (/email|почт|телефон|phone|mobile/.test(key) && (/^(?:id|ид)/.test(key) || /(?:id|ид)$/.test(key))) { result.ambiguous.push(String(label || '')); return; }
     var combined = /^(?:контакты|контакт|контактныеданные|контактнаяинформация|contact|contacts)$/.test(key);
     var isEmail = combined || existing.emailColumns.some(function (column) { return column.index === index; }) || /email|почт|электронн.*адрес/.test(key);
-    var isPhone = combined || existing.phoneColumns.some(function (column) { return column.index === index; }) || /телефон|мобильн/.test(key) || /^(?:phone|phones|mobile|mobiles|телосновной|телдоп)$/.test(key);
+    var isPhone = combined || existing.phoneColumns.some(function (column) { return column.index === index; }) || /телефон|мобильн/.test(key) || /^(?:phone|phones|mobile|mobiles|телосновной|телдоп|доптел)$/.test(key);
     if (isEmail && !/^(?:id|ид)/.test(key)) result.emailColumns.push({ index: index, label: String(label || '') });
     if (isPhone && !/(?:id|ид)$/.test(key)) result.phoneColumns.push({ index: index, label: String(label || '') });
     if ((isEmail && /^(?:id|ид)/.test(key)) || (isPhone && /(?:id|ид)$/.test(key))) result.ambiguous.push(String(label || ''));
@@ -548,7 +596,8 @@ function preparedDataAggregate_(observations, sourceId, warn, options) {
     var context = preparedDataFit_(Object.keys(record.contexts).join('; '), warn), refs = Object.keys(record.sources).map(function (key) { return record.sources[key]; });
     var sources = preparedDataFit_(preparedDataSourceLabel_(refs, options.includeSheetNames), warn);
     contactIndex.push({ type: kind, value: record.value, sourceRefs: refs, owners: Object.keys(record.owners), needsReview: review });
-    if (kind === 'email') return [record.value, context, sources, review ? 'Да' : '', CONTACT_MAILING_STATUS.initial];
+    if (kind === 'email') return [record.value, context, sources, review ? 'Да' : '', CONTACT_MAILING_STATUS.initial,
+      preparedDataFit_(preparedEmailSourceColumns_(refs),warn)];
     return [kind === 'phone' ? record.value : '', context, Object.keys(record.origins).join('; '), sources, review ? 'Да' : '', kind === 'telegram' ? record.value : '', kind === 'telegram' ? 'Telegram' : 'Телефон', CONTACT_MAILING_STATUS.initial];
   }); };
   var emailRows = rows('email'), onlyPhones = rows('phone'), telegramRows = rows('telegram');
@@ -560,6 +609,17 @@ function preparedDataSourceLabel_(refs, includeSheetNames) {
   var ids = Object.keys(sheets);
   if (!includeSheetNames && ids.length === 1) return 'Строки ' + preparedDataRowList_(Object.keys(sheets[ids[0]].rows).map(Number));
   return ids.map(function (id) { return sheets[id].name + ': строки ' + preparedDataRowList_(Object.keys(sheets[id].rows).map(Number)); }).join('; ');
+}
+
+function preparedEmailSourceColumns_(refs) {
+  var labels = new Set();
+  refs.forEach(function (ref) {
+    if (!Number.isSafeInteger(ref.column) || ref.column < 1) return;
+    var header = String(ref.columnHeader || '').replace(/\s+/g,' ').trim();
+    var sheet = String(ref.sheetName || '').replace(/\s+/g,' ').trim();
+    labels.add((sheet ? sheet + ' · ' : '') + preparedDataColumn_(ref.column) + (header ? ' — ' + header : ''));
+  });
+  return Array.from(labels).join('\n');
 }
 
 /** Read every explicitly selected source leaf; callers identify generated targets by IDs. */
@@ -596,7 +656,8 @@ function preparedDataReadWorkbook_(book, fileId, section, options) {
     sourceSheets.push({ id: sheet.getSheetId(), sheetId: sheet.getSheetId(), name: sheet.getName(), rowCount: height, columnCount: width });
     if (!complete && models.length < index) return;
     if (index >= 100 || Date.now() >= deadline || cells + height * width > PREPARED_DATA_LIMITS.maxCells || physicalRows + height > PREPARED_DATA_LIMITS.maxRows) { complete = false; warn('Книга превышает общий лимит полного чтения по листам, строкам, ячейкам или времени. Частичные списки нельзя использовать автоматически.'); return; }
-    var model = preparedDataRead_(sheet, fileId, section, { guard: guard, deadline: deadline, resolveLinkReference: resolveReference, sectionExplicit: options.sectionExplicit, segmentMasterChannels: options.segmentMasterChannels, segmentMasterRequired: options.segmentMasterRequired });
+    var routeKind = options.sheetRoutes && options.sheetRoutes[sheet.getSheetId()];
+    var model = preparedDataRead_(sheet, fileId, routeKind || section, { guard: guard, deadline: deadline, resolveLinkReference: resolveReference, routeKind: routeKind, sectionExplicit: routeKind ? true : options.sectionExplicit, segmentMasterChannels: options.segmentMasterChannels, segmentMasterRequired: options.segmentMasterRequired });
     models.push(model); cells += model.cellsRead; physicalRows += height;
     observations = observations.concat(model.observations || []); records = records.concat(model.records || []);
     var descriptor = sourceSheets[sourceSheets.length - 1]; descriptor.hasHeader = model.source.hasHeader; descriptor.headerIndex = model.source.headerIndex; descriptor.headers = model.source.headers; descriptor.section = model.section; descriptor.effectiveSection = model.section;
@@ -606,7 +667,7 @@ function preparedDataReadWorkbook_(book, fileId, section, options) {
   var normalized = preparedDataAggregate_(observations, fileId, warn, { includeSheetNames: true });
   if (normalized.partial) { complete = false; warn('В исходной книге слишком много контактов для одного полного чтения.'); }
   var counts = { sourceRows: models.reduce(function (total, model) { return total + model.counts.sourceRows; }, 0), companies: normalized.companies, companyUnknown: normalized.companyUnknown, emails: normalized.emailRows.length, phones: normalized.phoneCount, mobiles: normalized.mobiles, sharedEmails: normalized.sharedEmails, sharedPhones: normalized.sharedPhones, telegrams: normalized.telegrams, sharedTelegrams: normalized.sharedTelegrams };
-  var first = models[0], email = { headers: PREPARED_DATA_HEADERS.email.concat(CONTACT_MAILING_STATUS.header), rows: normalized.emailRows, sample: normalized.emailRows.slice(0, PREPARED_DATA_LIMITS.sampleRows) }, phone = { headers: PREPARED_DATA_HEADERS.phone.concat(CONTACT_MAILING_STATUS.header), rows: normalized.phoneRows, sample: normalized.phoneRows.slice(0, PREPARED_DATA_LIMITS.sampleRows) };
+  var first = models[0], email = { headers: PREPARED_DATA_HEADERS.email.concat(CONTACT_MAILING_STATUS.header, 'Исходный столбец email'), rows: normalized.emailRows, sample: normalized.emailRows.slice(0, PREPARED_DATA_LIMITS.sampleRows) }, phone = { headers: PREPARED_DATA_HEADERS.phone.concat(CONTACT_MAILING_STATUS.header), rows: normalized.phoneRows, sample: normalized.phoneRows.slice(0, PREPARED_DATA_LIMITS.sampleRows) };
   guard();
   return { complete: complete && models.length === selected.length, canConfirm: complete && models.length === selected.length && models.some(function (model) { return model.source.rowCount > 0 && model.source.columnCount > 0; }), fingerprint: preparedDataDigest_(JSON.stringify({ version: 2, fileId: fileId, section: section, sourceSheets: sourceSheets.map(function (sheet) { return sheet.sheetId; }), models: models.map(function (model) { return model.fingerprint; }) })), counts: counts, records: records, models: models, sourceSheets: sourceSheets, sourceSheetIds: sourceSheets.map(function (sheet) { return sheet.sheetId; }), email: email, phone: phone, emailHeaders: email.headers, emailRows: email.rows, phoneHeaders: phone.headers, phoneRows: phone.rows, warnings: warnings, cellsRead: cells, contactIndex: normalized.contactIndex, observations: observations, source: first ? first.source : null, sourceValues: first ? first.sourceValues : [], sourceDisplayValues: first ? first.sourceDisplayValues : [], sourceLinks: first ? first.sourceLinks : [], formulaSnapshots: first ? first.formulaSnapshots : [], sourceRows: physicalRows, sourceCols: first ? first.sourceCols : 0, previewSheets: [{ name: 'Исходная база', headers: first ? first.source.headers : [], sample: first ? first.source.sample : [], rowCount: physicalRows }, { name: 'Email', headers: email.headers, sample: email.sample, rowCount: email.rows.length + 1 }, { name: 'Телефоны', headers: phone.headers, sample: phone.sample, rowCount: phone.rows.length + 1 }] };
 }

@@ -136,6 +136,7 @@ function contactPreviewMapping_(header) {
   var phoneNames = ['phone', 'phones', 'mobile', 'mobiles', 'телефон', 'телефоны', 'мобильныйтелефон', 'мобильныетелефоны', 'городскойтелефон', 'городскиетелефоны', 'основнойтелефон', 'дополнительныйтелефон', 'телосновной', 'телдоп', 'телдополнительный', 'доптелефон', 'доптел', 'рабочийтелефонкомпания', 'рабочийтелефон', 'телефоныкомпании', 'мобильный', 'контактныйтелефон', 'номераизссылоксоцсетей'];
   header.forEach(function (label, index) {
     var key = contactPreviewHeader_(String(label || '').replace(/\([^)]*не\s+провер[^)]*\)/gi, '')), column = { index: index, label: contactPreviewLabel_(label) };
+    if (key==='исходныйстолбецemail') return;
     if (['companyid', 'idкомпании', 'идкомпании'].indexOf(key) !== -1) mapping.companyColumns.push({ index: index, label: column.label, kind: 'id' });
     if (['инн', 'иннкомпании', 'иннюрлица', 'inn', 'companyinn'].indexOf(key) !== -1) mapping.companyColumns.push({ index: index, label: column.label, kind: 'inn' });
     if (['название', 'названия', 'названиекомпания', 'названиекомпании', 'компания', 'компании', 'company', 'companyname', 'organization'].indexOf(key) !== -1) mapping.companyColumns.push({ index: index, label: column.label, kind: 'name' });

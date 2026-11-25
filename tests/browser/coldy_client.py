@@ -443,6 +443,57 @@ def main():
         assert len(pv_attempts) == 2 and pv_attempts[-1]['payload'] == pv_payload
         assert page.evaluate('coldyBackend.pvEmailRuns') == 1
 
+        # One workbook action previews only rows with the new workflow status in both tabs.
+        grid_reset()
+        page.evaluate("gridBackend.providerSettings={configured:true,enabled:true,autoPayLimitUsd:5};coldyBackend.settings.emailValidationProvider='coldy'")
+        page.get_by_role('button',name='Проверить новые контакты',exact=True).click()
+        expect(page.locator('#rg-grid-bulk-counts')).to_contain_text('Телефоны · Promouser2')
+        expect(page.locator('#rg-grid-bulk-counts')).to_contain_text('Email · Coldy3')
+        expect(page.locator('#rg-grid-bulk-start')).to_be_disabled()
+        protected_preview={'id':'grid_file_1234567890','newContactsOnly':True}
+        assert grid_calls('getContactWorkspace')[-1]['payload']=={'id':'grid_file_1234567890','prepareNewContactStatuses':True}
+        assert grid_calls('previewColdyValidation')[-1]['payload']==protected_preview
+        assert grid_calls('previewPhoneValidation')[-1]['payload']==protected_preview
+        assert not grid_calls('startPhoneValidation') and not grid_calls('startColdyValidation')
+        page.locator('#rg-grid-validation-close').click()
+        expect(page.locator('#rg-grid-validation')).to_be_hidden()
+
+        page.locator('#rg-grid-bulk-open').click()
+        page.locator('#rg-grid-bulk-credit').check()
+        page.evaluate('coldyBackend.failAfterPhone=true')
+        page.locator('#rg-grid-bulk-start').click()
+        expect(page.locator('#rg-grid-bulk-message')).to_contain_text('продолжить')
+        expect(page.locator('#rg-grid-bulk-counts')).to_contain_text('запуск подтверждён')
+        first=grid_calls('startPhoneValidation')[-1]['payload']
+        assert grid_calls('startColdyValidation')[0]['payload']['acceptValidationCredits']
+        page.get_by_role('button',name='Продолжить тот же запуск').click()
+        expect(page.locator('#rg-grid-bulk-message')).to_contain_text('Запуск подтверждён')
+        assert len(grid_calls('startColdyValidation'))==1
+        assert grid_calls('startPhoneValidation')[-1]['payload']==first
+        assert page.evaluate('[coldyBackend.validationRuns,coldyBackend.phoneRuns]')==[1,1]
+
+        # Direct entry from the creation notice provides the same free preview.
+        grid_reset()
+        page.evaluate("""() => { gridBackend.providerSettings={configured:true,enabled:true,autoPayLimitUsd:5};
+          return RegistryGrid.open({id:'grid_file_1234567890',transport:fakeGridRpc,validateNew:true}); }""")
+        expect(page.locator('#rg-grid-bulk')).to_be_visible()
+        expect(page.locator('#rg-grid-bulk-credit-label')).to_be_hidden()
+        expect(page.locator('#rg-grid-bulk-counts')).to_contain_text('Email · Promouser2')
+        assert grid_calls('previewPromouserValidation')[-1]['payload']=={**protected_preview,'kind':'email'}
+        page.locator('#rg-grid-bulk-start').click()
+        expect(page.locator('#rg-grid-bulk-message')).to_contain_text('Запуск подтверждён')
+        assert page.evaluate('[coldyBackend.pvEmailRuns,coldyBackend.phoneRuns]')==[1,1]
+
+        # An empty channel is displayed and consumes no order or credits.
+        grid_reset()
+        page.evaluate("coldyBackend.phonePlanned=0;coldyBackend.settings.emailValidationProvider='coldy'")
+        page.locator('#rg-grid-bulk-open').click()
+        expect(page.locator('#rg-grid-bulk-counts')).to_contain_text('Телефоны · Promouser0')
+        page.locator('#rg-grid-bulk-credit').check()
+        page.locator('#rg-grid-bulk-start').click()
+        expect(page.locator('#rg-grid-bulk-message')).to_contain_text('Запуск подтверждён')
+        assert len(grid_calls('startColdyValidation'))==1 and not grid_calls('startPhoneValidation')
+
         # Locking a workbook wins over a late response from a paid start. The
         # response cannot reopen the drawer or schedule more provider requests.
         grid_reset()

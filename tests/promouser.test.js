@@ -43,6 +43,7 @@ function fixture(options={}) {
   Sheets:{Spreadsheets:{batchUpdate:(body,id)=>{assert.ok(lock,'Service results/cache writes hold lock');for(const request of body.requests){const u=request.updateCells,s=books.get(id).tabs.find(s=>s.getSheetId()===u.range.sheetId);u.rows.forEach((row,y)=>row.values.forEach((cell,x)=>s.put(u.range.startRowIndex+y+1,u.range.startColumnIndex+x+1,cell.userEnteredValue.stringValue,u.fields.includes('note')?cell.note:undefined)));}calls.writes.push({id,requests:plain(body.requests)});return{spreadsheetId:id,replies:body.requests.map(()=>({}))};}}},
   UrlFetchApp:{fetch:(url,request)=>{assert.equal(lock,false,'No provider HTTP under global lock');assert.equal(request.headers.key,KEY);assert.equal(request.followRedirects,false);calls.fetch.push({url,request});if(options.transport) return options.transport({url,request,response,calls,now});if(url.endsWith('/api/balance'))return response({balance:'100'});if(url.endsWith('/api/order'))return response({order_id:nextOrder++,type:Number(request.payload.type)});if(url.includes('/api/status?'))return response(options.status||{status:'not_ready_unpaid',order_id:Number(url.split('=').pop()),cost:'0.5'});if(url.endsWith('/api/pay')){const p=JSON.parse(request.payload);return response({status:'success',order_id:Number(p.order_id),charged:'0.5',balance:'99.5'});}if(url.includes('/results/'))return response(options.result||'email\tresult\tprovider\na@example.test\tvalid\tExample Mail');throw new Error('Unexpected endpoint');}},
  });
+ vm.runInContext(readFileSync(new URL('../src/Config.gs',import.meta.url),'utf8'),c);
  vm.runInContext(readFileSync(new URL('../src/Promouser.gs',import.meta.url),'utf8'),c);
  vm.runInContext(readFileSync(new URL('../src/ServiceSettings.gs',import.meta.url),'utf8'),c);
  c.registryProjectId_=()=>'numshield';
@@ -60,6 +61,65 @@ function fixture(options={}) {
 }
 
 function createAndQuote(f,id=A){f.configure();f.queue(id);f.start(id);f.advance(id);f.advance(id);f.tick(15000);f.advance(id);return f.state(id).jobs[0];}
+
+test('scoped email and phone approvals split old mixed queues, skip non-new duplicates and safely replay both previews',()=>{
+ const email=(value,status,validation='')=>[value,'A','','',status,validation];
+ const phone=(value,status)=>[value,'A','','','','','Телефон',status];
+ const f=fixture({emailRows:[[...EH,'Статус рассылки','Валидация'],
+  email('legacy@example.test',' НОВЫЙ '),email('other@example.test','в рассылке'),email('new@example.test','Новый контакт'),
+  email('dupe@example.test','Новый контакт'),email('dupe@example.test','ручной статус'),email('blank@example.test',''),
+  email('history@example.test','Новый контакт','Невалиден')],phoneRows:[[...PH,'Статус'],
+  phone('+79990000001','Новый контакт'),phone('+79990000002','фильтр'),phone('+79990000003','в рассылке')]});
+ f.configure({autoPayLimitUsd:5});f.queue();
+ const p=f.c.previewPromouserValidation_({id:A,kind:'email',newContactsOnly:true});
+ const t=f.c.previewPhoneValidation_({id:A,newContactsOnly:true});
+ assert.deepEqual(plain(p.sample.map(x=>x.email)).sort(),['legacy@example.test','new@example.test']);assert.equal(p.plannedCount,2);
+ assert.equal(t.plannedCount,1);assert.equal(t.sample[0].phone,'+79990000001');
+ const first={id:A,kind:'email',previewToken:p.previewToken,requestId:'strict-email-request'};
+ const second={id:A,previewToken:t.previewToken,requestId:'strict-phone-request'};
+ f.c.startPromouserValidation_(first);f.c.startPhoneValidation_(second);
+ f.c.startPromouserValidation_(first);f.c.startPhoneValidation_(second);
+ const approved=f.ledger().jobs.filter(j=>j.manualStartApproved);
+ assert.deepEqual(approved.flatMap(j=>j.contacts.map(c=>c.value)).sort(),['+79990000001','legacy@example.test','new@example.test']);
+ assert.ok(approved.every(j=>j.newContactsOnly&&j.approvedAutoPayLimitUsd===5));assert.equal(f.calls.fetch.length,0);
+});
+
+test('strict approval requires the tagged status, confirmed payment limit, and the same rows through dispatch',()=>{
+ const f=fixture({emailRows:[[...EH,'Статус'],['only@example.test','A','','','Новый контакт']]});
+ f.configure({autoPayLimitUsd:5});
+ const preview=()=>f.c.previewPromouserValidation_({id:A,kind:'email',newContactsOnly:true});
+ const start=p=>f.c.startPromouserValidation_({id:A,kind:'email',previewToken:p.previewToken,requestId:'strict-retry-email'});
+ const first=preview();assert.equal(first.autoPayLimitUsd,5);
+ f.c.configurePromouser_({autoPayLimitUsd:8});assert.throws(()=>start(first),/PV_PREVIEW_STALE/);
+ const changed=preview();f.target().put(2,5,'в рассылке');assert.throws(()=>start(changed),/PV_PREVIEW_STALE/);
+ assert.equal(preview().plannedCount,0);
+ f.target().put(2,5,'Новый контакт');start(preview());f.target().put(2,5,'архив');
+ f.advance();assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/order')).length,0);
+ assert.equal(f.ledger().jobs.find(j=>j.manualStartApproved).state,'cancelled');
+ assert.equal(f.c.previewPhoneValidation_({id:A,newContactsOnly:true}).plannedCount,0);
+ const g=fixture();g.configure();
+ assert.equal(g.c.previewPromouserValidation_({id:A,kind:'email',newContactsOnly:true}).plannedCount,0);
+ assert.equal(g.c.previewPromouserValidation_({id:A,kind:'email'}).plannedCount,1);
+});
+
+test('changing the managed GIDs invalidates a scoped approval even if the old tabs still exist',()=>{
+ const f=fixture({emailRows:[[...EH,'Статус'],['one@example.test','A','','','Новый контакт']]});f.configure();
+ const p=f.c.previewPromouserValidation_({id:A,kind:'email',newContactsOnly:true});
+ f.c.getContactWorkspace_=()=>({targets:{emailSheetId:2,phoneSheetId:1}});
+ assert.throws(()=>f.c.startPromouserValidation_({id:A,kind:'email',previewToken:p.previewToken,requestId:'strict-moved-gids'}),/PV_PREVIEW_STALE/);
+ assert.equal(f.calls.fetch.length,0);assert.equal(f.ledger().jobs.length,0);
+});
+
+test('raising the site payment limit cannot raise the amount approved by the combined validation action',()=>{
+ const f=fixture({status:{status:'not_ready_unpaid',order_id:100,cost:'6'},
+  emailRows:[[...EH,'Статус'],['one@example.test','A','','','Новый контакт']]});
+ f.configure({autoPayLimitUsd:5});
+ const p=f.c.previewPromouserValidation_({id:A,kind:'email',newContactsOnly:true});
+ f.c.startPromouserValidation_({id:A,kind:'email',previewToken:p.previewToken,requestId:'strict-pay-limit'});
+ f.configure({autoPayLimitUsd:10});f.advance();f.advance();f.tick(15000);f.advance();f.tick(5000);f.advance();
+ assert.equal(f.state().jobs[0].state,'awaiting_payment');assert.equal(f.state().jobs[0].cost,6);
+ assert.equal(f.calls.fetch.filter(x=>x.url.endsWith('/pay')).length,0);
+});
 
 test('settings keep the API key write-only and retain it on an empty password field',()=>{
  const f=fixture();const configured=f.configure();assert.equal(configured.configured,true);assert.equal(configured.enabled,true);assert.equal(JSON.stringify(configured).includes(KEY),false);assert.equal(f.c.configurePromouser_({apiKey:'',enabled:false}).configured,true);assert.equal(f.properties.get('PROMOUSER_API_KEY'),KEY);assert.throws(()=>f.c.configurePromouser_({autoPayLimitUsd:-1}),/INVALID_REQUEST/);assert.throws(()=>f.c.configurePromouser_({apiKey:'bad\nsecret'}),/INVALID_REQUEST/);assert.equal(f.c.configurePromouser_({clearKey:true,enabled:false}).configured,false);

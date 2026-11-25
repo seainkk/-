@@ -8,7 +8,8 @@ from prepared_registry_client import FIXTURE, GRID_STUB, HTML
 
 def main():
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+        launch = {'channel': 'chrome'} if sys.platform == 'win32' else {'executable_path': '/usr/bin/chromium'}
+        browser = playwright.chromium.launch(**launch, headless=True, args=['--no-sandbox'])
         page = browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))

@@ -73,6 +73,7 @@ def main():
         page.locator('[data-segment="existing-segment"] button').filter(has_text='Пополнить базы').click()
         assert page.locator('#br-segment-editor-title').inner_text()=='Пополнить базы сегмента'
         assert page.locator('[data-choose-source="source-draft"]').count()==0
+        page.evaluate('backend.requireSegmentReview=true')
         page.locator('[data-choose-source="source-mixed"]').check()
         assert page.locator('#br-segment-source-options select').count()==0
         page.locator('#br-segment-submit').click()
@@ -82,6 +83,7 @@ def main():
         assert 'ЛПР без контактов' in page.locator('#br-segment-preview-counts').inner_text()
         assert 'Спорная компания' in page.locator('#br-segment-preview-review').inner_text()
         assert page.evaluate("backend.calls.filter(c=>c.name==='previewSegmentRecords').at(-1).p.sourceIds")==['source-mixed']
+        assert page.evaluate("backend.calls.filter(c=>c.name==='previewSegmentRecords').at(-1).p.targetKind")=='auto'
         page.locator('#br-segment-submit').click()
         page.wait_for_selector('#br-segment-panel',state='hidden')
         page.wait_for_function('backend.active===0')
@@ -92,6 +94,8 @@ def main():
         # returns to the same segment, then asks for normalization confirmation.
         page.locator('[data-segment="existing-segment"] button').filter(has_text='Пополнить базы').click()
         page.locator('#br-segment-upload').click()
+        page.locator('#br-import-mode-file').click()
+        page.locator('#br-upload-companies').check()
         assert page.locator('#br-import-panel').is_visible()
         assert page.locator('#br-upload-status').input_value()=='ready'
         page.locator('#br-upload-name').fill('Новая смешанная база')
@@ -188,6 +192,8 @@ def main():
         page.locator('#br-segment-name').fill('Клиентский сегмент с новым файлом')
         category.select_option('clients')
         page.locator('#br-segment-upload').click()
+        page.locator('#br-import-mode-file').click()
+        page.locator('#br-upload-companies').check()
         page.locator('#br-upload-name').fill('Исходник для нового сегмента')
         page.locator('#br-upload-file').set_input_files({
             'name': 'client-companies.csv', 'mimeType': 'text/csv',

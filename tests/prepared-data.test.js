@@ -83,6 +83,17 @@ test('social-link phones deduplicate with plain phones; numeric social profile I
   assert.equal(r.phoneRows.some(row => row[0].includes('8887766')), false);
 });
 
+test('LPR imports carry the source name into contacts regardless of component column order, and flag missing names', () => {
+  const f=fixture([['Компания','Отчество контакта','Имя контакта','Фамилия контакта','Email'],
+    ['Альфа','Сергеевна','Анна','Иванова','anna@example.test'],['Бета','','не указано','','other@example.test']]);
+  const r=f.result('lpr');
+  assert.equal(r.records[0].people[0].name,'Иванова Анна Сергеевна');
+  assert.equal(r.emailRows.find(row=>row[0]==='anna@example.test')[1],'Альфа — Иванова Анна Сергеевна');
+  assert.equal(r.records[1].people[0].name,'');
+  assert.deepEqual(r.records[1].people[0].emails,['other@example.test']);
+  assert.ok(r.warnings.some(message=>message.includes('не найдено имя')));
+});
+
 test('explicit phone URL schemes work without browser URL or URLSearchParams globals', () => {
   const { context: c } = fixture([['Телефон']]);
   for (const [url, number] of [
@@ -328,7 +339,7 @@ test('strong contacts in unfamiliar columns and arbitrary text are recognized wi
   assert.equal(r.canConfirm, true); assert.equal(r.counts.emails, 1); assert.equal(r.counts.phones, 1); assert.equal(r.counts.telegrams, 1);
   assert.equal(r.emailRows[0][0], 'sales@example.com');
   assert.equal(r.phoneRows.find(row => row[0])[0], '+79991234567');
-  assert.deepEqual(r.phoneRows.find(row => row[5] === '@sales_team').slice(5), ['@sales_team', 'Telegram', 'новый']);
+  assert.deepEqual(r.phoneRows.find(row => row[5] === '@sales_team').slice(5), ['@sales_team', 'Telegram', 'Новый контакт']);
   assert.equal(r.records[0].source.column, undefined); assert.equal(r.records[0].provenance.emails['sales@example.com'][0].column, 3);
 });
 
@@ -405,6 +416,20 @@ test('workbook scans all explicit leaves, deduplicates globally and keeps distin
   assert.match(r.email.rows[0][2], /Компании: строки 2/); assert.match(r.email.rows[0][2], /ЛПР: строки 2/);
   const refs = r.contactIndex.find(item => item.type === 'email').sourceRefs;
   assert.deepEqual(refs.map(ref => [ref.sheetId, ref.row, ref.column]), [[11, 2, 3], [22, 2, 3]]);
+});
+
+test('one shared email retains each original source header exactly once across owners and sheets', () => {
+  const email = 'shared@example.test', a = fixture([
+    ['Company_ID', 'Компания', 'Email', 'Доп. почта'], ['A', 'Альфа', email, email], ['B', 'Бета', email, '']
+  ], {sheetId: 0, name: 'Компании'});
+  const b = fixture([['Контакт', 'Комментарий'], ['Отдел', email]], {sheetId: 4, name: 'Филиал'});
+  const result = plain(a.context.preparedDataReadWorkbook_({getSheets: () => [a.sheet, b.sheet]}, FILE, 'companies', {}));
+  const originColumn = result.email.headers.indexOf('Исходный столбец email');
+  assert.equal(result.email.rows.length, 1);
+  assert.deepEqual(result.email.rows[0][originColumn].split('\n'),
+    ['Компании · C — Email', 'Компании · D — Доп. почта', 'Филиал · B — Комментарий']);
+  assert.deepEqual(result.contactIndex.find(entry => entry.value === email).sourceRefs.map(ref => [ref.sheetId, ref.row, ref.column]),
+    [[0,2,3], [0,2,4], [0,3,3], [4,2,2]]);
 });
 
 test('workbook does not mistake an original sheet named Email for a generated target and validates source IDs', () => {

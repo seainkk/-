@@ -170,7 +170,7 @@ function segmentRecordsPlanner_(input) {
     if (!record.status) record.status = !record.name && !segmentRecordsInn_(record.inn) && !segmentRecordsOgrn_(record.ogrn) ? 'Уточнить компанию' : segmentRecordsHasContacts_(record) ? 'Подготовка' : 'Нет контактов';
     indexCompany(record); return record;
   }
-  function resolveCompany(incoming) {
+  function resolveCompany(incoming, targetKind) {
     var keys = segmentRecordsCompanyKeys_(incoming), matches = [], hardConflict = false;
     var explicitId = /^C-[A-Za-z0-9_-]{20,43}$/.test(incoming.id || '') ? incoming.id : '';
     if (!keys.length) return null;
@@ -218,7 +218,7 @@ function segmentRecordsPlanner_(input) {
     if (identity.indexOf('contacts:') === 0) issue('company', 'Контакты сохранены без определения компании. Заполните компанию или ИНН позднее.', incoming.source, segmentRecordsList_(incoming.emails, 'email')[0] || segmentRecordsList_(incoming.phones, 'phone')[0] || segmentRecordsList_(incoming.telegrams, 'telegram')[0]);
     return mergeCompany(record, incoming);
   }
-  function resolvePerson(raw, company, companyLabel, source) {
+  function resolvePerson(raw, company, companyLabel, source, targetKind) {
     var record = { companyId: company ? company.id : '', companyName: company ? company.name : companyLabel, name: segmentRecordsText_(raw.name), role: segmentRecordsText_(raw.role), emails: segmentRecordsList_(raw.emails, 'email').join('; '), phones: segmentRecordsList_(raw.phones, 'phone').join('; '), telegrams: segmentRecordsList_(raw.telegrams, 'telegram').join('; ') };
     if (!record.name && !record.role && !segmentRecordsHasContacts_(record)) return null;
     var key = personIdentity(record), provisional = segmentRecordsId_('P', ['source', segmentRecordsSourceKey_(source), record.name, record.role].join('|'));
@@ -256,14 +256,19 @@ function segmentRecordsPlanner_(input) {
     else if ((target.status === 'Найти контакты' || target.status === 'Найти ФИО и контакты') && segmentRecordsHasContacts_(target)) target.status = 'Подготовка';
     indexPerson(target); return target;
   }
+  if (targetKind === 'auto') {
+    // Link people to the companies in the same import, regardless of tab order.
+    sourceRecords = sourceRecords.filter(function (record) { return record.routeKind === 'companies'; }).concat(sourceRecords.filter(function (record) { return record.routeKind === 'lpr'; }));
+  }
   sourceRecords.forEach(function (sourceRecord) {
+    var targetKind = input.targetKind === 'auto' ? sourceRecord.routeKind : input.targetKind;
     var incoming = segmentRecordsCompany_(sourceRecord), source = segmentRecordsSource_(sourceRecord.source), transferred = [];
     if (targetKind === 'lpr' && !(sourceRecord.people || []).length) return;
-    var company = resolveCompany(incoming);
+    var company = resolveCompany(incoming, targetKind);
     if (!company && !segmentRecordsHasContacts_(incoming) && !(Array.isArray(sourceRecord.people) && sourceRecord.people.length) && !segmentRecordsCompanyKeys_(incoming).length) issue('row', 'Строка не распознана как компания, ЛПР или контакт. Подробности сохранены в исходной базе.', source, incoming.name);
     if (targetKind === 'companies') return;
     (Array.isArray(sourceRecord.people) ? sourceRecord.people : []).forEach(function (raw) {
-      var person = resolvePerson(raw || {}, company, incoming.name, raw && raw.source || source);
+      var person = resolvePerson(raw || {}, company, incoming.name, raw && raw.source || source, targetKind);
       if (!person) return;
       if (targetKind === 'lpr') return;
       transferred.push(person.id);

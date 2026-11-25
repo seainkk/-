@@ -34,6 +34,8 @@ def main():
             return page.evaluate('name => backend.calls.filter(c => c.name === name).map(c => c.p)', name)
 
         def company_file():
+            page.locator('#br-import-mode-file').click()
+            page.locator('#br-upload-companies').check()
             page.locator('#br-upload-name').fill('Новая выборка')
             page.locator('#br-upload-file').set_input_files({
                 'name': 'groups.csv', 'mimeType': 'text/csv',
@@ -176,9 +178,80 @@ def main():
         confirm.click()
         expect(page.locator('#br-segment-panel')).to_be_hidden()
         assert page.evaluate('backend.normalizedImports') == 1
+        # Paste a mixed workbook from the segment card and approve both routes once.
+        open_form(from_segments=True)
+        page.locator('#br-import-cancel').click()
+        page.locator('[data-segment="existing-segment"]').get_by_role('button', name='Загрузить базу').click()
+        expect(destination).to_have_value('existing-segment')
+        expect(page.locator('#br-link-auto')).to_be_checked()
+        page.evaluate('''backend.preparedSourceSheets = [
+            {id:0,name:'Компании',section:'companies',rows:3,columns:17},
+            {id:7,name:'ЛПР',section:'lpr',rows:2,columns:25}
+        ]''')
+        page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/outside_123456/edit')
+        page.evaluate('backend.outsideLink = true')
+        page.locator('#br-link-submit').click()
+        error = page.locator('#br-import-message')
+        expect(error).to_contain_text('Таблица находится вне реестра')
+        expect(error.get_by_role('link')).to_have_attribute('href', 'https://drive.google.com/drive/folders/source-folder')
+        assert not calls('confirmPreparedBase') and not calls('importSegmentRecords')
+        page.evaluate('backend.outsideLink = false')
+        page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/registry_copy123456/edit')
+        page.locator('#br-link-submit').click()
+        expect(page.locator('#br-prepared-confirm')).to_be_enabled()
+        expect(prepared).to_contain_text('Смешанная книга')
+        expect(prepared).to_contain_text('Компании → Компании')
+        expect(prepared).to_contain_text('ЛПР → ЛПР')
+        expect(page.locator('#br-prepared-recalculate')).to_be_hidden()
+        assert calls('previewPreparedBase')[-1]['sourceSheetIds'] == [0, 7]
+        assert calls('stagePreparedBaseLink')[-1]['routeMode'] == 'auto'
+        assert not calls('stagePreparedBaseLink')[-1]['name']
+        assert not calls('importSegmentRecords')
+        page.get_by_role('button', name='Подтвердить и пополнить сегмент').click()
+        expect(page.get_by_role('link', name='Открыть таблицу компаний')).to_be_visible()
+        expect(page.get_by_role('link', name='Открыть таблицу ЛПР')).to_be_visible()
+        assert calls('confirmPreparedBase')[-1]['destination']['kind'] == 'auto'
+        assert calls('previewSegmentRecords')[-1]['targetKind'] == 'auto'
+        assert len(calls('importSegmentRecords')) == 1
+        assert page.evaluate('backend.sources.find(s => s.id === "prepared-source-1").contents') == ['companies', 'lpr']
+        # File mode carries automatic routing through live HTML form serialization.
+        # An uncertain company match is shown for review before writing.
+        page.locator('[data-segment="existing-segment"]').get_by_role('button', name='Загрузить базу').click()
+        page.locator('#br-import-mode-file').click()
+        expect(page.locator('#br-upload-auto')).to_be_checked()
+        page.evaluate('backend.requireSegmentReview = true')
+        page.locator('#br-upload-file').set_input_files({
+            'name': 'Mixed.xlsx',
+            'mimeType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'buffer': b'local mock workbook',
+        })
+        page.locator('#br-upload-submit').click()
+        expect(page.locator('#br-prepared-confirm')).to_be_enabled()
+        assert calls('uploadSourceBase')[-1]['routeMode'] == 'auto'
+        assert calls('uploadSourceBase')[-1]['section'] == 'companies'
+        page.locator('#br-prepared-confirm').click()
+        expect(final).to_be_visible()
+        expect(final).to_contain_text('Спорная компания')
+        assert len(calls('importSegmentRecords')) == 1
+        confirm.click()
+        expect(page.locator('#br-segment-panel')).to_be_hidden()
+        assert len(calls('importSegmentRecords')) == 2
+        # Reusing the already registered mixed source keeps its sheet routes.
+        page.locator('#br-view-sources').click()
+        page.locator('[data-add-source="prepared-source-1"]').click()
+        page.locator('#br-segment-target').select_option('existing-segment')
+        page.locator('#br-segment-submit').click()
+        expect(final).to_be_visible()
+        plan = calls('previewSegmentRecords')[-1]
+        assert plan['targetKind'] == 'auto' and plan['sourceIds'] == ['prepared-source-1']
+        assert len(calls('confirmPreparedBase')) == 2  # no new source copy
+        assert len(calls('importSegmentRecords')) == 2  # preview is read-only
+        confirm.click()
+        expect(page.locator('#br-segment-panel')).to_be_hidden()
+        assert len(calls('importSegmentRecords')) == 3
         assert not errors, errors
         browser.close()
-        print('PASS: explicit upload target, file to existing LPR, link to new partner segment, retry and cancellation')
+        print('PASS: manual routes, mixed link/file imports, single approval, review conflicts, folder scope, retries and cancellation')
 
 
 if __name__ == '__main__':

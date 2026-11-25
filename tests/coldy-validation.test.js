@@ -40,6 +40,7 @@ function fixture(options={}) {
   coldySave_:(ctx,kind,owner,value)=>{assert.ok(locked);assert.equal(ctx.rootId,root);assert.equal(JSON.stringify(value).includes(KEY),false);ledger.set(kind+':'+owner,plain(value));calls.saves.push(plain(value));if(saveHook)saveHook(value);},
   coldyApi_:(ctx,method,path,payload,httpOptions)=>{assert.equal(locked,false,'No HTTP while lock held');scope(path, false);},
  });
+ vm.runInContext(readFileSync(new URL('../src/Config.gs',import.meta.url),'utf8'),c);
  vm.runInContext(readFileSync(new URL('../src/Promouser.gs',import.meta.url),'utf8'),c);
  vm.runInContext(readFileSync(new URL('../src/ColdyValidation.gs',import.meta.url),'utf8'),c);
  c.coldyApi_=(ctx,method,path,payload,httpOptions)=>{
@@ -68,6 +69,31 @@ function finish(f) { f.tick(15000); f.advance(); f.tick(15000); return f.advance
 
 test('managed sheet ID zero is used; the similarly named unmanaged tab is ignored',()=>{
  const f=fixture();const p=f.preview();assert.equal(p.counts.new,1);assert.deepEqual(plain(p.sample),['a@example.test']);assert.equal(f.target().getLastColumn(),4);assert.equal(f.calls.http.length,0);
+});
+
+test('scoped Coldy validation sends only new unique emails once, preserves excludes and requires the selected provider',()=>{
+ const row=(email,status,history='')=>[email,'A','','',status,history];
+ const f=fixture({rows:[[...EH,'Статус рассылки','Валидация'],row('yes@example.test','новый'),
+  row('dup@example.test','Новый контакт'),row('dup@example.test','в рассылке'),row('no@example.test','фильтр'),
+  row('manual@example.test','свой статус'),row('history@example.test','Новый контакт','Неизвестно'),row('blank@example.test','')]});
+ const preview=()=>f.c.previewColdyValidation_({id:A,newContactsOnly:true});
+ const p=preview();assert.deepEqual(plain(p.sample),['yes@example.test']);assert.equal(p.plannedCount,1);
+ f.c.emailValidationProvider_=()=>'promouser';assert.throws(()=>f.start(p),/COLDY_PROVIDER_CHANGED/);
+ f.c.emailValidationProvider_=()=>'coldy';f.target().put(2,5,'в рассылке');assert.throws(()=>f.start(p),/COLDY_PREVIEW_CHANGED/);
+ f.target().put(2,5,'Новый контакт');const ready=preview();f.start(ready,A,'strict-coldy-request');f.start(ready,A,'strict-coldy-request');
+ assert.deepEqual(f.calls.http.filter(x=>x.method==='POST').map(x=>x.payload.emails),[['yes@example.test']]);
+ assert.equal(f.ledger().jobs[0].newContactsOnly,true);
+ f.target().put(2,5,'в рассылке');finish(f);
+ assert.equal(f.target().at(2,f.col('Валидация')).value,'Валиден');assert.equal(f.target().at(2,5).value,'в рассылке');
+ assert.equal(f.calls.http.filter(x=>x.method==='POST').length,1);
+});
+
+test('a scoped Coldy order relinquishes its reservation when its first dispatch sees a changed status',()=>{
+ const f=fixture({rows:[[...EH,'Статус'],['one@example.test','A','','','Новый контакт']]});
+ const p=f.c.previewColdyValidation_({id:A,newContactsOnly:true});
+ f.onSave(state=>{if(state.lease)f.target().put(2,5,'в рассылке');});
+ f.start(p);assert.equal(f.calls.http.length,0);assert.equal(f.ledger().jobs[0].state,'cancelled');
+ assert.equal(f.cache()[f.c.pvKey_('email','one@example.test')]?.pending,undefined);
 });
 
 test('manual source scanning and idle owner timer never create a paid job',()=>{

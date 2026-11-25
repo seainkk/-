@@ -382,7 +382,7 @@ test('V2 real reader aggregates all original leaves and keeps exactly two derive
   assert.deepEqual(phones.slice(1).map(row => row[phones[0].indexOf('Телефон')]).sort(), ['+79991112233', '+79994445566']);
   for (const name of ['Email', 'Телефоны и Telegram']) {
     const data = output.getSheetByName(name).state.data, status = data[0].indexOf('Статус рассылки');
-    assert.notEqual(status, -1); assert.deepEqual(data.slice(1).map(line => line[status]), ['новый', 'новый']);
+    assert.notEqual(status, -1); assert.deepEqual(data.slice(1).map(line => line[status]), ['Новый контакт', 'Новый контакт']);
   }
   assert.equal(output.getSheetByName('Компании').state.data[1][4], 'https://wa.me/79994445566');
   assert.deepEqual(output.getSheets().map(tab => tab.getName()), ['Компании', 'ЛПР', 'Email', 'Телефоны и Telegram']);
@@ -820,9 +820,30 @@ test('reimport of a curated book preserves both separate owner rows, validation 
   assert.equal(shown.sheets[1].rowCount, 3); assert.equal(shown.sheets[2].rowCount, 2);
   const final = f.finish(draft, shown), result = f.books.get(final.file.id);
   const data = result.getSheetByName('Email').state.data;
-  assert.deepEqual(data.map(row => row.slice(0, -1)), email.state.data);
-  assert.notEqual(data[1].at(-1), data[2].at(-1));
+  const sourceWidth = email.state.data[0].length, idColumn = data[0].indexOf('ID компании'), originColumn = data[0].indexOf('Исходный столбец email');
+  assert.deepEqual(data.map(row => row.slice(0, sourceWidth)), email.state.data);
+  assert.match(data[1][idColumn], /^C-[\w-]{24}$/); assert.match(data[2][idColumn], /^C-[\w-]{24}$/);
+  assert.notEqual(data[1][idColumn], data[2][idColumn]);
+  assert.deepEqual(data.slice(1).map(row => row[originColumn]), Array(2).fill('Компании · B — Email-адреса'));
   assert.deepEqual(result.getSheetByName('Мобильные телефоны').state.data.map(row => row.slice(0, -1)), mobile.state.data);
+});
+
+test('curated owner rows with the same email and shared row references report each owner’s actual source column', () => {
+  const f = workbookReader(fixture()), book = f.books.get(ORIGINAL);
+  const enroll = f.context.enrollContactWorkbook_;
+  for (const file of ['Promouser.gs', 'ContactSync.gs']) vm.runInContext(readFileSync(new URL('../src/' + file, import.meta.url), 'utf8'), f.context);
+  f.context.enrollContactWorkbook_ = enroll;
+  const [source, phone] = book.tabs, email = book.insertSheet('Email'), shared = 'shared@example.test';
+  source.state.data.splice(0, Infinity,
+    ['Названия', 'Email-адреса', 'Почта для связи'], ['One', shared, ''], ['Two', '', shared]);
+  phone.setName('Мобильные телефоны');
+  phone.state.data.splice(0, Infinity, ['Статус', 'Строки в Лист1', 'Компания', 'Мобильный телефон', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Сайты']);
+  email.state.data.splice(0, Infinity, ['Статус', 'Комментарий', 'Почт на компанию', 'Строки в Лист1', 'Компания', 'Email', 'Валидация', 'Провайдер', 'Сайты'],
+    ['Рассылка', '', '1', '2, 3', 'One', shared, 'valid', 'A', ''], ['Невалид', '', '1', '2, 3', 'Two', shared, 'invalid', 'B', '']);
+  const draft = f.stage(), preview = selectedPreview(f, draft, [0]);
+  const rows = f.books.get(f.finish(draft, preview).file.id).getSheetByName('Email').state.data;
+  const column = rows[0].indexOf('Исходный столбец email');
+  assert.deepEqual(rows.slice(1).map(row => row[column]), ['Компании · B — Email-адреса', 'Компании · C — Почта для связи']);
 });
 
 test('new working books keep stable company IDs across their master, email and phone rows and leave ambiguous ownership open', () => {
@@ -838,7 +859,7 @@ test('new working books keep stable company IDs across their master, email and p
   const row = (list, column, value) => list.slice(1).map(line => Object.fromEntries(list[0].map((k, i) => [k, line[i]]))).find(line => line[column] === value);
   const unique = row(email, 'Email', 'one@example.test'), shared = row(email, 'Email', 'shared@example.test');
   assert.equal(unique['ID компании'], master[1].at(-1)); assert.equal(unique['Сайты'], 'one.example.test');
-  assert.equal(unique['Статус рассылки'], 'новый'); assert.equal(unique['Валидация'], ''); assert.equal(unique['Провайдер'], '');
+  assert.equal(unique['Статус рассылки'], 'Новый контакт'); assert.equal(unique['Валидация'], ''); assert.equal(unique['Провайдер'], '');
   assert.equal(shared['ID компании'], ''); assert.equal(shared['Проверить принадлежность'], 'Да');
   assert.equal(row(phone, 'Телефон', '+79990000002')['ID компании'], master[2].at(-1));
 });
@@ -1001,6 +1022,55 @@ function historyWorkbookReader(f) {
   vm.runInContext(readFileSync(new URL('../src/LegacyContactHistory.gs', import.meta.url), 'utf8'), f.context, { filename: 'LegacyContactHistory.gs' });
   return f;
 }
+
+test('automatic direct preparation publishes one mixed source with separate contact verdicts and durable routing', () => {
+  const f = historyWorkbookReader(fixture()), book = f.books.get(ORIGINAL);
+  const company = book.tabs[0], person = book.tabs[1];
+  company.state.data.splice(0, company.state.data.length,
+    ['Название', 'ИНН', 'Имя', 'Фамилия', 'Должность', 'Рабочий телефон (компания)', 'Рабочий email'],
+    ['Компания Пример', '7707083893', 'Игнат', 'Петров', 'Директор', '+79991110001', 'work@example.test']);
+  person.state.data.splice(0, person.state.data.length,
+    ['Название (компания)', 'ИНН', 'Фамилия', 'Имя', 'Отчество', 'Основной телефон', 'Доп. тел. (не проверяли на тг)', 'Почта основная', 'Почта основная рез. валидации', 'Доп. почта', 'Доп. почта рез. валидации'],
+    ['Компания Пример', '7707083893', 'Иванова', 'Анна', 'Петровна', '+79991110002', '+79991110003', 'anna@example.test', 'valid', 'extra@example.test', 'invalid']);
+  book.insertSheet('Сводка').state.data.push(['Компания', 'Email'], ['Исключить', 'summary@example.test']);
+  book.insertSheet('Email').state.data.push(['Компания', 'Email'], ['Отчёт', 'report@example.test']);
+  book.insertSheet('Прочее').state.data.push(['Документ'], ['Договор']);
+  const draft = f.stage({ name:'', routeMode:'auto', status:'ready' });
+  assert.equal(draft.name, 'Источник');
+  assert.deepEqual(draft.sheets.map(leaf => [leaf.name, leaf.section]), [['Компании', 'companies'], ['ЛПР', 'lpr']]);
+  const shown = f.preview(draft), destination = {name:'Пример', category:'clients', kind:'auto'};
+  assert.equal(shown.counts.companyRows, 1); assert.equal(shown.counts.personRows, 1);
+  assert.equal(shown.counts.emails, 3); assert.equal(shown.counts.phones, 3);
+  assert.deepEqual(shown.sourceSheets.map(leaf => leaf.section), ['companies', 'lpr']);
+  assert.throws(() => f.confirm(draft, shown, { destination:{...destination, kind:'companies'} }), /INVALID_REQUEST/);
+  let state = f.confirm(draft, shown, {destination});
+  for (let i=0; state.state === 'processing' && i<30; i++) state=f.next(draft);
+  assert.equal(state.state, 'complete'); assert.deepEqual(state.destination, destination);
+  assert.equal(f.records.size, 1); assert.deepEqual(state.item.contents, ['companies', 'lpr']);
+  const output = f.books.get(state.file.id), tags = f.resources.get(state.file.id).appProperties;
+  assert.deepEqual(output.tabs.slice(0,2).map(tab=>f.context.preparedSavedRoute_(tags,tab.getSheetId())), ['companies','lpr']);
+  const [headers,...rows]=output.getSheetByName('Email').state.data;
+  const value = (email,label) => rows.find(row=>row[headers.indexOf('Email')]===email)[headers.indexOf(label)];
+  assert.equal(value('anna@example.test','Валидация'),'Валиден');
+  assert.equal(value('extra@example.test','Валидация'),'Невалиден');
+  assert.deepEqual(f.confirm(draft, shown, {destination}).file, state.file);
+});
+
+test('an existing segment receives only the explicitly selected auto leaf and keeps its registered destination on retry', () => {
+  const f=historyWorkbookReader(fixture()), draft=f.stage({routeMode:'auto', status:'ready'});
+  const destination={segmentId:'existing_segment_0001', name:'Уже создан', kind:'auto'};
+  const checks=[];
+  f.context.segmentSourceFolder_=()=>({getId:()=> 'segments_folder'});
+  f.context.segmentFolder_=(_context, folder, id)=>{ assert.equal(folder.getId(),'segments_folder'); checks.push(id); };
+  const shown=selectedPreview(f,draft,[9]);
+  assert.equal(shown.sourceSheets.length,1); assert.equal(shown.sourceSheets[0].section,'lpr');
+  let state=f.confirm(draft,shown,{destination});
+  for (let i=0; state.state==='processing' && i<30; i++) state=f.next(draft);
+  assert.equal(state.state,'complete'); assert.deepEqual(state.destination,destination);
+  assert.deepEqual(state.item.contents,['lpr']); assert.deepEqual(f.confirm(draft,shown,{destination}).file,state.file);
+  assert.ok(checks.length>=2 && checks.every(id=>id===destination.segmentId));
+  assert.equal(f.books.get(state.file.id).tabs.length,3);
+});
 
 test('explicit GID zero selection copies just that original plus two contact tabs and leaves the full original intact', () => {
   const f = workbookReader(fixture()), original = f.books.get(ORIGINAL), snapshot = plain(original.tabs.map(tab => tab.state.data));
