@@ -82,6 +82,29 @@ test('an explicit Telegram negative is a completed result with no invented user 
   assert.equal(field(data.phone, 0, 'Для Telegram'), 'Нет'); assert.equal(field(data.phone, 0, 'ID_TG'), '');
 });
 
+test('primary Telegram snapshot keeps the actual check, ID, nickname, days and campaign only on the primary phone', () => {
+  const c = env(), headers = ['Основной телефон','Есть ТГ','ТГ Ник','ТГ ID ','Active_days_ago','В рассылке НСА','Доп. тел. (не проверяли на тг)','Почта основная'];
+  const primary = '+79990001001', secondary = '+79990001002', absent = '+79990001003', conflicting = '+79990001004';
+  const source = leaf(headers, [
+    [primary,1,'sample_name','123456789',0,'да',secondary,'a@example.test'],
+    [absent,0,'','','','','',''],
+    [conflicting,0,'sample_conflict','123456790',0,'','',''],
+    ['нет номера',0,'','','','',secondary,'']
+  ]);
+  source.mainTelegram=true; source.preserveAmbiguousHistory=true;
+  const data=model([source], ['a@example.test'], [primary,secondary,absent,conflicting]);
+  data.phone.headers.push('Статус рассылки'); data.phone.rows.forEach(row=>row.push('Новый контакт'));
+  c.legacyContactHistoryEnrich_(data);
+  assert.deepEqual(['Валидация','ID_TG','Nickname_TG','Active_days_ago','Для Telegram','Статус рассылки','Статус из источника'].map(key=>field(data.phone,0,key)),
+    ['Telegram: активен','123456789','sample_name','0','Да','в рассылке','да']);
+  assert.deepEqual(['Валидация','ID_TG','Статус рассылки'].map(key=>field(data.phone,1,key)),['','','Новый контакт']);
+  assert.equal(field(data.phone,2,'Валидация'),'Telegram не найден');
+  assert.equal(field(data.phone,2,'Для Telegram'),'Нет');
+  assert.equal(field(data.phone,3,'Валидация'),'Проверить историю контакта');
+  assert.equal(data.email.headers.includes('Валидация'),false);
+  assert.throws(()=>c.legacyMainTelegramColumns_(headers.concat('Основной телефон')),/несколько одинаковых заголовков/);
+});
+
 test('inactive Telegram keeps ID, nickname and exact days without an invented check date', () => {
   const c = env(); const data = model([leaf(['Мобильный телефон', 'ID_TG', 'Nickname_TG', 'Active_days_ago'], [['89990000005', '987654321', 'offline_person', '101']])], [], ['+79990000005']);
   c.legacyContactHistoryEnrich_(data); assert.equal(field(data.phone, 0, 'Валидация'), 'Telegram: более 30 дней офлайн');
@@ -96,6 +119,21 @@ test('multi-phone report row is ambiguous and does not transfer the verdict to b
 test('a multi-email company row does not assign one provider verdict to all addresses', () => {
   const c = env(); const data = model([leaf(['Email', 'Валидация'], [['first@example.test; second@example.test', 'valid']])], ['first@example.test', 'second@example.test']);
   c.legacyContactHistoryEnrich_(data); assert.equal(data.email.headers.length, 4);
+});
+
+test('Telegram campaign notes other than да retain their wording and the independent completed check', () => {
+  const c=env(), headers=['Основной телефон','Есть ТГ','В рассылке НСА'];
+  const phones=['+79991110001','+79991110002','+79991110003'];
+  const notes=['добавление в контакты','Отправлено','Подготовить карточку'];
+  const source=leaf(headers,phones.map((phone,i)=>[phone,1,notes[i]])); source.mainTelegram=true;
+  const data=model([source],[],phones);
+  data.phone.headers.push('Статус рассылки'); data.phone.rows.forEach(row=>row.push('Новый контакт'));
+  c.legacyContactHistoryEnrich_(data);
+  phones.forEach((_phone,i)=>{
+    assert.equal(field(data.phone,i,'Валидация'),'Telegram найден');
+    assert.equal(field(data.phone,i,'Статус из источника'),notes[i]);
+    assert.equal(field(data.phone,i,'Статус рассылки'),'Новый контакт');
+  });
 });
 
 test('cross-tab completed verdict conflicts become review, never whichever tab came first', () => {

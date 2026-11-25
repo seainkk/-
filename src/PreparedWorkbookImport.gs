@@ -6,6 +6,7 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
     var book = SpreadsheetApp.openById(file.id), options = preparedWorkbookSourceOptions_(context, draft, book);
     var allSourceSheets = preparedWorkbookSourceSheets_(book, options);
     options.sourceSheetIds = preparedWorkbookSelection_(book, options, draft.sourceSheetIds);
+    options.mainTelegram = draft.mainTelegramHistory === true;
     // A whole historical workbook can need more time than a single changed
     // contact sheet. This server-only deadline remains below the execution
     // limit, and the recognizer still rejects every incomplete result.
@@ -24,7 +25,7 @@ function preparedWorkbookStableRead_(context, draft, initialFile) {
       // Unselected archives supply check/work history only. Their contacts and
       // records are never normalized into the selected output. Old managed
       // report tabs may also contain history when re-importing a prepared book.
-      var history = legacyContactHistoryReadWorkbook_(book, file.id, draft.section, options.guard, model.models || [], { sourceSheetIds: book.getSheets().map(function (sheet) { return sheet.getSheetId(); }), deadline: options.deadline, pairedEmail: draft.routeMode === 'auto' });
+      var history = legacyContactHistoryReadWorkbook_(book, file.id, draft.section, options.guard, model.models || [], { sourceSheetIds: book.getSheets().map(function (sheet) { return sheet.getSheetId(); }), deadline: options.deadline, pairedEmail: draft.routeMode === 'auto', mainTelegram: options.mainTelegram });
       if (!history || history.complete !== true || typeof history.fingerprint !== 'string') fail_('LEGACY_HISTORY_PARTIAL', 'Не удалось полностью прочитать историю контактов. Повторите предпросмотр.');
       if (typeof legacyContactHistoryEnrich_ === 'function') model = legacyContactHistoryEnrich_(model, history.history);
       model.fingerprint = digest_(JSON.stringify([3, model.fingerprint, history.fingerprint]));
@@ -133,6 +134,7 @@ function preparedWorkbookPreview_(context, draft, sheetId, sourceSheetIds) {
   // Only newly staged previews use the extended selected-source/history
   // envelope. Already confirmed V2 receipts keep their earlier fingerprints.
   draft.historyReadVersion = 1; draft.previewToken = ''; draft.canConfirm = false; draft.planId = ''; draft.planHash = ''; draft.planRole = '';
+  if (draft.routeMode === 'auto') draft.mainTelegramHistory = true;
   preparedSave_(context, draft);
   var stable = preparedWorkbookStableRead_(context, draft), model = stable.model;
   var selected = (model.models || []).filter(function (leaf) { return leaf.source.sheetId === sheetId; })[0];
@@ -181,7 +183,7 @@ function preparedWorkbookPreview_(context, draft, sheetId, sourceSheetIds) {
   var names = Object.create(null), sources = (model.models || []).map(function (leaf) {
     var title = model.models.length === 1 && !draft.routeMode ? 'Исходная база' : leaf.source.name;
     title = preparedWorkbookUniqueName_(title, names);
-    return { source: leaf.source, name: title, companyIds: working.sourceIds.get(leaf.source.sheetId), personIds: working.personIds.get(leaf.source.sheetId), formulas: (leaf.formulaSnapshots || []).map(preparedEncodeFormula_), sourceValueSignature: digest_(JSON.stringify(leaf.sourceValues || [])), copySignature: preparedCopySignature_(leaf.sourceValues || [], leaf.formulaSnapshots || []) };
+    return { source: leaf.source, name: title, companyIds: working.sourceIds.get(leaf.source.sheetId), personIds: working.personIds.get(leaf.source.sheetId), formulas: (leaf.formulaSnapshots || []).map(preparedEncodeFormula_), sourceValueSignature: preparedFrozenSourceSignature_(leaf), copySignature: preparedCopySignature_(leaf.sourceValues || [], leaf.formulaSnapshots || []) };
   });
   var emailName = preparedWorkbookUniqueName_('Email', names), phoneName = preparedWorkbookUniqueName_(model.workingReports ? 'Мобильные телефоны' : 'Телефоны и Telegram', names);
   var token = digest_(JSON.stringify([4, draft.draftId, sheetId, draft.name, draft.section, draft.status, model.fingerprint]));

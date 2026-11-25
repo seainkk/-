@@ -217,6 +217,36 @@ test('unknown country/local phones are kept without inventing +7 or declaring Te
   assert.equal(r.counts.mobiles, 0); assert.match(r.warnings.join(' '), /международного/);
 });
 
+test('a parse error in an explicit phone column recovers literal numbers and leaves ambiguous local chains for review', () => {
+  const formula = '=+7 999 101-11-01, +7 (495) 102-11-02, +7 (1234) 11-11-03, +7 (12345) 1-11-04, 111-22-33, 44-55-66, 7-88-99, 12-34-56-78-90-12-34';
+  const r = fixture([['Названия', 'Рабочий телефон (компания)'], ['Фабрика', '#ERROR!'], ['Фабрика', '+79991011101']],
+    {formulas:{'2:2': formula}}).result();
+  const numbers = ['+79991011101', '+74951021102', '+71234111103', '+71234511104', '1112233', '445566', '78899'];
+  assert.deepEqual(r.phoneRows.map(row => row[0]).sort(), numbers.sort());
+  assert.deepEqual(r.records[0].general.phones.sort(), numbers);
+  assert.deepEqual(r.phoneRows.map(row => row[2]).filter(value => value !== 'Столбец «Рабочий телефон (компания)»'), []);
+  assert.ok(r.warnings.some(message => message.includes('не удалось распознать')));
+  assert.equal(r.sourceValues[1][1], '#ERROR!'); assert.equal(r.sourceFormulas[1][1], formula);
+  assert.equal(r.formulaSnapshots[0].literalPhoneText, formula.slice(1));
+  const frozen = fixture([['Названия', 'Рабочий телефон (компания)'], ['Фабрика', formula.slice(1)]]).result();
+  assert.deepEqual(frozen.phoneRows.map(row => row[0]).sort(), numbers);
+});
+
+test('arithmetic, functions, references, mixed-purpose columns and other error types do not supply fallback phone data', () => {
+  const expressions = ['=SUM(79991234567)', '=+A7', '=+79991234567*3', '=+79991234567-1', '=+79991234567+1',
+    '=+79991234567, 2-3', '=+79991234567, A12', '=+79991234567, 7/1234567', '=HYPERLINK("tel:+79991234567",A1)'];
+  const rows = [['Компания', 'Телефон', 'Контакты', 'Примечание', 'Статус телефона', 'Почта']], formulas = {};
+  expressions.forEach((formula, i) => {
+    rows.push(['Компания', '#ERROR!', '#ERROR!', '#ERROR!', '#ERROR!', '#ERROR!']);
+    formulas[(i + 2) + ':2'] = formula;
+    for (let column = 3; column <= 6; column++) formulas[(i + 2) + ':' + column] = '=+79991234567';
+  });
+  rows.push(['Компания', '#REF!']); formulas[rows.length + ':2'] = '=+79991234567';
+  rows.push(['Компания', 'готово']); formulas[rows.length + ':2'] = '=+79991234567';
+  const r = fixture(rows, {formulas}).result();
+  assert.equal(r.complete, true); assert.equal(r.phoneRows.length, 0); assert.ok(r.formulaSnapshots.every(cell => !cell.literalPhoneText));
+});
+
 test('Company_ID aliases use valid INN while generic person IDs and matching names are not companies', () => {
   const r = fixture([
     ['Company_ID', 'ИНН', 'Компания', 'Email'],
