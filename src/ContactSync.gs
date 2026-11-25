@@ -700,6 +700,8 @@ function contactSyncKey_(kind, value, telegram) {
     if (/^8\d{10}$/.test(number)) number = '+7' + number.slice(1);
     else if (/^7\d{10}$/.test(number)) number = '+' + number;
     if (/^\+?\d{7,15}$/.test(number)) return 'phone:' + number.replace(/^\+/, '');
+    var local = contactLocalPhone_(text);
+    if (local) return 'local-phone:' + local;
     if (!telegram) telegram = text;
   }
   var username = String(telegram || '').trim().replace(/^https?:\/\/(?:t\.me|telegram\.me)\//i, '').replace(/^@/, '');

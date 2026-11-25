@@ -43,6 +43,14 @@ function contactMailingStatusIsNew_(value) {
   return status === 'новый контакт' || status === 'новый';
 }
 
+/** Local subscriber numbers have no dialling code. Keep their leading zeroes. */
+function contactLocalPhone_(value) {
+  var text = String(value == null ? '' : value).trim();
+  if (!/^(?:\d{5,7}|\d{1,3}[- ]\d{2}[- ]\d{2})$/.test(text)) return '';
+  var digits = text.replace(/[- ]/g, '');
+  return /^0+$/.test(digits) ? '' : digits;
+}
+
 function workingSelectionStatus_(value) {
   var status = String(value || '').trim().toLowerCase();
   if (!status || contactMailingStatusIsNew_(status)) return CONTACT_MAILING_STATUS.initial;

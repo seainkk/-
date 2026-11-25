@@ -433,7 +433,7 @@ function segmentSelectionContacts_(book, selection, records, guard, mainModel) {
         if (!line[contact] && line.every(function (value) { return !value; })) return;
         var key = contactSyncKey_(kind, line[contact], line[telegram]), handle = key.indexOf('telegram:') === 0;
         var field = kind === 'email' ? 'emails' : handle ? 'telegrams' : 'phones';
-        var value = kind === 'email' ? pvEmail_(line[contact]) : handle ? String(line[telegram] || '') : pvPhone_(line[contact]);
+        var value = kind === 'email' ? pvEmail_(line[contact]) : handle ? String(line[telegram] || '') : pvPhone_(line[contact]) || contactLocalPhone_(line[contact]);
         if (selection.managed && !byKey.has(key)) return;
         if (!value || !key) fail_('SOURCE_CHANGED', 'В отчёте выборки есть строка без однозначного контакта. Проверьте строку ' + (start + index) + ' на листе «' + sheet.getName() + '».');
         var refText = String(line[col(['Строки в Лист1', 'Исходные строки'])] || '').trim();

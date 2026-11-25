@@ -62,6 +62,24 @@ function fixture(options={}) {
 
 function createAndQuote(f,id=A){f.configure();f.queue(id);f.start(id);f.advance(id);f.advance(id);f.tick(15000);f.advance(id);return f.state(id).jobs[0];}
 
+test('new local phone numbers stay visible as missing a dialling code and never enter a provider order', () => {
+ const local = ['01234','01-23-45','3122211'];
+ const f = fixture({emailRows:[EH],phoneRows:[[...PH,'Статус рассылки'], ...local.map(phone => [phone,'Фабрика','','','','','Местный телефон','Новый контакт'])]});
+ f.configure({autoPayLimitUsd:5}); f.queue();
+ for (const newContactsOnly of [false,true]) {
+   const preview = f.c.previewPhoneValidation_({id:A,newContactsOnly});
+   assert.equal(preview.canStart,false); assert.equal(preview.plannedCount,0);
+   assert.equal(preview.counts.unknownCountry,3); assert.equal(preview.counts.invalid,0);
+ }
+ f.advance(); assert.equal(f.ledger().jobs.length,0); assert.equal(f.calls.fetch.length,0);
+ const mixed = fixture({emailRows:[EH],phoneRows:[[...PH,'Статус рассылки'], ...local.concat('+79990000001').map(phone => [phone,'A','','','','','','Новый контакт'])]});
+ mixed.configure({autoPayLimitUsd:5}); mixed.queue();
+ const preview = mixed.c.previewPhoneValidation_({id:A,newContactsOnly:true});
+ assert.equal(preview.plannedCount,1); assert.equal(preview.counts.unknownCountry,3);
+ mixed.c.startPhoneValidation_({id:A,previewToken:preview.previewToken,requestId:'full_number_only_order'});
+ assert.deepEqual(plain(mixed.ledger().jobs.flatMap(job => job.contacts.map(contact => contact.value))), ['+79990000001']);
+});
+
 test('scoped email and phone approvals split old mixed queues, skip non-new duplicates and safely replay both previews',()=>{
  const email=(value,status,validation='')=>[value,'A','','',status,validation];
  const phone=(value,status)=>[value,'A','','','','','Телефон',status];
