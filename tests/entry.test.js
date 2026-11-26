@@ -37,11 +37,11 @@ test('the public entry and Apps Script shell identify the service and open one s
   assert.doesNotMatch(app, /id="br-source-catalog-toggle"/);
 });
 
-function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true, storage = new Map(), fetch, firebase='' } = {}) {
+function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true, storage = new Map(), fetch, firebase='', clock=Date, crypto=webcrypto } = {}) {
   const events = new Map(), timers = new Map(), sequence = [], created = [];
   let timerId = 0;
   const location = new URL('https://seainkk.github.io' + path + hash);
-  const window = { location, fetch, crypto:webcrypto, localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},addEventListener(name, handler) { events.set(name, handler); } };
+  const window = { location, fetch, crypto, localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},addEventListener(name, handler) { events.set(name, handler); } };
   const states = [null], pushes = [], sent = [];
   let position = 0, backs = 0;
   window.history = {
@@ -80,7 +80,7 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
   function Frame() {}
   if (supported) Frame.prototype.credentialless = false;
   const context = vm.createContext({
-    window, document, URL, HTMLIFrameElement: Frame, TextEncoder, TextDecoder, btoa, atob, Uint8Array, AbortController,
+    window, document, URL, HTMLIFrameElement: Frame, TextEncoder, TextDecoder, btoa, atob, Uint8Array, AbortController, Date:clock,
     navigator: { userActivation: activation },
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
@@ -263,6 +263,76 @@ test('a delayed first-project response cannot expose rows or cover the active ap
   await new Promise(resolve=>setTimeout(resolve,15));
   assert.ok(messages.every(m=>m.epoch===2&&m.projectId==='neosender'));
   assert.equal(messages.find(m=>m.kind==='segments').items[0].name,'Сегмент neosender');assert.equal(f.ids['entry-preview-list'].children.length,0);
+});
+
+test('warm entry shows both encrypted lists with original timestamps while fetching, and clears all named rows on denial',async()=>{
+  const storage=new Map(), first=directoryMock(), one=fixture({...first,storage});
+  await until(()=>storage.size===1);
+  const [slot,raw]=[...storage][0];
+  assert.ok(!raw.includes(KEY)&&!raw.includes('Тестовый')&&!raw.includes('test_segment')&&!raw.includes('directoryViews'));
+  const originalDate=one.ids['entry-preview-time'].textContent;
+  let reply;const response=new Promise(done=>{reply=done;});let calls=0;
+  const repeat=fixture({storage,firebase:first.firebase,fetch:()=>{calls++;return response;}});
+  await until(()=>calls===1&&repeat.ids['entry-preview-list'].children.length===1);
+  assert.equal(repeat.ids['entry-preview-time'].textContent,originalDate);
+  repeat.ids['entry-view-segments'].listeners.get('click')();
+  assert.equal(repeat.ids['entry-preview-list'].children[0].children[0].dataset.directoryId,'test_segment_001');
+  reply({ok:false,status:403});
+  await until(()=>!storage.has(slot)&&!repeat.ids['entry-preview-list'].children.length);
+  assert.equal(repeat.ids['entry-preview-time'].textContent,'');
+  for(const reason of ['google-locked','changed-key']){
+    const local=new Map([[slot,raw],[slot.replace('numshield','neosender'),raw]]);
+    const page=fixture({storage:local,firebase:first.firebase,fetch:()=>new Promise(()=>{})});
+    await until(()=>page.ids['entry-preview-list'].children.length===1);
+    if(reason==='google-locked'){
+      page.event('message',{source:page.app(),origin:PAGES_ORIGIN,data:{type:'bases-registry-locked'}});
+    }else{
+      page.window.location.hash='#access_key='+'X'.repeat(43);
+      page.event('hashchange');
+    }
+    assert.equal(local.size,0,reason);
+    assert.equal(page.ids['entry-preview-list'].children.length,0,reason);
+  }
+});
+
+test('cached ciphertext is bound to its link, Firebase project, selected project and original expiry even if clear envelope timestamps are forged',async()=>{
+  const first=directoryMock(),store=new Map();fixture({...first,storage:store});
+  await until(()=>store.size===1);
+  const [slot,raw]=[...store][0], never=()=>new Promise(()=>{});
+  for(const mode of ['key','project','firebase','expired','malformed']){
+    const storage=new Map([[slot,raw]]), options={storage,fetch:never,firebase:first.firebase};
+    let target=slot;
+    if(mode==='key')options.hash='#access_key='+'X'.repeat(43);
+    if(mode==='project'){storage.set('registry.activeProject','neosender');target=slot.replace('numshield','neosender');storage.set(target,raw);}
+    if(mode==='firebase'){options.firebase='different-project';target=slot.replace(first.firebase,options.firebase);storage.set(target,raw);}
+    if(mode==='expired'){
+      const now=first.stamp+610000;
+      options.clock=class extends Date{static now(){return now;}};
+      storage.set(slot,JSON.stringify({...JSON.parse(raw),checkedAt:now,expiresAt:now+600000}));
+    }
+    if(mode==='malformed')storage.set(slot,'{broken');
+    const page=fixture(options);await until(()=>!storage.has(target));
+    assert.equal(page.ids['entry-preview-list'].children.length,0,mode);
+  }
+});
+
+test('a delayed decryption cannot replace newer verified data, and unavailable device storage does not block the network',async()=>{
+  const storage=new Map(),first=directoryMock();fixture({...first,storage});await until(()=>storage.size===1);
+  let release;
+  const barrier=new Promise(done=>{release=done;});
+  const subtle=new Proxy(webcrypto.subtle,{get(object,prop){
+    if(prop==='decrypt')return async(...args)=>{await barrier;return object.decrypt(...args);};
+    return typeof object[prop]==='function'?object[prop].bind(object):object[prop];
+  }});
+  const crypto={subtle,getRandomValues:webcrypto.getRandomValues.bind(webcrypto)};
+  const next=directoryMock(docs=>{const rows=JSON.parse(docs[1].found.fields.rowsJson.stringValue);rows[0].name='Новее';docs[1].found.fields.rowsJson.stringValue=JSON.stringify(rows);return docs;});
+  const page=fixture({...next,storage,crypto});
+  const visible=f=>f.ids['entry-preview-list'].children[0]?.children[0]?.textContent;
+  await until(()=>visible(page)==='Новее');release();await new Promise(done=>setTimeout(done,15));
+  assert.equal(visible(page),'Новее');
+  const denied={get(){throw Error('blocked');},set(){throw Error('blocked');},delete(){throw Error('blocked');}};
+  const fallback=fixture({...first,storage:denied});
+  await until(()=>visible(fallback)==='Тестовый источник');
 });
 
 test('missing, malformed, expired, or cross-project documents give way to Google and a truly empty catalogue is recognized',async()=>{

@@ -106,15 +106,21 @@ def main():
             send(dict(type='bases-registry-fast-directory',kind='segments',complete=True,checkedAt=1700000000002,items=[segment]))
             send(dict(type='bases-registry-fast-expired',kind='segments',checkedAt=1700000000001))
             expect(app.locator('#br-fast-directory')).to_contain_text(segment['name'])
-            app.wait_for_function("backend.pending.some(p=>p.method==='getSegmentDirectory')")
+            app.evaluate("""() => {
+              const normal=api.getSegmentContactCard;
+              api.getSegmentContactCard=p=>{const page=normal(p);page.rows=page.rows.slice(0,1);page.nextOffset=1;return page;};
+            }""")
             choose('segments',segment['id'],1)
             choose('segments',segment['id'],1)
-            # Authorization, compact directory and full dashboard can return independently.
-            assert not app.evaluate("backend.calls.some(c=>c.name==='getSegmentContactCard')")
+            # The card RPC authorizes independently; its first page stays out of the DOM until bootstrap.
+            app.wait_for_function("backend.calls.some(c=>c.name==='getSegmentContactCard')&&backend.active===1")
+            expect(app.locator('#sc-rows tr')).to_have_count(0)
             finish(app,'getAppBootstrap')
             expect(app.locator('#sc-rows')).to_contain_text('both@example.test')
+            expect(app.locator('#sc-rows tr')).to_have_count(1)
+            expect(app.locator('#sc-next')).to_be_enabled()
             assert app.evaluate("backend.calls.filter(c=>c.name==='getSegmentContactCard').length===1")
-            assert app.evaluate("backend.calls.filter(c=>c.name==='getSegmentDirectory').length===1 && !backend.calls.some(c=>c.name==='getSourceBases')")
+            assert app.evaluate("!backend.calls.some(c=>['getSegmentDirectory','getSegmentsDashboard','getSourceBases'].includes(c.name)) && backend.maxActiveReads===2")
             host.wait_for_function("acks.some(m=>m.type==='bases-registry-fast-opened'&&m.serial===1)")
             old_epoch = host.evaluate("scope.epoch")
             app.locator('#br-action-back').click()
@@ -127,10 +133,41 @@ def main():
             app = boot()
             offer('segments',[segment])
             choose('segments',segment['id'],1)
+            app.wait_for_function("backend.calls.some(c=>c.name==='getSegmentContactCard')&&backend.active===1")
             app.evaluate("backend.revoked=true")
             finish(app,'getAppBootstrap')
             app.wait_for_function("document.querySelector('#br-access-retry') && !document.querySelector('#br-fast-directory')")
-            assert not app.evaluate("backend.calls.some(c=>c.name==='getSegmentContactCard'||c.name==='getSourceBases')")
+            expect(app.locator('#sc-rows tr')).to_have_count(0)
+            assert app.evaluate("backend.calls.filter(c=>c.name==='getSegmentContactCard').length===1 && !backend.calls.some(c=>c.name==='getSourceBases')")
+
+            app = boot()
+            app.evaluate("() => {api.getSegmentContactCard=()=>{throw new Error('[OUTSIDE_PROJECT] Сегмент перемещён')};}")
+            offer('segments',[segment])
+            choose('segments',segment['id'],1)
+            app.wait_for_function("backend.calls.some(c=>c.name==='getSegmentContactCard')&&backend.active===1")
+            finish(app,'getAppBootstrap')
+            expect(app.locator('#sc-status')).to_contain_text('Сегмент перемещён')
+            expect(app.locator('#sc-rows tr')).to_have_count(0)
+            assert app.evaluate("backend.calls.filter(c=>c.name==='getSegmentContactCard').length===1")
+
+            for cancel in (True,False):
+                app = boot()
+                app.evaluate("backend.holdMethods.push('getSegmentContactCard')")
+                offer('segments',[segment])
+                choose('segments',segment['id'],1)
+                app.wait_for_function("backend.pending.some(p=>p.method==='getSegmentContactCard')")
+                if cancel:
+                    choose('segments',None,2)
+                finish(app,'getAppBootstrap')
+                if cancel:
+                    expect(app.locator('#br-segments-view')).to_be_visible()
+                else:
+                    expect(app.locator('#sc-view')).to_be_visible()
+                    app.locator('#br-project').select_option('neosender')
+                    host.wait_for_function("scope.projectId==='neosender'")
+                finish(app,'getSegmentContactCard')
+                expect(app.locator('#sc-rows tr')).to_have_count(0)
+                assert app.evaluate("backend.calls.filter(c=>c.name==='getSegmentContactCard').length===1")
             assert not errors,errors
         finally:
             context.close()

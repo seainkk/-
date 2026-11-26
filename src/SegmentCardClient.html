@@ -7,6 +7,9 @@
   const when=value=>value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК':'';
   // First pages live only in this authorized frame. clear() also runs on every project/key change.
   const firstPages=new Map(),pageLifetime=120000;
+  const initialFilters=Object.freeze({channel:'all',owner:'all',queue:'all',query:'',offset:0});
+  function pageParams(s){return {channel:s.channel,owner:s.owner,queue:s.queue,query:s.query,offset:s.offset,limit:60,prepared:true,...(s.offset?{revision:s.revision}:{})};}
+  function firstPageRequest(id){return {segmentId:id,...pageParams(initialFilters)};}
   let config,current=null;
   function node(tag,text){const item=document.createElement(tag);item.textContent=text;return item;}
   function action(label,fn){const item=node('button',label);item.type='button';item.className='br-button';item.addEventListener('click',fn);return item;}
@@ -50,9 +53,9 @@
     s.pages.set(pageKey(s),s.data);
     paintSummary(s);paintRows(s);
   }
-  function select(id,name,project){
+  function select(id,name,project,firstRead){
     if(current?.id===id)return;
-    resetView();current={id,name,project,channel:'all',owner:'all',queue:'all',query:'',offset:0,previous:[],seq:0,originSeq:0,coldSeq:0,
+    resetView();current={id,name,project,...initialFilters,firstRead,previous:[],seq:0,originSeq:0,coldSeq:0,
       panel:null,data:null,pages:new Map(),catalog:null,comparisons:new Map(),loading:false,exporting:false,updated:0};
     el('title').textContent=name;el('project').textContent=project;el('owner').value='all';el('query').value='';el('secondary').open=false;
     el('table-wrap').hidden=true;el('pages').hidden=true;el('export').disabled=true;
@@ -183,15 +186,22 @@
   }
   async function refresh(options={}){
     const s=current;if(!alive(s))return;
-    if(s.exporting||options.automatic&&(s.loading||s.panel||s.offset>0))return;
-    if(options.opening&&s.data&&!s.data.preview&&s.updated&&Date.now()-s.updated<15000){el('export').disabled=false;window.dispatchEvent(new Event('segment-card-update'));return;}
+    if(s.exporting||options.opening&&s.loading||options.automatic&&(s.loading||s.panel||s.offset>0))return;
+    if(options.opening&&!s.firstRead&&s.data&&!s.data.preview&&s.updated&&Date.now()-s.updated<15000){el('export').disabled=false;window.dispatchEvent(new Event('segment-card-update'));return;}
     const seq=++s.seq;const valid=()=>alive(s)&&s.seq===seq;
     s.loading=true;el('export').disabled=true;
     // A refresh of the visible page can finish after the user has already moved on.
     if(s.data?.offset!==s.offset){el('prev').disabled=true;el('next').disabled=true;}
     if(!s.data)message('status','Читаем контакты сегмента…');
     try{
-      const response=await run(s,'getSegmentContactCard',{channel:s.channel,owner:s.owner,queue:s.queue,query:s.query,offset:s.offset,limit:60,prepared:true,...(s.offset?{revision:s.revision}:{})},valid);
+      const firstRead=s.firstRead&&Object.keys(initialFilters).every(key=>initialFilters[key]===s[key])?s.firstRead:null;
+      s.firstRead=null;
+      let response;
+      if(firstRead){
+        const result=await firstRead;
+        if(result.error)throw result.error;
+        response=result.page;
+      }else response=await run(s,'getSegmentContactCard',pageParams(s),valid);
       if(!valid()||!response)return;
       if(response.segmentId!==s.id)throw new Error('Не удалось подтвердить сегмент.');
       if(s.revision&&s.revision!==response.revision){
@@ -354,6 +364,6 @@
     if(!['all','email','telegram'].includes(channel)||!['all','companies','lpr'].includes(owner)||!['all','ready','inCampaign','email','emailReview','telegram','telegramReview','telegramBook','ownership'].includes(queue))return;
     changeFilters({channel,owner,queue,query:String(query).trim().slice(0,120)});
   }
-  window.RegistrySegmentCard={configure,clear,acceptDashboard,select,show,refresh,dismiss:()=>window.RegistrySegmentSelections?.dismiss?.()||dismiss(),id:()=>current?.id,getFilters,setFilters};
+  window.RegistrySegmentCard={configure,clear,acceptDashboard,firstPageRequest,select,show,refresh,dismiss:()=>window.RegistrySegmentSelections?.dismiss?.()||dismiss(),id:()=>current?.id,getFilters,setFilters};
 })();
 </script>

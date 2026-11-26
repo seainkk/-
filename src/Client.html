@@ -109,9 +109,21 @@
     list.replaceChildren(rows);
   }
   function chooseDirectoryItem(kind,id,serial){
-    pendingDirectoryOpen={kind,id,serial};
+    if(pendingDirectoryOpen?.kind===kind&&pendingDirectoryOpen.id===id)pendingDirectoryOpen.serial=serial;
+    else pendingDirectoryOpen={kind,id,serial};
+    startEarlyCardRead();
     if(activeView!==kind)setView(kind);
     if(accessReady)applyDirectoryOpen();else renderFastDirectory();
+  }
+  function startEarlyCardRead(){
+    const choice=pendingDirectoryOpen,card=window.RegistrySegmentCard;
+    if(accessReady||!busy||!accessKey||!globalThis.RegistryPagesTransport||!card?.firstPageRequest||
+      choice?.kind!=='segments'||choice.read||networkPending>=2||!fastDirectories.segments?.items.some(row=>row.id===choice.id))return;
+    // This RPC authorizes the key and project on the server. Only the still
+    // selected, authenticated card can consume its in-memory result.
+    readPending++;
+    choice.read=rpc('getSegmentContactCard',card.firstPageRequest(choice.id))
+      .then(page=>({page}),error=>({error})).finally(()=>{readPending--;});
   }
   function applyDirectoryOpen(){
     const choice=pendingDirectoryOpen;
@@ -129,7 +141,7 @@
     if(kind==='sources'&&typeof item.workbook!=='boolean'&&!item.mimeType)return;
     pendingDirectoryOpen=null;
     if(kind==='segments'){
-      segmentSection=segmentCategory(item);openSegmentContactCard(id);
+      segmentSection=segmentCategory(item);openSegmentContactCard(id,choice.read);
     }else{
       if(!sourceData&&!sourceLoading)pendingSyncViews.add('sources');
       if(item.workbook===true||canOpenSourceWorkbook(item))openGridWorkbook(id);
@@ -1163,9 +1175,9 @@
     }}
     finally{if(epoch!==accessEpoch||request!==dashboardRequest)return;dashboardLoading=false;dashboardAnalysisLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();if(dashboard?.analysisPending===true&&activeView==='segments'&&!formIsOpen())scheduleSegmentAnalysis();}
   }
-  function openSegmentContactCard(id){
+  function openSegmentContactCard(id,firstRead){
     const item=segmentById(id)||(!dashboard&&!segmentDirectory&&fastDirectories.segments?.items.find(item=>item.id===id));if(!accessReady||!item||!window.RegistrySegmentCard)return;
-    window.RegistrySegmentCard.select(id,item.name,projectNames[activeProjectId]+' / '+segmentCategories[segmentCategory(item)]);
+    window.RegistrySegmentCard.select(id,item.name,projectNames[activeProjectId]+' / '+segmentCategories[segmentCategory(item)],firstRead);
     setView('segmentCard');$('sc-title').focus({preventScroll:true});window.scrollTo(0,0);
   }
   function openSegmentMailings(id){
@@ -1747,6 +1759,7 @@
     if(activeView==='mailings')return refreshMailings(options);
   }
   function flushPendingView(){
+    if(!accessReady)startEarlyCardRead();
     applyDirectoryOpen();
     if(pendingImportExit&&accessReady&&!requesting()){const exit=pendingImportExit;pendingImportExit=null;closePreparedImport(exit.toInput);return;}
     if(segmentReturnPending&&accessReady&&!requesting()&&!gridIsOpen()&&!segmentEditor&&!preparedImport&&!suspendedSegment){
@@ -1797,7 +1810,7 @@
   function rememberView(entry){viewTrail.push(entry);if(viewTrail.length>32)viewTrail.shift();}
   function setView(view,options={}){
     if(pendingDirectoryOpen&&view!==pendingDirectoryOpen.kind)pendingDirectoryOpen=null;
-    if(view==='segments'&&!accessReady&&busy&&accessKey&&bootstrapIncludesDirectory===false&&globalThis.RegistryPagesTransport)void fetchSegmentDirectory();
+    if(view==='segments'&&!options.fromFastEntry&&!fastDirectories.segments&&!accessReady&&busy&&accessKey&&bootstrapIncludesDirectory===false&&globalThis.RegistryPagesTransport)void fetchSegmentDirectory();
     if(view!==activeView&&!options.back)rememberView({view:activeView,scroll:window.scrollY,mailingSegmentId,cardId:window.RegistrySegmentCard?.id()});
     activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});if(view==='segments'&&dashboard?.analysisPending===true&&!formIsOpen())scheduleSegmentAnalysis();if(view==='sources'&&preparedJobsQueued)flushPendingView();
   }
@@ -1869,7 +1882,7 @@
         if(!Number.isSafeInteger(msg.serial)||msg.serial<=lastDirectoryView)return;
         lastDirectoryView=msg.serial;
         const available=['sources','segments'].includes(activeView)&&!formIsOpen()&&!gridIsOpen();
-        if(available){pendingDirectoryOpen=null;if(activeView!==msg.kind)setView(msg.kind);else if(!accessReady)renderFastDirectory();}
+        if(available){pendingDirectoryOpen=null;if(activeView!==msg.kind)setView(msg.kind,{fromFastEntry:true});else if(!accessReady)renderFastDirectory();}
         postEntryMessage({type:'bases-registry-fast-viewed',epoch:accessEpoch,projectId:activeProjectId,kind:msg.kind,serial:msg.serial,visible:available&&activeView===msg.kind});
         return;
       }
