@@ -76,8 +76,25 @@ def main():
         }""")
         expect(page.locator('#entry-preview')).to_be_hidden()
         assert app.evaluate("messages.filter(m=>m.type==='bases-registry-fast-open').length") == 1
+
+        stored_directory = "Object.keys(localStorage).some(k => k.startsWith('outreach.dir.device.v1/'))"
+        page.wait_for_function(stored_directory)
+        pending.clear()
+        page.reload(wait_until='commit')
+        sources = page.locator('#entry-preview-list [data-directory-kind=sources]')
+        expect(sources).to_have_text('Синтетическая база')
+        segments.click()
+        expect(segment).to_have_text('Синтетический сегмент')
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and ('directory' not in pending or 'app' not in pending):
+            page.wait_for_timeout(10)
+        assert 'directory' in pending and 'app' in pending
+        pending['directory'].fulfill(status=403, content_type='application/json',
+                                     headers={'Access-Control-Allow-Origin': host}, body='{}')
+        expect(page.locator('#entry-preview-list [data-directory-kind]')).to_have_count(0)
+        page.wait_for_function('!(' + stored_directory + ')')
         browser.close()
-        print('Cold Pages navigation, verified rows before iframe, and acknowledged handoff passed.',flush=True)
+        print('Cold navigation, app handoff, warm navigation with a pending refresh, and revocation passed.',flush=True)
 
 
 if __name__=='__main__':

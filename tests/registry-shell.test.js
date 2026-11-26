@@ -29,6 +29,11 @@ test('Pages publishes the shared interface and its transport without server file
     assert.ok(entry.indexOf('takeEntryDirectoryRead')<entry.indexOf('<body'));
     assert.doesNotMatch(entry,/access_key=[\w-]{43}|private_key|client_email|directoryViews\/[\w-]{43}/);
     assert.doesNotMatch(app, /<\?|access_key=[\w-]{43}|function authorize_\(/);
+    await buildPages(output,'outreach-directory');
+    const productionEntry=await readFile(path.join(output,'index.html'),'utf8');
+    const directoryOrigin='https://firestore.europe-west3.rep.googleapis.com';
+    assert.ok(productionEntry.includes('<link rel="preconnect" href="'+directoryOrigin+'" crossorigin>'));
+    assert.ok(productionEntry.includes('})('+JSON.stringify(directoryOrigin)+');'));
     await writeFile(path.join(output,'unrelated.txt'),'test');
     await assert.rejects(buildPages(output), /папка только с файлами интерфейса/);
   } finally { await rm(output,{recursive:true,force:true}); }

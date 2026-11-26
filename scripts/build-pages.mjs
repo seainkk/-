@@ -24,10 +24,13 @@ export async function buildPages(destination, firebaseProject = process.env.FIRE
   }
   const entry = path.join(root,'entry');
   const [index,reader] = await Promise.all([readFile(path.join(entry,'index.html'),'utf8'),readFile(path.join(entry,'directory.js'),'utf8')]);
+  const directoryOrigin = firebaseProject === 'outreach-directory'
+    ? 'https://firestore.europe-west3.rep.googleapis.com'
+    : 'https://firestore.googleapis.com';
   await Promise.all([
     writeFile(path.join(destination,'index.html'),index
-      .replace('<!-- directory preconnect -->',firebaseProject?'<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>':'')
-      .replace('/* directory reader bundle */',()=>reader)
+      .replace('<!-- directory preconnect -->',firebaseProject?'<link rel="preconnect" href="'+directoryOrigin+'" crossorigin>':'')
+      .replace('/* directory reader bundle */',()=>reader.replace('/* directory service origin */',JSON.stringify(directoryOrigin)))
       .replace('const directoryProject = "";',()=> 'const directoryProject = '+JSON.stringify(firebaseProject)+';')),
     copyFile(path.join(entry,'favicon.png'),path.join(destination,'favicon.png')),
     writeFile(path.join(destination, 'app.html'), app)
