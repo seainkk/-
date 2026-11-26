@@ -1,0 +1,161 @@
+<script>
+(() => {
+  'use strict';
+  let config, session;
+  const host=()=>document.getElementById('sc-saved-actions');
+  const card=()=>window.RegistrySegmentCard?.getFilters();
+  const channels={all:'Все каналы',email:'Email',telegram:'Telegram'};
+  const owners={all:'Компании и ЛПР',companies:'Компании',lpr:'ЛПР'};
+  const queues={all:'Все контакты',ready:'Готово к запуску',inCampaign:'Уже в рассылке',email:'Проверка Email',telegram:'Проверка Telegram',ownership:'Проверка принадлежности'};
+  function elem(tag,text){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;return node;}
+  function button(text,click){const node=elem('button',text);node.type='button';node.className='br-button';node.addEventListener('click',click);return node;}
+  function field(text,input){const label=elem('label');label.append(document.createTextNode(text+' '),input);return label;}
+  function input(name){const node=elem('input');node.type='text';node.maxLength=160;node.name=name;node.autocomplete='off';return node;}
+  function active(s){return !!s&&s===session&&card()?.segmentId===s.id;}
+  function filterOf(f){return {channel:f.channel,owner:f.owner,queue:f.queue,query:f.query||''};}
+  function describe(f){return [channels[f.channel],owners[f.owner],queues[f.queue],f.query?'«'+f.query+'»':''].filter(Boolean).join(' · ');}
+  function when(value){const time=Date.parse(value);return Number.isFinite(time)?new Date(time).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК':'';}
+  function formatError(error){return config.error?.(error)?.message||error?.message||'Не удалось выполнить действие.';}
+  function run(s,method,payload={},extra=()=>true){return config.rpc(method,{segmentId:s.id,...payload},()=>active(s)&&extra());}
+  function notice(s,text){if(active(s))s.notice.textContent=text;}
+  function operation(s,type,signature){
+    const same=s.pending[type];
+    if(same?.signature===signature)return same;
+    const id=globalThis.crypto?.randomUUID?.()||Date.now()+'-'+Math.random().toString(36).slice(2);
+    return s.pending[type]={signature,id};
+  }
+  function rerenderLists(s){
+    s.filters.replaceChildren();s.exports.replaceChildren();
+    if(!s.data.filters.length)s.filters.append(elem('p','Сохранённых фильтров пока нет.'));
+    for(const f of s.data.filters.slice().reverse()){
+      const line=elem('p'),apply=button(f.name,()=>{
+        if(!active(s))return;
+        window.RegistrySegmentCard.setFilters(filterOf(f));
+        s.panel.open=false;
+      });
+      line.append(apply,document.createTextNode(' '+describe(f)));s.filters.append(line);
+    }
+    if(!s.data.exports.length)s.exports.append(elem('p','Сохранённых выгрузок пока нет.'));
+    for(const item of s.data.exports.slice().reverse()){
+      const line=elem('p'),download=button('Скачать адресатов',()=>downloadSaved(s,item));
+      download.disabled=s.downloading;
+      const info=[item.name,item.campaignName!==item.name?item.campaignName:'',when(item.createdAt),'Контактов '+item.count].filter(Boolean).join(' · ');
+      line.append(elem('span',info+' '),download);s.exports.append(line);
+    }
+  }
+  async function list(s,force=false){
+    if(!active(s)||s.listing||s.data&&!force)return;
+    s.listing=true;s.refresh.disabled=true;notice(s,'Открываем сохранённые фильтры и выгрузки…');
+    try{
+      const data=await run(s,'getSegmentSelections');
+      if(!active(s)||!data)return;
+      if(!Array.isArray(data.filters)||!Array.isArray(data.exports))throw new Error('Ответ сервиса не содержит перечень подборок.');
+      const selected=s.campaign.value;
+      s.data=data;s.campaign.replaceChildren(new Option('Без привязки',''));
+      for(const campaign of data.campaigns||[])s.campaign.add(new Option(campaign.name,campaign.id));
+      if(Array.from(s.campaign.options).some(option=>option.value===selected))s.campaign.value=selected;
+      rerenderLists(s);notice(s,data.campaignsAvailable===false?'Не удалось прочитать список рассылок сегмента.':'');
+    }catch(error){notice(s,formatError(error));}
+    finally{if(active(s)){s.listing=false;s.refresh.disabled=false;}}
+  }
+  async function saveFilter(s){
+    const current=card(),name=s.name.value.trim();
+    if(!active(s)||s.saving)return;
+    if(!name){s.name.setCustomValidity('Введите название фильтра.');s.name.reportValidity();return;}
+    const filter=filterOf(current),op=operation(s,'filter',JSON.stringify([name,filter]));
+    s.saving=true;s.save.disabled=true;notice(s,'Сохраняем фильтр…');
+    try{
+      const saved=await run(s,'saveSegmentFilter',{name,...filter,requestId:op.id});
+      if(!active(s)||!saved)return;
+      if(!saved.id)throw new Error('Сервис не подтвердил сохранение фильтра.');
+      delete s.pending.filter;s.name.value='';
+      if(s.data){s.data.filters=s.data.filters.filter(item=>item.id!==saved.id).concat(saved);rerenderLists(s);}
+      else await list(s,true);
+      notice(s,'Сохранён фильтр «'+saved.name+'».');
+    }catch(error){notice(s,formatError(error));}
+    finally{if(active(s)){s.saving=false;s.save.disabled=false;}}
+  }
+  function mount(s){
+    const panel=elem('details'),summary=elem('summary','Фильтры и выгрузки'),body=elem('div');body.className='sc-panel';
+    panel.append(summary,body);s.panel=panel;
+    s.name=input('filterName');s.name.required=true;s.save=elem('button','Сохранить фильтр');
+    s.name.addEventListener('input',()=>s.name.setCustomValidity(''));
+    s.save.type='submit';s.save.className='br-button';const form=elem('form');form.className='sc-filters';
+    form.append(field('Название текущего фильтра',s.name),s.save);
+    form.addEventListener('submit',event=>{event.preventDefault();saveFilter(s);});
+    s.filters=elem('div');s.exports=elem('div');
+    s.campaign=elem('select');s.campaign.id='sc-export-campaign';s.campaign.add(new Option('Без привязки',''));
+    s.exportName=input('exportName');s.exportName.placeholder='Необязательно';
+    const options=elem('div');options.className='sc-filters';options.append(field('Рассылка для выгрузки',s.campaign),field('Название выгрузки',s.exportName));
+    s.refresh=button('Обновить список',()=>list(s,true));
+    const close=button('Свернуть',()=>{panel.open=false;summary.focus();});
+    const commands=elem('div');commands.className='sc-actions';commands.append(s.refresh,close);
+    s.notice=elem('p');s.notice.setAttribute('role','status');s.notice.setAttribute('aria-live','polite');
+    body.append(form,s.filters,elem('h3','Следующая выгрузка'),options,elem('p','Чтобы сохранить состав CSV в истории, укажите название или выберите рассылку.'),elem('h3','История выгрузок'),s.exports,commands,s.notice);
+    panel.addEventListener('toggle',()=>{if(panel.open)list(s);});
+    panel.addEventListener('keydown',event=>{if(event.key==='Escape'&&panel.open){event.preventDefault();event.stopPropagation();panel.open=false;summary.focus();}});
+    host().replaceChildren(panel);
+  }
+  function reset(){session=null;host()?.replaceChildren();}
+  function dismiss(){
+    if(!active(session)||!session.panel.open)return false;
+    session.panel.open=false;session.panel.querySelector('summary').focus({preventScroll:true});return true;
+  }
+  function update(){
+    const current=card();if(!config||!current||!host())return;
+    if(session?.id===current.segmentId)return;
+    session={id:current.segmentId,pending:{},listing:false,downloading:false,saving:false,data:null};mount(session);
+  }
+  async function recordExport(filters,records){
+    update();
+    const s=session,now=card();
+    if(!active(s)||s.id!==filters.segmentId||now.revision!==filters.revision||JSON.stringify(filterOf(now))!==JSON.stringify(filterOf(filters)))
+      throw new Error('Отбор изменился. Повторите выгрузку.');
+    if(!Array.isArray(records)||!records.length)throw new Error('Нет контактов для сохранения.');
+    const campaignId=s.campaign.value,campaignName=campaignId?s.campaign.selectedOptions[0]?.textContent:'';
+    const name=s.exportName.value.trim()||campaignName,filter=filterOf(filters);
+    if(!name&&!campaignId)return null;
+    const rows=records.map(row=>({channel:row.channel,value:row.value}));
+    const op=operation(s,'export',JSON.stringify([name,campaignId,filters.revision,filter,rows.length]));
+    const saved=await run(s,'saveSegmentExport',{name,revision:filters.revision,filter,rows,requestId:op.id,...(campaignId?{campaignId}:{})});
+    if(!active(s))throw new Error('Карточка сегмента изменилась.');
+    if(!saved?.id||saved.count!==rows.length)throw new Error('Сервис не подтвердил состав выгрузки. Повторите сохранение.');
+    delete s.pending.export;
+    if(s.data){s.data.exports=s.data.exports.filter(item=>item.id!==saved.id).concat(saved);rerenderLists(s);}
+    return saved;
+  }
+  function csv(value,index){
+    let text=String(value||'');
+    const literal=index===1&&/^(?:\+\d{7,15}|@[A-Za-z0-9_]{1,32})$/.test(text);
+    if(!literal&&(/^[\s]*[=+\-@]/.test(text)||/^[\t\r\n]/.test(text)))text="'"+text;
+    return '"'+text.replaceAll('"','""')+'"';
+  }
+  async function downloadSaved(s,item){
+    if(!active(s)||s.downloading)return;
+    s.downloading=true;rerenderLists(s);notice(s,'Получаем адресатов сохранённой выгрузки…');
+    try{
+      const lines=[['Канал','Контакт']],seen=new Set();let offset=0;
+      do{
+        const page=await run(s,'getSegmentExport',{id:item.id,offset,limit:200});
+        if(!active(s)||!page)return;
+        if(page.id!==item.id||page.count!==item.count||!Array.isArray(page.rows)||page.rows.length>200)throw new Error('Не удалось подтвердить состав выгрузки.');
+        for(const row of page.rows){
+          const key=JSON.stringify([row.channel,row.value]);
+          if(!['email','telegram'].includes(row.channel)||typeof row.value!=='string'||!row.value||seen.has(key))throw new Error('В составе выгрузки есть некорректная запись.');
+          seen.add(key);lines.push([channels[row.channel],row.value]);
+        }
+        if(page.nextOffset!=null&&(!page.rows.length||page.nextOffset!==offset+page.rows.length||page.nextOffset>=item.count))throw new Error('Не удалось подтвердить следующую страницу выгрузки.');
+        offset=page.nextOffset;
+      }while(offset!=null);
+      if(seen.size!==item.count)throw new Error('Получена только часть сохранённых адресатов.');
+      const file=new Blob(['\uFEFF'+lines.map(row=>row.map(csv).join(';')).join('\r\n')],{type:'text/csv;charset=utf-8'});
+      const url=URL.createObjectURL(file),a=elem('a');a.href=url;a.download=item.name.replace(/[\\/:*?"<>|]/g,'_')+'.csv';
+      document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);notice(s,'Скачано адресатов · '+seen.size);
+    }catch(error){notice(s,formatError(error));}
+    finally{if(active(s)){s.downloading=false;rerenderLists(s);}}
+  }
+  window.addEventListener('segment-card-update',update);
+  window.addEventListener('segment-card-clear',reset);
+  window.RegistrySegmentSelections={configure(options){config=options;update();},recordExport,dismiss};
+})();
+</script>

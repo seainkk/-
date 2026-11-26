@@ -25,8 +25,8 @@ function helper(name) {
 test('source workflow and manual format checks have independent explicit labels', () => {
   const status = helper('sourceStatusLabel'), check = helper('sourceCheckLabel');
   assert.equal(status('collection'), 'Сбор');
-  assert.equal(status('ready'), 'Готова');
-  assert.equal(status('rework'), 'Доработка');
+  assert.equal(status('ready'), 'Готова к добавлению');
+  assert.equal(status('rework'), 'Подготовка');
   assert.equal(check('unchecked'), 'Не проверено');
   assert.equal(check('valid'), 'Корректно');
   assert.equal(check('invalid'), 'Некорректно');

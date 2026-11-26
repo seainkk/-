@@ -2,6 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 
+from performance_client import expand_segment_actions
 from playwright.sync_api import expect, sync_playwright
 from performance_client import FIXTURE, HTML, ROOT
 
@@ -35,7 +36,8 @@ def check_browser_history(browser):
         app = host.frame_locator('#entry-frame-host iframe')
         app.locator('#br-view-segments').click()
         row = app.locator('[data-segment="existing-segment"]')
-        row.get_by_role('button', name='Пополнить базы').click()
+        expand_segment_actions(row)
+        row.get_by_role('button', name='Выбрать готовый источник').click()
         host.wait_for_function('history.state?.basesRegistryBack===true')
         host.go_back(wait_until='commit')
         expect(app.locator('#br-segment-panel')).to_be_hidden()
@@ -262,9 +264,11 @@ def main():
         page.locator('#br-view-segments').click()
         page.wait_for_selector('[data-segment="existing-segment"]')
         page.evaluate("backend.holdAfterMethods=['getSegmentMailings']")
+        expand_segment_actions(page.locator('[data-segment="existing-segment"]'))
         page.locator('[data-segment="existing-segment"] .br-link-button').click()
         held('getSegmentMailings')
         page.locator('#br-mailings-back').click()
+        expand_segment_actions(page.locator('[data-segment="empty-segment"]'))
         page.locator('[data-segment="empty-segment"] .br-link-button').click()
         expect(page.locator('#br-mailings-title')).to_contain_text('Пустой сегмент')
         page.evaluate('backend.holdAfterMethods=[]')

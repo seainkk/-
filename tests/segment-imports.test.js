@@ -74,6 +74,13 @@ function fixture(options = {}) {
   context.Utilities = { getUuid: () => 'lease-' + ++sequence, newBlob: value => ({ value }) };
   context.LockService = { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) };
   context.SpreadsheetApp = { openById: id => { if (!books.has(id)) throw new Error('Missing book'); return books.get(id); }, flush() {} };
+  context.Sheets = { Spreadsheets:{ batchUpdate(body,id) {
+    const tab=body.requests[0].addSheet.properties;
+    const book=books.get(id);
+    if (book.getSheets().some(s=>s.getSheetId()===tab.sheetId || s.getName()===tab.title)) throw Error('Duplicate tab');
+    sheet(book,tab.title,[],tab.sheetId);
+    if (options.loseMasterCreation) { options.loseMasterCreation=false; throw Error('Lost addSheet response'); }
+  } } };
   context.DriveApp = { getFileById: id => { if (!resources.has(id)) throw new Error('Missing file'); return resources.get(id); } };
   context.Drive = { Files: {
     get: id => metadata(id),
@@ -91,12 +98,12 @@ function fixture(options = {}) {
     resources.get(id).version++;
     if (writeFailure && (!writeFailure.id || id === writeFailure.id) && firstRow > 1) { writeFailure = null; throw context.registryError_('SHEETS_RAW_UNCERTAIN', 'Reply lost after apply'); }
   };
-  for (const name of ['ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs', 'LegacyContactHistory.gs', 'SegmentRecords.gs', 'SegmentImports.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
+  for (const name of ['ContactPreview.gs', 'SourceRecords.gs', 'PreparedData.gs', 'LegacyContactHistory.gs', 'SegmentRecords.gs', 'SegmentImports.gs','SegmentContactCard.gs','SegmentLegacyPreview.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
   const preview = () => context.previewSegmentRecords_({ segmentId: SEGMENT, sourceIds: [SOURCE] });
   const start = (shown, requestId = 'segment-normalize-request-001') => context.importSegmentRecords_({ segmentId: SEGMENT, planToken: shown.planToken, requestId });
   const next = state => context.continueSegmentRecords_({ segmentId: SEGMENT, jobId: state.jobId, requestId: state.requestId });
   const finish = initial => { let result = initial; for (let i = 0; i < 100 && result.state === 'processing'; i++) result = next(result); assert.equal(result.state, 'complete'); return result; };
-  const master = kind => context.segmentRecordsMaster_({ context: config, folder: resources.get(SEGMENT), tables: { companies: COMPANIES, lpr: PEOPLE } }, kind, false).sheet;
+  const master = (kind, create = false) => context.segmentRecordsMaster_({ context: config, folder: resources.get(SEGMENT), tables: { companies: COMPANIES, lpr: PEOPLE } }, kind, create).sheet;
   return { context, calls, resources, books, properties, sourceBook, sourceSheet, companyBook, peopleBook, status, preview, start, next, finish, master, config, addSource };
 }
 
@@ -388,7 +395,7 @@ test('all 17 directory values survive two independent uploads into one company a
 });
 
 test('an established working sheet appends directory columns beyond user data and preserves earlier previews and formulas', () => {
-  const f = fixture(), old = f.preview(), sheet = f.master('companies');
+  const f = fixture(), sheet = f.master('companies', true), old = f.preview();
   const oldHeaders = [...sheet.state.rows[0], 'Заметка пользователя', 'Категории'];
   sheet.state.rows[0] = [...oldHeaders];
   const secondId = 'independent_directory_0003';
@@ -424,7 +431,8 @@ test('partial and reordered directory headings preserve company evidence and kee
 test('creates lean masters, transfers a person without contacts and marks original only after verified LPR write', () => {
   const f = fixture(), shown = f.preview();
   assert.equal(shown.counts.companiesAdded, 1); assert.equal(shown.counts.peopleAdded, 1); assert.equal(shown.counts.peopleWithoutContacts, 1);
-  assert.equal(f.calls.raw.filter(call => call.firstRow > 1).length, 0, 'preview writes only new empty master headers');
+  assert.equal(f.calls.raw.length, 0, 'preview leaves even empty working sheets untouched');
+  assert.equal(f.calls.enrollments.length, 0);
   let state = f.start(shown), companies = f.master('companies'), people = f.master('lpr');
   const transferColumn = f.context.SEGMENT_RECORDS_SCHEMA.company.findIndex(field => field[0] === 'transferred');
   assert.equal(companies.state.rows[1]?.[transferColumn] || '', '', 'company marker is not set before LPR confirmation');
@@ -472,14 +480,14 @@ test('lost write acknowledgement resumes fixed rows instead of appending duplica
 test('source edits after preview stop the job and release its active pointer for a new preview', () => {
   const f = fixture(), shown = f.preview(); f.sourceSheet.state.rows[1][0] = 'Другая компания'; f.resources.get(SOURCE).version++;
   assert.throws(() => f.start(shown), /SEGMENT_PREVIEW_CHANGED/);
-  assert.equal(f.master('companies').state.rows.length, 1);
+  assert.equal(f.companyBook.sheets[0].getLastRow(), 0);
   assert.equal(f.properties.has('SEGMENT_RECORD_ACTIVE_' + SEGMENT), false);
 });
 
 test('renaming a source leaf after preview invalidates a plan even if all cells stay identical', () => {
   const f = fixture(), shown = f.preview(); f.sourceSheet.setName('ЛПР — исходные'); f.resources.get(SOURCE).version++;
   assert.throws(() => f.start(shown), /SEGMENT_PREVIEW_CHANGED/);
-  assert.equal(f.master('companies').state.rows.length, 1);
+  assert.equal(f.companyBook.sheets[0].getLastRow(), 0);
 });
 
 test('source readiness is rechecked between job steps', () => {
@@ -490,13 +498,44 @@ test('source readiness is rechecked between job steps', () => {
 
 test('legacy worksheets and manually added columns remain intact', () => {
   const f = fixture({ legacy: true }), original = plain(f.companyBook.sheets[0].state.rows);
-  f.preview(); const master = f.master('companies'); master.state.rows[0].push('Ручная заметка');
-  f.finish(f.start(f.preview()));
+  const shown = f.preview();
+  assert.equal(f.companyBook.sheets.length, 1);
+  f.finish(f.start(shown));
+  const master = f.master('companies'); master.state.rows[0].push('Ручная заметка');
   assert.deepEqual(f.companyBook.sheets[0].state.rows, original);
   const noteColumn = master.state.rows[0].indexOf('Ручная заметка'); master.state.rows[1][noteColumn] = 'Не менять';
   f.sourceSheet.state.rows[1][2] += '; new@example.test'; f.resources.get(SOURCE).version++;
   f.finish(f.start(f.preview(), 'segment-normalize-request-002'));
   assert.equal(master.state.rows[1][noteColumn], 'Не менять');
+});
+
+test('lost master creation acknowledgement reuses the planned sheet id and records a single import', () => {
+  const f=fixture({legacy:true,loseMasterCreation:true}), shown=f.preview();
+  assert.equal(shown.counts.contactsAdded,1);
+  assert.equal(shown.counts.contactDuplicates,0);
+  assert.equal(f.companyBook.sheets.length,1);
+  assert.throws(()=>f.start(shown),/Lost addSheet response/);
+  const result=f.finish(f.start(shown));
+  assert.equal(f.companyBook.sheets.length,2);
+  const job=f.context.segmentRecordsReadJob_(f.config,result.jobId);
+  assert.ok(Date.parse(job.completedAt)>=Date.parse(job.startedAt));
+  assert.equal(job.sources[0].id,SOURCE);
+  const repeated=f.preview();
+  assert.equal(repeated.counts.contactsAdded,0);
+  assert.equal(repeated.counts.contactDuplicates,1);
+});
+
+test('a segment without tracked tables previews empty targets and binds them only on explicit confirmation', () => {
+  const f=fixture(), tracked=f.context.segmentTrackingStorage_(f.config).tables;
+  const initial=tracked.splice(0), folder=f.resources.get(SEGMENT);
+  folder.getFilesByType=()=>({hasNext:()=>false});
+  let mutations=0;
+  f.context.segmentMutation_=()=>{mutations++;tracked.push(...initial);};
+  const shown=f.preview();
+  assert.equal(shown.counts.contactsAdded,1);
+  assert.equal(mutations,0);assert.equal(f.calls.raw.length,0);assert.equal(tracked.length,0);
+  assert.equal(f.finish(f.start(shown)).state,'complete');
+  assert.equal(mutations,1);assert.equal(f.master('companies').getLastRow(),2);
 });
 
 test('manual company edits transfer a new contactless person automatically and do not self-invalidate', () => {
@@ -511,7 +550,7 @@ test('manual company edits transfer a new contactless person automatically and d
 });
 
 test('manual cell changes during import are not overwritten and another user column is not confused with a new company row', () => {
-  const f = fixture(), shown = f.preview(), master = f.master('companies'); master.state.rows[0].push('Заметка'); master.state.rows.push(Array(17).fill('').concat(['Новое ручное содержимое']));
+  const f = fixture(), master = f.master('companies', true), shown = f.preview(); master.state.rows[0].push('Заметка'); master.state.rows.push(Array(17).fill('').concat(['Новое ручное содержимое']));
   assert.throws(() => f.start(shown), /SEGMENT_PREVIEW_CHANGED/);
   assert.equal(master.state.rows[1][17], 'Новое ручное содержимое');
   assert.equal(master.state.rows[1][0], '');

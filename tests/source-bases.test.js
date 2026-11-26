@@ -504,12 +504,14 @@ test('duplicate stored source IDs fail closed without rewriting either service t
   const result = f.list();
   assert.equal(result.state, 'storage_unavailable');
   assert.equal(result.canEdit, false);
+  assert.ok(result.items.every(item => item.distribution === 'unknown'));
   assert.equal(f.calls.writes.length, 0);
 });
 
 test('a common source lists only its real segments in the current project without marking other assignments broken', () => {
   const a = 'segment_a_1234567890', b = 'segment_b_1234567890';
-  const f = fixture({ relationRows: [RELATION_HEADERS, [CSV, a, '2026-11-15T10:00:00Z', MEMBER], [CSV, b, '2026-11-15T10:00:00Z', MEMBER]] });
+  const f = fixture({ relationRows: [RELATION_HEADERS, [CSV, a, '2026-11-15T10:00:00Z', MEMBER], [CSV, b, '2026-11-15T10:00:00Z', MEMBER],
+    [XLSX, b, '2026-11-15T10:00:00Z', MEMBER]] });
   f.makeFolder(OUTREACH, 'Аутричи', ROOT);
   f.makeFolder(a, 'Сегмент А', OUTREACH); f.makeFolder(b, 'Сегмент Б', OUTREACH);
   let project = 'numshield';
@@ -519,6 +521,10 @@ test('a common source lists only its real segments in the current project withou
   const card = () => f.list().items.find(item => item.id === CSV);
   assert.deepEqual(card().segments.map(entry => entry.id), [a]);
   assert.equal(card().associationsAvailable, true);
+  const list=f.list(), foreign=list.items.find(item=>item.id===XLSX);
+  assert.equal(foreign.distribution,'assigned');assert.deepEqual(foreign.segments,[]);
+  assert.ok(!JSON.stringify(foreign).includes(b));
+  assert.equal(list.items.find(item=>item.id===NATIVE).distribution,'unassigned');
   project = 'neosender';
   assert.deepEqual(card().segments.map(entry => entry.id), [b]);
   assert.deepEqual(card().projectIds, []);

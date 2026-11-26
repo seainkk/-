@@ -36,7 +36,7 @@
     <noscript><p>Для работы сервиса включите JavaScript в браузере.</p></noscript>
   </main>
   <section id="entry-preview" aria-labelledby="entry-preview-title" hidden>
-    <h1 id="entry-preview-title">Исходные базы и выборки</h1>
+    <h1 id="entry-preview-title">Входящие базы</h1>
     <p id="entry-preview-time"></p>
     <ul id="entry-preview-list"></ul>
   </section>
@@ -60,7 +60,9 @@
       const items=[];
       for(const row of data.items){
         if(!row||typeof row.name!=='string'||!row.name.trim()||row.name.length>200||!Array.isArray(row.contents)||row.contents.length>2||row.contents.some(type=>type!=='companies'&&type!=='lpr'))return null;
-        items.push({name:row.name,contents:row.contents.slice()});
+        const item={name:row.name,contents:row.contents.slice()};
+        if(row.distribution==='assigned'||row.distribution==='unassigned')item.distribution=row.distribution;
+        items.push(item);
       }
       return {items,checkedAt:data.checkedAt};
     }
@@ -75,7 +77,9 @@
       savedCatalog=null;$('entry-preview').hidden=true;$('entry-preview-list').replaceChildren();$('entry-preview-time').textContent='';
     }
     function renderPreview(data){
-      const rows=data.items.map(item=>{const row=document.createElement('li');row.textContent=item.name;return row;});
+      const incoming=data.items.filter(item=>item.distribution==='unassigned');
+      if(!incoming.length&&data.items.some(item=>item.distribution!=='assigned'))return;
+      const rows=incoming.map(item=>{const row=document.createElement('li');row.textContent=item.name;return row;});
       $('entry-preview-list').replaceChildren(...rows);
       const date=new Date(data.checkedAt).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'});
       $('entry-preview-time').textContent=(rows.length?'Список':'Пустой список')+' на '+date+' МСК. Проверяем доступ и обновляем базы.';

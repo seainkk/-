@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 sys.dont_write_bytecode = True
+from performance_client import expand_segment_actions
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -72,6 +73,7 @@ def main():
             page.locator('#br-view-segments').click()
             page.wait_for_selector('[data-segment="existing-segment"]')
             registry_idle()
+            expand_segment_actions(page.locator('[data-segment="existing-segment"]'))
             page.locator('[data-segment="existing-segment"] .br-link-button').click()
             expect(page.locator('#br-coldy-bindings-panel')).to_be_visible()
             registry_idle()

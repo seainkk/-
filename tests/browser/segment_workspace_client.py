@@ -2,6 +2,7 @@
 import sys
 import json
 sys.dont_write_bytecode = True
+from performance_client import expand_segment_actions
 from playwright.sync_api import expect, sync_playwright
 from performance_client import FIXTURE, HTML
 
@@ -36,7 +37,8 @@ def check_reload_recovery(browser):
     page.goto('https://registry.example.test/')
     card = page.locator('[data-segment="existing-segment"]')
     page.locator('#br-view-segments').click()
-    card.get_by_role('button', name='Пополнить базы').click()
+    expand_segment_actions(card)
+    card.get_by_role('button', name='Выбрать готовый источник').click()
     page.locator('[data-choose-source="source-mixed"]').check()
     page.locator('#br-segment-submit').click()
     expect(page.locator('#br-segment-normalized-preview')).to_be_visible()
@@ -45,6 +47,7 @@ def check_reload_recovery(browser):
     saved.update(page.evaluate('backend.confirmed'))
     page.reload()
     page.locator('#br-view-segments').click()
+    expand_segment_actions(card)
     resume = card.get_by_role('button', name='Продолжить пополнение')
     expect(resume).to_be_visible()
     resume.click()
@@ -70,7 +73,8 @@ def main():
         page.wait_for_selector('[data-segment="existing-segment"]')
         page.wait_for_function('backend.active===0')
         expect(page.locator('[data-segment="existing-segment"] [data-channel="email"]')).to_have_text('Email · рассылок Coldy 2 · активных при привязке 1')
-        page.locator('[data-segment="existing-segment"] button').filter(has_text='Пополнить базы').click()
+        expand_segment_actions(page.locator('[data-segment="existing-segment"]'))
+        page.locator('[data-segment="existing-segment"] button').filter(has_text='Выбрать готовый источник').click()
         assert page.locator('#br-segment-editor-title').inner_text()=='Пополнить базы сегмента'
         assert page.locator('[data-choose-source="source-draft"]').count()==0
         page.evaluate('backend.requireSegmentReview=true')
@@ -92,7 +96,8 @@ def main():
 
         # A computer file is first a reviewed Ready Registry source. Its receipt
         # returns to the same segment, then asks for normalization confirmation.
-        page.locator('[data-segment="existing-segment"] button').filter(has_text='Пополнить базы').click()
+        expand_segment_actions(page.locator('[data-segment="existing-segment"]'))
+        page.locator('[data-segment="existing-segment"] button').filter(has_text='Выбрать готовый источник').click()
         page.locator('#br-segment-upload').click()
         page.locator('#br-import-mode-file').click()
         page.locator('#br-upload-companies').check()
@@ -150,6 +155,7 @@ def main():
         expect(created).to_be_visible()
         assert page.evaluate("backend.calls.find(c=>c.name==='createSegment').p.category") == 'partners'
 
+        expand_segment_actions(created)
         edit = created.get_by_role('button', name='Редактировать сегмент')
         edit.click()
         expect(category).to_have_value('partners')
@@ -174,6 +180,7 @@ def main():
         clients.click()
         expect(created).to_be_visible()
 
+        expand_segment_actions(created)
         edit.click()
         expect(category).to_have_value('clients')
         page.locator('#br-segment-name').fill('Переименованный клиентский сегмент')

@@ -1,0 +1,64 @@
+<section id="sc-view" aria-labelledby="sc-title" hidden>
+  <div class="br-list-heading">
+    <div><p id="sc-project" class="br-muted"></p><h1 id="sc-title" tabindex="-1"></h1></div>
+    <div class="sc-actions">
+      <button id="sc-add" type="button" class="br-button br-primary">Добавить контакты</button>
+      <button id="sc-prepare" type="button" class="br-button" aria-expanded="false" aria-controls="sc-prep-panel">Что подготовить</button>
+    </div>
+  </div>
+  <details id="sc-secondary"><summary>Другие действия</summary>
+    <div class="sc-actions sc-secondary">
+    <button id="sc-coldy" type="button" class="br-button" aria-expanded="false" aria-controls="sc-coldy-panel">Сверить с Coldy</button>
+    <button id="sc-origins" type="button" class="br-button" aria-expanded="false" aria-controls="sc-origins-panel">Исходники и история импортов</button>
+    <button id="sc-settings" type="button" class="br-button">Настройки сегмента</button>
+  </div>
+  </details>
+  <div id="sc-summary" aria-label="Готовность по каналам"></div>
+  <p id="sc-warnings" class="br-segment-warning" hidden></p>
+  <section id="sc-prep-panel" class="sc-panel" aria-labelledby="sc-prep-title" hidden>
+    <div class="sc-bar"><h2 id="sc-prep-title">Что подготовить</h2><button type="button" class="br-button" data-sc-dismiss>Закрыть</button></div>
+    <div id="sc-queues" class="sc-actions"></div>
+    <div id="sc-validation" class="sc-actions"></div>
+  </section>
+  <section id="sc-coldy-panel" class="sc-panel" aria-labelledby="sc-coldy-title" hidden>
+    <div class="sc-bar"><h2 id="sc-coldy-title">Рассылки сегмента</h2><button type="button" class="br-button" data-sc-dismiss>Закрыть</button></div>
+    <p id="sc-coldy-status" class="br-muted" role="status"></p><ul id="sc-campaigns"></ul>
+    <button id="sc-mailings" type="button" class="br-button">Открыть рассылки</button>
+  </section>
+  <p id="sc-legacy-note" class="br-segment-warning" hidden></p>
+  <section id="sc-origins-panel" class="sc-panel" aria-labelledby="sc-origins-title" hidden>
+    <div class="sc-bar"><h2 id="sc-origins-title">Исходники и история импортов</h2><button type="button" class="br-button" data-sc-dismiss>Закрыть</button></div>
+    <div id="sc-files" class="sc-actions"></div>
+    <p id="sc-origin-status" class="br-muted" role="status"></p><div id="sc-sources"></div>
+    <div id="sc-preview" aria-live="polite"></div>
+    <h3>История импортов</h3><ul id="sc-history"></ul>
+  </section>
+  <h2 class="sc-subhead">Контакты</h2>
+  <div class="sc-bar">
+    <div class="sc-filters">
+      <div class="br-registry-sections" role="group" aria-label="Канал контакта">
+        <button type="button" class="br-button" data-sc-channel="all" aria-pressed="true">Все</button>
+        <button type="button" class="br-button" data-sc-channel="email" aria-pressed="false">Email</button>
+        <button type="button" class="br-button" data-sc-channel="telegram" aria-pressed="false">Telegram</button>
+      </div>
+      <label>Принадлежность <select id="sc-owner"><option value="all">Все</option><option value="companies">Компании</option><option value="lpr">ЛПР</option></select></label>
+      <div class="br-registry-sections" role="group" aria-label="Состояние контакта">
+        <button type="button" class="br-button" data-sc-state="ready" aria-pressed="false">Готово к запуску</button>
+        <button type="button" class="br-button" data-sc-state="inCampaign" aria-pressed="false">Уже в рассылке</button>
+      </div>
+    </div>
+    <form id="sc-search" class="sc-filters" role="search">
+      <label for="sc-query">Поиск по контактам</label>
+      <input id="sc-query" type="search" maxlength="120" autocomplete="off">
+      <button class="br-button" type="submit">Найти</button>
+    </form>
+  </div>
+  <div id="sc-saved-actions" class="sc-actions"></div>
+  <div class="sc-actions"><button type="button" id="sc-export" class="br-button" disabled>Скачать CSV по фильтру</button><small id="sc-export-hint" class="br-muted">Чтобы выгрузить контакты для запуска, выберите «Готово к запуску».</small></div>
+  <p id="sc-export-status" class="br-muted" role="status" hidden></p>
+  <p id="sc-status" class="br-muted" role="status"></p>
+  <div id="sc-table-wrap" class="sc-table-wrap" hidden>
+    <table><thead><tr><th>Контакт</th><th>Принадлежность</th><th>Ручной статус</th><th>Проверка и готовность</th><th>События Coldy</th></tr></thead><tbody id="sc-rows"></tbody></table>
+  </div>
+  <div id="sc-pages" class="sc-actions" hidden><button id="sc-prev" type="button" class="br-button">← Предыдущие</button><button id="sc-next" type="button" class="br-button">Следующие →</button></div>
+</section>

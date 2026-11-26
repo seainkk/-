@@ -19,7 +19,7 @@ function doGet() {
 }
 
 function include_(name) {
-  if (['Styles', 'Client', 'GridPanel', 'GridStyles', 'GridClient', 'ProjectPanel', 'ProjectStyles', 'ProjectClient'].indexOf(name) === -1) fail_('INVALID_REQUEST', 'Неизвестный компонент интерфейса.');
+  if (['Styles', 'Client', 'GridPanel', 'GridStyles', 'GridClient', 'ProjectPanel', 'ProjectStyles', 'ProjectClient', 'SegmentCardPanel', 'SegmentCardClient', 'SegmentSelectionsClient'].indexOf(name) === -1) fail_('INVALID_REQUEST', 'Неизвестный компонент интерфейса.');
   return HtmlService.createHtmlOutputFromFile(name).getContent();
 }
 

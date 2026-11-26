@@ -19,8 +19,7 @@ test('the published shell is byte-for-byte the authored Index with the existing 
   }}});
   vm.runInContext(file('Code.gs'), context);
   const rendered = file('Index.html').replace(/<\?!= include_\('([^']+)'\); \?>/g, (_, name) => context.include_(name));
-  assert.equal(used.length, 8);
-  assert.equal(new Set(used).size, 8);
+  assert.deepEqual(used.sort(), ['Client', 'GridClient', 'GridPanel', 'GridStyles', 'ProjectClient', 'ProjectPanel', 'ProjectStyles', 'SegmentCardClient', 'SegmentCardPanel', 'SegmentSelectionsClient', 'Styles']);
   assert.ok(!rendered.includes('<?'));
   assert.equal(await buildRegistryShell(source), rendered);
 });

@@ -1211,3 +1211,19 @@ test('partial selected models expose all metadata but cannot be confirmed', () =
   const shown = selectedPreview(f, draft, [0]); assert.equal(shown.canConfirm, false); assert.equal(shown.allSourceSheets.length, 2); assert.deepEqual(shown.sourceSheetIds, [0]);
   assert.throws(() => f.confirm(draft, shown), /PREVIEW_REQUIRED/);
 });
+
+test('pasted cells remain literal in one private draft across upload retries', () => {
+  const f = fixture({ loseCreateRole: 'input' });
+  const fields = { text: 'ФИО\tТелефон\tКомментарий\nИрина\t+79991110000\t=1+1', name: 'Проверка вставки', section: 'lpr', status: 'ready', requestId: 'paste-request-1234' };
+  f.context.Utilities.parseCsv = (body, delimiter) => body.split('\n').map(line => line.split(delimiter));
+  const first = f.invoke('stagePreparedRows_', fields);
+  const staged = f.drafts()[0];
+  assert.equal(f.books.get(staged.stageFileId).tabs[0].getName(), 'ЛПР');
+  assert.deepEqual(f.books.get(staged.stageFileId).tabs[0].state.data[1], ['Ирина', '+79991110000', '=1+1']);
+  assert.equal(f.resources.get(staged.stageFileId).parents[0], staged.folderId);
+  assert.equal(f.calls.writes.filter(item => item.raw).length, 1);
+  assert.equal(f.invoke('stagePreparedRows_', fields).draftId, first.draftId);
+  assert.equal(f.calls.writes.filter(item => item.raw).length, 1);
+  assert.throws(() => f.invoke('stagePreparedRows_', {...fields, text: fields.text + 'changed'}), /REQUEST_REUSED/);
+  assert.throws(() => f.invoke('stagePreparedRows_', {...fields, text: 'Только заголовок'}), /INVALID_UPLOAD/);
+});

@@ -1,0 +1,105 @@
+"""Segment card from the production navigation, using synthetic Sheets and Coldy responses."""
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from playwright.sync_api import expect, sync_playwright
+from performance_client import FIXTURE, HTML, ROOT
+
+DATA = """
+const cardRows=[
+  {value:'both@example.test',channel:'email',owners:['companies','lpr'],ownerNames:['Компания','Представитель'],manualStatuses:['фильтр'],readiness:'Исключён вручную',validationStatuses:['Валиден'],ready:false,inCampaign:true,coldyStatuses:['Отправлено писем: 2'],channelFacts:[{campaign:'Тестовая кампания',statuses:['Отправлено писем: 2']}],campaigns:['Тестовая кампания'],sources:[{name:'Рабочая таблица',url:'https://docs.google.com/spreadsheets/d/synthetic/edit#gid=2&range=A3',column:'Рабочая почта'}]},
+  {value:'+79990000001',channel:'telegram',owners:['companies'],ownerNames:['=SUM(1)'],manualStatuses:['Новый контакт'],readiness:'Готов',validationStatuses:['Проверен'],ready:true,inCampaign:false,coldyStatuses:[],campaigns:[]}
+];
+api.getSegmentContactCard=p=>{
+  const filtered=cardRows.filter(r=>(p.channel==='all'||p.channel===r.channel)&&(p.owner==='all'||r.owners.includes(p.owner))&&(p.queue==='all'||(p.queue==='ready'&&r.ready)||(p.queue==='inCampaign'&&r.inCampaign))&&(!p.query||r.value.includes(p.query)));
+  return {segmentId:p.segmentId,name:'Пилот',revision:'v1',checkedAt:'2026-11-26T00:00:00Z',summary:{email:{total:1,ready:0,toCheck:0},telegram:{total:1,ready:1,toCheck:0},sharedEmail:1,ownership:0},files:{companies:{id:'synthetic-c',name:'Компании'}},warnings:[],total:filtered.length,offset:p.offset,nextOffset:null,rows:filtered};
+};
+api.getSegmentLegacyPreview=p=>({segmentId:p.segmentId,sources:[{id:'legacy',name:'Старый оригинал'}],history:[{name:'Импорт контактов',kind:'Завершён'}],preview:p.sourceId?{source:{id:'legacy',name:'Старый оригинал'},complete:true,channels:{email:{added:12,existing:1,duplicates:2}},entities:{companies:13},warnings:[]}:null});
+api.refreshColdyMailings=p=>({campaigns:[{id:'test',name:'Тестовая кампания'}]});
+api.getSegmentSelections=()=>({filters:[],exports:[],campaigns:[{id:'test',name:'Тестовая кампания'}]});
+api.saveSegmentFilter=p=>({id:'filter-id',name:p.name,...p.filter});
+api.saveSegmentExport=p=>{if(!backend.snapshotRetry){backend.snapshotRetry=p.requestId;throw new Error('Не удалось подтвердить запись');}
+  if(p.requestId!==backend.snapshotRetry)throw new Error('Требуется тот же запрос');
+  return {id:'snapshot-id',campaignName:'Тестовая кампания',name:p.name,count:p.rows.length};};
+"""
+
+
+def main():
+    html=HTML.replace(FIXTURE,FIXTURE+DATA,1)
+    for part in ('SegmentCardPanel','SegmentCardClient','SegmentSelectionsClient'):
+        html=html.replace("<?!= include_('"+part+"'); ?>",(ROOT/'src'/(part+'.html')).read_text(encoding='utf-8'))
+    with sync_playwright() as pw:
+        launch={'channel':'chrome'} if sys.platform=='win32' else {'executable_path':'/usr/bin/chromium'}
+        browser=pw.chromium.launch(**launch, headless=True)
+        page=browser.new_page()
+        errors=[]
+        page.on('pageerror',lambda error: errors.append(str(error)))
+        page.set_content(html)
+        page.locator('#br-view-segments').click()
+        segment=page.locator('[data-segment="existing-segment"]')
+        segment.locator('.br-segment-row-name').click()
+        rows=page.locator('#sc-rows tr')
+        expect(rows).to_have_count(2)
+        assert page.evaluate("backend.calls.filter(c=>/Coldy|LegacyPreview|Promouser/.test(c.name)).length")==0
+        expect(rows.first.locator('td').nth(2)).to_have_text('фильтр')
+        expect(rows.first.locator('td').nth(4)).to_contain_text('Отправлено писем: 2')
+        rows.first.locator('summary').click()
+        expect(rows.first.locator('a')).to_have_attribute('href','https://docs.google.com/spreadsheets/d/synthetic/edit#gid=2&range=A3')
+        page.locator('[data-sc-state="inCampaign"]').click()
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text('both@example.test')
+        page.locator('[data-sc-state="ready"]').click()
+        expect(rows.first).to_contain_text('+79990000001')
+        with TemporaryDirectory() as temp:
+            with page.expect_download() as download:
+                page.locator('#sc-export').click()
+            path=Path(temp)/'contacts.csv'
+            download.value.save_as(path)
+            csv=path.read_text(encoding='utf-8-sig')
+            assert csv.count('"+79990000001"')==1 and 'both@example.test' not in csv and "'=SUM(1)" in csv
+        assert page.evaluate("backend.calls.filter(c=>c.name==='saveSegmentExport').length")==0
+        saved=page.locator('#sc-saved-actions')
+        saved.locator('summary').click()
+        saved.locator('[name="filterName"]').fill('Готовые Telegram')
+        saved.get_by_role('button',name='Сохранить фильтр').click()
+        expect(saved.get_by_role('button',name='Готовые Telegram')).to_be_visible()
+        saved.locator('#sc-export-campaign').select_option('test')
+        page.locator('#sc-export').click()
+        expect(page.locator('#sc-export-status')).to_contain_text('Не удалось подтвердить запись')
+        with page.expect_download():
+            page.locator('#sc-export').click()
+        assert page.evaluate("backend.calls.filter(c=>c.name==='saveSegmentExport').every(c=>c.p.rows.length===1&&c.p.rows[0].value==='+79990000001'&&c.p.campaignId==='test')")
+        saved.get_by_role('button',name='Свернуть').click()
+        page.locator('#sc-prepare').click()
+        expect(page.locator('#sc-prep-panel')).to_be_visible()
+        page.locator('#sc-prep-panel [data-sc-dismiss]').click()
+        page.locator('#sc-secondary summary').click()
+        page.locator('#sc-origins').click()
+        expect(page.locator('#sc-history')).to_contain_text('Завершён')
+        page.locator('#sc-sources button').click()
+        expect(page.locator('#sc-preview')).to_contain_text('новых 12')
+        expect(page.locator('#sc-legacy-note')).to_contain_text('не перенесены')
+        page.locator('#sc-origins-panel [data-sc-dismiss]').click()
+        page.locator('#sc-secondary summary').click()
+        page.locator('#sc-coldy').click()
+        expect(page.locator('#sc-campaigns')).to_contain_text('Тестовая кампания')
+        assert page.evaluate("backend.calls.filter(c=>/^(start|upload|enable|sync)/.test(c.name)).length")==0
+        page.locator('#sc-coldy-panel [data-sc-dismiss]').click()
+        page.locator('#sc-add').click()
+        expect(page.locator('#br-import-destination')).to_have_value('existing-segment')
+        page.locator('#br-import-cancel').click()
+        expect(page.locator('#sc-view')).to_be_visible()
+        page.evaluate("backend.holdMethods=['getSegmentContactCard']")
+        page.locator('[data-sc-channel="telegram"]').click()
+        page.wait_for_function("backend.pending.some(p=>p.method==='getSegmentContactCard')")
+        page.locator('#br-project').select_option('neosender')
+        page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")
+        expect(page.locator('#sc-view')).to_be_hidden()
+        expect(page.locator('#sc-rows')).to_be_empty()
+        assert not errors,errors
+        browser.close()
+
+
+if __name__ == '__main__':
+    main()

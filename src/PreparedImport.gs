@@ -50,6 +50,57 @@ function stagePreparedUpload_(form) {
   });
 }
 
+/** Clipboard cells use literal Sheets stringValue, including phones beginning with +. */
+function stagePreparedRows_(request) {
+  return api_(function () {
+    var context = authorize_(), input = importInput_(request, ['text', 'name', 'section', 'routeMode', 'status', 'requestId']);
+    var common = preparedCommon_(input), rows = preparedPastedRows_(input.text);
+    common.kind = 'paste';
+    common.sourceFingerprint = digest_(JSON.stringify(rows));
+    common.origin = { id: 'upload:' + common.sourceFingerprint, name: 'Вставленные строки' };
+    preparedSweepExpired_(context);
+    var draft = preparedAllocate_(context, common);
+    return preparedWithLease_(draft.draftId, function (current, fresh) {
+      if (current.state !== 'staged') fail_('PREVIEW_LOCKED', 'Подготовка уже начата. Откройте текущий предпросмотр.');
+      if (!current.stageFileId) {
+        var file = preparedFindArtifact_(fresh, current, 'input');
+        if (!file) {
+          if (current.stageAttempted) fail_('CREATION_UNCERTAIN', 'Google ещё не подтвердил создание черновика. Повторите тот же запрос.');
+          current.stageAttempted = true; preparedSave_(fresh, current);
+          try {
+            file = Drive.Files.create({ name: current.name, mimeType: REGISTRY_CONFIG.spreadsheetMime, parents: [current.folderId], appProperties: preparedTags_(current, 'input') }, null, { fields: PREPARED_IMPORT.fields, supportsAllDrives: true });
+          } catch (error) {
+            file = preparedFindArtifact_(fresh, current, 'input');
+            if (!file) fail_('CREATION_UNCERTAIN', 'Google не подтвердил создание черновика. Повторите тот же запрос.');
+          }
+        }
+        current.stageFileId = id_(file.id); preparedSave_(fresh, current);
+      }
+      if (!current.rowsStaged) {
+        var owned = preparedDraftFile_(fresh, current), sheets = SpreadsheetApp.openById(owned.id).getSheets();
+        if (sheets.length !== 1) fail_('PREVIEW_CHANGED', 'Состав черновика изменился.');
+        preparedWriteBlock_(sheets[0], 1, rows, rows[0].length);
+        if (!current.routeMode) sheets[0].setName(current.section === 'lpr' ? 'ЛПР' : 'Компании');
+        current.rowsStaged = true; preparedSave_(fresh, current);
+      }
+      return preparedStageResponse_(fresh, current);
+    });
+  });
+}
+
+function preparedPastedRows_(text) {
+  if (typeof text !== 'string' || !text.trim() || text.length > 1000000 || /\u0000/.test(text)) fail_('INVALID_UPLOAD', 'Вставьте до миллиона символов вместе с заголовками.');
+  var rows;
+  try { rows = Utilities.parseCsv(text.replace(/(?:\r?\n)+$/, ''), '\t'); }
+  catch (error) { fail_('INVALID_UPLOAD', 'Не удалось прочитать строки. Скопируйте прямоугольный диапазон из таблицы вместе с заголовками.'); }
+  var width = rows.reduce(function (max, row) { return Math.max(max, row.length); }, 0);
+  if (rows.length < 2 || !width || rows.length * width > 50000) fail_('INVALID_UPLOAD', 'Нужны заголовки и хотя бы одна строка данных. За раз можно вставить до 50 000 ячеек.');
+  return rows.map(function (row) {
+    if (row.some(function (cell) { return typeof cell !== 'string' || cell.length > 50000; })) fail_('INVALID_UPLOAD', 'В одной ячейке больше 50 000 символов.');
+    return row.concat(Array(width - row.length).fill(''));
+  });
+}
+
 function stagePreparedBaseLink_(request) {
   return api_(function () {
     var context = authorize_(), input = importInput_(request, ['url', 'name', 'section', 'routeMode', 'status', 'requestId']);
@@ -90,14 +141,18 @@ function stagePreparedBaseLink_(request) {
 
 function previewPreparedBase_(request) {
   return api_(function () {
-    var input = importInput_(request, ['draftId', 'sheetId', 'sourceSheetIds']);
+    var input = importInput_(request, ['draftId', 'sheetId', 'sourceSheetIds', 'comparison']);
     return preparedWithLease_(input.draftId, function (draft, context) {
       if (draft.state !== 'staged') fail_('PREVIEW_LOCKED', 'Подготовка уже начата. Дождитесь результата или продолжите тот же запрос.');
-      if (typeof preparedDataReadWorkbook_ === 'function') return preparedWorkbookPreview_(context, draft, preparedSheetId_(input.sheetId), input.sourceSheetIds);
+      if (typeof preparedDataReadWorkbook_ === 'function') return preparedWorkbookPreview_(context, draft, preparedSheetId_(input.sheetId), input.sourceSheetIds, input.comparison);
       if (input.sourceSheetIds !== undefined) fail_('PREVIEW_UPDATE_REQUIRED', 'Для выбора исходных листов обновите приложение.');
       var sheetId = preparedSheetId_(input.sheetId), stable = preparedStableRead_(context, draft, sheetId), model = stable.model;
       var token = digest_(JSON.stringify([draft.draftId, sheetId, draft.name, draft.section, draft.status, model.fingerprint]));
       var response = { draftId: draft.draftId, sheetId: sheetId, previewToken: token, canConfirm: model.complete === true && model.canConfirm === true, counts: model.counts, sheets: model.previewSheets || [], warnings: model.warnings || [] };
+      if (input.comparison !== undefined) {
+        response.segmentDelta = preparedSegmentDelta_(context, model, input.comparison, draft);
+        response.canConfirm = response.canConfirm && response.segmentDelta.available;
+      }
       draft.sheetId = sheetId; draft.previewToken = token; draft.sourceFingerprint = model.fingerprint; draft.sourceVersion = stable.version;
       draft.canConfirm = response.canConfirm;
       if (response.canConfirm) {

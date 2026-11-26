@@ -125,7 +125,7 @@ function preparedWorkbookSelection_(book, options, requested) {
   return allowed.filter(function (id) { return requested.indexOf(id) >= 0; });
 }
 
-function preparedWorkbookPreview_(context, draft, sheetId, sourceSheetIds) {
+function preparedWorkbookPreview_(context, draft, sheetId, sourceSheetIds, comparison) {
   var file = preparedDraftFile_(context, draft), book = SpreadsheetApp.openById(file.id), options = preparedWorkbookSourceOptions_(context, draft, book);
   var selectedIds = preparedWorkbookSelection_(book, options, sourceSheetIds === undefined ? draft.sourceSheetIds : sourceSheetIds);
   if (selectedIds.indexOf(sheetId) < 0) fail_('INVALID_SOURCE', 'Лист предпросмотра должен входить в выбранные исходные листы.');
@@ -201,6 +201,11 @@ function preparedWorkbookPreview_(context, draft, sheetId, sourceSheetIds) {
     { name: emailName, headers: email.headers, sample: email.rows.slice(0, 8), rowCount: email.rows.length + 1 },
     { name: phoneName, headers: phone.headers, sample: phone.rows.slice(0, 8), rowCount: phone.rows.length + 1 }
   ] };
+  if (comparison !== undefined) {
+    response.segmentDelta = preparedSegmentDelta_(context, model, comparison, draft, working);
+    canConfirm = canConfirm && response.segmentDelta.available;
+    response.canConfirm = canConfirm;
+  }
   draft.sheetId = sheetId; draft.planVersion = 2; draft.previewToken = token; draft.sourceFingerprint = model.fingerprint; draft.sourceVersion = stable.version; draft.canConfirm = canConfirm;
   if (canConfirm) {
     var plan = { version: 2, token: token, fingerprint: model.fingerprint, sheetId: sheetId, sources: sources, counts: model.counts, warnings: model.warnings || [], email: email, phone: phone };
