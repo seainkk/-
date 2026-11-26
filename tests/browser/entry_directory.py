@@ -93,6 +93,8 @@ def main():
                                      headers={'Access-Control-Allow-Origin': host}, body='{}')
         expect(page.locator('#entry-preview-list [data-directory-kind]')).to_have_count(0)
         page.wait_for_function('!(' + stored_directory + ')')
+        pending['app'].fulfill(content_type='text/html', body='<title>Test application</title>')
+        page.wait_for_load_state('load')
         browser.close()
         print('Cold navigation, app handoff, warm navigation with a pending refresh, and revocation passed.',flush=True)
 
