@@ -2,6 +2,7 @@
 from pathlib import Path
 import json
 import sys
+from performance_client import expand_segment_actions
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -733,6 +734,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.evaluate("""backend.bindings[0].recipientSync={enabled:true,state:'error',issue:'contact_job',
 progress:{phase:'write',kind:'lpr',checked:300,matched:17,total:670},lastSyncedAt:'2026-11-23T09:00:00Z',
 nextRetryAt:'2026-11-23T09:15:00Z',suppressionPending:true,lastSuppressionAt:'2026-11-22T09:00:00Z'}""")
+        expand_segment_actions(page.locator('[data-segment="segment-a"]'))
         page.locator('[data-segment-focus="segment-a/mailings"]').click()
         check_completion('#br-mailings-services')
         sync=page.locator('#br-coldy-bindings-list .pj-recipient-sync').first

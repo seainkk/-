@@ -16,7 +16,7 @@ def check_source_card(page):
     expect(summary).to_have_text('Настройки базы')
     expect(status).to_be_hidden()
     expect(card.locator('h2')).to_be_visible()
-    expect(badge).to_have_text('Готова')
+    expect(badge).to_have_text('Готова к добавлению')
     expect(card.locator('[data-grid-source]')).to_be_visible()
     expect(card.locator('[data-preview-source]')).to_be_visible()
     expect(card.locator('[data-add-source]')).to_be_enabled()
@@ -24,7 +24,7 @@ def check_source_card(page):
 
     summary.press('Enter')
     expect(status).to_be_visible()
-    status.press('ArrowDown')
+    status.press('ArrowUp')
     expect(status).to_have_value('rework')
     expect(status).to_be_focused()
     expect(card.locator('[data-add-source]')).to_be_disabled()
@@ -34,7 +34,7 @@ def check_source_card(page):
     expect(card.locator('[data-add-source]')).to_be_enabled()
     assert not page.evaluate("backend.calls.some(call => call.name === 'updateSourceBase')")
 
-    status.press('ArrowUp')
+    status.press('Home')
     expect(status).to_have_value('collection')
     card.locator('[data-source-save]').click()
     expect(badge).to_have_text('Сбор')
@@ -70,7 +70,7 @@ def check_lineage(page):
     expect(page.locator('#br-origin-dialog')).to_be_hidden()
     expect(attach).to_have_count(0)
     expect(card.locator('.br-source-role')).to_have_text('Выборка')
-    expect(card.locator('.br-source-status')).to_have_text('Готова')
+    expect(card.locator('.br-source-status')).to_have_text('Готова к добавлению')
     expect(card.get_by_text('Два региона',exact=False)).to_be_visible()
     expect(card.get_by_role('link',name='Существующий сегмент')).to_be_visible()
 
@@ -100,11 +100,13 @@ def main():
   launch={'channel':'chrome'} if sys.platform=='win32' else {'executable_path':'/usr/bin/chromium'}
   browser=p.chromium.launch(**launch,headless=True,args=['--no-sandbox'])
   page=browser.new_page(viewport={'width':1440,'height':1100});errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
-  def reset(saved=None,boot=''):
+  def reset(saved=None,boot='',catalog=False):
    import json
    init=boot+('backend.preparedDrafts='+json.dumps(saved)+';backend.importCount=1;' if saved else '')
    html=HTML.replace('<script>'+FIXTURE+GRID_STUB+'</script>','<script>'+FIXTURE+GRID_STUB+init+'</script>')
-   page.goto('about:blank');page.set_content(html);page.wait_for_selector('[data-source-id="source-companies"]');page.wait_for_function('backend.active===0')
+   page.goto('about:blank');page.set_content(html)
+   if catalog:page.locator('#br-source-catalog-toggle').click()
+   page.wait_for_selector('[data-source-id="source-companies"]');page.wait_for_function('backend.active===0')
   def idle():page.wait_for_function('backend.active===0')
   def held(method):page.wait_for_function('(m)=>backend.pending.some(p=>p.method===m)',arg=method)
   def release(method):page.evaluate('(m)=>releaseRpc(m)',method)
@@ -114,7 +116,7 @@ def main():
   def stage_link(name='Кухни',section='companies'):
    if section=='lpr':page.locator('#br-section-lpr').click()
    open_catalog();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
-  reset(boot="""
+  reset(catalog=True,boot="""
    backend.sources.forEach(source=>source.originAvailable=true);
    backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});
    const origin=backend.sources[2];
@@ -123,7 +125,7 @@ def main():
    backend.sources[4].origin={id:'upload:'+'a'.repeat(43),name:'Выгрузка.csv',criteria:'',url:null};
   """)
   check_lineage(page)
-  reset(boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});")
+  reset(catalog=True,boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});")
   check_source_card(page)
   assert page.locator('[data-source-id="source-lpr"]').count()==0
   assert page.locator('[data-source-id="source-mixed"]').is_visible()

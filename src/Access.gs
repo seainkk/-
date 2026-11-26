@@ -22,6 +22,13 @@ function callApp(request) {
       // Explicit optional handlers keep isolated legacy fixtures usable; the
       // release check requires every feature module in the deployed project.
       var contactMethods = {
+        getSegmentSelections: typeof getSegmentSelections_ === 'function' ? getSegmentSelections_ : null,
+        saveSegmentFilter: typeof saveSegmentFilter_ === 'function' ? saveSegmentFilter_ : null,
+        saveSegmentExport: typeof saveSegmentExport_ === 'function' ? saveSegmentExport_ : null,
+        getSegmentExport: typeof getSegmentExport_ === 'function' ? getSegmentExport_ : null,
+        getSegmentContactCard: typeof getSegmentContactCard_ === 'function' ? getSegmentContactCard_ : null,
+        getSegmentLegacyPreview: typeof getSegmentLegacyPreview_ === 'function' ? getSegmentLegacyPreview_ : null,
+        stagePreparedRows: typeof stagePreparedRows_ === 'function' ? stagePreparedRows_ : null,
         getServiceLimits: typeof getServiceLimits_ === 'function' ? getServiceLimits_ : null,
         getSourceBasesRevision: typeof getSourceBasesRevision_ === 'function' ? getSourceBasesRevision_ : null,
         claimRegistrySegment: typeof claimRegistrySegment_ === 'function' ? claimRegistrySegment_ : null,

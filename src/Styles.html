@@ -388,4 +388,32 @@ body{margin:0;background:#fff}
 #bases-registry-app .br-prepared-sources input{margin-top:2px}
 #bases-registry-app #br-prepared-source-summary{line-height:1.6}
 #bases-registry-app #br-prepared-recalculate{margin:16px 0 0;white-space:normal}
+#bases-registry-app button.br-segment-row-name{background:transparent;border:0;padding:0;font-family:inherit;text-align:left;cursor:pointer;color:var(--br-blue)}
+#sc-view{padding-block:8px 20px}
+#sc-view .sc-actions,#sc-view .sc-filters,#sc-view .sc-bar,#sc-summary{display:flex;align-items:center;flex-wrap:wrap;gap:.55rem}
+#sc-view .sc-bar{justify-content:space-between;gap:.75rem}
+#sc-view .sc-bar h2,#sc-view .sc-bar h3,#sc-project{margin:0}
+#sc-view summary,.br-segment-secondary summary{cursor:pointer;color:var(--br-blue);width:fit-content}
+#sc-view .sc-secondary,#sc-view .sc-actions+.sc-actions{margin-top:.5rem}
+#sc-view #sc-saved-actions:empty{display:none}
+#sc-view .sc-filters input{min-width:8rem;max-width:100%;padding:.45rem;border:1px solid var(--br-line,#ddd);border-radius:8px;font:inherit}
+#bases-registry-app .br-segment-secondary{margin-top:.45rem}
+#bases-registry-app .br-segment-secondary .br-segment-row-actions{margin-block:.35rem}
+#sc-summary{margin:1rem 0;align-items:stretch}
+#sc-summary>div{flex:1 1 210px;border:1px solid var(--br-line,#ddd);padding:.7rem 1rem;border-radius:12px}
+#sc-summary span,#sc-view td small{display:block}
+#sc-view .sc-panel{margin:1rem 0;padding:1rem;border:1px solid var(--br-line,#ddd);border-radius:14px}
+#sc-view .sc-panel .sc-actions,#sc-pages,#sc-origins{margin-top:.75rem}
+#sc-view .sc-subhead{margin:1.4rem 0 .6rem}
+#sc-view select{padding:.45rem;border:1px solid var(--br-line,#ddd);border-radius:8px;background:white;color:inherit;font:inherit}
+#sc-view .sc-table-wrap{overflow-x:auto;max-width:100%}
+#sc-view table{width:100%;border-collapse:collapse;font-size:.9rem}
+#sc-view th,#sc-view td{padding:.6rem;text-align:left;vertical-align:top;border-bottom:1px solid var(--br-line,#ddd);overflow-wrap:anywhere}
+#sc-view th{background:var(--br-light,#f5f5f8);font-weight:600}
+#sc-view td:first-child{min-width:10rem}
+#sc-view td small{color:var(--br-muted,#626674);margin-top:.2rem}
+#sc-view button[aria-pressed=true]{border-color:var(--br-blue);color:var(--br-blue)}
+#sc-sources>div{display:flex;align-items:center;flex-wrap:wrap;gap:.6rem;margin-top:.5rem}
+#sc-preview{margin-block:1rem}
+#sc-view [hidden],#sc-view[hidden]{display:none}
 </style>

@@ -14,6 +14,12 @@ INDEX = (ROOT / 'src/Index.html').read_text(encoding='utf-8')
 HTML = INDEX.replace("<?!= include_('Styles'); ?>", (ROOT / 'src/Styles.html').read_text(encoding='utf-8')).replace("<?!= include_('Client'); ?>", '<script>' + FIXTURE + '</script>' + (ROOT / 'src/Client.html').read_text(encoding='utf-8'))
 
 
+def expand_segment_actions(row):
+    details = row.locator('.br-segment-secondary')
+    if not details.evaluate('(node) => node.open'):
+        details.locator('summary').click()
+
+
 def main():
     with sync_playwright() as p:
         launch = {'channel':'chrome'} if sys.platform == 'win32' else {'executable_path':'/usr/bin/chromium'}
@@ -87,10 +93,12 @@ def main():
         assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
 
         # Every mailing entry needs actual data for that segment, even within the cache window.
+        expand_segment_actions(page.locator('[data-segment="existing-segment"]'))
         page.locator('[data-segment="existing-segment"] .br-link-button').click()
         page.wait_for_selector('.br-mailing-service')
         first_mailings = page.evaluate("backend.calls.filter(item=>item.name==='getSegmentMailings').length")
         page.locator('#br-mailings-back').click()
+        expand_segment_actions(page.locator('[data-segment="empty-segment"]'))
         page.locator('[data-segment="empty-segment"] .br-link-button').click()
         page.wait_for_selector('.br-mailing-service')
         assert 'Пустой сегмент' in page.locator('#br-mailings-title').inner_text()
@@ -195,6 +203,8 @@ def main():
         assert page.locator('[data-source-id="prepared-source-1"]').is_visible()
         held('getSourceBases')
         page.locator('#br-import-open').click()
+        page.locator('#br-import-destination').select_option('catalog')
+        page.locator('#br-import-mode-link').click()
         page.locator('#br-link-name').fill('Следующая база')
         assert page.locator('#br-link-name').is_enabled()
         page.evaluate('backend.holdMethods=[]')

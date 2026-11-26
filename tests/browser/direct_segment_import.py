@@ -2,6 +2,7 @@
 import json
 import sys
 
+from performance_client import expand_segment_actions
 from playwright.sync_api import expect, sync_playwright
 
 from performance_client import FIXTURE, HTML
@@ -128,7 +129,8 @@ def main():
 
         # The segment card sets its own destination. Hiding a confirmed preparation
         # keeps the list on screen when the background job finishes.
-        page.locator('[data-segment="existing-segment"]').get_by_role('button', name='Загрузить базу').click()
+        expand_segment_actions(page.locator('[data-segment="existing-segment"]'))
+        page.locator('[data-segment="existing-segment"]').get_by_role('button', name='Добавить контакты').click()
         expect(destination).to_have_value('existing-segment')
         company_file()
         page.locator('#br-upload-submit').click()
@@ -181,7 +183,8 @@ def main():
         # Paste a mixed workbook from the segment card and approve both routes once.
         open_form(from_segments=True)
         page.locator('#br-import-cancel').click()
-        page.locator('[data-segment="existing-segment"]').get_by_role('button', name='Загрузить базу').click()
+        expand_segment_actions(page.locator('[data-segment="existing-segment"]'))
+        page.locator('[data-segment="existing-segment"]').get_by_role('button', name='Добавить контакты').click()
         expect(destination).to_have_value('existing-segment')
         expect(page.locator('#br-link-auto')).to_be_checked()
         page.evaluate('''backend.preparedSourceSheets = [
@@ -207,7 +210,10 @@ def main():
         assert calls('stagePreparedBaseLink')[-1]['routeMode'] == 'auto'
         assert not calls('stagePreparedBaseLink')[-1]['name']
         assert not calls('importSegmentRecords')
-        page.get_by_role('button', name='Подтвердить и пополнить сегмент').click()
+        page.get_by_role('button', name='Сохранить исходник и сравнить').click()
+        expect(final).to_be_visible()
+        assert not calls('importSegmentRecords')
+        confirm.click()
         expect(page.get_by_role('link', name='Открыть таблицу компаний')).to_be_visible()
         expect(page.get_by_role('link', name='Открыть таблицу ЛПР')).to_be_visible()
         assert calls('confirmPreparedBase')[-1]['destination']['kind'] == 'auto'
@@ -216,7 +222,8 @@ def main():
         assert page.evaluate('backend.sources.find(s => s.id === "prepared-source-1").contents') == ['companies', 'lpr']
         # File mode carries automatic routing through live HTML form serialization.
         # An uncertain company match is shown for review before writing.
-        page.locator('[data-segment="existing-segment"]').get_by_role('button', name='Загрузить базу').click()
+        expand_segment_actions(page.locator('[data-segment="existing-segment"]'))
+        page.locator('[data-segment="existing-segment"]').get_by_role('button', name='Добавить контакты').click()
         page.locator('#br-import-mode-file').click()
         expect(page.locator('#br-upload-auto')).to_be_checked()
         page.evaluate('backend.requireSegmentReview = true')
@@ -238,6 +245,7 @@ def main():
         assert len(calls('importSegmentRecords')) == 2
         # Reusing the already registered mixed source keeps its sheet routes.
         page.locator('#br-view-sources').click()
+        page.get_by_role('button', name='Общий каталог').click()
         page.locator('[data-add-source="prepared-source-1"]').click()
         page.locator('#br-segment-target').select_option('existing-segment')
         page.locator('#br-segment-submit').click()
@@ -249,6 +257,16 @@ def main():
         confirm.click()
         expect(page.locator('#br-segment-panel')).to_be_hidden()
         assert len(calls('importSegmentRecords')) == 3
+        open_form()
+        destination.select_option('existing-segment')
+        page.locator('#br-import-mode-paste').click()
+        page.locator('#br-upload-lpr').check()
+        page.locator('#br-upload-paste').fill('ФИО\tЛичная почта\nИрина\tperson@example.test')
+        page.locator('#br-upload-submit').click()
+        expect(prepared).to_be_visible()
+        assert calls('stagePreparedRows')[-1]['section'] == 'lpr'
+        assert calls('stagePreparedRows')[-1]['text'].endswith('person@example.test')
+        assert not calls('confirmPreparedBase') and not calls('importSegmentRecords')
         assert not errors, errors
         browser.close()
         print('PASS: manual routes, mixed link/file imports, single approval, review conflicts, folder scope, retries and cancellation')

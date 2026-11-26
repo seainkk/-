@@ -2,6 +2,7 @@
 from pathlib import Path
 import sys
 
+from performance_client import expand_segment_actions
 from playwright.sync_api import expect, sync_playwright
 from project_client import integrated_html
 
@@ -12,7 +13,7 @@ def main():
 const fullCatalog=api.getSourceBases;
 const bootstrapCatalog=api.getAppBootstrap;
 api.getAppBootstrap=payload=>({...bootstrapCatalog(),catalogPreview:payload?.includeSourcePreview?{
-  checkedAt:Date.now(),items:[{name:'Быстрый список',contents:['companies']},{name:'Тип ещё не указан',contents:[]}]
+  checkedAt:Date.now(),items:[{name:'Быстрый список',contents:['companies'],distribution:'unassigned'},{name:'Тип ещё не указан',contents:[]}]
 }:null});
 backend.holdMethods=['getSourceBases'];
 backend.revision='v1';
@@ -29,6 +30,8 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         page.on('pageerror',lambda error:errors.append(str(error)))
         page.set_content(integrated_html().replace('api.getColdySettings=',fixture+'api.getColdySettings=',1))
         titles=page.locator('#br-sources-items h2')
+        expect(titles).to_have_text(['Быстрый список'])
+        page.get_by_role('button',name='Общий каталог',exact=True).click()
         expect(titles).to_have_text(['Быстрый список','Тип ещё не указан'])
         expect(page.locator('#br-sources-health')).to_contain_text('в фоне')
         expect(page.locator('#br-sources-items a, #br-sources-items button')).to_have_count(0)
@@ -39,21 +42,22 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         page.locator('#br-section-lpr').click()
         expect(titles).to_have_text(['Тип ещё не указан'])
         page.locator('#br-section-companies').click()
+        page.get_by_role('button',name='Вернуться во входящие',exact=True).click()
         assert not page.evaluate("backend.calls.some(c=>/Coldy|ServiceLimits/i.test(c.name))")
         page.evaluate("backend.failSource=true;backend.holdMethods=[];releaseRpc('getSourceBases')")
         expect(page.locator('#br-sources-health')).to_contain_text('Показаны последние данные')
-        expect(titles).to_have_text(['Быстрый список','Тип ещё не указан'])
+        expect(titles).to_have_text(['Быстрый список'])
         page.wait_for_function('backend.active===0')
         page.locator('#br-refresh').click()
         source=page.locator('[data-source-id="source-companies"]')
         expect(source).to_be_visible()
         header=page.locator('header.br-header')
-        bases=header.get_by_role('button',name='Базы',exact=True)
+        bases=header.get_by_role('button',name='Входящие базы',exact=True)
         expect(bases).to_have_attribute('aria-pressed','true')
         expect(bases).to_have_attribute('aria-controls','br-sources-view')
         expect(header).not_to_contain_text('Реестр баз')
-        expect(page.get_by_role('region',name='Исходные базы и выборки')).to_be_visible()
-        expect(page.get_by_role('heading',name='Исходные базы и выборки',level=1)).to_be_visible()
+        expect(page.get_by_role('region',name='Входящие базы')).to_be_visible()
+        expect(page.get_by_role('heading',name='Входящие базы',level=1)).to_be_visible()
         page.wait_for_function('backend.active===0')
 
         def calls(method):
@@ -106,6 +110,7 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         page.evaluate("testClock.hidden=false;document.dispatchEvent(new Event('visibilitychange'))")
         page.wait_for_function('backend.active===0')
 
+        expand_segment_actions(segment)
         segment.locator('[data-grid-source]').first.click()
         expect(page.locator('#rg-cell-2-1')).to_have_text('Альфа')
         page.locator('#rg-grid-tabs [data-sheet-id="1"]').click()

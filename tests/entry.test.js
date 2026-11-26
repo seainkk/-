@@ -30,8 +30,9 @@ test('the public entry and Apps Script shell identify the service and retain the
     assert.match(page, /<title>Центр мультиканального аутрича<\/title>/);
     assert.match(page, /Центр <(?:b|span)>мультиканального аутрича</);
   }
-  assert.match(app, /id="br-view-sources"[^>]*>Базы<\/button>/);
-  assert.match(app, /id="br-sources-title">Исходные базы и выборки<\/h1>/);
+  assert.match(app, /id="br-view-sources"[^>]*>Входящие базы<\/button>/);
+  assert.match(app, /id="br-sources-title">Входящие базы<\/h1>/);
+  assert.match(app, /id="br-source-catalog-toggle"[^>]*>Общий каталог<\/button>/);
 });
 
 function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true, storage = new Map() } = {}) {
@@ -137,7 +138,10 @@ test('repeat entry decrypts only dated names for this link before Google respond
     assert.ok(check());
   }
   const storage=new Map(), first=fixture({storage}), source=first.ready();
-  const message={type:'bases-registry-catalog',checkedAt:Date.now(),items:[{name:'Справочник',contents:['companies'],email:'excluded@example.test'}]};
+  const message={type:'bases-registry-catalog',checkedAt:Date.now(),items:[
+    {name:'Справочник',contents:['companies'],distribution:'unassigned',email:'excluded@example.test'},
+    {name:'Уже распределена',contents:['companies'],distribution:'assigned'},
+    {name:'Без подтверждённого статуса',contents:[]}]};
   first.event('message',{source:first.app(),origin:GOOGLE_ORIGIN,data:message});
   assert.equal(storage.size,0);
   first.event('message',{source,origin:GOOGLE_ORIGIN,data:message});

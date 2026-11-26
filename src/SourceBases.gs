@@ -565,7 +565,7 @@ function requireReadySourceBase_(context, storage, database, fileId, expectedRev
   var metadata = sourceBaseMetadata_(file), record = database && database.records && database.records[fileId];
   if (!storage || !record || !record.present) fail_('SOURCE_NOT_READY', 'База отсутствует в актуальном реестре. Обновите список.');
   if (expectedRevision !== undefined && record.revision !== expectedRevision) fail_('CONFLICT', 'Исходная база изменена. Обновите список перед загрузкой в сегмент.');
-  if (record.status !== 'ready') fail_('SOURCE_NOT_READY', 'В сегмент можно загрузить только базу со статусом «Готова».');
+  if (record.status !== 'ready') fail_('SOURCE_NOT_READY', 'Для добавления контактов выберите исходник со статусом «Готова к добавлению».');
   if (metadata.mimeType !== REGISTRY_CONFIG.spreadsheetMime) fail_('INVALID_FILE_TYPE', 'Для загрузки листов в сегмент нужна Google Таблица. Сначала загрузите файл через «Загрузить базу».');
   var contents = sourceBaseContents_(record.contents || record.baseType);
   if (sourceBaseLegacyType_(contents) !== record.baseType) fail_('STORAGE_SCHEMA', 'Наполнение исходной базы требует проверки администратора.');
@@ -707,8 +707,11 @@ function sourceBaseChanged_(before, after) { return ['fileName', 'mimeType', 'ur
 function sourceBaseBump_(record, email) { if (record.revision >= Number.MAX_SAFE_INTEGER) fail_('STORAGE_LIMIT', 'Достигнут предел версии записи. Требуется проверка администратора.'); record.revision++; record.updatedAt = new Date().toISOString(); record.updatedBy = email; }
 
 function sourceBasesAssociations_(relations, context) {
-  var index = Object.create(null), byFile = Object.create(null);
-  if (!relations.length) return { byFile: byFile, index: index };
+  var index = Object.create(null), byFile = Object.create(null), distributed = Object.create(null);
+  // Presence in the global relation ledger is enough to remove a source from the inbox.
+  // Keep this marker separate from the segment identities visible to the selected project.
+  relations.forEach(function (relation) { distributed[relation.fileId] = true; });
+  if (!relations.length) return { byFile: byFile, index: index, distributed: distributed };
   try {
     context = context || authorize_();
     var segments = getSegmentNames_(context);
@@ -726,7 +729,7 @@ function sourceBasesAssociations_(relations, context) {
     if (!byFile[relation.fileId]) byFile[relation.fileId] = [];
     byFile[relation.fileId].push(relation.segmentId);
   });
-  return { byFile: byFile, index: index };
+  return { byFile: byFile, index: index, distributed: distributed };
 }
 
 // The service book stores references only. Never fetch external files to render lineage.
@@ -932,6 +935,7 @@ function sourceBaseAddProject_(context, storage, fileId, projectId, requestId) {
 
 function sourceBaseItem_(file, record, associations, origins, projects) {
   var item = { id: file.id, name: file.name, fileName: file.fileName, mimeType: file.mimeType, url: file.url, format: file.format, status: record ? record.status : null, formatCheck: record ? record.formatCheck : null, baseType: record ? record.baseType : null, contents: record ? sourceBaseContents_(record.contents || record.baseType) : null, canAddToSegment: !!(record && record.present && record.status === 'ready' && file.mimeType === REGISTRY_CONFIG.spreadsheetMime), revision: record ? record.revision : null, present: true, segments: associations ? [] : null, associationsAvailable: !!associations };
+  item.distribution = associations && associations.distributed ? (associations.distributed[file.id] ? 'assigned' : 'unassigned') : 'unknown';
   item.origin = origins && origins.index[file.id] || null;
   item.originAvailable = !!origins;
   var membership = projects && projects.index[file.id];
