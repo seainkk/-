@@ -252,8 +252,13 @@ function getSegmentNames_(context, folderRefs) {
   var binding = segmentMetadataBinding_(context);
   if (binding.state !== 'ready') return binding;
   var source = binding.folder, sourceId = source.getId(), items = [], seen = Object.create(null);
-  var children = source.getFolders(), count = 0;
-  while (children.hasNext()) {
+  // A single metadata page proves direct parentage and trash state for every name.
+  // Keep the iterator for callers needing Folder objects and incomplete Drive responses.
+  var listed = !folderRefs && typeof Drive !== 'undefined' && Drive.Files && Drive.Files.list
+    ? segmentDirectNames_(sourceId, context.rootId) : null;
+  var children = listed ? null : source.getFolders(), count = 0;
+  if (listed) items = listed;
+  while (children && children.hasNext()) {
     var child = children.next(), childId = child.getId();
     if (seen[childId] || child.isTrashed() || childId === sourceId || childId === context.rootId) continue;
     if (++count > REGISTRY_CONFIG.maxTreeEntries) fail_('REGISTRY_LIMIT', 'В папке сегментов превышен лимит папок.');
@@ -275,6 +280,28 @@ function getSegmentNames_(context, folderRefs) {
     return { state: 'source_outside_registry', source: null, items: [] };
   }
   return { state: 'ready', source: descriptor, items: items.sort(byName_) };
+}
+
+function segmentDirectNames_(sourceId, rootId) {
+  var mime = 'application/vnd.google-apps.folder', page;
+  try {
+    page = Drive.Files.list({q:"trashed=false and mimeType='" + mime + "' and '" + id_(sourceId) + "' in parents",
+      fields:'nextPageToken,incompleteSearch,files(id,name,mimeType,parents,trashed)', pageSize:1000,
+      supportsAllDrives:true,includeItemsFromAllDrives:true});
+  } catch (unavailable) { return null; }
+  if (!page || page.nextPageToken || page.incompleteSearch || !Array.isArray(page.files)) return null;
+  var seen = new Set(), items = [];
+  for (var i = 0; i < page.files.length; i++) {
+    var file = page.files[i];
+    if (!file || file.trashed !== false || file.mimeType !== mime || typeof file.name !== 'string' ||
+        !Array.isArray(file.parents) || file.parents.length !== 1 || file.parents[0] !== sourceId ||
+        typeof file.id !== 'string' || !/^[\w-]{10,200}$/.test(file.id)) return null;
+    if (file.id === rootId || file.id === sourceId || seen.has(file.id)) continue;
+    seen.add(file.id);
+    items.push({id:file.id,name:file.name,url:segmentFolderUrl_(file.id)});
+  }
+  if (items.length > REGISTRY_CONFIG.maxTreeEntries) fail_('REGISTRY_LIMIT', 'В папке сегментов превышен лимит папок.');
+  return items;
 }
 
 /** Enumerate only previously verified parents. A whole level usually fits in one Drive request. */

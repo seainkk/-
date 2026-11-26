@@ -58,7 +58,7 @@
       if (state.mailingStatusPending === true) book.needsMailingStatus = true;
       if (payload.includeInitialRange === true && !state.omitInitialRange) {
         const first = state.sheets[0];
-        book.initialRange = range({id:payload.id,sheetId:first.id,row:1,column:1,rowCount:Math.min(80,first.rowCount),columnCount:Math.min(50,first.columnCount)});
+        book.initialRange = range({id:payload.id,sheetId:first.id,row:1,column:1,rowCount:Math.min(payload.initialRows||80,first.rowCount),columnCount:Math.min(payload.initialColumns||50,first.columnCount)});
       }
       return book;
     }

@@ -39,7 +39,7 @@ test('a direct bridge, untrusted ancestor or mistaken Pages sibling cannot obtai
   connect(f.frames[1],pages);assert.equal(sent[0].type,'connected');assert.equal(typeof port.onmessage,'function');
 });
 
-function transportFixture(){
+function transportFixture(entry){
   const listeners=new Map(),timers=new Map(),posted=[],frames=[],pipes=[];
   let ticks=0;
   class Iframe {
@@ -50,7 +50,7 @@ function transportFixture(){
   class Channel{
     constructor(){this.port1={postMessage:(m)=>posted.push(m),close(){}};this.port2={close(){}};pipes.push(this);}
   }
-  const window={addEventListener:(t,f)=>listeners.set(t,f)};
+  const window={parent:{location:entry},addEventListener:(t,f)=>listeners.set(t,f)};
   const ctx=vm.createContext({window,location:{origin:pages,pathname:'/-/app.html'},document:{body:{append:f=>frames.push(f)},createElement:()=>new Iframe()},
     HTMLIFrameElement:Iframe,crypto:{randomUUID:()=>channel},MessageChannel:Channel,
     setTimeout:(fn,delay)=>{timers.set(++ticks,{fn,delay});return ticks;},clearTimeout:id=>timers.delete(id)});
@@ -59,6 +59,17 @@ function transportFixture(){
   const reply=data=>pipes[0].port1.onmessage({data:{protocol,channel,...data}});
   return {api:window.RegistryPagesTransport,listeners,timers,frames,posted,pipes,hello,reply};
 }
+test('only a private Pages entry warms one anonymous bridge before controls initialize', async()=>{
+  const entry={origin:pages,pathname:'/-/',hash:'#access_key='+key};
+  for(const change of [{hash:''},{origin:google},{pathname:'/other/'}]){
+    assert.equal(transportFixture({...entry,...change}).frames.length,0);
+  }
+  const f=transportFixture(entry);
+  assert.equal(f.frames.length,1);assert.equal(f.posted.length,0);assert.ok(!f.frames[0].src.includes(key));
+  const connected=f.api.ready();assert.equal(f.frames.length,1);
+  f.hello({parent:f.frames[0].contentWindow,postMessage(){}},google);
+  f.reply({type:'connected'});await connected;assert.equal(f.posted.length,0);
+});
 test('credentials and RPC replies travel only on the verified bridge port, resolve by id and time out without replay',async()=>{
   const f=transportFixture();
   const started=f.api.ready(),frame=f.frames[0];

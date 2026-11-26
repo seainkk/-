@@ -15,6 +15,7 @@ def check_source_card(page):
     badge = card.locator('.br-source-status')
 
     expect(summary).to_have_text('Сведения')
+    expect(page.locator('#br-sources-items .br-source-fields')).to_have_count(0)
     expect(status).to_be_hidden()
     expect(card.locator('h2')).to_be_visible()
     expect(badge).to_have_text('Готова к добавлению')
@@ -24,6 +25,7 @@ def check_source_card(page):
 
     summary.press('Enter')
     expect(status).to_be_visible()
+    expect(page.locator('#br-sources-items .br-source-fields')).to_have_count(1)
     expect(card.locator('[data-add-source]')).to_be_enabled()
     expect(card.get_by_role('link', name='Существующий сегмент')).to_be_visible()
     status.press('ArrowUp')

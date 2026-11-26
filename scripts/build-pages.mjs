@@ -1,4 +1,5 @@
 import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildRegistryShell } from './deploy.mjs';
@@ -13,12 +14,17 @@ export async function buildPages(destination, firebaseProject = process.env.FIRE
     buildRegistryShell(source), readFile(path.join(source, 'PagesTransport.html'), 'utf8'),
     readFile(path.join(source, 'PagesNavigation.html'), 'utf8')
   ]);
-  const headEnd = shell.indexOf('</head>');
-  const firstScript = shell.search(/<script\b/i);
-  if (headEnd < 0 || firstScript < headEnd || /<\?/.test(transport + navigation)) throw new Error('Не удалось собрать статический интерфейс Pages.');
-  const app = shell.slice(0, headEnd) + navigation + '\n' + shell.slice(headEnd, firstScript) + transport + '\n' + shell.slice(firstScript);
+  const scripts = [];
+  const markup = shell.replace(/<script>([\s\S]*?)<\/script>/gi, (tag, code) => { scripts.push(code); return ''; });
+  if (!scripts.length || !markup.includes('<body>') || !markup.includes('</head>') ||
+      /<script\b|<\?/.test(markup) || /<\?/.test(transport + navigation)) throw new Error('Не удалось собрать статический интерфейс Pages.');
+  const bundle = scripts.join('\n;\n');
+  const asset = './registry.js?v=' + createHash('sha256').update(bundle).digest('hex').slice(0, 16);
+  const onAssetError = "parent.postMessage({type:'bases-registry-unavailable'},location.origin)";
+  const app = markup.replace('</head>', () => navigation + '\n<script defer src="' + asset + '" onerror="' + onAssetError + '"></script>\n</head>')
+    .replace('<body>', () => '<body>\n' + transport);
   await mkdir(destination, { recursive: true });
-  const publicFiles = new Set([...assets, 'app.html']);
+  const publicFiles = new Set([...assets, 'app.html', 'registry.js']);
   if ((await readdir(destination)).some(name => !publicFiles.has(name))) {
     throw new Error('Для публикации нужна отдельная папка только с файлами интерфейса.');
   }
@@ -29,11 +35,13 @@ export async function buildPages(destination, firebaseProject = process.env.FIRE
     : 'https://firestore.googleapis.com';
   await Promise.all([
     writeFile(path.join(destination,'index.html'),index
+      .replace('</head>', () => '<script>if (/^#access_key=[\\w-]{43}$/.test(location.hash) && !new URLSearchParams(location.search).has("validate")) { const link=document.createElement("link"); link.rel="preload"; link.as="script"; link.href="'+asset+'"; document.head.append(link); }</script>\n</head>')
       .replace('<!-- directory preconnect -->',firebaseProject?'<link rel="preconnect" href="'+directoryOrigin+'" crossorigin>':'')
       .replace('/* directory reader bundle */',()=>reader.replace('/* directory service origin */',JSON.stringify(directoryOrigin)))
       .replace('const directoryProject = "";',()=> 'const directoryProject = '+JSON.stringify(firebaseProject)+';')),
     copyFile(path.join(entry,'favicon.png'),path.join(destination,'favicon.png')),
-    writeFile(path.join(destination, 'app.html'), app)
+    writeFile(path.join(destination, 'app.html'), app),
+    writeFile(path.join(destination, 'registry.js'), bundle)
   ]);
 }
 

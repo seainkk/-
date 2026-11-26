@@ -102,9 +102,12 @@
     session.panel.open=false;session.panel.querySelector('summary').focus({preventScroll:true});return true;
   }
   function update(){
-    const current=card();if(!config||!current||!host())return;
-    if(session?.id===current.segmentId)return;
-    session={id:current.segmentId,pending:{},listing:false,downloading:false,saving:false,data:null};mount(session);
+    const current=card(),id=current?.segmentId||window.RegistrySegmentCard?.id();
+    if(!config||!id||!host()||document.getElementById('sc-view').hidden)return;
+    if(session?.id!==id){
+      session={id,pending:{},listing:false,downloading:false,saving:false,data:null};mount(session);
+    }
+    session.panel.inert=!current;
   }
   async function recordExport(filters,records){
     update();

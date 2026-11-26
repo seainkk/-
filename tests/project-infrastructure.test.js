@@ -10,6 +10,26 @@ const KEY = 'infrastructure_fixture_secret_NEVER_PUBLIC';
 const plain = value => JSON.parse(JSON.stringify(value));
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('base64url');
 
+test('a cached infrastructure read reuses the observed selection only at its current version', () => {
+  const f=fixture(), original=f.c.coldyLoad_;
+  let change=false;
+  f.configure();
+  f.c.coldyLoad_=(context,kind,owner,observation)=>{
+    const value=original(context,kind,owner);
+    if(kind==='monitoring'&&observation&&value){
+      const revision=value.revision;
+      observation.unchanged=()=>f.cache.get(`${context.rootId}|monitoring|${owner}`)?.revision===revision;
+    }
+    if(kind==='infrastructure'&&change)f.select([]);
+    return value;
+  };
+  const before=f.calls.loads.length;
+  assert.deepEqual(f.get().monitoring.accountIds,['1']);
+  assert.equal(f.calls.loads.slice(before).filter(load=>load.kind==='monitoring').length,1);
+  change=true;
+  assert.throws(()=>f.get(),/COLDY_MONITORING_CHANGED/);
+});
+
 function account(id, extra = {}) {
   return { id, email: `sender${id}@example.test`, first_name: 'Sender', last_name: String(id), service: 'google',
     limit: 100, sent_today: id, total_sent: id * 10, tags: [], error_text: null,

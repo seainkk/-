@@ -71,7 +71,7 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
     }
     return node;
   }
-  const ids = Object.fromEntries(['entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host','entry-preview','entry-preview-title','entry-preview-list','entry-preview-time','entry-validation-access','entry-private-link','entry-directory-nav','entry-view-sources','entry-view-segments'].map(id => [id, element()]));
+  const ids = Object.fromEntries(Array.from(html.matchAll(/id="(entry-[\w-]+)"/g),match => [match[1],element()]));
   const body = element('body');
   const document = {
     body, getElementById: id => ids[id],
@@ -219,10 +219,28 @@ function directoryMock(transform) {
   return {calls,firebase,stamp,fetch};
 }
 
+test('first document shows all sections and passes live catalog filters through the authenticated frame handoff',async()=>{
+  const mock=directoryMock(),page=fixture(mock);
+  await until(()=>page.ids['entry-preview-list'].children.length===1);
+  assert.equal(page.ids['entry-source-fields'].hidden,false);
+  page.ids['entry-search'].value='нет такого имени';page.ids['entry-search'].listeners.get('input')();
+  assert.equal(page.ids['entry-preview-list'].children.length,0);
+  for(const view of ['analytics','infrastructure','retarget','settings','sources']){
+    page.ids['entry-view-'+view].listeners.get('click')();
+    assert.equal(page.ids['entry-view-'+view].attributes['aria-pressed'],'true');
+  }
+  const messages=[],scope={epoch:1,projectId:'numshield'};
+  page.app().postMessage=(m)=>messages.push(structuredClone(m));
+  page.event('message',{origin:PAGES_ORIGIN,source:page.app(),data:{type:'bases-registry-directory-scope',...scope}});
+  const view=messages.find(m=>m.type==='bases-registry-fast-view');
+  assert.equal(view.kind,'sources');assert.equal(view.filters.query,'нет такого имени');
+});
+
 test('first document reads real directory rows with an origin-scoped capability and keeps them until the application acknowledges the selected view',async()=>{
   const mock=directoryMock(),f=fixture(mock);
   assert.equal(f.ids['entry-directory-nav'].hidden,false);
   f.ids['entry-view-segments'].listeners.get('click')();
+  f.ids['entry-category-partners'].listeners.get('click')();
   await until(()=>f.ids['entry-preview-list'].children.length===1);
   const row=f.ids['entry-preview-list'].children[0].children[0];
   assert.equal(row.textContent,'Сегмент numshield');assert.equal(row.dataset.directoryKind,'segments');
@@ -276,6 +294,7 @@ test('warm entry shows both encrypted lists with original timestamps while fetch
   await until(()=>calls===1&&repeat.ids['entry-preview-list'].children.length===1);
   assert.equal(repeat.ids['entry-preview-time'].textContent,originalDate);
   repeat.ids['entry-view-segments'].listeners.get('click')();
+  repeat.ids['entry-category-partners'].listeners.get('click')();
   assert.equal(repeat.ids['entry-preview-list'].children[0].children[0].dataset.directoryId,'test_segment_001');
   reply({ok:false,status:403});
   await until(()=>!storage.has(slot)&&!repeat.ids['entry-preview-list'].children.length);
@@ -434,7 +453,9 @@ test('a visible static shell stays open for a slow backend and cannot authorize 
   f.event('message',{origin:PAGES_ORIGIN,source,data:{type:'bases-registry-shell'}});
   assert.equal(f.timers.size,0);
   assert.equal(f.body.dataset.state,'loading');assert.equal(f.currentFrame(),frame);
-  f.nav(source,true);assert.equal(f.pushes.length,0);
+  f.nav(source,true);assert.deepEqual(f.pushes,[{basesRegistryBack:true}]);
+  assert.equal(f.body.dataset.state,'loading');
+  f.traverse(-1);assert.deepEqual(f.sent,[{type:'bases-registry-back',origin:PAGES_ORIGIN}]);
   f.ready(source);assert.equal(f.body.dataset.state,'ready');assert.equal(f.currentFrame(),frame);
 });
 

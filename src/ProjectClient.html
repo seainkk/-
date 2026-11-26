@@ -2,8 +2,8 @@
 (() => {
   'use strict';
   const $=id=>document.getElementById(id), views=new Set(['analytics','infrastructure']);
-  let config=null, view=null, ready=false, accessEpoch=null, generation=0;
-  let catalog=null,catalogLoading=false,catalogError='',catalogSequence=0,catalogLoadedAt=0,segmentId='';
+  let config=null, view=null, ready=false, preview=false, accessEpoch=null, generation=0;
+  let catalog=null,catalogLoading=false,catalogError='',catalogSequence=0,catalogLoadedAt=0,catalogExpiryTimer=null,segmentId='';
   let lastCampaignCatalog=null,hintRevision=0,dashboardHintsAfter=0;
   let catalogOptionsKey=null,campaignRowsKey=null,capacityRowsKey=null,capacitySource=null,capacityFilter=null;
   let infrastructure=null,infraLoading=false,infraError='',infraNotice='',infraSequence=0,infraLoadedAt=0,initialSyncAttempted=false;
@@ -83,6 +83,7 @@
     return dashboardNames?.slice(0,10)||[];
   }
   function clear(){
+    clearTimeout(catalogExpiryTimer);catalogExpiryTimer=null;
     expandedSenders.clear();clearTimeout(senderTimer);senderTimer=null;senderAttempt=0;senderView=null;
     resetForecast();
     resetCompletions();
@@ -94,7 +95,7 @@
     infrastructure=null;infraLoadedAt=0;infraLastLiveAttempt=0;infraLoading=false;infraError='';infraNotice='';infraSequence++;initialSyncAttempted=false;infraSyncMode='';
     scrub();
   }
-  function lock(){ready=false;clear();view=null;render();}
+  function lock(){ready=false;preview=false;clear();view=null;render();}
   function invalidate(options={}){
     if(options.credentialsChanged){clear();}
     else{
@@ -108,20 +109,35 @@
     render();notify();
   }
   function show(next,options={}){
-    const previous=view;
-    if(options.epoch!==undefined&&options.epoch!==accessEpoch){clear();accessEpoch=options.epoch;}
-    ready=options.ready===true;view=views.has(next)?next:null;
+    const previous=view,wasReady=ready,wasPreview=preview;
+    const scopeChanged=options.epoch!==undefined&&options.epoch!==accessEpoch;
+    if(scopeChanged||wasReady&&options.ready!==true){ready=false;clear();}
+    if(scopeChanged)accessEpoch=options.epoch;
+    ready=options.ready===true;preview=!ready&&options.preview===true;
+    view=(ready||preview)&&views.has(next)?next:null;
+    const directoryApplied=updateCatalogHint();
     if((view!=='analytics'||!ready)&&$('pj-forecast')?.open){$('pj-forecast').open=false;pauseForecast();}
-    if(view!=='infrastructure'||!ready)closeMailboxPicker();
-    if(view!=='analytics'||!ready)closeRecipientImport();
-    if(!ready){view=null;if(catalog||infrastructure||contexts.size)clear();}
-    render();
+    if((view!=='infrastructure'||!ready)&&mailboxPicker?.open)closeMailboxPicker();
+    if((view!=='analytics'||!ready)&&recipientImport?.open)closeRecipientImport();
+    if(directoryApplied||scopeChanged||view!==previous||wasReady!==ready||wasPreview!==preview)render();
     if(next!==senderView){
       senderView=next;
       // The host toggles the segment mailing view immediately after this callback.
       if(ready)queueMicrotask(()=>queueSenderUpdate(true));
     }
     if(ready&&(next==='mailings'||view!==previous&&completionCells().length))queueCompletions();
+  }
+  function updateCatalogHint(){
+    if(!ready||view!=='analytics'||catalogError||catalog&&catalogExpiryTimer===null)return false;
+    const known=config?.peekSegments?.(),previous=catalog;
+    if(catalog&&known?.preview&&known.loadedAt===catalog.loadedAt&&known.expiresAt===catalog.expiresAt&&known.expiresAt>Date.now())return false;
+    clearTimeout(catalogExpiryTimer);catalogExpiryTimer=null;
+    catalog=known?.state==='ready'&&Array.isArray(known.segments)&&(!known.preview||known.expiresAt>Date.now())?known:null;
+    if(catalog?.preview)catalogExpiryTimer=setTimeout(()=>{
+      catalogExpiryTimer=null;
+      if(catalog===known){catalog=null;render();}
+    },known.expiresAt-Date.now());
+    return catalog!==previous;
   }
   async function invoke(method,payload,mark,canDispatch){
     if(!config?.transport||!alive(mark))throw new Error('Доступ закрыт.');
@@ -134,14 +150,16 @@
   async function loadCatalog(){
     if(!ready||catalogLoading)return;
     const mark=token(),sequence=++catalogSequence;
-    if(!catalog&&view==='analytics'){
-      const cached=config?.peekSegments?.();
-      if(cached?.state==='ready'&&Array.isArray(cached.segments))catalog={state:'ready',source:cached.source,segments:cached.segments};
-    }
     catalogLoading=true;catalogError='';render();notify();
-    try{const data=await invoke('getProjectAnalytics',{},mark);if(!alive(mark)||sequence!==catalogSequence||!data)return;catalog=data;catalogLoadedAt=Date.now();
+    try{const data=await invoke('getProjectAnalytics',{},mark);if(!alive(mark)||sequence!==catalogSequence||!data)return;
+      clearTimeout(catalogExpiryTimer);catalogExpiryTimer=null;catalog=data;catalogLoadedAt=Date.now();
       if(segmentId&&!data.segments?.some(item=>item.id===segmentId)){segmentId='';resetCampaignSearch();}
-    }catch(error){if(alive(mark)&&sequence===catalogSequence){catalogError=failure(error).message;discardCampaignHints();}}
+    }catch(error){if(alive(mark)&&sequence===catalogSequence){
+      const problem=failure(error);
+      if(/^(LINK_|OUTSIDE_|ACCESS_|SOURCE_CHANGED|NOT_FOUND)/.test(problem.code))clear();
+      catalogError=problem.message;discardCampaignHints();
+      if(sequence!==catalogSequence){render();notify();}
+    }}
     finally{if(alive(mark)&&sequence===catalogSequence){catalogLoading=false;render();notify();}}
   }
   function segmentReadFailed(context,error,metricsOnly){
@@ -656,6 +674,8 @@
       }
       const updateCatalog=!catalog||options.manual||!catalogLoadedAt||!isEditing()&&!recentPoll(catalogLoadedAt);
       const catalogRequest=updateCatalog?loadCatalog():null;
+      // If a segment can already be selected, keep the other read slot for that click.
+      if(!segmentId&&!catalog?.segments?.length)void preloadForecast();
       if(catalogRequest)await catalogRequest;
       if(!alive(mark)||view!==requestedView)return;
       const selection=currentContext();
@@ -1273,8 +1293,10 @@
   }
   function render(){
     if(!$('pj-analytics-view'))return;
-    $('pj-analytics-view').hidden=!ready||view!=='analytics';$('pj-infrastructure-view').hidden=!ready||view!=='infrastructure';
-    if(!ready){scrub();return;}
+    for(const name of views){
+      const panel=$('pj-'+name+'-view');
+      panel.hidden=(!ready&&!preview)||view!==name;panel.inert=!ready;
+    }
     if(view==='analytics')renderAnalytics();else if(view==='infrastructure')renderInfrastructure();
   }
   function scrub(){

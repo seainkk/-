@@ -135,6 +135,20 @@ test('initial viewport clamps to the actual grid and false preserves the old met
   }
 });
 
+test('combined opening reads only the requested viewport within the original limits', () => {
+  const f = fixture({rowCount: 1000, columnCount: 150});
+  const {sheets, initialRange: area} = f.metadata({includeInitialRange: true, initialRows: 32, initialColumns: 12, includeUsage:false});
+  assert.deepEqual(sheets, [{id:0,name:'Исходная база',rowCount:1000,columnCount:150}]);
+  assert.equal(area.rowCount, 32);
+  assert.equal(area.columnCount, 12);
+  assert.equal(area.versions.length, 32);
+  assert.equal(area.versions[0].length, 12);
+  for (const sizes of [{initialRows: 81}, {initialColumns: 51}, {initialRows: 0}]) {
+    assert.throws(() => f.metadata({includeInitialRange: true, ...sizes}), /GRID_LIMIT/);
+  }
+  assert.throws(() => f.metadata({initialRows: 3}), /INVALID_REQUEST/);
+});
+
 test('combined opening checks moved, protected, revoked and changed-root workbooks after reading cells', () => {
   for (const failure of ['moved', 'protected', 'revoked', 'root']) {
     let f; const options = { onRead(event) {

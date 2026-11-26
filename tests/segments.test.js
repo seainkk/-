@@ -49,6 +49,23 @@ function fixture(options = {}) {
   };
 }
 
+test('catalog associations read verified direct names in one page and fall back on uncertain membership', () => {
+  const f=fixture(), mime='application/vnd.google-apps.folder', id='synthetic_segment_12345';
+  const first={id,name:'Синтетический сегмент',parents:[SOURCE],mimeType:mime,trashed:false};
+  let page={files:[first,first]}, queries=[], iterations=0, moved=false;
+  const binding={getId:()=>SOURCE,getName:()=>'Сегменты',isTrashed:()=>moved,getFolders:()=>{iterations++;return emptyIterator();}};
+  f.context.segmentMetadataBinding_=()=>({state:'ready',folder:binding});f.context.insideRegistry_=()=>!moved;
+  f.context.Drive={Files:{list:q=>{queries.push(q);return page;}}};
+  const read=()=>plain(f.context.getSegmentNames_({rootId:ROOT}));
+  assert.deepEqual(read().items.map(item=>[item.id,item.name]),[[id,first.name]]);
+  assert.equal(queries.length,1);assert.equal(iterations,0);assert.ok(queries[0].q.includes("'"+SOURCE+"' in parents"));
+  for(const uncertain of [{files:[{...first,parents:[ROOT]}]},{files:[first],nextPageToken:'more'},{incompleteSearch:true,files:[]}]){
+    page=uncertain;assert.deepEqual(read().items,[]);
+  }
+  assert.equal(iterations,3);
+  page={files:[first]};moved=true;assert.equal(read().state,'source_outside_registry');
+});
+
 test('each project has its own partners and clients and can claim the same legacy segment only once', () => {
   const f = fixture(), ctx = { rootId: ROOT, properties: f.propertyStore };
   const studios = 'web_studios_segment_123', kitchens = 'kitchens_segment_123', neo = 'new_clients_segment_123';

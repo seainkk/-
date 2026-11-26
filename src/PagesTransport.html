@@ -98,5 +98,11 @@
   window.addEventListener('pagehide',()=>{if(session)close(session,timeoutMessage);});
   window.RegistryPagesTransport=Object.freeze({ready:async()=>connect().ready,run,
     upload:(form,projectId,accessKey)=>run('uploadSourceBase',form,projectId,accessKey)});
+  // Establish only the anonymous bridge while the static controls and their code download.
+  try {
+    const entry=window.parent.location;
+    if(window.parent!==window && entry.origin===pages && ['/-/','/-/index.html'].includes(entry.pathname) &&
+       /^#access_key=[\w-]{43}$/.test(entry.hash)) connect().ready.catch(()=>{});
+  } catch(ignored) {}
 })();
 </script>

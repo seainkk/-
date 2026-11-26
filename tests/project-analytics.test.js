@@ -68,6 +68,24 @@ test('configured category overrides folder-name default', () => {
   assert.equal(f.overview().segments.find(segment => segment.id === A).category, 'partners');
 });
 
+test('the scoped overview lists Drive metadata once, excludes other projects and falls back for an incomplete page', () => {
+  const f = fixture();
+  let lists = 0, partial = false;
+  f.context.registryProjectScoped_ = () => true;
+  f.context.registryProjectId_ = () => 'numshield';
+  f.context.registrySegmentProject_ = (_,id) => id === A ? 'numshield' : 'neosender';
+  const folder = row => ({ ...row,trashed:false,mimeType:'application/vnd.google-apps.folder' });
+  f.context.Drive = {Files:{
+    list:() => { lists++;return {files:f.rows.filter(row=>row.parents.includes(SOURCE)).map(folder),nextPageToken:partial?'next':null}; },
+  }};
+  const fast = f.overview();
+  assert.deepEqual(fast.segments.map(s=>s.id),[A]);assert.equal(fast.source.name,'Аутричи');
+  assert.equal(lists,1);assert.equal(f.calls.metadata,0);
+  partial=true;
+  assert.deepEqual(f.overview().segments,fast.segments);
+  assert.ok(f.calls.metadata>0);
+});
+
 test('all new handlers reject missing, wrong and revoked shared access before any file/provider reads', () => {
   const f = fixture(); assert.throws(() => f.context.getProjectAnalytics_(), /LINK_ACCESS_REQUIRED/);
   assert.throws(() => f.context.getProjectAnalyticsCampaigns_({ segmentId: A }), /LINK_ACCESS_REQUIRED/);

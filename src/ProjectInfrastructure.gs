@@ -6,9 +6,10 @@ function getProjectInfrastructure_(request) {
   return api_(function () {
     var input = coldyInput_(request === undefined ? {} : request, ['diagnose']);
     if (input.diagnose !== undefined && typeof input.diagnose !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный режим диагностики почтовой инфраструктуры.');
-    var context = authorize_(), settings = coldySettings_(context), monitoring = projectMonitoringRead_(context,settings);
+    var context = authorize_(), settings = coldySettings_(context), observation = {};
+    var monitoring = projectMonitoringRead_(context,settings,observation);
+    var signature = projectMonitoringSignature_(context,monitoring);
     if (input.diagnose === true) {
-      var signature = projectMonitoringSignature_(context, monitoring);
       projectInfraMonitoringCurrent_(context, settings.credentialHash, signature);
       var response = coldyApi_(context, 'GET', '/accounts');
       var arrayLength = function (value) { return Array.isArray(value) ? value.length : null; };
@@ -21,8 +22,10 @@ function getProjectInfrastructure_(request) {
       projectInfraMonitoringCurrent_(context, settings.credentialHash, signature);
       return { diagnostics: diagnostics };
     }
+    var check = projectInfraMonitoringGuard_(context,settings.credentialHash,signature,observation);
     projectInfraCurrent_(context, settings.credentialHash);
-    return projectInfraPublic_(context, monitoring.accountIds.length ? projectInfraRead_(context,settings) : null);
+    var saved = monitoring.accountIds.length ? projectInfraRead_(context,settings) : null;
+    return projectInfraPublic_(context,saved,signature,{settings:settings,monitoring:monitoring,check:check});
   });
 }
 
@@ -317,8 +320,11 @@ function projectInfraDetail_(listed, response, key, selectedOnly) {
     updatedAt: new Date().toISOString(), stale: false, syncError: null };
 }
 
-function projectInfraPublic_(context, saved, expectedSignature) {
-  var settings = coldySettings_(context), monitoring = projectMonitoringRead_(context, settings), signature = projectMonitoringSignature_(context, monitoring);
+function projectInfraPublic_(context, saved, expectedSignature, read) {
+  var settings = read ? read.settings : coldySettings_(context), observation = {};
+  var monitoring = read ? read.monitoring : projectMonitoringRead_(context,settings,observation);
+  var signature = projectMonitoringSignature_(context,monitoring);
+  var checkMonitoring = read ? read.check : projectInfraMonitoringGuard_(context,settings.credentialHash,signature,observation);
   if (saved && saved.credentialHash !== settings.credentialHash) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Обновите данные.');
   if (expectedSignature && expectedSignature !== signature) fail_('COLDY_MONITORING_CHANGED', 'Выбор почт изменился. Обновите данные.');
   var known = !!saved && !!saved.inventoryAt, inventoryStale = !known || Date.parse(saved.inventoryAt) < Date.now() - PROJECT_INFRASTRUCTURE.cacheMillis;
@@ -357,7 +363,7 @@ function projectInfraPublic_(context, saved, expectedSignature) {
     error: activeError ? { code: projectInfraText_(activeError.code, settings.key, 100), message: projectInfraText_(activeError.message, settings.key) } : null,
     stale: !emptySelection && (inventoryStale || !!activeError || missing.length > 0), countersScope: 'selected_accounts', cached: !!saved };
   projectCapacityPublic_(context, settings, jobMatches ? saved : null, result);
-  projectInfraMonitoringCurrent_(context, settings.credentialHash, signature);
+  checkMonitoring();
   return result;
 }
 
