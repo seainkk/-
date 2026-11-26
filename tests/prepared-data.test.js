@@ -255,7 +255,13 @@ test('Company_ID aliases use valid INN while generic person IDs and matching nam
     ['B', INN_B, 'Бета', 'same@example.com'],
   ]).result();
   assert.equal(r.counts.companies, 2); assert.equal(r.counts.sharedEmails, 1); assert.equal(r.counts.companyUnknown, 0);
-  const unknown = fixture([['ID', 'Компания', 'Email'], ['personA', 'Одинаковая', 'one@example.com'], ['personB', 'Одинаковая', 'one@example.com']]).result();
+  const source = fixture([['ID', 'Компания', 'Email'], ['00123', 'Одинаковая', 'one@example.com'], ['other', 'Одинаковая', 'one@example.com']]);
+  const companies = source.result('companies');
+  assert.equal(companies.counts.companies, 2); assert.equal(companies.records[0].company.id, '00123');
+  const crm = fixture([['Айди', 'Компания', 'Моб. тел.'], ['79991112233', 'Альфа', '+7 (999) 222-11-00']]).result('companies');
+  assert.equal(crm.records[0].company.id, '79991112233');
+  assert.deepEqual(crm.records[0].general.phones, ['+79992221100']);
+  const unknown = source.result('lpr');
   assert.equal(unknown.counts.companies, 0); assert.equal(unknown.counts.companyUnknown, 2); assert.equal(unknown.emailRows[0][3], 'Да'); assert.equal(unknown.canConfirm, true);
 });
 

@@ -268,7 +268,9 @@ test('a shared address retains only company or LPR source columns accepted by ea
   const shown = f.preview(), plan = f.context.segmentRecordsLoadPreview_(f.config, shown.planToken, SEGMENT);
   const prefix = 'База для теста / Исходная база · ';
   assert.deepEqual(plain(plan.emailOrigins), {
-    companies: {[key]: prefix + 'C — Email-адреса\n' + prefix + 'F — Корпоративный email'},
+    companies: {[key]: prefix + 'C — Email-адреса\n' + prefix + 'F — Корпоративный email',
+      [JSON.stringify([plan.companies[0].after[0],key])]: prefix + 'C — Email-адреса',
+      [JSON.stringify([plan.companies[1].after[0],key])]: prefix + 'F — Корпоративный email'},
     lpr: {[key]: prefix + 'E — Email ЛПР'}
   });
   assert.equal(f.finish(f.start(shown)).state, 'complete');
@@ -358,6 +360,42 @@ test('preview rejects unready files before creating masters or plans', () => {
 const directoryHeaders = ['Названия', 'Категории', 'Регионы, области', 'Населенные пункты', 'Полные адреса', 'Мобильные телефоны', 'Городские телефоны', 'Email-адреса', 'Telegram', 'WhatsApp', 'Вконтакте', 'Одноклассники', 'Сайты', 'Max', 'Филиалов', 'Индексы', 'Дата парсинга'];
 const directoryRow = ['Тестовый каталог', 'Мебель', 'Ленинградская область', 'Санкт-Петербург', 'Тестовая ул., 2', '+7 (999) 100-02-01', '+7 (812) 100-02-01', 'shop@example.test', 'https://t.me/test_catalog', 'https://wa.me/79991000201', 'https://vk.com/test_catalog', 'https://ok.ru/test_catalog', 'https://shop.example.test', 'https://max.ru/test_catalog', '2', '019001', '01.11.2026'];
 
+test('imports preserve external company IDs as text and append email to the same master on a second upload', () => {
+  const headers = ['Айди', 'Название компании', 'Сайт', 'ИНН', 'Почта', 'Телефон', 'Telegram'];
+  const original = ['00123', 'Альфа', 'example.test', '7707083893', 'one@example.test', '+79991000102', '@company_example'];
+  const f = fixture({rows: [headers, original]});
+  const preview = id => f.context.previewSegmentRecords_({segmentId: SEGMENT, sourceIds: [id], targetKind: 'companies'});
+  const first = preview(SOURCE); assert.equal(first.counts.companiesAdded, 1);
+  f.finish(f.start(first, 'external-first-import'));
+  const rows = f.master('companies').state.rows;
+  assert.deepEqual(rows[0].slice(0,7), ['ID компании','Компания','Сайт','ИНН','Email','Мобильные телефоны','Telegram']);
+  assert.deepEqual(rows[1].slice(0,7), original);
+  const nextId = 'second_directory_file_0002';
+  f.addSource(nextId, [['ID', ...headers.slice(1)], original.map((value, index) => index === 4 ? 'two@example.test' : value)]);
+  const next = preview(nextId); assert.equal(next.counts.companiesAdded, 0); assert.equal(next.counts.companiesUpdated, 1);
+  f.finish(f.start(next, 'external-second-import'));
+  assert.equal(rows.length, 2); assert.equal(rows[1][0], '00123'); assert.equal(rows[1][4], 'one@example.test; two@example.test');
+});
+
+test('new company workbooks separate mobile and landline columns for both labelled and ordinary CRM exports', () => {
+  for (const [phoneHeaders, phones, mobile, landline] of [
+    [['Mobile phone', 'Landline'], ['+44 7700 900123', '+44 20 7946 0999'], '+44 7700 900123', '+44 20 7946 0999'],
+    [['Телефон 1', 'Телефон 2'], ['8 (999) 100-01-02', '+7 (812) 100-02-01'], '+79991000102', '+78121000201'],
+    [['Телефон офиса', 'Моб. тел.'], ['+7 (812) 100-02-01', '+7 (999) 100-01-02'], '+7 (999) 100-01-02', '+7 (812) 100-02-01']
+  ]) {
+    const f = fixture({rows: [['ID', 'Компания', ...phoneHeaders], ['00123', 'Пример', ...phones]]});
+    const preview = f.context.previewSegmentRecords_({segmentId: SEGMENT, sourceIds: [SOURCE], targetKind: 'companies'});
+    f.finish(f.start(preview, 'separate-phone-columns'));
+    const [headers, company] = f.master('companies').state.rows;
+    assert.equal(headers[5], 'Мобильные телефоны');
+    assert.equal(company[5], mobile); assert.equal(company[headers.indexOf('Городские телефоны')], landline);
+  }
+  const fresh = fixture({rows: [['ФИО ЛПР', 'Email ЛПР'], ['Анна Иванова', 'person@example.test']]});
+  const firstLpr = fresh.context.previewSegmentRecords_({segmentId: SEGMENT, sourceIds: [SOURCE], targetKind: 'lpr'});
+  fresh.finish(fresh.start(firstLpr, 'people-first-workbook'));
+  assert.equal(fresh.master('companies').state.rows[0][5], 'Мобильные телефоны');
+});
+
 test('all 17 directory values survive two independent uploads into one company and retain their original headings', () => {
   const f = fixture({ rows: [directoryHeaders, directoryRow] });
   function prepareIds(sheet, sourceId) {
@@ -373,8 +411,8 @@ test('all 17 directory values survive two independent uploads into one company a
   const first = typed(SOURCE); assert.equal(first.sample.companies[0].length, first.headers.companies.length);
   f.finish(f.start(first, 'directory-batch-001'));
   const sheet = f.master('companies'), headers = sheet.state.rows[0], firstRow = sheet.state.rows[1];
-  assert.deepEqual(headers.slice(0,18), ['ID компании', ...directoryHeaders]);
-  assert.deepEqual(firstRow.slice(1,18), directoryRow);
+  assert.deepEqual(headers.slice(0,7), ['ID компании', 'Компания', 'Сайт', 'ИНН', 'Email', 'Мобильные телефоны', 'Telegram']);
+  assert.deepEqual(directoryHeaders.map(label => firstRow[headers.indexOf(label)]), directoryRow);
   const secondId = 'independent_selection_file_0002', nextRow = [...directoryRow];
   nextRow[1] = 'Кухни'; nextRow[4] = 'Тестовая ул., 5'; nextRow[7] = 'office@example.test';
   const secondSheet = f.addSource(secondId, [directoryHeaders,nextRow]);
@@ -434,7 +472,7 @@ test('creates lean masters, transfers a person without contacts and marks origin
   assert.equal(f.calls.raw.length, 0, 'preview leaves even empty working sheets untouched');
   assert.equal(f.calls.enrollments.length, 0);
   let state = f.start(shown), companies = f.master('companies'), people = f.master('lpr');
-  const transferColumn = f.context.SEGMENT_RECORDS_SCHEMA.company.findIndex(field => field[0] === 'transferred');
+  const transferColumn = companies.state.rows[0].indexOf(f.context.SEGMENT_RECORDS_SCHEMA.company.find(field => field[0] === 'transferred')[1]);
   assert.equal(companies.state.rows[1]?.[transferColumn] || '', '', 'company marker is not set before LPR confirmation');
   state = f.finish(state);
   assert.equal(state.counts.peopleAdded, 1);
@@ -540,7 +578,7 @@ test('a segment without tracked tables previews empty targets and binds them onl
 
 test('manual company edits transfer a new contactless person automatically and do not self-invalidate', () => {
   const f = fixture(); f.finish(f.start(f.preview()));
-  const companySheet = f.master('companies'), headers = f.context.SEGMENT_RECORDS_SCHEMA.company, index = key => headers.findIndex(field => field[0] === key);
+  const companySheet = f.master('companies'), headers = f.context.SEGMENT_RECORDS_SCHEMA.company, index = key => companySheet.state.rows[0].indexOf(headers.find(field => field[0] === key)[1]);
   companySheet.setName('ЛПР — пользовательское название');
   companySheet.state.rows[1][index('personName')] = 'Анна Иванова'; companySheet.state.rows[1][index('personRole')] = 'Маркетолог'; companySheet.state.rows[1][index('personEmails')] = ''; companySheet.state.rows[1][index('personPhones')] = '';
   f.resources.get(COMPANIES).version++;
@@ -607,7 +645,7 @@ test('per-sheet person target and header choice are retained through preview and
   const noHeader = g.context.previewSegmentRecords_({ segmentId: SEGMENT, loads: [{ sourceId: SOURCE, sheets: [{ sheetId: 11, target: 'companies', hasHeader: false }] }] });
   assert.equal(noHeader.counts.companiesAdded, 2, 'first physical data row is never consumed as a header');
   g.finish(g.start(noHeader));
-  assert.match(g.master('companies').state.rows.map(row => row[6]).join(';'), /only@example\.test/);
+  assert.match(g.master('companies').state.rows.map(row => row[g.master('companies').state.rows[0].indexOf('Email')]).join(';'), /only@example\.test/);
 });
 
 test('strong LPR leaf names classify generic contacts personally while an explicit companies target wins', () => {
@@ -622,7 +660,7 @@ test('strong LPR leaf names classify generic contacts personally while an explic
   const overridden = g.context.previewSegmentRecords_({ segmentId: SEGMENT, loads: [{ sourceId: SOURCE, sheets: [{ sheetId: explicit.getSheetId(), target: 'companies', hasHeader: true }] }] });
   assert.equal(overridden.counts.peopleWithoutContacts, 1, 'explicit company allocation keeps generic mail on the company');
   g.finish(g.start(overridden));
-  assert.match(g.master('companies').state.rows[1][6], /anna@example\.test/);
+  assert.match(g.master('companies').state.rows[1][g.master('companies').state.rows[0].indexOf('Email')], /anna@example\.test/);
   assert.equal(g.master('lpr').state.rows[1][5], '');
 });
 

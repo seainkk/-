@@ -99,12 +99,20 @@ function coldyRememberConnection_(context,settings,checkedAt) {
 
 function listColdyCampaigns_(request) {
   return api_(function () {
-    var input = coldyInput_(request || {}, ['refresh']);
+    var input = coldyInput_(request || {}, ['refresh', 'segmentId']);
     if (input.refresh !== undefined && typeof input.refresh !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный режим обновления Coldy.');
     var context = authorize_(), settings = coldySettings_(context);
+    if (input.segmentId !== undefined) coldyCampaignScope_(context, id_(input.segmentId));
     if (!settings.configured) return { state: 'not_configured', campaigns: [], generatedAt: '', cached: false };
     var list = coldyReadCampaignCatalog_(context, input.refresh === true, settings);
-    list.campaigns = coldyProjectCampaigns_(context, settings.credentialHash, list.campaigns);
+    if (input.segmentId !== undefined) {
+      coldyCampaignScope_(context, input.segmentId);
+      var registry = coldyCampaignRegistry_(context);
+      var other = new Set(registry.bindings.filter(function (b) { return b.segmentId !== input.segmentId; }).map(function (b) { return b.campaignId; }));
+      list.campaigns = coldyProjectCampaigns_(context, settings.credentialHash, list.campaigns, registry).filter(function (c) {
+        return !other.has(c.id.toLowerCase()) && ['Active','Paused','Draft'].indexOf(c.status) >= 0;
+      });
+    } else list.campaigns = coldyProjectCampaigns_(context, settings.credentialHash, list.campaigns);
     return list;
   });
 }
@@ -168,7 +176,9 @@ function coldyApi_(context, method, path, payload, options) {
   var current = coldyCurrent_(context, false), settings = coldySettings_(current);
   if (!settings.configured) fail_('COLDY_KEY_REQUIRED', 'Подключите API-ключ Coldy в настройках.');
   method = typeof method === 'string' ? method.toUpperCase() : '';
-  var address = coldyPath_(method, path), inputOptions = options === undefined ? {} : coldyInput_(options, ['idempotencyKey']);
+  var address = coldyPath_(method, path), inputOptions = options === undefined ? {} : coldyInput_(options, ['idempotencyKey','expectedCredentialHash']);
+  if (inputOptions.expectedCredentialHash !== undefined && inputOptions.expectedCredentialHash !== settings.credentialHash)
+    fail_('COLDY_CREDENTIAL_CHANGED','Ключ Coldy изменился. Подтвердите действие в текущей организации.');
   var request = coldyRequestOptions_(method, settings.key);
   if (inputOptions.idempotencyKey !== undefined) {
     if (typeof inputOptions.idempotencyKey !== 'string' || !/^[A-Za-z0-9_.:-]{8,200}$/.test(inputOptions.idempotencyKey) || method !== 'POST' || address !== '/email-verifications') fail_('INVALID_REQUEST', 'Некорректный ключ повторного запроса Coldy.');
@@ -358,7 +368,7 @@ function coldyPath_(method, path) {
   var bits = path.split('?'); if (bits.length > 2) fail_('INVALID_REQUEST', 'Некорректные параметры Coldy.');
   var route = bits[0], uuid = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', identifier = '[A-Za-z0-9_-]{1,200}', allowed = null;
   if (method === 'POST') {
-    if (route !== '/leads/bulk' && route !== '/email-verifications' || bits.length > 1) fail_('INVALID_REQUEST', 'Неподдерживаемое действие Coldy.');
+    if (['/leads/bulk','/email-verifications','/campaigns'].indexOf(route) < 0 || bits.length > 1) fail_('INVALID_REQUEST', 'Неподдерживаемое действие Coldy.');
     return route;
   }
   if (route === '/accounts' || /^\/accounts\/[1-9]\d*$/.test(route)) {
@@ -390,6 +400,12 @@ function coldyPath_(method, path) {
 }
 
 function coldyPayload_(path, payload) {
+  if (path === '/campaigns') {
+    var draft = coldyInput_(payload, ['name']);
+    if (typeof draft.name !== 'string' || !draft.name.trim() || draft.name.length > 200 || /[\u0000-\u001f\u007f]/.test(draft.name))
+      fail_('INVALID_REQUEST','Введите название рассылки длиной до 200 символов.');
+    return {name:draft.name.trim()};
+  }
   var input = coldyInput_(payload, path === '/email-verifications' ? ['emails'] : ['campaign', 'items', 'skip_if_in_campaign', 'skip_if_in_workspace', 'skip_if_in_blacklist']);
   var seen = Object.create(null);
   if (path === '/email-verifications') {

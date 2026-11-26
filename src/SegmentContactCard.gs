@@ -166,7 +166,7 @@ function segmentCardRevision_(context, scope, campaigns) {
     });
     return [entry.binding,status];
   });
-  scope.cardRevision = digest_(JSON.stringify(['segment-contact-card-v2',scopeKey,validation,campaigns.credential,states]));
+  scope.cardRevision = digest_(JSON.stringify(['segment-contact-card-v3',scopeKey,validation,campaigns.credential,states]));
   scope.revisionCampaigns = campaigns;
   return scope.cardRevision;
 }
@@ -199,7 +199,7 @@ function segmentCardFilter_(input) {
   }
   if (input.query !== undefined && (typeof input.query !== 'string' || input.query.length > 300)) fail_('INVALID_REQUEST', 'Сократите поисковый запрос.');
   return {channel: option(input.channel, ['all', 'email', 'telegram'], 'all'), owner: option(input.owner, ['all', 'companies', 'lpr'], 'all'),
-    queue: option(input.queue, ['all', 'email', 'telegram', 'ownership', 'ready', 'inCampaign'], 'all'), query: String(input.query || '').trim().toLowerCase(),
+    queue: option(input.queue, ['all', 'email', 'emailReview', 'telegram', 'ownership', 'ready', 'inCampaign'], 'all'), query: String(input.query || '').trim().toLowerCase(),
     offset: number(input.offset, 0, 0, 1000000), limit: number(input.limit, 50, 1, 200)};
 }
 
@@ -215,9 +215,12 @@ function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, 
   col('handle', ['Telegram','Телеграм']); col('ownerName', ['Компания / ЛПР']); col('company', ['Компания','Название компании']); col('person', ['ФИО','ЛПР','Имя']);
   col('review', ['Проверить принадлежность']); col('validation', ['Валидация']); col('type', ['Тип контакта','Тип телефона']);
   col('origin', ['Исходный столбец email']); col('originRows', ['Исходные строки','Строки в Лист1']); col('history', ['История контакта']);
+  indices.companyEmail = channel === 'email' && owner === 'companies' && companyEmailWorkflowHeaders_(headers);
+  if (indices.companyEmail) col('rawResult', ['Результат валидации']);
   col('membership', [COLDY_CAMPAIGNS.headers[0]]);
   if (indices.value === undefined && (channel === 'email' || indices.handle === undefined)) fail_('SEGMENT_CARD_SCHEMA', 'В рабочем листе отсутствует столбец контакта.');
-  var manualCols = CONTACT_MAILING_STATUS.headers.map(function (header) { return map[pvHeader_(header)]; }).filter(function (index) { return index !== undefined; });
+  var statusHeaders = indices.companyEmail ? ['Статус'] : CONTACT_MAILING_STATUS.headers;
+  var manualCols = statusHeaders.map(function (header) { return map[pvHeader_(header)]; }).filter(function (index) { return index !== undefined; });
   var notes = channel === 'email' && campaigns.length ? head.getNotes()[0] : [];
   var layouts = channel === 'email' ? campaigns.map(function (campaign) {
     var positions = {}, marker = 'registry/coldy-recipient/v1/' + coldyCampaignId_(campaign.binding.campaignId) + '/';
@@ -234,7 +237,8 @@ function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, 
   var stride = Math.max(1, Math.min(2000, Math.floor(80000 / width)));
   for (var start = 2; start < count + 2; start += stride) {
     var n = Math.min(stride, count + 2 - start), values = sheet.getRange(start, 1, n, width).getDisplayValues();
-    var bindings = indices.validation === undefined ? [] : sheet.getRange(start, indices.validation + 1, n, 1).getNotes();
+    var noteColumn = indices.validation === undefined ? indices.rawResult : indices.validation;
+    var bindings = noteColumn === undefined ? [] : sheet.getRange(start, noteColumn + 1, n, 1).getNotes();
     values.forEach(function (line, index) {
       var source = {id: file.id, row: start + index, sheetId: sheetId, sheetName: sheetName};
       segmentCardGroupRow_(groups, channel, owner, line, map, indices, manualCols, String(bindings[index] && bindings[index][0] || ''), validation, layouts, source);
@@ -274,26 +278,40 @@ function segmentCardGroupRow_(groups, channel, owner, line, map, cols, manualCol
     sourceType: 'working', column: cell(cols.origin), sourceRows: cell(cols.originRows), history: !!cell(cols.history)});
   if (!manualCols.length) group.manualNew = false;
   manualCols.forEach(function (i) {
-    var status = cell(i);
+    var status = cell(i), workflow = cols.companyEmail ? companyEmailWorkflowStatus_(status) : null;
     if (status) group.manual.add(status);
     if (!contactMailingStatusIsNew_(status)) group.manualNew = false;
-    if (pvExcludedStatus_(status, true)) group.excluded = true;
+    if (workflow === 'Рассылка') group.inCampaign = true;
+    else if (workflow === 'Невалид') group.workflowInvalid = true;
+    else if (pvExcludedStatus_(status, true)) group.excluded = true;
   });
   var flag = cell(cols.review);
   group.ownership = group.ownership || !!flag && !/^(?:нет|no|false|0)$/i.test(flag);
   var phoneType = cell(cols.type).toLowerCase(), country = kind === 'telegram' && validFormat ? pvCountry_(value) : '';
   if (country && !/городск|стационар|fixed|landline/i.test(phoneType) && (country === 'RU' || country === 'KZ' || /мобил|mobile/i.test(phoneType))) group.mobile = true;
-  var key = group.validationKey || (group.validationKey = pvKey_(kind, value)), bound = pvBinding_(note), status = cell(cols.validation);
+  var key = group.validationKey || (group.validationKey = pvKey_(kind, value)), bound = pvBinding_(note), status = cell(cols.validation) || cell(cols.rawResult);
+  var cached = validation[key];
+  if (cols.companyEmail) {
+    group.companyEmail = true;
+    var manual = cell(manualCols[0]).toLowerCase(), changed = !!bound && bound !== key;
+    var readyState = coldyReadyEmailState_(value, manual, cell(cols.rawResult), changed, cached && cached.result);
+    if (readyState === 'ready' && validFormat) group.workflowReady = true;
+    if (changed) group.workflowStale = true;
+    else if (readyState === 'invalid') group.workflowInvalid = true;
+    if (contactMailingStatusIsNew_(manual)) group.workflowNew = true;
+  }
   var legacy = !bound && !status ? pvLegacyResult_(kind, line, map) : null;
   var rowResult = pvResultFromRow_({kind: kind, map: map, values: line, status: legacy ? legacy.status : status, legacyResult: legacy,
     completed: !!legacy || !!status && !pvPendingStatus_(status), changed: !!bound && bound !== key});
-  var cached = validation[key];
-  if (status && (!bound || bound === key) && pvPendingStatus_(status)) group.pendingLabels.add(status);
+  if (status && (!bound || bound === key) && pvPendingStatus_(status)) {
+    group.pendingLabels.add(status); if (cols.companyEmail) group.pending = true;
+  }
   if (cached && cached.pending) { group.pending = true; group.pendingLabels.add('Проверка в обработке'); }
   [rowResult, cached && cached.result].forEach(function (result) {
     if (!result || !result.status) return;
     group.results.add(result.status);
-    if (result.review) group.review = true;
+    if (result.review && (!cols.companyEmail || cached && cached.result === result)) group.review = true;
+    if (cols.companyEmail) return;
     var accepted = channel === 'email' ? pvEmailStatus_(result.status) === 'Валиден' : result.eligible === true && !!result.idTg;
     if (accepted) group.valid = true; else group.invalid = true;
   });
@@ -327,10 +345,15 @@ function segmentCardSnapshot_(groups, warnings) {
   groups.forEach(function (g) {
     var needsOwnership = g.ownership, blocked = g.excluded || g.blocked, completed = g.results.size > 0;
     var checkable = g.validFormat && (g.channel === 'email' || g.mobile), review = g.review || g.valid && g.invalid;
-    var needsCheck = checkable && !completed && !g.pending && g.manualNew && !needsOwnership && !blocked && !g.inCampaign;
-    var ready = g.validFormat && g.valid && !g.invalid && !review && !g.pending && !blocked && !needsOwnership && !g.inCampaign;
+    var available = g.validFormat && !review && !blocked && !needsOwnership && !g.inCampaign && !g.workflowInvalid && !g.workflowStale;
+    var legacyReady = g.valid && !g.invalid && !g.pending;
+    var ready = available && (legacyReady || !!g.workflowReady);
+    var needsCheck = checkable && !completed && !g.pending && g.manualNew && !needsOwnership && !blocked && !g.inCampaign && !g.workflowInvalid;
+    var chooseStatus = !!g.workflowNew && completed && !g.workflowReady && available && !g.pending;
     var readiness = blocked ? 'Исключён' : needsOwnership ? 'Проверить принадлежность' : review ? 'Проверить историю контакта' :
-      g.inCampaign ? 'Уже в рассылке' : g.pending ? 'Проверка в обработке' : ready ? 'Готов' : completed ? 'Не прошёл проверку' :
+      g.inCampaign ? 'Уже в рассылке' : g.workflowInvalid ? 'Невалид' : ready ? 'Готов' : g.pending ? 'Проверка в обработке' :
+      chooseStatus ? 'Выбрать «Готов» или «Фильтр»' : g.workflowStale && !needsCheck ? 'Проверить привязку результата' :
+      completed ? g.companyEmail ? 'Проверить ручной статус' : 'Не прошёл проверку' :
       !g.validFormat ? 'Проверить формат' : !checkable ? 'Нужен мобильный телефон' : needsCheck ? 'Требует проверки' : 'Проверить ручной статус';
     var channelFacts = [], statuses = new Set(), campaigns = [];
     g.facts.forEach(function (fact) {
@@ -342,12 +365,17 @@ function segmentCardSnapshot_(groups, warnings) {
     });
     if (g.channel === 'email' && !channelFacts.length) statuses.add('Рассылки не подключены');
     var channel = summary[g.channel]; channel.total++; if (ready) channel.ready++; if (needsCheck) channel.toCheck++;
+    if (chooseStatus) channel.toReview = (channel.toReview || 0) + 1;
     if (needsOwnership) summary.ownership++;
     if (g.inCampaign) summary.inCampaign++;
     if (g.channel === 'email' && g.owners.size === 2) summary.sharedEmail++;
-    rows.push({channel: g.channel, value: g.value, owners: Array.from(g.owners), ownerNames: Array.from(g.names), manualStatuses: Array.from(g.manual),
+    var row = {channel: g.channel, value: g.value, owners: Array.from(g.owners), ownerNames: Array.from(g.names), manualStatuses: Array.from(g.manual),
       validationStatuses: Array.from(completed ? g.results : g.pendingLabels), readiness: readiness, ready: ready, needsCheck: needsCheck,
-      needsOwnership: needsOwnership, inCampaign: g.inCampaign, sources: g.sources, coldyStatuses: Array.from(statuses), campaigns: campaigns, channelFacts: channelFacts});
+      needsOwnership: needsOwnership, inCampaign: g.inCampaign, sources: g.sources, coldyStatuses: Array.from(statuses), campaigns: campaigns, channelFacts: channelFacts};
+    if (chooseStatus) row.needsStatus = true;
+    if (ready && g.companyEmail && g.owners.size === 2 && !(g.workflowReady && legacyReady))
+      row.readyOwners = [g.workflowReady ? 'companies' : 'lpr'];
+    rows.push(row);
   });
   rows.sort(function (a, b) { return a.channel.localeCompare(b.channel) || a.value.localeCompare(b.value); });
   return {rows: rows, summary: summary, warnings: warnings, checkedAt: new Date().toISOString()};
@@ -356,15 +384,24 @@ function segmentCardSnapshot_(groups, warnings) {
 function segmentCardMatchingRows_(snapshot, filter) {
   return snapshot.rows.filter(function (r) {
     return (filter.channel === 'all' || r.channel === filter.channel) && (filter.owner === 'all' || r.owners.indexOf(filter.owner) >= 0) &&
-      (filter.queue === 'all' || filter.queue === 'ownership' && r.needsOwnership || filter.queue === 'ready' && r.ready || filter.queue === 'inCampaign' && r.inCampaign || filter.queue === r.channel && r.needsCheck) &&
+      (filter.queue === 'all' || filter.queue === 'ownership' && r.needsOwnership ||
+        filter.queue === 'ready' && r.ready && (!r.readyOwners || filter.owner === 'all' || r.readyOwners.indexOf(filter.owner) >= 0) ||
+        filter.queue === 'emailReview' && r.needsStatus && filter.owner !== 'lpr' ||
+        filter.queue === 'inCampaign' && r.inCampaign || filter.queue === r.channel && r.needsCheck) &&
       (!filter.query || [r.value].concat(r.ownerNames).some(function (value) { return value.toLowerCase().includes(filter.query); }));
   });
 }
 
 function segmentCardPage_(snapshot, filter) {
   var rows = segmentCardMatchingRows_(snapshot, filter);
-  var end = filter.offset + filter.limit;
-  return {rows: rows.slice(filter.offset, end), offset: filter.offset, nextOffset: end < rows.length ? end : null,
+  var end = filter.offset + filter.limit, page = rows.slice(filter.offset,end);
+  if (filter.owner !== 'all' || filter.queue === 'emailReview') page = page.map(function (row) {
+    if (!row.readyOwners || filter.owner !== 'all' && row.readyOwners.indexOf(filter.owner) >= 0 && filter.queue !== 'emailReview') return row;
+    var readiness = row.needsStatus && filter.owner !== 'lpr' ? 'Выбрать «Готов» или «Фильтр»' :
+      'Готов в таблице «' + (row.readyOwners[0] === 'companies' ? 'Компании' : 'ЛПР') + '»';
+    return Object.assign({},row,{ready:false,readiness:readiness});
+  });
+  return {rows: page, offset: filter.offset, nextOffset: end < rows.length ? end : null,
     total: rows.length, summary: snapshot.summary, warnings: snapshot.warnings, checkedAt: snapshot.checkedAt};
 }
 

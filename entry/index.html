@@ -31,7 +31,7 @@
     <form id="entry-validation-access" hidden>
       <label for="entry-private-link">Закрытая ссылка на сервис</label>
       <input id="entry-private-link" type="password" autocomplete="off" required>
-      <button type="submit">Открыть проверку контактов</button>
+      <button type="submit">Открыть выбранное действие</button>
     </form>
     <noscript><p>Для работы сервиса включите JavaScript в браузере.</p></noscript>
   </main>
@@ -46,8 +46,10 @@
     'use strict';
     const GOOGLE_APP_URL='https://script.google.com/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec';
     const $=(id)=>document.getElementById(id);
-    const target=new URL(window.location.href).searchParams.get('validate');
-    const validationFile=target&&/^[A-Za-z0-9_-]{10,200}$/.test(target)?target:null;
+    const params=new URL(window.location.href).searchParams;
+    const target=params.get('validate'),action=params.get('action'),project=params.get('project');
+    const validRoute=(action===null||['email','mailing'].includes(action))&&(project===null||['numshield','neosender'].includes(project));
+    const validationFile=validRoute&&target&&/^[A-Za-z0-9_-]{10,200}$/.test(target)?target:null;
     let validationOpened=false;
     let accessKey=null,currentFrame=null,loadingTimer=null,ready=false;
     let appWindow=null,appOrigin='',canBack=false,backArmed=false,releasingBack=false;
@@ -156,7 +158,8 @@
       $('entry-validation-access').hidden=true;
       if(!accessKey){
         if(validationFile){
-          showState('locked','Проверить новые контакты','Для доступа к выбранной таблице вставьте обычную закрытую ссылку вашей команды.',false);
+          const title=action==='mailing'?'Загрузить готовые email в рассылку':action==='email'?'Проверить новые email':'Проверить новые контакты';
+          showState('locked',title,'Для доступа к выбранной таблице вставьте обычную закрытую ссылку вашей команды.',false);
           $('entry-validation-access').hidden=false;
         }else showState('locked','Для входа нужна закрытая ссылка','Откройте полную ссылку, которую вам передал владелец сервиса.',false);
         return;
@@ -184,7 +187,10 @@
         if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-preview').hidden=true;$('entry-frame-host').hidden=false;
         if(event.data.catalogPending)sendSavedCatalog();
         if(validationFile&&!validationOpened){
-          validationOpened=true;appWindow.postMessage({type:'bases-registry-open-validation',id:validationFile},appOrigin);
+          const message={type:'bases-registry-open-validation',id:validationFile};
+          if(action)message.workbookAction=action;
+          if(project)message.projectId=project;
+          validationOpened=true;appWindow.postMessage(message,appOrigin);
         }
       }else if(ready&&event.data.type==='bases-registry-catalog'){
         void rememberCatalog(event.data);

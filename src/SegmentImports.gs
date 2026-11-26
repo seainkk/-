@@ -12,6 +12,10 @@ function previewSegmentRecords_(request) {
     var collected = segmentRecordsCollect_(context, bindings);
     targets.directory = targetKind !== 'lpr' && (targets.directory || collected.records.some(function (record) { return record.routeKind !== 'lpr' && !!record.directory; }));
     var masters = segmentRecordsReadMasters_(targets, true);
+    if (!targets.directory && masters.companies.descriptor.newMaster) {
+      targets.directory = true;
+      masters.companies.descriptor = segmentRecordsMaster_(targets, 'companies', false, true).descriptor;
+    }
     var planned = segmentRecordsPlanner_({ records: collected.records, companies: masters.companies.records, people: masters.lpr.records, targetKind: targetKind, directory: targets.directory });
     var companyStages = segmentRecordsSplitCompanyMarkers_(planned.companies);
     var plan = {
@@ -155,13 +159,18 @@ function segmentRecordsTargets_(context, segmentId, create, deferMasters, newDir
     });
   } else if (needsBinding) fail_('SEGMENT_TABLE_UNKNOWN', 'Не найдена одна из двух рабочих таблиц сегмента.');
   if (tables.companies && tables.companies === tables.lpr) fail_('SEGMENT_TABLE_UNKNOWN', 'У сегмента должны быть две разные связанные таблицы: компании и ЛПР.');
-  var targets = { context: context, folder: folder, tables: tables, directory: !!newDirectory, needsBinding:needsBinding };
+  var targets = { context: context, folder: folder, tables: tables, directory: !!newDirectory, needsBinding:needsBinding }, companyMasterBound = false;
   ['companies', 'lpr'].forEach(function (kind) {
     if (!tables[kind]) return;
     var scope = segmentRecordsTargetGuard_(context, folder, tables[kind]);
-    if (kind === 'companies' && (scope.metadata.appProperties || {}).registrySegmentDirectoryMode) targets.directory = true;
+    if (kind === 'companies') {
+      var tags = scope.metadata.appProperties || {};
+      companyMasterBound = tags.registrySegmentMasterSheetId !== undefined;
+      if (tags.registrySegmentDirectoryMode) targets.directory = true;
+    }
   });
   if (create && !deferMasters) {
+    if (!targets.directory && !companyMasterBound) targets.directory = !!segmentRecordsMaster_(targets, 'companies', false, true).descriptor.newMaster;
     ['companies', 'lpr'].forEach(function (kind) { segmentRecordsMaster_(targets, kind, true); });
     segmentRecordsEnroll_(targets);
   }
@@ -179,7 +188,12 @@ function segmentRecordsTargetGuard_(context, folder, fileId) {
 
 function segmentRecordsInitialHeaders_(kind, directory) {
   var schema = segmentRecordsSchema_(kind);
-  return directory ? ['ID компании'].concat(SOURCE_DIRECTORY_FIELDS.map(function (field) { return field[1]; }), schema.slice(1).map(function (field) { return field[0] === 'telegrams' ? 'Telegram для контактов' : field[1]; })) : schema.map(function (field) { return field[1]; });
+  var headers = schema.map(function (field) { return field[1]; });
+  if (kind !== 'companies') return headers;
+  // The planner still uses its stable field order; the physical sheet prioritizes the company's contact data.
+  var front = ['ID компании','Компания','Сайт','ИНН','Email',directory ? 'Мобильные телефоны' : 'Телефон','Telegram'];
+  if (directory) headers = SOURCE_DIRECTORY_FIELDS.map(function (field) { return field[1]; }).concat(schema.map(function (field) { return segmentRecordsFieldLabel_(field,true); }));
+  return front.concat(headers.filter(function (label) { return front.indexOf(label) < 0; }));
 }
 
 function segmentRecordsMaster_(targets, kind, create, projectSchema, reserved) {
@@ -240,6 +254,12 @@ function segmentRecordsMaster_(targets, kind, create, projectSchema, reserved) {
     } else if (leaves.length === 1 && leaves[0].getLastRow() === 0) sheet = leaves[0].setName(title);
     else { var name = title, suffix = 1; while (book.getSheetByName(name)) name = title + ' — единая база ' + (++suffix); sheet = book.insertSheet(name); }
     var initial = segmentRecordsInitialHeaders_(kind, directory);
+    // A preview from the previous release reserved the old physical positions.
+    if (reserved && reserved.newMaster && reserved.columns.length === initial.length) {
+      segmentRecordsSchema_(kind,directory).forEach(function (field,i) {
+        initial[reserved.columns[i]] = segmentRecordsFieldLabel_(field,directory);
+      });
+    }
     if (sheet.getMaxColumns() < initial.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), initial.length - sheet.getMaxColumns());
     segmentRecordsTargetGuard_(targets.context, targets.folder, scope.file.getId());
     sheetWriteRawStrings_(scope.file.getId(), sheet.getSheetId(), 1, 1, [initial]);
@@ -509,7 +529,7 @@ function segmentSelectionContacts_(book, selection, records, guard, mainModel) {
         var refText = String(line[col(['Строки в Лист1', 'Исходные строки'])] || '').trim();
         var fields = {};
         ['Статус', 'Комментарий', 'Компания', 'ID компании', 'Связанные ID компаний', 'Валидация', 'Дата проверки', 'Результат проверки', 'Валидатор', 'Провайдер', 'ID_TG', 'Nickname_TG', 'Active_days_ago', 'Для Telegram', 'Статус из источника'].forEach(function (label) {
-          var column = label === 'Статус' ? col(['Статус рассылки', 'Статус']) : label === 'Компания' ? col(['Компания', 'Компания / ЛПР']) : col([label]);
+          var column = label === 'Статус' ? col(['Статус рассылки', 'Статус']) : label === 'Компания' ? col(['Компания', 'Компания / ЛПР']) : label === 'Результат проверки' ? col(['Результат проверки', 'Результат валидации']) : col([label]);
           if (column >= 0 && line[column] !== '') fields[label] = String(line[column]);
         });
         var bound = notes && pvBinding_(notes[index][0]);
@@ -555,7 +575,7 @@ function segmentSelectionContacts_(book, selection, records, guard, mainModel) {
   return { roles: roles, fingerprint: digest_(JSON.stringify(signatures)) };
 }
 
-function segmentSelectionAccepted_(history, masters, planned) {
+function segmentSelectionAccepted_(history, masters, planned, includeCompanyIds) {
   var result = {};
   Object.keys(history).forEach(function (kind) {
     var schema = segmentRecordsSchema_(kind).map(function (field) { return field[0]; });
@@ -568,17 +588,21 @@ function segmentSelectionAccepted_(history, masters, planned) {
         var channel = field === 'emails' ? 'email' : field === 'phones' ? 'phone' : 'telegram';
         segmentRecordsList_(row[schema.indexOf(field)], channel).forEach(function (value) {
           var key = channel === 'telegram' ? contactSyncKey_('phone', '', value) : contactSyncKey_(channel, value); if (!history[kind][key]) return;
-          if (!accepted.has(key)) accepted.set(key, new Set());
-          refs.forEach(function (ref) { accepted.get(key).add(ref.trim()); });
+          if (!accepted.has(key)) accepted.set(key, new Map());
+          refs.forEach(function (ref) { accepted.get(key).set(ref.trim(), row[schema.indexOf('id')]); });
         });
       });
     });
     Object.keys(history[kind]).forEach(function (key) {
       var refs = accepted.get(key); if (!refs) return;
-      var rows = history[kind][key].filter(function (entry) {
-        return entry.refs.split(/\s*[,;]\s*/).some(function (row) {
-          return refs.has(segmentRecordsSourceLabel_({ fileId: entry.source, sheetId: entry.sourceSheet, row: Number(row) }));
-        });
+      var rows = [];
+      history[kind][key].forEach(function (entry) {
+        var matches = entry.refs.split(/\s*[,;]\s*/).map(function (row) {
+          return segmentRecordsSourceLabel_({ fileId: entry.source, sheetId: entry.sourceSheet, row: Number(row) });
+        }).filter(function (ref) { return refs.has(ref); });
+        if (matches.length) rows.push(includeCompanyIds && kind === 'companies' ? Object.assign({}, entry, {
+          companyIds: Array.from(new Set(matches.map(function (ref) { return refs.get(ref); }).filter(Boolean)))
+        }) : entry);
       });
       if (rows.length) { if (!result[kind]) result[kind] = {}; result[kind][key] = rows; }
     });
@@ -613,13 +637,21 @@ function segmentEmailOrigins_(records, masters, planned) {
       if (refs.length) collect('companies',email,personal ? refs.filter(function (ref) { return !personal.has(ref.column); }) : refs);
     });
   });
-  var accepted = segmentSelectionAccepted_(observations,masters,planned);
+  var accepted = segmentSelectionAccepted_(observations, masters, planned, true);
   Object.keys(accepted).forEach(function (role) {
+    var origins = {};
     Object.keys(accepted[role]).forEach(function (key) {
-      var labels = new Set();
-      accepted[role][key].forEach(function (row) { row.columns.forEach(function (value) { labels.add(value); }); });
-      accepted[role][key] = Array.from(labels).join('\n');
+      var columns = new Map();
+      accepted[role][key].forEach(function (entry) {
+        var keys = [key].concat((entry.companyIds || []).map(function (id) { return JSON.stringify([id,key]); }));
+        keys.forEach(function (target) {
+          if (!columns.has(target)) columns.set(target, new Set());
+          entry.columns.forEach(function (value) { columns.get(target).add(value); });
+        });
+      });
+      columns.forEach(function (labels,target) { origins[target] = Array.from(labels).join('\n'); });
     });
+    accepted[role] = origins;
   });
   return accepted;
 }

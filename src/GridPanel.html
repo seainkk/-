@@ -16,6 +16,9 @@
     <button id="rg-grid-add-columns" class="rg-grid-button" type="button">＋ Столбец</button>
     <span class="rg-grid-toolbar-divider" aria-hidden="true"></span>
     <button id="rg-grid-new-contacts" class="rg-grid-button" type="button" disabled>Распределить контакты</button>
+    <label id="rg-grid-workflow-label" hidden>Статус email <select id="rg-grid-workflow-status" aria-label="Статус выбранного email"></select></label>
+    <button id="rg-grid-email-check" class="rg-grid-button rg-grid-contact-button" type="button" hidden>Проверить новые email в Promouser</button>
+    <button id="rg-grid-mail-open" class="rg-grid-button" type="button" hidden>Загрузить готовые контакты в рассылку</button>
     <button id="rg-grid-bulk-open" class="rg-grid-button rg-grid-contact-button" type="button" disabled>Проверить новые контакты</button>
     <button id="rg-grid-validation-open" class="rg-grid-button" type="button">Валидация</button>
     <span id="rg-grid-readonly" class="rg-grid-readonly" hidden>Только просмотр</span>
@@ -28,11 +31,25 @@
   <div id="rg-grid-error" class="rg-grid-error" role="alert" hidden><p id="rg-grid-error-text"></p><div class="rg-grid-error-actions"><button id="rg-grid-retry" class="rg-grid-button" type="button">Повторить сохранение</button><button id="rg-grid-copy-draft" class="rg-grid-button" type="button">Скопировать несохранённое</button><button id="rg-grid-discard" class="rg-grid-button" type="button">Отменить несохранённые правки и перечитать</button></div></div>
   <p id="rg-grid-hint" class="rg-grid-hint" role="status" aria-live="polite"></p>
   <div id="rg-grid-contact-progress" class="rg-grid-contact-progress" role="status" aria-live="polite" hidden><span id="rg-grid-contact-message"></span><button id="rg-grid-contact-retry" class="rg-grid-button" type="button" hidden>Продолжить тот же запрос</button></div>
+  <aside id="rg-grid-mail-panel" class="rg-grid-validation" aria-labelledby="rg-grid-mail-title" hidden>
+    <div class="rg-grid-validation-heading"><h2 id="rg-grid-mail-title">Готовые контакты в Coldy</h2><button type="button" id="rg-grid-mail-close" class="rg-grid-button" aria-label="Закрыть загрузку в Coldy">✕</button></div>
+    <label for="rg-grid-mail-mode">Куда загрузить</label>
+    <select id="rg-grid-mail-mode"><option value="existing">В существующую рассылку</option><option value="new">В новую рассылку</option></select>
+    <label id="rg-grid-mail-existing">Рассылка <select id="rg-grid-mail-campaign"></select></label>
+    <label id="rg-grid-mail-new" hidden>Название новой рассылки <input id="rg-grid-mail-name" type="text" maxlength="150" autocomplete="off"></label>
+    <button id="rg-grid-mail-preview" type="button" class="rg-grid-button">Посмотреть, кого загрузим</button>
+    <p id="rg-grid-mail-status" role="status" aria-live="polite"></p>
+    <dl id="rg-grid-mail-counts" class="rg-grid-validation-counts"></dl>
+    <ul id="rg-grid-mail-sample" class="rg-grid-validation-sample"></ul>
+    <label id="rg-grid-mail-consent" class="rg-grid-provider-choice" hidden><input id="rg-grid-mail-active" type="checkbox">Разрешаю добавить эти контакты в активную рассылку</label>
+    <button type="button" id="rg-grid-mail-review" class="rg-grid-button" hidden>Проверить список рассылок</button>
+    <button type="button" id="rg-grid-mail-start" class="rg-grid-button" hidden>Подтвердить загрузку</button>
+  </aside>
   <aside id="rg-grid-validation" class="rg-grid-validation" aria-labelledby="rg-grid-validation-title" hidden>
     <div class="rg-grid-validation-heading"><h2 id="rg-grid-validation-title">Проверка новых контактов</h2><button id="rg-grid-validation-close" class="rg-grid-button" type="button" aria-label="Скрыть валидацию">✕</button></div>
     <p class="rg-grid-validation-note" id="rg-grid-validation-intro">Проверяются только контакты без результата. Уже проверенные email и телефоны, включая невалидные, остаются без изменений.</p>
     <section id="rg-grid-bulk" class="rg-grid-validation-section" hidden>
-      <p class="rg-grid-validation-note">В проверку входят Email и телефоны со статусом «Новый контакт» без завершённой валидации.</p>
+      <p id="rg-grid-bulk-note" class="rg-grid-validation-note">В проверку входят Email и телефоны со статусом «Новый контакт» без завершённой валидации.</p>
       <dl id="rg-grid-bulk-counts" class="rg-grid-validation-counts" aria-label="Контакты для валидации"></dl>
       <p id="rg-grid-bulk-message" role="status" aria-live="polite"></p>
       <p id="rg-grid-bulk-cost" class="rg-grid-validation-note"></p>

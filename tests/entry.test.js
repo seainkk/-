@@ -122,6 +122,23 @@ test('a worksheet opens only its preview after a valid private link and authenti
   assert.deepEqual(JSON.parse(JSON.stringify(calls)),[{data:{type:'bases-registry-open-validation',id:'workbook_123456'},origin:GOOGLE_ORIGIN}]);
 });
 
+test('an authenticated sheet link keeps the requested Email action and project inside the ready Google frame', () => {
+  for(const action of ['email','mailing'])for(const project of ['numshield','neosender']){
+    const path='/-/?validate=workbook_123456&action='+action+'&project='+project;
+    const f=fixture({path,hash:''}),sent=[];
+    assert.equal(f.ids['entry-validation-access'].hidden,false);
+    assert.match(f.ids['entry-title'].textContent,action==='mailing'?/рассылку/:/email/);
+    f.ids['entry-private-link'].value='https://seainkk.github.io/-/#access_key='+KEY;
+    f.ids['entry-validation-access'].listeners.get('submit')({preventDefault(){}});f.event('hashchange');
+    const app=f.app();app.postMessage=(m,to)=>sent.push([m,to]);f.ready(app);f.ready(app);
+    assert.deepEqual(JSON.parse(JSON.stringify(sent)),[[{type:'bases-registry-open-validation',id:'workbook_123456',workbookAction:action,projectId:project},GOOGLE_ORIGIN]]);
+  }
+  for(const suffix of ['&action=other','&action=mailing&project=other']){
+    const f=fixture({path:'/-/?validate=workbook_123456'+suffix});f.ready();
+    assert.equal(f.sent.some(m=>m.type==='bases-registry-open-validation'),false);
+  }
+});
+
 test('an invalid worksheet identifier leaves the service at its normal entry', () => {
   for (const target of ['short', 'not%2Fa%2Fworkbook', 'x'.repeat(201)]) {
     const path = '/-/?validate=' + target, locked = fixture({path, hash:''});

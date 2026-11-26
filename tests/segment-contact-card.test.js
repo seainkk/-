@@ -11,7 +11,7 @@ const campaignId = '550e8400-e29b-41d4-a716-446655440000';
 const digest = value => createHash('sha256').update(value).digest('base64url');
 const plain = value => JSON.parse(JSON.stringify(value));
 
-function fixture() {
+function fixture(options={}) {
   const c = vm.createContext({});
   for (const file of ['Config', 'Promouser', 'ColdyCampaigns', 'ColdyRecipientSheet', 'SegmentContactCard'])
     vm.runInContext(readFileSync(new URL('../src/' + file + '.gs', import.meta.url), 'utf8'), c);
@@ -38,18 +38,18 @@ function fixture() {
       registryContactRoot: root, registryContactEmailSheetId:'1', registryContactPhoneSheetId:'2'}};
   }
   const members = 'Кухни [' + campaignId + ']';
-  book(companies,'companies',sheet(1,'Email',[headers,
+  book(companies,'companies',sheet(1,'Email',options.companyEmail || [headers,
     ['SHARED@example.org','ООО Пример','фильтр','Валиден','',members,'Письмо отправлено',3,'Да','','Рабочая почта'],
     ['prepared@example.org','А','Новый контакт'],
     ['check@example.org','Б','Новый контакт'],
     ['review@example.org','В','Новый контакт','Валиден','Да'],
     ['stale@example.org','Г','Новый контакт','Валиден'],
     ['wait@example.org','Д','Новый контакт']],
-    {'0:6':marker+'status','0:7':marker+'sent','0:8':marker+'replied',
+    options.companyNotes || {'0:6':marker+'status','0:7':marker+'sent','0:8':marker+'replied',
       '5:3':c.PROMOUSER.bindingPrefix+digest('foreigncontact')}),
     sheet(2,'Телефоны',[phoneHeaders,['8 (999) 111-22-33','Б','Новый контакт'],['+74951234567','Б','Новый контакт'],
       ['','А','Новый контакт','','@sample_name'],['+79992224455','А','Новый контакт']]));
-  book(lpr,'lpr',sheet(1,'Email',[headers,['shared@example.org','Анна','Новый контакт','Валиден'],['prepared@example.org','Пётр','Новый контакт']]),
+  book(lpr,'lpr',sheet(1,'Email',options.peopleEmail || [headers,['shared@example.org','Анна','Новый контакт','Валиден'],['prepared@example.org','Пётр','Новый контакт']]),
     sheet(2,'Телефоны',[phoneHeaders]));
   meta[service] = {id:service, version:'2'};
   const cache = new Map();
@@ -106,6 +106,37 @@ function preparedFixture() {
   return {...f,values,cache,disk,context,dashboard,rebuild:(guard=()=>context)=>plain(c.segmentCardRefreshSnapshot_(context,segment,guard))};
 }
 
+test('company Email queues respect manual approvals, all duplicate exclusions and separate provider events',()=>{
+  const headers=['ID компании','Почт на компанию','Email','Статус','Результат валидации','Проверить принадлежность','Валидация'];
+  const data=[
+    ['approved','готов',''],['approved','Новый контакт','valid'],
+    ['review','Новый контакт','valid'],['check','Новый контакт',''],['mixed','Готов','valid'],['mixed','Фильтр',''],
+    ['raw-invalid','Готов','invalid'],['manual-invalid','Невалид',''],['active','Рассылка','valid'],
+    ['cached-invalid','Готов',''],['cached-review','Готов',''],['stale','Готов','valid'],['unclear','Готов','','Да'],
+    ['risky','Готов','risky'],['shared','Новый контакт','valid']
+  ];
+  const notes={};
+  const f=fixture({companyEmail:[headers,...data.map(([addr,manual,raw,ownership],i)=>['company-'+i,1,addr+'@example.org',manual,raw,ownership||''])],
+    companyNotes:notes,peopleEmail:[['Email','Статус рассылки','Валидация'],['shared@example.org','Новый контакт','Валиден']]});
+  f.state.shared[f.c.pvKey_('email','cached-invalid@example.org')]={result:{status:'Невалиден'}};
+  f.state.shared[f.c.pvKey_('email','cached-review@example.org')]={result:{status:'Валиден',review:true}};
+  const staleIndex=data.findIndex(row=>row[0]==='stale')+1;
+  notes[staleIndex+':6']=f.c.PROMOUSER.bindingPrefix+digest('other');
+  const names=(opts)=>f.run({channel:'email',...opts}).rows.map(row=>row.value.split('@')[0]);
+  assert.deepEqual(names({owner:'companies',queue:'ready'}),['approved','risky']);
+  assert.deepEqual(names({owner:'lpr',queue:'ready'}),['shared']);
+  assert.deepEqual(names({queue:'emailReview'}),['review','shared']);
+  assert.deepEqual(names({queue:'email'}),['check']);
+  assert.deepEqual(names({queue:'inCampaign'}),['active']);
+  const rows=Object.fromEntries(f.run({channel:'email'}).rows.map(row=>[row.value.split('@')[0],row]));
+  assert.equal(rows.approved.sources.length,2);
+  assert.equal(rows.mixed.ready,false);assert.equal(rows.mixed.readiness,'Исключён');
+  for(const addr of ['manual-invalid','raw-invalid','cached-invalid'])assert.equal(rows[addr].readiness,'Невалид');
+  assert.equal(rows.active.channelFacts[0].sent,null);assert.equal(rows.active.channelFacts[0].replied,null);
+  assert.deepEqual(rows.active.campaigns,[]);assert.ok(!rows.active.coldyStatuses.some(label=>/отправлено|ответил|добавлен/i.test(label)));
+  assert.equal(f.run({channel:'email',owner:'companies',query:'shared@'}).rows[0].ready,false);
+});
+
 test('prepared card survives cache eviction and serves the same filtered pages without reading contact sheets or campaign recipients',()=>{
   const f=preparedFixture(), baseline=f.run(), result=f.rebuild();
   const reads=f.state.reads, recipients=f.state.privateReads;
@@ -126,6 +157,17 @@ test('prepared card survives cache eviction and serves the same filtered pages w
   assert.equal(f.dashboard()[segment].revision,result.revision);
   assert.equal(f.rebuild().rebuilt,false);assert.equal(f.state.diskWrites,1);assert.equal(f.dashboard()[segment].revision,result.revision);
   assert.doesNotMatch(JSON.stringify(f.values),/@example/);
+});
+
+test('a prepared card predating the manual company workflow is rebuilt before it can supply readiness counts',()=>{
+  const f=preparedFixture();
+  f.rebuild();
+  const {key}=f.c.segmentCardSnapshotSlot_(f.context,segment);
+  const old=JSON.parse(f.values[key]);old.schema=1;f.values[key]=JSON.stringify(old);
+  assert.deepEqual(f.dashboard(),{});
+  assert.notEqual(f.run({prepared:true}).prepared,true);
+  assert.equal(f.rebuild().rebuilt,true);
+  assert.equal(f.dashboard()[segment].prepared,true);
 });
 
 test('a cold maintenance build hashes each unique contact once and packs the full snapshot once, even without Apps Script cache',()=>{

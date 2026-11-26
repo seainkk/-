@@ -40,7 +40,12 @@ function fixture(options={}) {
   DriveApp:{getFileById:id=>({getBlob:()=>({getDataAsString:()=>files.get(id).body})})},
   Drive:{Files:{get:id=>{if(!files.has(id))throw new Error('Missing file');return plain(files.get(id));},list:()=>({files:[...files.values()].filter(f=>f.mimeType==='application/vnd.google-apps.folder'&&!f.trashed).map(plain)}),create:(meta,blob)=>{const id=`validation_state_${++seq}_123456`;const f={...plain(meta),id,body:blob?.text||''};files.set(id,f);return plain(f);},update:(meta,id,blob)=>{if(options.stateWriteFail&&blob?.name==='validation.json')throw new Error('Storage lost');const file=files.get(id);Object.assign(file,plain(meta));if(blob)file.body=blob.text;calls.fileWrites.push(id);return plain(file);}}},
   sheetWriteRawStrings_:(id,sheetId,r,col,rows)=>{const s=books.get(id).tabs.find(s=>s.getSheetId()===sheetId);rows.forEach((row,y)=>row.forEach((value,x)=>s.put(r+y,col+x,String(value))));calls.writes.push({id,header:true,r,col,rows:plain(rows)});},
-  Sheets:{Spreadsheets:{batchUpdate:(body,id)=>{assert.ok(lock,'Service results/cache writes hold lock');for(const request of body.requests){const u=request.updateCells,s=books.get(id).tabs.find(s=>s.getSheetId()===u.range.sheetId);u.rows.forEach((row,y)=>row.values.forEach((cell,x)=>s.put(u.range.startRowIndex+y+1,u.range.startColumnIndex+x+1,cell.userEnteredValue.stringValue,u.fields.includes('note')?cell.note:undefined)));}calls.writes.push({id,requests:plain(body.requests)});return{spreadsheetId:id,replies:body.requests.map(()=>({}))};}}},
+  Sheets:{Spreadsheets:{batchUpdate:(body,id)=>{assert.ok(lock,'Service results/cache writes hold lock');for(const request of body.requests){if(request.findReplace){
+    const rule=request.findReplace, r=rule.range, tab=books.get(id).tabs.find(s=>s.getSheetId()===r.sheetId), x=r.startColumnIndex+1, y=r.startRowIndex+1;
+    options.beforeStatusWrite?.(tab,y,x);
+    if(new RegExp(rule.find,rule.matchCase?'':'i').test(tab.at(y,x).value))tab.put(y,x,rule.replacement);
+    continue;
+  }const u=request.updateCells,s=books.get(id).tabs.find(s=>s.getSheetId()===u.range.sheetId);u.rows.forEach((row,y)=>row.values.forEach((cell,x)=>s.put(u.range.startRowIndex+y+1,u.range.startColumnIndex+x+1,cell.userEnteredValue.stringValue,u.fields.includes('note')?cell.note:undefined)));}calls.writes.push({id,requests:plain(body.requests)});return{spreadsheetId:id,replies:body.requests.map(()=>({}))};}}},
   UrlFetchApp:{fetch:(url,request)=>{assert.equal(lock,false,'No provider HTTP under global lock');assert.equal(request.headers.key,KEY);assert.equal(request.followRedirects,false);calls.fetch.push({url,request});if(options.transport) return options.transport({url,request,response,calls,now});if(url.endsWith('/api/balance'))return response({balance:'100'});if(url.endsWith('/api/order'))return response({order_id:nextOrder++,type:Number(request.payload.type)});if(url.includes('/api/status?'))return response(options.status||{status:'not_ready_unpaid',order_id:Number(url.split('=').pop()),cost:'0.5'});if(url.endsWith('/api/pay')){const p=JSON.parse(request.payload);return response({status:'success',order_id:Number(p.order_id),charged:'0.5',balance:'99.5'});}if(url.includes('/results/'))return response(options.result||'email\tresult\tprovider\na@example.test\tvalid\tExample Mail');throw new Error('Unexpected endpoint');}},
  });
  vm.runInContext(readFileSync(new URL('../src/Config.gs',import.meta.url),'utf8'),c);
@@ -61,6 +66,64 @@ function fixture(options={}) {
 }
 
 function createAndQuote(f,id=A){f.configure();f.queue(id);f.start(id);f.advance(id);f.advance(id);f.tick(15000);f.advance(id);return f.state(id).jobs[0];}
+
+const companyHeaders=['ID компании','Почт на компанию','Email','Комментарий','Статус','Провайдер','Результат валидации'];
+const companyRow=(id,email,status='Новый контакт')=>[id,'1',email,'комментарий '+id,status,'',''];
+const companyPreview=f=>f.c.previewPromouserValidation_({id:A,kind:'email',newContactsOnly:true,provider:'promouser'});
+const companyStart=(f,preview)=>f.c.startPromouserValidation_({id:A,kind:'email',previewToken:preview.previewToken,requestId:'company-email-confirmed'});
+
+test('the company Email action validates only new addresses through the explicitly chosen Promouser, preserves manual work and fills each matching row',()=>{
+  let paid=false;
+  const f=fixture({emailRows:[companyHeaders,companyRow('01','bad@example.test'),companyRow('02','bad@example.test'),
+    companyRow('03','good@example.test'),companyRow('04','reviewed@example.test'),companyRow('05','ignored@example.test','Фильтр')],
+    phoneRows:[PH,['+79990000001']],transport:({url,request,response})=>{
+      if(url.endsWith('/balance'))return response({balance:'5'});
+      if(url.endsWith('/order')){assert.equal(Number(request.payload.type),17);return response({type:17,order_id:48});}
+      if(url.includes('/status?'))return response(paid?{order_id:48,status:'ready_paid',cost:'0.5',result:'https://promouser.com/results/48.txt'}:{order_id:48,status:'not_ready_unpaid',cost:'0.5'});
+      if(url.endsWith('/pay')){paid=true;return response({order_id:48,status:'success',charged:'0.5',balance:'4.5'});}
+      if(url.includes('/results/'))return response('email\tresult\tprovider\nbad@example.test\tinvalid\tMX A\ngood@example.test\tvalid\tMX B\nreviewed@example.test\tinvalid\tMX C');
+      throw Error('Unexpected provider operation');
+    }});
+  f.c.emailValidationProvider_=()=>'coldy';f.configure();
+  const phone=f.target(A,'Телефоны'), oldLastRow=phone.getLastRow;
+  phone.getLastRow=()=>{throw Error('The Email action must not open the phone list');};
+  const p=companyPreview(f);assert.equal(p.canStart,true);assert.equal(p.plannedCount,3);
+  companyStart(f,p);companyStart(f,p);
+  assert.equal(f.ledger().jobs.length,1);assert.equal(f.calls.fetch.length,0);
+  phone.getLastRow=oldLastRow;
+  f.advance();f.advance();f.tick(15000);f.advance();
+  const job=f.ledger().jobs.find(j=>j.kind==='email');assert.equal(job.state,'awaiting_payment');
+  f.tick(5000);f.c.payValidationOrder_({id:A,jobId:job.jobId,requestId:'company-email-pay-48',expectedCostUsd:.5});
+  f.target().put(5,5,'Готов');
+  f.tick(15000);f.advance();f.tick(5000);f.advance();
+  assert.deepEqual([2,3,4,5,6].map(i=>f.target().at(i,5).value),['Невалид','Невалид','Новый контакт','Готов','Фильтр']);
+  assert.deepEqual([2,3,4,5,6].map(i=>f.target().at(i,7).value),['invalid','invalid','valid','invalid','']);
+  assert.deepEqual([2,3,4,5,6].map(i=>f.target().at(i,6).value),['MX A','MX A','MX B','MX C','']);
+  assert.equal(f.col('Результат проверки'),0);
+  assert.equal(f.target().at(2,4).value,'комментарий 01');assert.match(f.target().at(2,f.col('Валидация')).note,/registry-promouser-contact/);
+  assert.equal(f.calls.fetch.filter(c=>c.url.endsWith('/order')).length,1);assert.equal(f.calls.fetch.filter(c=>c.url.endsWith('/pay')).length,1);
+  assert.equal(companyPreview(f).canStart,false);
+});
+
+test('an explicit Email run applies a previous invalid result without placing another order',()=>{
+  const f=fixture({emailRows:[companyHeaders,companyRow('01','known@example.test')],
+    otherEmailRows:[[...EH,'Валидация','Результат проверки','Провайдер'],['known@example.test','','','','Невалиден','invalid','MX']]});
+  f.queue(B);
+  const preview=companyPreview(f);assert.equal(preview.plannedCount,0);assert.equal(preview.counts.cached,1);
+  assert.equal(preview.canStart,true);
+  companyStart(f,preview);companyStart(f,preview);
+  assert.equal(f.target().at(2,5).value,'Невалид');assert.equal(f.target().at(2,6).value,'MX');assert.equal(f.target().at(2,7).value,'invalid');
+  assert.equal(f.target().at(2,4).value,'комментарий 01');assert.equal(f.ledger().jobs.length,0);assert.equal(f.calls.fetch.length,0);
+});
+
+test('native changes to the work status during the result write take precedence over the automatic invalid transition',()=>{
+  const f=fixture({emailRows:[companyHeaders,companyRow('01','known@example.test')],
+    beforeStatusWrite:(tab,row,col)=>tab.put(row,col,'Фильтр'),
+    otherEmailRows:[[...EH,'Валидация','Результат проверки','Провайдер'],['known@example.test','','','','Невалиден','invalid','MX']]});
+  f.queue(B);companyStart(f,companyPreview(f));
+  assert.equal(f.target().at(2,5).value,'Фильтр');assert.equal(f.target().at(2,7).value,'invalid');
+  assert.equal(f.calls.fetch.length,0);
+});
 
 test('new local phone numbers stay visible as missing a dialling code and never enter a provider order', () => {
  const local = ['01234','01-23-45','3122211'];

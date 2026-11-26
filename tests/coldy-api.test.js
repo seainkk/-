@@ -25,6 +25,19 @@ test('connection saves report credential rotation without treating same-key sett
   assert.equal(f.calls.fetch.length,0);
 });
 
+test('workbook creation accepts only a named draft on the previewed connection',()=>{
+  const f=fixture({transport:({response})=>response({id:CAMPAIGN,name:'Тест',status:'Draft'},201)});
+  f.configure();
+  for(const payload of [{name:'  '},{name:'Тест',status:'Active'},{name:'Тест',accounts:[1]}]) {
+    assert.throws(()=>f.c.coldyApi_(f.context,'POST','/campaigns',payload),/INVALID_REQUEST/);
+  }
+  assert.throws(()=>f.c.coldyApi_(f.context,'POST','/campaigns',{name:'Тест'},{expectedCredentialHash:'old-organization'}),/COLDY_CREDENTIAL_CHANGED/);
+  assert.equal(f.calls.fetch.length,0);
+  const current=f.c.coldyCredentialHash_(f.context);
+  assert.equal(f.c.coldyApi_(f.context,'POST','/campaigns',{name:' Тест '},{expectedCredentialHash:current}).status,'Draft');
+  assert.deepEqual(JSON.parse(f.calls.fetch[0].request.payload),{name:'Тест'});
+});
+
 test('campaign catalog reads use the current project even for an existing provider cache',()=>{
   const extra='710f6f14-1f31-4571-9ca3-d3ec89ba22aa';
   const f=fixture({transport:({response})=>response({items:[{id:CAMPAIGN,name:'Закреплена',status:'Active'},{id:extra,name:'Общая',status:'Draft'}]})});
@@ -38,6 +51,11 @@ test('campaign catalog reads use the current project even for an existing provid
   for(const refresh of [false,true]) assert.deepEqual(plain(f.c.listColdyCampaigns_({refresh})).campaigns.map(item=>item.id),[extra]);
   project='neosender';
   const own=plain(f.c.listColdyCampaigns_({}));assert.equal(own.cached,true);assert.deepEqual(own.campaigns.map(item=>item.id),[CAMPAIGN,extra]);
+  const scoped=[];
+  f.c.coldyCampaignScope_=(_,segment)=>{scoped.push(segment);};
+  const segment='syn_segment_test_1234';
+  assert.deepEqual(plain(f.c.listColdyCampaigns_({segmentId:segment})).campaigns.map(item=>item.id),[extra]);
+  assert.deepEqual(scoped,[segment,segment]);
 });
 
 

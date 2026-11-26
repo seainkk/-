@@ -9,6 +9,7 @@ const ROOT = 'registry_root_1234567890';
 const OUTREACH = 'outreach_folder_1234567890';
 const SOURCE = 'source_folder_1234567890';
 const STORAGE = 'service_book_1234567890';
+const TEMPLATE = 'private_company_template_1234567890';
 const SEGMENT = 'existing_segment_1234567890';
 const COMPANY = 'companies_book_1234567890';
 const LPR = 'lpr_book_1234567890';
@@ -114,6 +115,7 @@ function fixture(options = {}) {
   const sources = sheet('SourceBases', [HEADERS, ...records], 1, STORAGE);
   const relations = sheet('SourceBaseSegments', [RELATIONS], 2, STORAGE);
   book(STORAGE, [sources, relations]);
+  book(TEMPLATE, [sheet('Лист1', options.templateRows || [], 1, TEMPLATE)]);
   book(MIXED, [sheet('Компании', [['Компания'], ['ООО Пример']], 11, MIXED), sheet('ЛПР', [['ФИО'], ['Иван Иванов']], 12, MIXED)]);
   book(GENERAL, [sheet('Компании', [['Компания'], ['Компания Б']], 21, GENERAL)]);
   book(COMPANY, [sheet('Существующие данные', [['Компания'], ['Не менять']], 31, COMPANY)]);
@@ -148,7 +150,13 @@ function fixture(options = {}) {
       newRichTextValue: () => { let text; const builder = { setText: v => { text = v; return builder; }, build: () => ({ getText: () => text }) }; return builder; },
     },
     Drive: { Files: {
-      get: () => ({ capabilities: { canEdit: options.storageCanEdit !== false } }),
+      get: id => id === TEMPLATE ? Object.assign({id:TEMPLATE,mimeType:MIME,ownedByMe:true,shared:false,trashed:false,version:'1',properties:{outreachTemplate:'company-email-menu-v1'}},options.templateMetadata) : { capabilities: { canEdit: options.storageCanEdit !== false } },
+      copy: (metadata,templateId) => {
+        assert.equal(templateId,TEMPLATE);
+        assert.equal(metadata.properties.outreachTemplate,'company-email-workbook-v1');
+        assert.equal(metadata.properties.outreachMenuProject,null);
+        return context.Drive.Files.create({...metadata, mimeType:MIME});
+      },
       create: metadata => {
         calls.creates.push(structuredClone(metadata));
         const id = 'created_artifact_' + (++sequence);
@@ -168,6 +176,7 @@ function fixture(options = {}) {
     } },
   });
   for (const name of ['Config.gs','Code.gs','Segments.gs','SourceBases.gs','SegmentActions.gs']) vm.runInContext(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8'), context, { filename: name });
+  context.REGISTRY_CONFIG = {...context.REGISTRY_CONFIG, companyWorkbookTemplateId:TEMPLATE};
   installSharedApi(context, { accessKey: () => Object.hasOwn(options, 'accessKey') ? options.accessKey : TEST_ACCESS_KEY });
   return { context, calls, folders, files, books, properties, sources, relations, records, book, sheet, folder };
 }
@@ -293,7 +302,7 @@ test('renaming an uncategorized legacy studio preserves its partners category an
 test('empty creation has bounded service calls and reads only the two tracking tabs', () => {
   const f = fixture();
   f.context.createSegment({ name: 'Без контактов', requestId: 'empty_budget_12345678' });
-  assert.deepEqual(f.calls.opens.map(call => call.id), [STORAGE]);
+  assert.deepEqual(f.calls.opens.map(call => call.id), [STORAGE,TEMPLATE]);
   // Previously this path read 12 whole ranges, listed markers four times,
   // fetched files nine times and wrote ScriptProperties fourteen times.
   assert.deepEqual(f.calls.reads.map(read => [read.name, read.type]), [
@@ -459,8 +468,46 @@ test('lost LPR create response survives companies revisit and hidden name listin
   assert.ok(f.calls.lists.some(options => /registrySegmentRole.*lpr/.test(options.q)));
 });
 
+test('company creation rejects a changed or shared template before recording an uncertain copy and permits the same retry',()=>{
+  for(const override of [{id:COMPANY},{shared:true},{ownedByMe:false},{trashed:true},{mimeType:FOLDER_MIME},{properties:{}},{version:''}]){
+    const options={templateMetadata:override}, f=fixture(options), input={name:'С меню',requestId:'private-company-menu-retry'};
+    assert.throws(()=>f.context.createSegment(input),/COMPANY_TEMPLATE_UNAVAILABLE/);
+    assert.equal(f.calls.creates.filter(call=>call.appProperties.registrySegmentRole==='companies').length,0);
+    const saved=[...f.properties].filter(([key])=>key.startsWith('SEGMENT_ACTION_'))[0];
+    assert.ok(saved);assert.ok(!JSON.parse(saved[1]).creating.companies);
+    options.templateMetadata={};const result=f.context.createSegment(input);
+    assert.equal(result.segment.files.length,2);
+    const copies=f.calls.creates.filter(call=>call.properties?.outreachTemplate==='company-email-workbook-v1');
+    assert.equal(copies.length,1);assert.deepEqual([...copies[0].parents],[result.segment.id]);assert.ok(copies[0].appProperties.registrySegmentAction);
+    const retry=f.context.createSegment(input);assert.equal(retry.segment.id,result.segment.id);
+    assert.equal(f.calls.creates.length,3);
+  }
+  const f=fixture({templateRows:[['Черновик']]});
+  assert.throws(()=>f.context.createSegment({name:'С меню',requestId:'not-empty-menu-master'}),/COMPANY_TEMPLATE_UNAVAILABLE/);
+  assert.equal(f.calls.creates.filter(call=>call.appProperties.registrySegmentRole==='companies').length,0);
+});
+
+test('the native menu opens the current workbook Email tab and its own action inside a Sheets dialog',()=>{
+  const labels=[],dialogs=[],shown=[], id='new_working_companies_1234567890', sheet={getLastColumn:()=>2,
+    getRange:()=>({getRichTextValues:()=>[[{getLinkUrl:()=>'https://example.test/?validate='+id+'&project=numshield'},
+      {getLinkUrl:()=>'https://seainkk.github.io/-/?validate='+id+'&action=email&project=neosender'}]]})};
+  const menu={addItem(label,fn){labels.push([label,fn]);return menu;},addToUi(){return menu;}};
+  const book={getId:()=>id,getSheetByName:name=>name==='Email'?sheet:null,setActiveSheet:tab=>shown.push(tab)};
+  const ui={createMenu:name=>{assert.equal(name,'Email');return menu;},showModalDialog:(out,title)=>dialogs.push({src:out.src,title})};
+  const context=vm.createContext({SpreadsheetApp:{getUi:()=>ui,getActiveSpreadsheet:()=>book},
+    HtmlService:{createHtmlOutput(src){return {src,setWidth(){return this;},setHeight(){return this;}};}}});
+  vm.runInContext(readFileSync(new URL('../native/CompanyMenu.gs',import.meta.url),'utf8'),context);
+  context.onOpen();assert.equal(labels.length,2);
+  labels.forEach(([,fn])=>context[fn]());
+  assert.deepEqual(shown,[sheet,sheet]);
+  for(const [i,action] of ['email','mailing'].entries()){
+    const html=dialogs[i].src;assert.ok(html.includes('https://seainkk.github.io/-/?validate='+id+'&amp;action='+action+'&amp;project=neosender'));
+    assert.doesNotMatch(html,/example\.test|access_key/);
+  }
+});
+
 test('an uncertain create redoes marker lookup in the next invocation and blocks on a missing marker', () => {
-  for (const role of ['folder','lpr']) {
+  for (const role of ['folder','companies','lpr']) {
     const options = { failCreateRole: role }, f = fixture(options);
     const input = { name: 'Новый', requestId: 'pending_creation_' + role + '_12345' };
     assert.throws(() => f.context.createSegment(input), /SEGMENT_RECOVERY_REQUIRED/);

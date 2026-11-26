@@ -119,7 +119,7 @@ test('Google parent URL metadata is used rather than an iframe URL or query toke
 test('embedded status messages go only to the fixed entry origin without a credential', () => {
   const calls = [], outer = { postMessage: (data, origin) => calls.push({ data, origin }) };
   const context = vm.createContext({ window: { top: outer } });
-  vm.runInContext(source('notifyEntry') + ';notifyEntry("ready");notifyEntry("locked");', context);
+  vm.runInContext(['entryWindow','postEntryMessage','notifyEntry'].map(source).join('\n') + ';notifyEntry("ready");notifyEntry("locked");', context);
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     { data: { type: 'bases-registry-ready' }, origin: 'https://seainkk.github.io' },
     { data: { type: 'bases-registry-locked' }, origin: 'https://seainkk.github.io' },
@@ -130,7 +130,7 @@ test('embedded status messages go only to the fixed entry origin without a crede
 test('only bounded catalog titles and classifications can reach the authenticated Pages preview', () => {
   const sent=[];
   const context=vm.createContext({accessReady:false,window:{top:{postMessage:(data,origin)=>sent.push({data,origin})}}});
-  vm.runInContext(['catalogNames','normalizeContents','sendEntryCatalog','notifyEntry'].map(source).join('\n'),context);
+  vm.runInContext(['entryWindow','postEntryMessage','catalogNames','normalizeContents','sendEntryCatalog','notifyEntry'].map(source).join('\n'),context);
   const rows=[{name:' Тест ',contents:['lpr','private','companies'],id:'private-id',url:'private-url',contacts:['secret-email']}];
   const preview=context.catalogNames(rows,100);
   context.sendEntryCatalog(preview);
@@ -148,4 +148,30 @@ test('only bounded catalog titles and classifications can reach the authenticate
   assert.equal(context.catalogNames([{name:' '}],100),null);
   assert.equal(context.catalogNames(rows,NaN),null);
   assert.equal(context.catalogNames([{name:'x'.repeat(300)}],100).items[0].name.length,200);
+});
+
+test('the embedded Sheets dialog exchanges messages with its actual Pages ancestor and opens the authorized project', () => {
+  const origin='https://seainkk.github.io', outerOrigin='https://docs.google.com', wrapperOrigin='https://script.google.com';
+  const sent=[], opened=[], project={value:''};
+  const sheets={postMessage(){assert.fail('the outer sheet received a message');}};
+  const pages={parent:sheets,postMessage:(message,to)=>sent.push([message,to])};
+  const wrapper={parent:pages,postMessage(){assert.fail('the Google wrapper received a message');}};
+  const window={top:sheets,parent:wrapper,location:{ancestorOrigins:[wrapperOrigin,origin,outerOrigin]},RegistryGrid:{open:options=>opened.push(options)}};
+  const context=vm.createContext({window,projectNames:{numshield:'Намшилд',neosender:'Нео Сендер'},activeProjectId:'numshield',accessReady:false,
+    $:()=>project,importing:false,sourceSaving:false,segmentSaving:false,segmentEditor:null,coldySession:null,providerSession:null,coldyMailings:null,
+    workspaceRpc(){},armViewTimer(){},updateControls(){},switchProject(){context.activeProjectId=project.value;}});
+  vm.runInContext(['entryWindow','postEntryMessage','notifyEntry','sendEntryCatalog','receiveEntryMessage','openEntryWorkbook','openGridWorkbook'].map(source).join('\n'),context);
+  const message={type:'bases-registry-open-validation',id:'workbook_123456',projectId:'neosender',workbookAction:'mailing'};
+  const receive=(source,from,data=message)=>context.receiveEntryMessage({source,origin:from,data});
+  receive(pages,origin);assert.equal(opened.length,0);
+  context.accessReady=true;context.notifyEntry('ready');context.sendEntryCatalog({items:[{name:'Кухни'}],checkedAt:123});
+  assert.deepEqual(sent.map(([m,to])=>[m.type,to]),[['bases-registry-ready',origin],['bases-registry-catalog',origin]]);
+  for(const [source,from] of [[sheets,origin],[{},origin],[wrapper,origin],[pages,outerOrigin],[pages,'null']])receive(source,from);
+  receive(pages,origin,{...message,projectId:'unknown'});receive(pages,origin,{...message,workbookAction:'other'});
+  assert.equal(opened.length,0);assert.equal(context.activeProjectId,'numshield');
+  receive(pages,origin);assert.equal(project.value,'neosender');
+  assert.deepEqual([opened[0].id,opened[0].projectId,opened[0].workbookAction,opened[0].validateNew],['workbook_123456','neosender','mailing',false]);
+  receive(pages,origin,{type:message.type,id:message.id});assert.equal(opened[1].validateNew,true);
+  window.location.ancestorOrigins=[wrapperOrigin,'https://other.invalid',outerOrigin];
+  context.notifyEntry('ready');context.sendEntryCatalog(null);receive(pages,origin);assert.equal(sent.length,2);assert.equal(opened.length,2);
 });

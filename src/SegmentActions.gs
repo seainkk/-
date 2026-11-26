@@ -321,6 +321,23 @@ function segmentCreateFolder_(context, parent, name, journal) {
   return folderById_(folderId);
 }
 
+/** The template lives in the deployer's private Drive, outside of the team registry. */
+function segmentCompanyTemplate_() {
+  var templateId = REGISTRY_CONFIG.companyWorkbookTemplateId;
+  var options = {fields:'id,mimeType,ownedByMe,shared,trashed,properties,version', supportsAllDrives:true};
+  try {
+    var file = Drive.Files.get(templateId, options);
+    if (file.id === templateId && file.mimeType === REGISTRY_CONFIG.spreadsheetMime && file.ownedByMe === true &&
+        file.shared === false && file.trashed === false && file.version && file.properties &&
+        file.properties.outreachTemplate === 'company-email-menu-v1') {
+      var sheets = SpreadsheetApp.openById(templateId).getSheets();
+      if (sheets.length === 1 && sheets[0].getLastRow() === 0 &&
+          String(Drive.Files.get(templateId, {fields:'version',supportsAllDrives:true}).version) === String(file.version)) return templateId;
+    }
+  } catch (error) { /* Nothing has been copied and the same request may retry. */ }
+  fail_('COMPANY_TEMPLATE_UNAVAILABLE', 'Проверьте закрытый шаблон таблицы компаний и повторите добавление.');
+}
+
 /** The marker and parent are committed atomically by Drive with the artifact. */
 function segmentCreateArtifact_(context, parent, role, name, journal, lookupOnly) {
   var marker = journal.key.slice('SEGMENT_ACTION_'.length);
@@ -357,6 +374,7 @@ function segmentCreateArtifact_(context, parent, role, name, journal, lookupOnly
     return null;
   }
   if (journal.lookupMisses) delete journal.lookupMisses[lookupKey];
+  var template = role === 'companies' ? segmentCompanyTemplate_() : null;
   journal.value.stage = stage;
   journal.value.creating[role] = true;
   // A prior request can recover this receipt after Drive creates its folder
@@ -364,10 +382,18 @@ function segmentCreateArtifact_(context, parent, role, name, journal, lookupOnly
   if (role === 'folder' && typeof registryProjectId_ === 'function') journal.value.creationProjectId = registryProjectId_();
   segmentSaveJournal_(context, journal);
   var created;
+  var metadata = {name:name, parents:[parent.getId()], appProperties:{registrySegmentAction:marker, registrySegmentRole:role, registrySegmentFingerprint:journal.value.fingerprint}};
   try {
-    created = Drive.Files.create({ name: name, mimeType: mimeType, parents: [parent.getId()], appProperties: { registrySegmentAction: marker, registrySegmentRole: role, registrySegmentFingerprint: journal.value.fingerprint } }, null, { fields: 'id', supportsAllDrives: true });
+    if (template) {
+      // A working copy must never be discovered as a template by the provisioning script.
+      metadata.properties = {outreachTemplate:'company-email-workbook-v1', outreachMenuProject:null};
+      created = Drive.Files.copy(metadata, template, {fields:'id',supportsAllDrives:true});
+    } else {
+      metadata.mimeType = mimeType;
+      created = Drive.Files.create(metadata, null, {fields:'id',supportsAllDrives:true});
+    }
   } catch (error) { segmentRecovery_(parent, 'Google не подтвердил создание ' + (role === 'folder' ? 'сегмента' : 'вложенной таблицы') + '.'); }
-  if (!created || typeof created.id !== 'string') segmentRecovery_(parent, 'Google не вернул идентификатор созданного объекта.');
+  if (!created || typeof created.id !== 'string' || created.id === template) segmentRecovery_(parent, 'Google не вернул идентификатор созданного объекта.');
   return id_(created.id);
 }
 

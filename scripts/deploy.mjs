@@ -53,7 +53,7 @@ async function defaultInvoker(args, { cwd, packageDir = cwd, env }) {
 // Index contains literal includes only. Never evaluate server code or accept a path from a scriptlet.
 export async function buildRegistryShell(sourceDirectory) {
   const template = await readFile(path.join(sourceDirectory, 'Index.html'), 'utf8');
-  const allowed = new Set(['Styles','GridStyles','ProjectStyles','GridPanel','ProjectPanel','GridClient','ProjectClient','SegmentCardPanel','SegmentCardClient', 'SegmentSelectionsClient','Client']);
+  const allowed = new Set(['Styles','GridStyles','ProjectStyles','GridPanel','ProjectPanel','WorkbookMailingClient','GridClient','ProjectClient','SegmentCardPanel','SegmentCardClient', 'SegmentSelectionsClient','Client']);
   const directive = /<\?[\s\S]*?(?:\?>|$)/g;
   const names = new Map();
   for (const [text] of template.matchAll(directive)) {
