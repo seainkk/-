@@ -9,6 +9,7 @@ from project_client import integrated_html
 FIXTURE = """
 gridBackend.contactsEnabled=true;
 gridServerEdit(1,1,5,'Статус');gridServerEdit(1,2,5,'Новый контакт');
+gridBackend.sheets[2].name='Телеграм';gridServerEdit(2,1,4,'Статус');gridServerEdit(2,2,4,'Новый контакт');
 const readyCampaign='11111111-1111-4111-8111-111111111112';
 const readySegment='segment-email-test';
 const readyCalls=window.readyCalls=[];
@@ -18,6 +19,7 @@ for(const method of ['getGridWorkbook','getGridRange','getContactWorkspace','get
     const value=await fakeGridRpc(method,p);
     if(method==='getGridWorkbook'&&p.id==='source-companies'){
       value.companyEmailSegment=readySegment;value.companyEmailSheetId=1;
+      value.companyTelegramSheetId=2;value.companyTelegramStatuses=['Новый контакт','Готов','Записная книжка','Не активен > 30 дней','Ручная проверка','Невалид'];
       value.companyEmailStatuses=['Новый контакт','Готов','Рассылка','Фильтр','Невалид'];
     }
     if(method==='getContactWorkspace'&&p.id==='source-companies'){
@@ -34,15 +36,16 @@ api.previewColdyWorkbookUpload=observed('previewColdyWorkbookUpload',p=>({
 }));
 const makeJob=(p,state)=>({state,segmentId:readySegment,bindingId:'workbook-binding-for-test',jobId:'workbook-job-for-tests',
   requestId:p.requestId,counts:{created:state==='complete'?2:0},progress:{completed:state==='complete'?2:0,total:2,label:state==='complete'?'Загрузка завершена':'Загружаем'},warnings:[]});
-let interruptNextStart=false;
+window.interruptNextStart=false;
 api.startColdyWorkbookUpload=observed('startColdyWorkbookUpload',p=>{
-  if(interruptNextStart){interruptNextStart=false;throw new Error('Связь прервана');}
+  if(window.interruptNextStart){window.interruptNextStart=false;throw new Error('Связь прервана');}
   return makeJob(p,'processing');
 });
 api.continueColdyUpload=observed('continueColdyUpload',p=>makeJob(p,'complete'));
 api.previewPromouserValidation=observed('previewPromouserValidation',()=>({kind:'email',canStart:true,plannedCount:2,
   previewToken:'synthetic-promo-preview',fingerprint:'synthetic-promo-fingerprint',counts:{new:2},autoPayLimitUsd:5}));
 api.startPromouserValidation=observed('startPromouserValidation',()=>({state:'complete',configured:true,enabled:true,counts:{checked:2},jobs:[]}));
+api.exportCompanyTelegramCsv=observed('exportCompanyTelegramCsv',p=>({state:'ready',count:1,withoutPhone:p.mode==='ready'?1:0,message:'Строк в CSV: 1',filename:'numshield-'+p.mode+'.csv',csv:'\uFEFF"Username","Телефон"'}));
 """
 
 
@@ -116,6 +119,29 @@ def main():
         page.locator('#rg-grid-validation-close').click()
         assert not page.evaluate("readyCalls.some(c=>c.method==='startPromouserValidation')")
 
+        page.locator('#rg-grid-tabs [data-sheet-id="2"]').click()
+        page.locator('#rg-cell-2-4').click()
+        assert 'Записная книжка' in status.locator('option').all_text_contents()
+        expect(button).to_be_hidden()
+        page.locator('#rg-grid-telegram-check').click()
+        expect(page.locator('#rg-grid-validation-title')).to_have_text('Проверка новых телефонов')
+        expect(page.locator('#rg-grid-bulk-start')).to_be_enabled()
+        assert page.evaluate("readyCalls.filter(c=>c.method==='previewPromouserValidation').at(-1).p.kind")=='telegram'
+        page.locator('#rg-grid-bulk-start').click()
+        page.wait_for_function("readyCalls.some(c=>c.method==='startPromouserValidation' && c.p.kind==='telegram')")
+        page.locator('#rg-grid-validation-close').click()
+        for control, mode in [('ready','ready'),('book','addressBook')]:
+            page.locator('#rg-grid-telegram-'+control).click()
+            link = page.locator('#rg-grid-telegram-download')
+            expect(link).to_be_visible()
+            with page.expect_download() as info:
+                link.click()
+            assert info.value.suggested_filename=='numshield-'+mode+'.csv'
+            assert info.value.path().read_bytes().startswith(bytes.fromhex('efbbbf'))
+            assert page.evaluate("readyCalls.filter(c=>c.method==='exportCompanyTelegramCsv').at(-1).p")=={'id':'source-companies','sheetId':2,'mode':mode}
+            page.locator('#rg-grid-back').click()
+            expect(link).to_be_hidden()
+
         page.locator('#rg-grid-close').click()
         page.locator('[data-source-id="source-mixed"] h2 button').click()
         page.locator('#rg-grid-tabs [data-sheet-id="1"]').click()
@@ -124,7 +150,7 @@ def main():
         expect(panel).to_be_hidden()
         assert not errors, errors
         browser.close()
-        print('PASS: company Email actions, preview, active consent, continuation, cancellation and workbook scope.')
+        print('PASS: company Email and Telegram actions, validation scope, confirmed mailing retries and both CSV downloads.')
 
 
 if __name__ == '__main__':

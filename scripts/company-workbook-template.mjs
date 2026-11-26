@@ -54,6 +54,7 @@ try {
   await auth.request({ method:'PUT', url:projectUrl + '/content', data:{ files } });
   const published = await auth.request({ url:projectUrl + '/content' });
   if (!published.data.files.some(f => f.name === 'CompanyMenu' && f.source === menu)) throw Error('Не удалось сверить код меню.');
+  await auth.request({method:'PATCH', url:drive + '/' + encodeURIComponent(file.id), data:{properties:{outreachMenuVersion:'2'}}});
   console.log('Готов закрытый шаблон: ' + file.id);
 } catch (error) {
   // OAuth errors may contain credentials in their request configuration.

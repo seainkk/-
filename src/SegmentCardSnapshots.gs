@@ -1,6 +1,6 @@
 /** A team's rebuildable read model. Sheets and provider journals remain authoritative. */
 var SEGMENT_CARD_SNAPSHOT = Object.freeze({
-  schema:2, pageSize:60, compactSize:12, dashboardLimit:8, cacheSeconds:21600, maxAge:24 * 3600000,
+  schema:3, pageSize:60, compactSize:12, dashboardLimit:8, cacheSeconds:21600, maxAge:24 * 3600000,
   dashboardChars:400000, cacheChars:95000
 });
 

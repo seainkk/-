@@ -20,6 +20,12 @@
   function hasPending(){return !!session&&(!!session.inFlight||!!session.failed||session.queue.length>0||session.dirty.size>0||dirtyEditor()||session.contactBusy||session.validationBusy);}
   function notify(current=session){if(!alive(current))return;update();try{window.dispatchEvent(new CustomEvent('registry-grid-state',{detail:{open:true,pending:hasPending()}}));}catch(ignored){}}
   function hint(text){$('rg-grid-hint').textContent=text||'';}
+  function workflowStatuses(current){
+    const book=current?.book;
+    if(!book)return null;
+    if(current.sheetId===book.companyTelegramSheetId)return book.companyTelegramStatuses;
+    return current.sheetId===book.companyEmailSheetId?book.companyEmailStatuses:null;
+  }
   function rpc(current,method,payload,canDispatch){const next=current.rpcTail.catch(()=>{}).then(()=>{if(!alive(current))throw new Error('[GRID_CLOSED] Таблица закрыта.');if(canDispatch&&!canDispatch())return null;if(method!=='getGridRange')current.sheetPreviews.clear();return current.transport(method,payload,canDispatch);});current.rpcTail=next.then(()=>{},()=>{});return next;}
   function effective(row,column,current=session){const id=key(row,column),draft=current?.dirty.get(id),cell=current?.cache.get(id);return draft?draft.value:cell?.input??'';}
   function cellDisplay(row,column,current=session){const draft=current?.dirty.get(key(row,column));return draft?draft.value:current?.cache.get(key(row,column))?.display??current?.preview?.values[row-1]?.[column-1]??'';}
@@ -38,16 +44,21 @@
     $('rg-grid-new-contacts').disabled=readonly||current.contactBusy||current.validationBusy||current.bulk?.preparing||current.transition||!current.book||current.workspace?.canSync===false;
     $('rg-grid-new-contacts').textContent=current.contactBusy?'Распределяем…':'Распределить контакты';
     $('rg-grid-bulk-open').disabled=readonly||current.contactBusy||current.validationBusy||current.bulk?.preparing||current.validationOpening||current.transition;
-    const statuses=current.book?.companyEmailStatuses, statusSelect=$('rg-grid-workflow-status');
-    const statusCell=Array.isArray(statuses)&&current.sheetId===current.book.companyEmailSheetId&&current.active?.row>1&&effective(1,current.active.column,current)==='Статус';
+    const statuses=workflowStatuses(current), statusSelect=$('rg-grid-workflow-status');
+    const statusCell=!!statuses&&current.active?.row>1&&effective(1,current.active.column,current)==='Статус';
     $('rg-grid-workflow-label').hidden=!statusCell;
     if(statusCell){
-      if(!statusSelect.options.length)statusSelect.replaceChildren(...statuses.map(value=>new Option(value,value)));
+      const choices=statuses.join('|');
+      if(statusSelect.dataset.choices!==choices){statusSelect.replaceChildren(...statuses.map(value=>new Option(value,value)));statusSelect.dataset.choices=choices;}
       statusSelect.value=effective(current.active.row,current.active.column,current);statusSelect.disabled=readonly||current.transition;
     }
-    const companyEmail=!!current.book?.companyEmailSegment;
+    const telegramTab=current.book?.companyTelegramSheetId!=null&&current.book.companyTelegramSheetId===current.sheetId;
+    const companyEmail=!!current.book?.companyEmailSegment&&!telegramTab;
     $('rg-grid-email-check').hidden=!companyEmail;$('rg-grid-mail-open').hidden=!companyEmail;
-    $('rg-grid-bulk-open').hidden=companyEmail;
+    $('rg-grid-bulk-open').hidden=companyEmail||telegramTab;
+    for(const id of ['rg-grid-telegram-check','rg-grid-telegram-ready','rg-grid-telegram-book']){
+      $(id).hidden=!telegramTab;$(id).disabled= id==='rg-grid-telegram-check'?$('rg-grid-bulk-open').disabled:current.transition||!!current.preview;
+    }
     $('rg-grid-email-check').disabled=$('rg-grid-bulk-open').disabled;
     $('rg-grid-mail-open').disabled=$('rg-grid-bulk-open').disabled;
     $('rg-grid-contact-retry').disabled=current.contactBusy;
@@ -205,6 +216,7 @@
     $('rg-grid-service-settings').disabled=!!current.validationOpening||hasPending();$('rg-grid-provider-save').disabled=current.validationBusy||current.contactBusy;update();$('rg-grid-provider-balance').disabled=current.validationBusy||current.contactBusy||!current.providerSettings?.configured;renderColdyValidation(current);
   }
   async function openValidation(){
+    closeTelegramExport();
     window.RegistryWorkbookMailing?.hide();
     $('rg-grid-validation-title').textContent='Проверка новых контактов';
     const current=session;if(!current||current.validationBusy||current.contactBusy||current.bulk?.preparing)return;
@@ -303,8 +315,9 @@
     box.hidden=!batch;
     const counts=$('rg-grid-bulk-counts');counts.replaceChildren();
     if(!batch)return;
-    $('rg-grid-validation-title').textContent=batch.emailOnly?'Проверка новых email':'Проверка новых контактов';
-    $('rg-grid-bulk-note').textContent=batch.emailOnly?'Promouser проверит email со статусом «Новый контакт». Сохранённые результаты будут применены к этим адресам.':'В проверку входят Email и телефоны со статусом «Новый контакт» без завершённой валидации.';
+    const telegram=batch.channel==='telegram',email=batch.channel==='email';
+    $('rg-grid-validation-title').textContent=telegram?'Проверка новых телефонов':email?'Проверка новых email':'Проверка новых контактов';
+    $('rg-grid-bulk-note').textContent=telegram?'Promouser проверит российские мобильные со статусом «Новый контакт». Для ников нужна ручная проверка.':email?'Promouser проверит email со статусом «Новый контакт». Сохранённые результаты будут применены к этим адресам.':'В проверку входят Email и телефоны со статусом «Новый контакт» без завершённой валидации.';
     const pending=batch.items.filter(item=>item.payload&&!item.done);
     const ready=batch.items.filter(item=>!item.done&&!item.stale&&item.preview?.canStart);
     const locked=batch.preparing||current.validationBusy||current.contactBusy;
@@ -337,15 +350,16 @@
     start.disabled=locked||batch.previewError||(!pending.length&&(!ready.length||coldy&&!$('rg-grid-bulk-credit').checked));
     $('rg-grid-bulk-refresh').hidden=locked||!!pending.length;
   }
-  async function openBulkValidation(emailOnly=false){
+  async function openBulkValidation(channel=null){
     const current=session;
     if(!alive(current)||current.book?.canEdit!==true||current.contactBusy||current.validationBusy||current.validationOpening||current.transition||current.bulk?.preparing)return;
     $('rg-grid-validation').hidden=false;
     if(current.bulk?.items.some(item=>item.payload&&!item.done)){renderValidation(current);return;}
     if([current.coldyStep,current.pvEmailStep,current.phoneStep].some(Boolean)){await openValidation();return;}
-    emailOnly=emailOnly===true&&!!current.book?.companyEmailSegment;
+    if(channel==='telegram'&&current.book.companyTelegramSheetId==null||channel==='email'&&!current.book.companyEmailSegment)return;
     window.RegistryWorkbookMailing?.hide();
-    const batch={emailOnly,items:[],preparing:true,message:'Готовим список новых контактов…'};
+    closeTelegramExport();
+    const batch={channel,items:[],preparing:true,message:'Готовим список новых контактов…'};
     current.bulk=batch;current.lastValidationPreview=null;
     const opening=++current.validationOpenEpoch;
     const visible=()=>alive(current)&&current.bulk===batch&&current.validationOpenEpoch===opening&&!$('rg-grid-validation').hidden;
@@ -353,9 +367,10 @@
     try{
       await flush(current);
       const emailItem={label:'Email · Promouser',kind:'email',previewMethod:'previewPromouserValidation',startMethod:'startPromouserValidation'};
-      if(emailOnly){
-        current.validationBusy=true;batch.items=[emailItem];
-        emailItem.preview=await rpc(current,emailItem.previewMethod,{id:current.id,kind:'email',newContactsOnly:true,provider:'promouser'},visible);
+      if(channel){
+        const item=channel==='email'?emailItem:{...emailItem,kind:'telegram',label:'Телефоны · Promouser'};
+        current.validationBusy=true;batch.items=[item];
+        item.preview=await rpc(current,item.previewMethod,{id:current.id,kind:channel,newContactsOnly:true,provider:'promouser'},visible);
         if(visible())batch.message='';
         return;
       }
@@ -401,7 +416,7 @@
       if(!eligible.length||eligible.some(item=>item.kind==='coldy')&&!$('rg-grid-bulk-credit').checked)return;
       for(const item of eligible){
         item.payload={id:current.id,previewToken:item.preview.previewToken,requestId:requestId()};
-        if(item.kind==='email')item.payload.kind='email';
+        if(item.kind==='email'||item.kind==='telegram')item.payload.kind=item.kind;
         if(item.kind==='coldy')item.payload.acceptValidationCredits=true;
         pending.push(item);
       }
@@ -495,6 +510,7 @@
   async function switchSheet(id){
     const current=session;
     if(!current||current.transition&&!current.switchingSheet||String(id)===String(current.sheetId))return;
+    closeTelegramExport();
     commitEditor();if(current.formulaDirty)commitFormula();
     const turn=++current.sheetChange,latest=()=>alive(current)&&current.sheetChange===turn;
     current.switchingSheet=false;current.transition=true;notify(current);
@@ -522,6 +538,7 @@
   async function close(){const current=session;if(!current)return;if(current.contactBusy||current.validationBusy||current.transition&&hasPending()){current.closeAfterOperation=true;hint('Таблица закроется после ответа на отправленный запрос.');return;}try{commitEditor();if(current.formulaDirty)commitFormula();if(!hasPending()){lock(false);return;}await flush(current);if(alive(current))lock(false);}catch(error){if(alive(current))hint('Есть несохранённые правки. Повторите сохранение или явно отмените их перед выходом.');}}
   function back(){
     const current=session;if(!current)return;
+    if(closeTelegramExport(true))return;
     if(window.RegistryWorkbookMailing?.hide())return;
     if(!$('rg-grid-validation').hidden){
       if($('rg-grid-provider-settings').open){$('rg-grid-provider-settings').open=false;$('rg-grid-provider-key').value='';return;}
@@ -535,7 +552,7 @@
     }
     close();
   }
-  function lock(locked=true){window.RegistryWorkbookMailing?.reset();const current=session;if(!current)return;current.sheetPreviews?.clear();current.preview=null;generation++;session=null;clearTimeout(current.saveTimer);clearTimeout(current.scrollTimer);clearTimeout(current.contactTimer);clearTimeout(current.validationTimer);clearTimeout(current.coldyValidationTimer);$('rg-grid-coldy-credit-consent').checked=false;for(const id of ['rg-grid-coldy-counts','rg-grid-coldy-sample','rg-grid-coldy-jobs','rg-grid-phone-counts','rg-grid-phone-sample','rg-grid-pv-email-counts','rg-grid-pv-email-sample'])$(id).replaceChildren();$('rg-grid-coldy-message').textContent='';$('rg-grid-phone-message').textContent='';$('rg-grid-provider-key').value='';$('rg-grid-provider-form').inert=false;$('rg-grid-provider-message').textContent='';$('rg-grid-provider-configured').textContent='';$('rg-grid-validation').hidden=true;$('rg-grid-contact-progress').hidden=true;$('rg-grid-validation-jobs').replaceChildren();for(const item of current.waiters.splice(0))item.reject(new Error('[GRID_CLOSED] Таблица закрыта.'));current.queue=[];current.failed=null;current.dirty.clear();current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];panel.hidden=true;$('rg-grid-body').replaceChildren();$('rg-grid-head').replaceChildren();$('rg-grid-colgroup').replaceChildren();$('rg-grid-tabs').replaceChildren();$('rg-grid-title').textContent='Таблица';$('rg-grid-native').removeAttribute('href');$('rg-grid-formula').value='';$('rg-grid-editor').value='';$('rg-grid-editor').hidden=true;$('rg-grid-error-text').textContent='';$('rg-grid-error').hidden=true;hint('');document.body.style.overflow=current.bodyOverflow;try{current.onClose?.({locked});}catch(ignored){}try{if(current.returnFocus?.isConnected&&!current.returnFocus.disabled)current.returnFocus.focus({preventScroll:true});}catch(ignored){}try{window.dispatchEvent(new CustomEvent('registry-grid-state',{detail:{open:false,pending:false}}));}catch(ignored){}}
+  function lock(locked=true){closeTelegramExport();window.RegistryWorkbookMailing?.reset();const current=session;if(!current)return;current.sheetPreviews?.clear();current.preview=null;generation++;session=null;clearTimeout(current.saveTimer);clearTimeout(current.scrollTimer);clearTimeout(current.contactTimer);clearTimeout(current.validationTimer);clearTimeout(current.coldyValidationTimer);$('rg-grid-coldy-credit-consent').checked=false;for(const id of ['rg-grid-coldy-counts','rg-grid-coldy-sample','rg-grid-coldy-jobs','rg-grid-phone-counts','rg-grid-phone-sample','rg-grid-pv-email-counts','rg-grid-pv-email-sample'])$(id).replaceChildren();$('rg-grid-coldy-message').textContent='';$('rg-grid-phone-message').textContent='';$('rg-grid-provider-key').value='';$('rg-grid-provider-form').inert=false;$('rg-grid-provider-message').textContent='';$('rg-grid-provider-configured').textContent='';$('rg-grid-validation').hidden=true;$('rg-grid-contact-progress').hidden=true;$('rg-grid-validation-jobs').replaceChildren();for(const item of current.waiters.splice(0))item.reject(new Error('[GRID_CLOSED] Таблица закрыта.'));current.queue=[];current.failed=null;current.dirty.clear();current.cache.clear();current.committed.clear();current.undo=[];current.redo=[];panel.hidden=true;$('rg-grid-body').replaceChildren();$('rg-grid-head').replaceChildren();$('rg-grid-colgroup').replaceChildren();$('rg-grid-tabs').replaceChildren();$('rg-grid-title').textContent='Таблица';$('rg-grid-native').removeAttribute('href');$('rg-grid-formula').value='';$('rg-grid-editor').value='';$('rg-grid-editor').hidden=true;$('rg-grid-error-text').textContent='';$('rg-grid-error').hidden=true;hint('');document.body.style.overflow=current.bodyOverflow;try{current.onClose?.({locked});}catch(ignored){}try{if(current.returnFocus?.isConnected&&!current.returnFocus.disabled)current.returnFocus.focus({preventScroll:true});}catch(ignored){}try{window.dispatchEvent(new CustomEvent('registry-grid-state',{detail:{open:false,pending:false}}));}catch(ignored){}}
   async function open(options={}){
     if(!panel)throw new Error('Редактор таблиц недоступен. Обновите страницу.');if(session){if(hasPending())return false;lock(false);}if(typeof options.transport!=='function'||!options.id)throw new Error('Не указана таблица для открытия.');
     const current={epoch:++generation,id:String(options.id),transport:options.transport,onClose:options.onClose,bodyOverflow:document.body.style.overflow,returnFocus:document.activeElement,book:null,sheetId:null,cache:new Map(),committed:new Map(),dirty:new Map(),queue:[],failed:null,inFlight:null,error:null,waiters:[],rpcTail:Promise.resolve(),active:{row:1,column:1},selection:{r1:1,c1:1,r2:1,c2:1},window:{row:1,column:1},loadSequence:0,editSequence:0,undo:[],redo:[],loading:true,transition:false,formulaFocused:false,formulaDirty:false,workspace:null,workspaceLoaded:false,contactBusy:false,contactFailed:false,contactDirty:false,contactStep:null,contactTimer:null,validation:null,validationTimer:null,validationBusy:false,validationOpenEpoch:0,payRequests:new Map(),coldyValidation:null,coldyValidationTimer:null,coldyPreview:null,coldyStep:null,coldyFailed:false,phonePreview:null,phoneStep:null,phoneFailed:false,pvEmailPreview:null,pvEmailStep:null,pvEmailFailed:false};session=current;panel.hidden=false;document.body.style.overflow='hidden';$('rg-grid-title').textContent='Открываем таблицу…';$('rg-grid-editor').hidden=true;hint('Двойной щелчок или F2 — изменить ячейку. Enter — подтвердить, Esc — отменить ввод.');notify(current);
@@ -552,10 +569,21 @@
       if(alive(current)&&data?.initialRange&&String(data.initialRange.sheetId)===String(current.sheetId)){
         mergeRange(current,data.initialRange);current.loading=false;draw();$('rg-grid-viewport').focus({preventScroll:true});
       }else if(alive(current))await loadWindow(1,1,{focus:true});
-      if(alive(current)&&data?.canEdit===true&&data.needsMailingStatus===true&&options.validateNew!==true)prepareGridMailingStatus(current);
+      const telegramAction=['telegram','telegramReady','telegramAddressBook'].includes(options.workbookAction);
+      if(alive(current)&&data?.canEdit===true&&data.needsMailingStatus===true){
+        if(telegramAction)await prepareGridMailingStatus(current);
+        else if(!options.validateNew&&!options.workbookAction)void prepareGridMailingStatus(current);
+      }
       if(alive(current)&&data?.canEdit===true){
-        if(options.workbookAction==='mailing'&&data.companyEmailSegment)openWorkbookMailing();
-        else if(options.workbookAction==='email'&&data.companyEmailSegment)await openBulkValidation(true);
+        const action=options.workbookAction;
+        if(telegramAction){
+          if(current.book.companyTelegramSheetId==null){hint('Для действий Telegram откройте лист «Телеграм» рабочей книги компаний и распределите контакты.');return true;}
+          await switchSheet(current.book.companyTelegramSheetId);
+          if(!alive(current))return false;
+          if(action==='telegram')await openBulkValidation('telegram');
+          else await openTelegramExport(action==='telegramReady'?'ready':'addressBook');
+        }else if(action==='mailing'&&data.companyEmailSegment)openWorkbookMailing();
+        else if(action==='email'&&data.companyEmailSegment)await openBulkValidation('email');
         else if(options.validateNew===true)await openBulkValidation();
       }
       return alive(current);
@@ -573,7 +601,7 @@
         $('rg-grid-coldy-credit-consent').checked=false;
         const opening=current.validationOpenEpoch;
         void Promise.resolve(pendingWrite).then(()=>{
-          if(validationVisible(current)&&current.validationOpenEpoch===opening&&!hasPending())return current.bulk?openBulkValidation(current.bulk.emailOnly):openValidation();
+          if(validationVisible(current)&&current.validationOpenEpoch===opening&&!hasPending())return current.bulk?openBulkValidation(current.bulk.channel):openValidation();
         }).finally(()=>{
           if(validationVisible(current)&&document.activeElement===document.body)$('rg-grid-service-settings').focus();
         });
@@ -582,9 +610,49 @@
     if(current.openSettings(resume)){current.settingsShown=true;scheduleValidationPoll(current);scheduleColdyValidationPoll(current);}
   });
   document.addEventListener('visibilitychange',()=>{if(session){scheduleValidationPoll(session);scheduleColdyValidationPoll(session);}});
+  function closeTelegramExport(restoreFocus=false){
+    const current=session,box=$('rg-grid-telegram-export');
+    if(!box||box.hidden)return false;
+    const file=$('rg-grid-telegram-download');
+    if(current?.telegramExport?.url)URL.revokeObjectURL(current.telegramExport.url);
+    const opener=current?.telegramExport?.opener;
+    if(current)current.telegramExport=null;
+    file.hidden=true;file.removeAttribute('href');file.removeAttribute('download');
+    $('rg-grid-telegram-summary').textContent='';box.hidden=true;
+    if(restoreFocus&&opener&&!opener.hidden)opener.focus();
+    return true;
+  }
+  async function openTelegramExport(mode){
+    const current=session,sheetId=current?.book?.companyTelegramSheetId;
+    if(!alive(current)||sheetId==null||current.sheetId!==sheetId||current.transition)return;
+    closeTelegramExport();window.RegistryWorkbookMailing?.hide();
+    if(!$('rg-grid-validation').hidden)$('rg-grid-validation-close').click();
+    const ready=mode==='ready',request={opener:$(ready?'rg-grid-telegram-ready':'rg-grid-telegram-book')};
+    current.telegramExport=request;
+    const valid=()=>alive(current)&&current.telegramExport===request&&current.sheetId===sheetId;
+    const message=$('rg-grid-telegram-summary');
+    $('rg-grid-telegram-export').hidden=false;
+    $('rg-grid-telegram-title').textContent=ready?'Готовые контакты для рассылки':'Телефоны для записной книжки';
+    message.textContent='Готовим CSV для Numshield…';$('rg-grid-telegram-close').focus({preventScroll:true});
+    try{
+      await flush(current);if(!valid())return;
+      const result=await rpc(current,'exportCompanyTelegramCsv',{id:current.id,sheetId,mode},valid);
+      if(!valid())return;
+      const notes=[result.message];
+      for(const [key,label] of [['duplicates','Объединено повторов'],['skippedNoUsername','Пропущено без юзернейма'],['skippedNoPhone','Пропущено без мобильного РФ'],['withoutPhone','Юзернеймов без телефона в файле'],['excluded','Пропущено по другим причинам']]){
+        if(result[key]>0)notes.push(label+' — '+result[key]);
+      }
+      message.textContent=notes.filter(Boolean).join(' · ');
+      if(result.state==='ready'&&result.csv&&result.filename){
+        const link=$('rg-grid-telegram-download');request.url=URL.createObjectURL(new Blob([result.csv],{type:'text/csv;charset=utf-8'}));
+        link.href=request.url;link.download=result.filename;link.hidden=false;link.focus({preventScroll:true});
+      }
+    }catch(error){if(valid())message.textContent=gridFailure(error).message;}
+  }
   function openWorkbookMailing(){
     const current=session;
     if(!alive(current)||!current.book?.companyEmailSegment||!current.book.canEdit||current.contactBusy||current.validationBusy)return;
+    closeTelegramExport();
     if(!$('rg-grid-validation').hidden)$('rg-grid-validation-close').click();
     window.RegistryWorkbookMailing?.open({id:current.id,segmentId:current.book.companyEmailSegment,
       requestId, valid:()=>alive(current), call:(method,payload,guard)=>rpc(current,method,payload,guard), flush:()=>flush(current),
@@ -592,13 +660,17 @@
   }
   $('rg-grid-workflow-status').addEventListener('change',()=>{
     const current=session,value=$('rg-grid-workflow-status').value;
-    if(!alive(current)||!editAllowed()||$('rg-grid-workflow-label').hidden||!current.book.companyEmailStatuses?.includes(value))return;
+    if(!alive(current)||!editAllowed()||$('rg-grid-workflow-label').hidden||!workflowStatuses(current)?.includes(value))return;
     queueRange(current.active.row,current.active.column,[[value]]);
   });
   $('rg-grid-mail-open').addEventListener('click',openWorkbookMailing);
-  $('rg-grid-email-check').addEventListener('click',()=>openBulkValidation(true));
+  $('rg-grid-email-check').addEventListener('click',()=>openBulkValidation('email'));
+  $('rg-grid-telegram-check').addEventListener('click',()=>openBulkValidation('telegram'));
+  $('rg-grid-telegram-ready').addEventListener('click',()=>openTelegramExport('ready'));
+  $('rg-grid-telegram-book').addEventListener('click',()=>openTelegramExport('addressBook'));
+  $('rg-grid-telegram-close').addEventListener('click',()=>closeTelegramExport(true));
   $('rg-grid-bulk-open').addEventListener('click',()=>openBulkValidation());
-  $('rg-grid-bulk-refresh').addEventListener('click',()=>openBulkValidation(session?.bulk?.emailOnly));
+  $('rg-grid-bulk-refresh').addEventListener('click',()=>openBulkValidation(session?.bulk?.channel));
   $('rg-grid-bulk-credit').addEventListener('change',()=>{if(session)renderBulkValidation(session);});
   $('rg-grid-bulk-start').addEventListener('click',startBulkValidation);
   for(const [id,kind] of [['rg-grid-pv-email-preview','pvEmail'],['rg-grid-phone-preview','phone'],['rg-grid-coldy-preview','coldy']]){

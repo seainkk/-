@@ -37,6 +37,36 @@ var COMPANY_EMAIL_STATUS = Object.freeze({
   values: ['Новый контакт', 'Готов', 'Рассылка', 'Фильтр', 'Невалид']
 });
 
+var COMPANY_TELEGRAM_STATUS = Object.freeze({
+  values: ['Новый контакт', 'Готов', 'Записная книжка', 'Не активен > 30 дней', 'Ручная проверка', 'Невалид']
+});
+
+/** DEF 940 belongs to Abkhazia within the shared +7 numbering plan. */
+function companyTelegramAbkhazMobile_(compact) {
+  return /^(?:\+?7|8)?940\d{7}$/.test(compact);
+}
+
+function companyTelegramRussianMobile_(value) {
+  var compact = String(value == null ? '' : value).trim().replace(/[()\s.-]/g, '');
+  if (!/^(?:\+?7|8)?9\d{9}$/.test(compact) || companyTelegramAbkhazMobile_(compact)) return '';
+  return '+7' + compact.slice(-10);
+}
+
+function companyTelegramWorkflowHeaders_(headers) {
+  return CONTACT_MAILING_STATUS.headers.some(function (name) { return headers.indexOf(name) >= 0; }) &&
+    ['Контакт', 'Тип контакта', 'ID компании', 'Валидация', 'ID_TG', 'Nickname_TG', 'Active_days_ago'].every(function (name) { return headers.indexOf(name) >= 0; });
+}
+
+function companyTelegramWorkflowStatus_(value) {
+  var original = String(value == null ? '' : value).trim(), lower = original.toLowerCase();
+  if (!lower || contactMailingStatusIsNew_(lower)) return CONTACT_MAILING_STATUS.initial;
+  return COMPANY_TELEGRAM_STATUS.values.filter(function (item) { return item.toLowerCase() === lower; })[0] || original;
+}
+
+function companyTelegramStatusDropdown_(range, preserve, mask) {
+  return contactMailingStatusDropdown_(range, preserve, mask, 'telegram');
+}
+
 function companyEmailWorkflowHeaders_(headers) {
   return ['ID компании', 'Почт на компанию', 'Email', 'Статус', 'Результат валидации'].every(function (name) { return headers.indexOf(name) >= 0; });
 }
@@ -86,7 +116,7 @@ function contactMailingStatusFromHistory_(history) {
 
 function contactMailingStatusDropdown_(range, preserve, mask, companyEmail) {
   if (typeof SpreadsheetApp.newDataValidation !== 'function') return;
-  var allowed = companyEmail ? COMPANY_EMAIL_STATUS.values : CONTACT_MAILING_STATUS.values;
+  var allowed = companyEmail === 'telegram' ? COMPANY_TELEGRAM_STATUS.values : companyEmail ? COMPANY_EMAIL_STATUS.values : CONTACT_MAILING_STATUS.values;
   var rule = SpreadsheetApp.newDataValidation().requireValueInList(allowed, true).setAllowInvalid(false).build();
   if (!preserve) { range.setDataValidation(rule); return; }
   var rules = range.getDataValidations(), values = range.getDisplayValues(), formulas = range.getFormulas(), changed = false;

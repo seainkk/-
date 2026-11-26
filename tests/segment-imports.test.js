@@ -377,6 +377,15 @@ test('imports preserve external company IDs as text and append email to the same
   assert.equal(rows.length, 2); assert.equal(rows[1][0], '00123'); assert.equal(rows[1][4], 'one@example.test; two@example.test');
 });
 
+test('registered company imports report unique foreign phones before and after confirmation, and keep them in the company source fields', () => {
+  const f = fixture({rows: [['ID', 'Компания','Телефон','Telegram'], ['001','Пример','+7 (701) 123-45-67; +44 7700 900123; +79991234567; +78121234567','@test_account'], ['002','Ещё','+447700900123','']]});
+  const preview = f.context.previewSegmentRecords_({segmentId: SEGMENT, sourceIds:[SOURCE],targetKind:'companies'});
+  assert.equal(preview.counts.telegramForeignPhonesSkipped,2); assert.ok(preview.warnings.some(w=>/иностранные номера: 2/.test(w)));
+  const result=f.finish(f.start(preview,'company-foreign-phones'));
+  assert.equal(result.counts.telegramForeignPhonesSkipped,2);
+  assert.match(f.master('companies').state.rows[1][f.master('companies').state.rows[0].indexOf('Телефон')], /447700900123/);
+});
+
 test('new company workbooks separate mobile and landline columns for both labelled and ordinary CRM exports', () => {
   for (const [phoneHeaders, phones, mobile, landline] of [
     [['Mobile phone', 'Landline'], ['+44 7700 900123', '+44 20 7946 0999'], '+44 7700 900123', '+44 20 7946 0999'],

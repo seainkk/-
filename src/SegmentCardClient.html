@@ -94,7 +94,10 @@
     message('warnings',(s.data.warnings||[]).join(' '));el('queues').replaceChildren();el('validation').replaceChildren();
     const queues=[['all','Все контакты',null],['email','Проверить новые email',summary.email.toCheck]];
     if(summary.email.toReview)queues.push(['emailReview','Разобрать проверенные email',summary.email.toReview]);
-    queues.push(['telegram','Проверить Telegram по мобильным',summary.telegram.toCheck],['ownership','Разобрать принадлежность',summary.ownership]);
+    queues.push(['telegram','Проверить Telegram по мобильным',summary.telegram.toCheck]);
+    if(summary.telegram.toReview)queues.push(['telegramReview','Ручная проверка Telegram',summary.telegram.toReview]);
+    if(summary.telegram.addressBook)queues.push(['telegramBook','Записная книжка',summary.telegram.addressBook]);
+    queues.push(['ownership','Разобрать принадлежность',summary.ownership]);
     for(const [queue,label,amount] of queues){
       const item=action(label+(amount===null?'':' · '+count(amount)),()=>changeFilters({queue,channel:'all'}));
       item.dataset.scQueue=queue;item.setAttribute('aria-pressed',String(s.queue===queue));el('queues').append(item);
@@ -344,7 +347,7 @@
     return {segmentId:s.id,name:s.name,channel:s.channel,owner:s.owner,queue:s.queue,query:s.query,revision:s.data.revision};
   }
   function setFilters({channel='all',owner='all',queue='all',query=''}={}){
-    if(!['all','email','telegram'].includes(channel)||!['all','companies','lpr'].includes(owner)||!['all','ready','inCampaign','email','emailReview','telegram','ownership'].includes(queue))return;
+    if(!['all','email','telegram'].includes(channel)||!['all','companies','lpr'].includes(owner)||!['all','ready','inCampaign','email','emailReview','telegram','telegramReview','telegramBook','ownership'].includes(queue))return;
     changeFilters({channel,owner,queue,query:String(query).trim().slice(0,120)});
   }
   window.RegistrySegmentCard={configure,clear,acceptDashboard,select,show,refresh,dismiss:()=>window.RegistrySegmentSelections?.dismiss?.()||dismiss(),id:()=>current?.id,getFilters,setFilters};

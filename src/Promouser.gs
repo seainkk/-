@@ -58,8 +58,8 @@ function previewPromouserValidation_(request) {
   return api_(function () {
     var input = pvInput_(request, ['id', 'kind','newContactsOnly','provider']), kind = pvValidationKind_(input.kind), scope = gridFile_(id_(input.id), true);
     var onlyNew = pvNewOnlyOption_(input.newContactsOnly);
-    if (input.provider !== undefined && (input.provider !== 'promouser' || kind !== 'email' || !onlyNew))
-      fail_('INVALID_REQUEST', 'Выбор Promouser доступен для новых адресов на вкладке Email.');
+    if (input.provider !== undefined && (input.provider !== 'promouser' || !onlyNew))
+      fail_('INVALID_REQUEST', 'Выбор Promouser доступен для проверки новых контактов.');
     return locked_(function () {
       var fresh = gridFile_(input.id, true, scope.context.rootId), state = pvLedger_(fresh.context, input.id, true);
       pvUpdateTargets_(state, {});
@@ -68,7 +68,7 @@ function previewPromouserValidation_(request) {
       var preview = { token: token, kind: kind, newContactsOnly:onlyNew, rootId: fresh.context.rootId, fileId: input.id, sourceHash: snapshot.sourceHash, keys: snapshot.keys, credentialHash: settings.key ? digest_(settings.key) : '', autoPayLimitUsd:settings.autoPayLimitUsd, createdAt: Date.now(), expiresAt: Date.now() + PROMOUSER.previewMillis };
       if (input.provider) {
         preview.provider = input.provider;
-        preview.preferredAtStart = pvEmailPreferred_(fresh.context);
+        if (kind === 'email') preview.preferredAtStart = pvEmailPreferred_(fresh.context);
       }
       state.validationPreviews = (state.validationPreviews || []).filter(function (item) { return item.expiresAt > Date.now(); }).slice(-9).concat([preview]);
       pvSave_(fresh.context, state);
@@ -144,6 +144,15 @@ function pvNewContactRows_(rows, kind) {
   });
   return rows.filter(function (row) { return (row.kind === 'email' ? 'email' : 'telegram') === kind && !blocked.has(row.key); });
 }
+function pvEligibleCompanyPhones_(rows) {
+  var blocked = new Set();
+  rows.forEach(function (row) {
+    if (!row.companyTelegram) return;
+    if (row.kind !== 'telegram' || row.country !== 'RU' || row.contactType !== 'телефон' || row.statusFormula ||
+        !contactMailingStatusIsNew_(row.values[row.map[pvHeader_('Статус')]])) blocked.add(row.key);
+  });
+  return rows.filter(function (row) { return !row.companyTelegram || !blocked.has(row.key); });
+}
 function pvEmailPreferred_(context) { return typeof emailValidationProvider_ === 'function' ? emailValidationProvider_(context) : 'promouser'; }
 function pvEmailProviderAllowed_(preferred, approval) {
   return approval && approval.provider === 'promouser' && approval.newContactsOnly && approval.kind === 'email' ?
@@ -187,6 +196,9 @@ function pvCheckPreview_(context, state, preview, kind) {
 }
 function pvPreviewSnapshot_(context, state, kind, onlyNew, provider) {
   var targets = pvTargets_(context, state, false,onlyNew,kind), cache = pvCache_(context, false), cacheMap = pvCacheRead_(cache), seen = Object.create(null), completed = Object.create(null), pending = Object.create(null), counts = { new: 0, checked: 0, cached: 0, inProgress: 0, unknownCountry: 0, telegramWithoutPhone: 0, invalid: 0 }, keys = [], sample = [], source = [];
+  if (provider && kind === 'telegram' && !targets.layout.some(function (entry) { return entry.companyTelegram; }))
+    fail_('PV_TARGETS_REQUIRED', 'Откройте вкладку «Телеграм» рабочей таблицы компаний.');
+  targets.rows = pvEligibleCompanyPhones_(targets.rows);
   if (onlyNew) targets.rows = pvNewContactRows_(targets.rows,kind);
   state.jobs.forEach(function (job) { if (job.state !== 'cancelled') job.contacts.forEach(function (contact) { pending[contact.key] = job; }); });
   targets.rows.forEach(function (row) { if (row.completed && !row.changed && !row.invalid) completed[row.key] = true; });
@@ -201,7 +213,11 @@ function pvPreviewSnapshot_(context, state, kind, onlyNew, provider) {
       else counts.invalid++;
       return;
     }
-    if (completed[row.key]) { counts.checked++; return; }
+    if (completed[row.key]) {
+      if (row.companyTelegram && row.completed && pvResultFromRow_(row)) counts.cached++;
+      else counts.checked++;
+      return;
+    }
     if (cacheMap[row.key] && cacheMap[row.key].result) { counts.cached++; return; }
     if (row.kind === 'telegram_username') { counts.telegramWithoutPhone++; return; }
     if (kind === 'telegram' && !row.country) { counts.unknownCountry++; return; }
@@ -236,6 +252,7 @@ function queueWorkbookValidation_(context, fileId, options) {
     pvUpdateTargets_(state, options || {});
     var kind = options && options.newContactKind;
     var targets = pvTargets_(fresh.context, state, true,kind,kind), cache = pvCache_(fresh.context, true), cacheMap = pvCacheRead_(cache);
+    targets.rows = pvEligibleCompanyPhones_(targets.rows);
     if (kind) targets.rows = pvNewContactRows_(targets.rows,kind);
     var existing = Object.create(null), pending = Object.create(null), collected = Object.create(null), updates = [], settings = pvSettings_(fresh.context);
     pvCancelUnsent_(fresh.context, state, cache, cacheMap, targets.rows,kind,options && options.provider);
@@ -248,7 +265,10 @@ function queueWorkbookValidation_(context, fileId, options) {
         existing[row.key] = true;
         // A checked legacy/manual row is respected, but never silently rewritten.
         var seeded = pvResultFromRow_(row);
-        if (seeded) { pvCachePut_(fresh.context, cache, cacheMap, row.key, row.kind, seeded); }
+        if (seeded) {
+          pvCachePut_(fresh.context, cache, cacheMap, row.key, row.kind, seeded);
+          if (row.companyTelegram) updates.push({row:row,savedTelegram:true,result:seeded});
+        }
         return;
       }
       if (cacheMap[row.key] && cacheMap[row.key].result) { updates.push({ row: row, result: cacheMap[row.key].result }); return; }
@@ -540,16 +560,29 @@ function pvAccept_(context, state, job, action, response) {
   parsed.results.forEach(function (item) {
     var key = pvKey_(job.kind, item.contact);
     if (!allowed[key]) return;
+    if (job.kind === 'telegram' && (item.ambiguous || !pvTelegramDecision_(item))) return;
     item.orderId = job.orderId; item.checkedAt = pvNow_();
     pvCachePut_(context, cache, cacheMap, key, job.kind, item);
   });
   var current = pvTargets_(context, state, false,job.newContactsOnly,job.kind);
+  if (job.kind === 'telegram' && current.layout.some(function (entry) { return entry.companyTelegram; })) {
+    job.contacts.forEach(function (contact) {
+      if (cacheMap[contact.key] && cacheMap[contact.key].result) return;
+      // A paid report with a missing or ambiguous row must release the shared reservation without ordering again.
+      pvCachePut_(context, cache, cacheMap, contact.key, job.kind, {status:'Проверка не подтверждена',review:true,
+        raw:'В отчёте Promouser нет однозначного результата для этого телефона.',orderId:job.orderId,checkedAt:pvNow_()});
+    });
+  }
   current.rows.forEach(function (row) {
-    if ((!row.completed || row.changed) && allowed[row.key] && cacheMap[row.key] && cacheMap[row.key].result) updates.push({ row: row, result: cacheMap[row.key].result });
+    if ((!row.completed || row.changed) && allowed[row.key]) {
+      if (cacheMap[row.key] && cacheMap[row.key].result) updates.push({row:row,result:cacheMap[row.key].result});
+    }
   });
   state.pendingApplications = Math.max(state.pendingApplications || 0, updates.length - PROMOUSER.applyRows);
   pvCacheFlush_(context, cache); pvApply_(context, state, updates.slice(0, PROMOUSER.applyRows));
-  var found = job.contacts.filter(function (contact) { return !!(cacheMap[contact.key] && cacheMap[contact.key].result); }).length;
+  var found = job.contacts.filter(function (contact) {
+    var result = cacheMap[contact.key] && cacheMap[contact.key].result; return result && result.status !== 'Проверка не подтверждена';
+  }).length;
   job.completedAt = pvNow_(); job.resultCount = found;
   job.state = found === job.contacts.length ? 'complete' : 'result_review';
   job.message = found === job.contacts.length ? '' : 'Не все строки результата однозначно сопоставлены. Повторная платная проверка отключена; проверьте результат заказа.';
@@ -574,9 +607,11 @@ function pvTargets_(context, state, ensure, verifyTargets, onlyKind) {
     if (usedRows > PROMOUSER.maxRows || width > PROMOUSER.maxColumns) fail_('PV_LIMIT', 'Таблица контактов превышает лимит одной проверки.');
     var headers = width ? sheet.getRange(1, 1, 1, width).getDisplayValues()[0].map(String) : [];
     var companyEmail = entry.kind === 'email' && companyEmailWorkflowHeaders_(headers);
+    var companyTelegram = entry.kind === 'telegram' && companyTelegramWorkflowHeaders_(headers);
     function mapHeaders() {
       var result = pvHeaderMap_(headers);
       if (companyEmail) result[pvHeader_('Результат проверки')] = result[pvHeader_('Результат валидации')];
+      if (companyTelegram && result[pvHeader_('Статус')] === undefined) result[pvHeader_('Статус')] = result[pvHeader_('Статус рассылки')];
       return result;
     }
     var map = mapHeaders();
@@ -591,12 +626,18 @@ function pvTargets_(context, state, ensure, verifyTargets, onlyKind) {
     var emailColumn = pvFindHeader_(map, ['email', 'e-mail', 'почта']), phoneColumn = pvFindHeader_(map, ['телефон', 'мобильный телефон', 'phone', 'mobile']), telegramColumn = pvFindHeader_(map, ['telegram', 'телеграм']);
     var statusColumn = map[pvHeader_('Валидация')], count = Math.max(0, usedRows - 1);
     var values = count ? sheet.getRange(2, 1, count, width).getDisplayValues() : [];
-    var workFormulas = companyEmail && count ? sheet.getRange(2,map[pvHeader_('Статус')]+1,count,1).getFormulas() : [];
+    var workFormulas = (companyEmail || companyTelegram) && count ? sheet.getRange(2,map[pvHeader_('Статус')]+1,count,1).getFormulas() : [];
     var notes = count && statusColumn !== undefined && typeof sheet.getRange(2, statusColumn + 1, count, 1).getNotes === 'function' ? sheet.getRange(2, statusColumn + 1, count, 1).getNotes() : Array.from({ length: count }, function () { return ['']; });
-    layout.push({ sheet: sheet, map: map, width: width, kind: entry.kind });
+    layout.push({ sheet: sheet, map: map, width: width, kind: entry.kind, companyTelegram:companyTelegram });
     values.forEach(function (line, index) {
-      var value = '', kind = entry.kind, country = '', rawValue = '';
+      var value = '', kind = entry.kind, country = '', rawValue = '', contactType = '';
       if (kind === 'email') { rawValue = emailColumn === undefined ? '' : String(line[emailColumn] || '').trim(); value = pvEmail_(rawValue); }
+      else if (companyTelegram) {
+        rawValue = String(line[map[pvHeader_('Контакт')]] || '').trim();
+        contactType = String(line[map[pvHeader_('Тип контакта')]] || '').trim().toLowerCase();
+        if (contactType === 'телефон') { value = companyTelegramRussianMobile_(rawValue); if (value) country = 'RU'; }
+        else { kind = 'telegram_username'; value = pvUsername_(rawValue); }
+      }
       else {
         rawValue = phoneColumn === undefined ? '' : String(line[phoneColumn] || '').trim(); value = pvPhone_(rawValue);
         if (value) country = pvCountry_(value);
@@ -610,7 +651,7 @@ function pvTargets_(context, state, ensure, verifyTargets, onlyKind) {
       var legacy = !bound && !status ? pvLegacyResult_(kind, line, map) : null;
       if (legacy) { completed = true; status = legacy.status; }
       rows.push({ fileId: state.fileId, sheetId: sheet.getSheetId(), row: index + 2, value: value, key: key, kind: kind, country: country, invalid: invalid, map: map, status: status, note: note, bound: bound, changed: changed, completed: completed, legacyResult: legacy, values: line,
-        companyEmail:companyEmail, statusFormula:!!(workFormulas[index] && workFormulas[index][0]) });
+        companyEmail:companyEmail, companyTelegram:companyTelegram, contactType:contactType, statusFormula:!!(workFormulas[index] && workFormulas[index][0]) });
     });
   });
   return { rows: rows.filter(function (row) { return !excluded.has(row.key); }), layout: layout };
@@ -642,13 +683,13 @@ function pvApply_(context, state, updates) {
   current.rows.forEach(function (row) { byLocation[row.sheetId + ':' + row.row] = row; });
   updates.forEach(function (update) {
     var wanted = update.row, row = byLocation[wanted.sheetId + ':' + wanted.row];
-    if (!row || row.key !== wanted.key || (row.completed && !row.changed)) return;
+    if (!row || row.key !== wanted.key || (row.completed && !row.changed && !update.savedTelegram)) return;
     var fields = pvUpdateFields_(row, update);
     Object.keys(fields).forEach(function (header) {
       var column = row.map[pvHeader_(header)]; if (column === undefined) return;
       if (header === 'Статус') {
         // A teammate can mark a row Ready/Filter in native Sheets between the read and the batch.
-        requests.push({findReplace:{find:'^\\s*(новый контакт|новый)\\s*$',replacement:'Невалид',searchByRegex:true,
+        requests.push({findReplace:{find:'^\\s*(новый контакт|новый)\\s*$',replacement:fields[header],searchByRegex:true,
           matchCase:false,matchEntireCell:true,includeFormulas:false,
           range:{sheetId:row.sheetId,startRowIndex:row.row-1,endRowIndex:row.row,startColumnIndex:column,endColumnIndex:column+1}}});
         return;
@@ -674,13 +715,42 @@ function pvApply_(context, state, updates) {
 }
 
 function pvUpdateFields_(row, update) {
+  if (update.savedTelegram) {
+    var existing = pvResultFromRow_(row);
+    if (!existing || row.statusFormula || !contactMailingStatusIsNew_(row.values[row.map[pvHeader_('Статус')]])) return {};
+    var saved = pvTelegramDecision_(existing) || {validation:'Проверка не подтверждена',work:'Ручная проверка'};
+    return {'Валидация':saved.validation, 'Статус':saved.work};
+  }
   var fields = update.result ? pvResultCells_(row.kind, update.result) : { 'Валидация': update.pending || 'Ожидает проверки', 'Дата проверки': '', 'Результат проверки': update.details || '', 'Заказ Promouser': '' };
   var result = update.result;
+  if (row.companyTelegram && result) {
+    var decision = pvTelegramDecision_(result) || {validation:'Проверка не подтверждена',work:'Ручная проверка'};
+    fields['Валидация'] = decision.validation;
+    if (!row.statusFormula && contactMailingStatusIsNew_(row.values[row.map[pvHeader_('Статус')]])) fields['Статус'] = decision.work;
+  }
   if (row.companyEmail && !row.statusFormula && result && !result.review && pvEmailStatus_(result.status) === 'Невалиден' &&
       contactMailingStatusIsNew_(row.values[row.map[pvHeader_('Статус')]])) fields['Статус'] = 'Невалид';
   if (row.kind === 'email' && update.result && !update.result.provider && !row.changed) delete fields['Провайдер'];
   if (row.changed) (row.kind === 'email' ? PROMOUSER.emailHeaders.concat(['Валидатор', 'Проверка Coldy']) : PROMOUSER.phoneHeaders).forEach(function (header) { if (!Object.prototype.hasOwnProperty.call(fields, header)) fields[header] = ''; });
   return fields;
+}
+
+function pvTelegramDecision_(result) {
+  if (!result || result.ambiguous || /(?:противоречивые строки|^(?:error|ошибка|unknown|неизвестно)$)/i.test(String(result.raw || '').trim())) return null;
+  if (result.review && result.status === 'Проверка не подтверждена') return {validation:'Проверка не подтверждена',work:'Ручная проверка'};
+  if (result.review) return {validation:'Проверить историю контакта',work:'Ручная проверка'};
+  if (/^[1-9]\d*$/.test(String(result.idTg || ''))) {
+    var days = pvDays_(result.days), username = String(result.nickname || '').trim(), work = 'Ручная проверка';
+    if (days !== null) {
+      if (days > 30) work = 'Не активен > 30 дней';
+      else if (!username) work = 'Записная книжка';
+      else if (pvUsername_('@' + username.replace(/^@/, ''))) work = 'Готов';
+    }
+    return {validation:'Валиден',work:work};
+  }
+  if (/^(?:Нет Telegram|Telegram не найден|Невалид|Невалиден)$/i.test(String(result.status || '').trim()))
+    return {validation:'Невалид',work:'Невалид'};
+  return null;
 }
 function pvNeedsUpdate_(row, update) {
   var fields = pvUpdateFields_(row, update);
@@ -724,7 +794,7 @@ function pvLegacyResult_(kind, values, map) {
     return { status: pvEmailStatus_(raw), raw: raw, checkedAt: date, provider: provider, orderId: '', imported: true };
   }
   if (!raw && (map[pvHeader_('ID_TG')] !== undefined || map[pvHeader_('Active_days_ago')] !== undefined)) raw = pick(['result', 'статус проверки']);
-  var explicitNo = /^(?:0|нет|не найден|not found|no telegram)$/i.test(idTg);
+  var explicitNo = /^(?:нет|не найден|not found|no telegram)$/i.test(idTg) || /^(?:нет telegram|не найден|not found|no telegram|not registered)$/i.test(raw);
   if (!/^[1-9]\d*$/.test(idTg) && !explicitNo && days === null && !raw && !date) return null;
   if (!/^[1-9]\d*$/.test(idTg)) idTg = '';
   var eligible = explicitNo ? false : idTg && days !== null ? days <= 30 : null;
@@ -856,20 +926,22 @@ function pvParseResults_(text, kind) {
       result.provider = pvSafeText_(pick(['provider', 'провайдер', 'emailprovider', 'mailprovider']), 500);
       result.status = pvEmailStatus_(result.raw);
     } else {
-      result.idTg = pvSafeText_(pick(['ID_TG', 'tg_id', 'telegramid', 'idtelegram']), 100);
+      var idEvidence = pvSafeText_(pick(['ID_TG', 'tg_id', 'telegramid', 'idtelegram']), 100).trim();
+      result.idTg = idEvidence;
       if (!/^[1-9]\d*$/.test(result.idTg)) result.idTg = '';
       result.nickname = pvSafeText_(pick(['Nickname_TG', 'nickname', 'username', 'tgusername']), 100);
       result.days = pvDays_(pick(['Active_days_ago', 'days_offline', 'daysago', 'дней офлайн', 'сколько дней оффлайн']));
       result.raw = pvSafeText_(pick(['status', 'result', 'статус', 'результат']), 1000);
       if (result.idTg && result.days !== null) { result.eligible = result.days <= 30; result.status = result.eligible ? 'Telegram: активен' : 'Telegram: более 30 дней офлайн'; }
       else if (result.idTg) result.status = 'Telegram: активность скрыта';
-      else if (/^(?:no|false|not.?registered|нет|не.?зарегистрирован)$/i.test(result.raw.trim())) { result.status = 'Нет Telegram'; result.eligible = false; }
+      else if (/^(?:no|false|not[ _-]?registered|not[ _-]?found|no telegram|нет|нет telegram|не найден|не зарегистрирован|невалид|invalid)$/i.test(result.raw.trim()) ||
+          /^(?:не найден|not found|no telegram)$/i.test(idEvidence)) { result.status = 'Нет Telegram'; result.eligible = false; }
       else result.status = 'Telegram не подтверждён';
     }
     var identity = pvKey_(kind, contact);
     if (seen[identity]) {
       var previous = results[seen[identity] - 1];
-      if (JSON.stringify(previous) !== JSON.stringify(result)) { previous.status = 'Неизвестно'; previous.raw = 'В ответе противоречивые строки для одного контакта.'; previous.eligible = null; warnings.push('В результате есть противоречивые дубли.'); }
+      if (JSON.stringify(previous) !== JSON.stringify(result)) { previous.status = 'Неизвестно'; previous.raw = 'В ответе противоречивые строки для одного контакта.'; previous.eligible = null; if (kind === 'telegram') {previous.ambiguous = true; previous.idTg = ''; previous.nickname = ''; previous.days = null;} warnings.push('В результате есть противоречивые дубли.'); }
     } else { seen[identity] = results.length + 1; results.push(result); }
   });
   if (!results.length) warnings.push('Не удалось однозначно прочитать контакты и статусы результата.');
@@ -1046,6 +1118,7 @@ function pvAutomaticHint_(state, settings) {
 function pvNextAt_(job) { return Math.max((job.lastRequestAt || 0) + PROMOUSER.orderDelay, (job.lastStatusAt || 0) + PROMOUSER.statusDelay); }
 function pvJobFinished_(state) { return ['complete', 'complete_shared', 'result_review', 'cancelled', 'creation_uncertain', 'credential_changed', 'result_error'].indexOf(state) !== -1; }
 function pvContactsStillPresent_(rows, contacts, newContactKind) {
+  rows = pvEligibleCompanyPhones_(rows);
   if (newContactKind) rows = pvNewContactRows_(rows,newContactKind);
   var pending = new Set(), completed = new Set();
   rows.forEach(function (row) {
@@ -1071,7 +1144,7 @@ function pvPhone_(value) { var text = String(value || '').trim(); if (!/^\+?[\d 
 function pvUsername_(value) { var text = String(value || '').trim(); return /^@[A-Za-z][A-Za-z0-9_]{3,31}$/.test(text) ? text.toLowerCase() : ''; }
 function pvCountry_(phone) {
   var digits = phone.replace(/^\+/, '');
-  if (/^79\d{9}$/.test(digits)) return 'RU';
+  if (companyTelegramRussianMobile_(phone)) return 'RU';
   if (/^7(?:700|701|702|705|706|707|708|747|750|751|760|761|762|763|764|771|775|776|777|778)\d{7}$/.test(digits)) return 'KZ';
   if (/^7/.test(digits)) return '';
   var prefixes = [['380', 'UA'], ['375', 'BY'], ['44', 'GB'], ['49', 'DE'], ['33', 'FR'], ['48', 'PL'], ['370', 'LT'], ['371', 'LV'], ['372', 'EE'], ['373', 'MD'], ['374', 'AM'], ['995', 'GE'], ['994', 'AZ'], ['996', 'KG'], ['998', 'UZ'], ['992', 'TJ'], ['90', 'TR'], ['91', 'IN'], ['39', 'IT'], ['34', 'ES'], ['31', 'NL'], ['32', 'BE'], ['46', 'SE'], ['47', 'NO'], ['45', 'DK'], ['358', 'FI'], ['420', 'CZ'], ['421', 'SK'], ['36', 'HU'], ['40', 'RO'], ['359', 'BG'], ['30', 'GR'], ['351', 'PT'], ['353', 'IE'], ['61', 'AU'], ['64', 'NZ'], ['81', 'JP'], ['82', 'KR'], ['86', 'CN'], ['55', 'BR'], ['52', 'MX'], ['972', 'IL']];

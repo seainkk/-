@@ -603,7 +603,7 @@
   function openEntryWorkbook(data){
     const {id,projectId,workbookAction}=data;
     if(!accessReady||typeof id!=='string'||!/^[A-Za-z0-9_-]{10,200}$/.test(id)||
-      (workbookAction!==undefined&&!['email','mailing'].includes(workbookAction))||
+      (workbookAction!==undefined&&!['email','mailing','telegram','telegramReady','telegramAddressBook'].includes(workbookAction))||
       (projectId!==undefined&&!Object.hasOwn(projectNames,projectId)))return;
     if(projectId&&projectId!==activeProjectId){
       $('br-project').value=projectId;switchProject();

@@ -492,15 +492,16 @@ test('the native menu opens the current workbook Email tab and its own action in
     getRange:()=>({getRichTextValues:()=>[[{getLinkUrl:()=>'https://example.test/?validate='+id+'&project=numshield'},
       {getLinkUrl:()=>'https://seainkk.github.io/-/?validate='+id+'&action=email&project=neosender'}]]})};
   const menu={addItem(label,fn){labels.push([label,fn]);return menu;},addToUi(){return menu;}};
-  const book={getId:()=>id,getSheetByName:name=>name==='Email'?sheet:null,setActiveSheet:tab=>shown.push(tab)};
-  const ui={createMenu:name=>{assert.equal(name,'Email');return menu;},showModalDialog:(out,title)=>dialogs.push({src:out.src,title})};
+  const telegram={...sheet};
+  const book={getId:()=>id,getSheetByName:name=>name==='Email'?sheet:name==='Телеграм'?telegram:null,setActiveSheet:tab=>shown.push(tab)};
+  const menus=[],ui={createMenu:name=>{menus.push(name);return menu;},showModalDialog:(out,title)=>dialogs.push({src:out.src,title})};
   const context=vm.createContext({SpreadsheetApp:{getUi:()=>ui,getActiveSpreadsheet:()=>book},
     HtmlService:{createHtmlOutput(src){return {src,setWidth(){return this;},setHeight(){return this;}};}}});
   vm.runInContext(readFileSync(new URL('../native/CompanyMenu.gs',import.meta.url),'utf8'),context);
-  context.onOpen();assert.equal(labels.length,2);
+  context.onOpen();assert.equal(labels.length,5);assert.deepEqual(menus,['Email','Телеграм']);
   labels.forEach(([,fn])=>context[fn]());
-  assert.deepEqual(shown,[sheet,sheet]);
-  for(const [i,action] of ['email','mailing'].entries()){
+  assert.deepEqual(shown,[sheet,sheet,telegram,telegram,telegram]);
+  for(const [i,action] of ['email','mailing','telegram','telegramReady','telegramAddressBook'].entries()){
     const html=dialogs[i].src;assert.ok(html.includes('https://seainkk.github.io/-/?validate='+id+'&amp;action='+action+'&amp;project=neosender'));
     assert.doesNotMatch(html,/example\.test|access_key/);
   }

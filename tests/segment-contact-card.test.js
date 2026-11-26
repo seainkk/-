@@ -13,7 +13,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 
 function fixture(options={}) {
   const c = vm.createContext({});
-  for (const file of ['Config', 'Promouser', 'ColdyCampaigns', 'ColdyRecipientSheet', 'SegmentContactCard'])
+  for (const file of ['Config','Promouser','ContactSync','CompanyTelegramExports','ColdyCampaigns','ColdyRecipientSheet','SegmentContactCard'])
     vm.runInContext(readFileSync(new URL('../src/' + file + '.gs', import.meta.url), 'utf8'), c);
   const state = {project: 'numshield', permitted: true, sources: [companies, lpr], reads: 0, shared: {}, privateReads: 0};
   const marker = 'registry/coldy-recipient/v1/' + campaignId + '/';
@@ -47,7 +47,7 @@ function fixture(options={}) {
     ['wait@example.org','Д','Новый контакт']],
     options.companyNotes || {'0:6':marker+'status','0:7':marker+'sent','0:8':marker+'replied',
       '5:3':c.PROMOUSER.bindingPrefix+digest('foreigncontact')}),
-    sheet(2,'Телефоны',[phoneHeaders,['8 (999) 111-22-33','Б','Новый контакт'],['+74951234567','Б','Новый контакт'],
+    sheet(2,options.companyPhone ? 'Телеграм':'Телефоны',options.companyPhone || [phoneHeaders,['8 (999) 111-22-33','Б','Новый контакт'],['+74951234567','Б','Новый контакт'],
       ['','А','Новый контакт','','@sample_name'],['+79992224455','А','Новый контакт']]));
   book(lpr,'lpr',sheet(1,'Email',options.peopleEmail || [headers,['shared@example.org','Анна','Новый контакт','Валиден'],['prepared@example.org','Пётр','Новый контакт']]),
     sheet(2,'Телефоны',[phoneHeaders]));
@@ -135,6 +135,34 @@ test('company Email queues respect manual approvals, all duplicate exclusions an
   assert.equal(rows.active.channelFacts[0].sent,null);assert.equal(rows.active.channelFacts[0].replied,null);
   assert.deepEqual(rows.active.campaigns,[]);assert.ok(!rows.active.coldyStatuses.some(label=>/отправлено|ответил|добавлен/i.test(label)));
   assert.equal(f.run({channel:'email',owner:'companies',query:'shared@'}).rows[0].ready,false);
+});
+
+test('the company Telegram card uses the typed contact, exposes review and address book queues, and never invents delivery',()=>{
+  const headers=['Статус','Nickname_TG','ID компании','Контакт','Тип контакта','ID_TG','Валидация','Active_days_ago','Телефон','Telegram'];
+  const mobile='+79991002030';
+  const companyPhone=[headers,
+    ['Готов','@Nick','one','8 (999) 100-20-30','телефон','123','Валиден',3,'+79999999999','@wrong'],
+    ['Записная книжка','','two','89990000001','телефон','234','Валиден',1],
+    ['Новый контакт','','two','https://t.me/ManualName','юзернейм','','Ручная проверка'],
+    ['Готов','','one','@ReadyName','юзернейм','','Ручная проверка'],
+    ['Готов','','one','+79990000008','телефон','333','Валиден',1],
+    ['Не активен > 30 дней','@OldName','one','+79990000006','телефон','456','Валиден',31],
+    ['Новый контакт','','one','+79990000007','телефон'],
+    ['Готов','@Blocked','one','+79990000003','телефон'],
+    ['Невалид','','two','89990000003','телефон'],
+  ];
+  const f=fixture({companyPhone});
+  const values=queue=>f.run({queue,channel:'telegram',owner:'companies'}).rows.map(r=>r.value).sort();
+  assert.deepEqual(values('ready'),[mobile,'@readyname'].sort());
+  assert.deepEqual(values('telegramReview'),['+79990000008','@manualname']);
+  assert.deepEqual(values('telegramBook'),['+79990000001']);
+  assert.deepEqual(values('telegram'),['+79990000007']);
+  const book=f.run({channel:'telegram',queue:'telegramBook'}).rows[0];
+  assert.equal(book.readiness,'Записная книжка');assert.equal(book.inCampaign,false);assert.deepEqual(book.channelFacts,[]);
+  const all=values('all');assert.ok(!all.includes('+79999999999')&&!all.includes('@wrong'));
+  companyPhone[3][0]='Готов'; f.meta[companies].version='9';
+  assert.ok(!values('telegramReview').includes('@manualname'));
+  assert.ok(values('ready').includes('@manualname'));
 });
 
 test('prepared card survives cache eviction and serves the same filtered pages without reading contact sheets or campaign recipients',()=>{
