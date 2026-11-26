@@ -4,13 +4,22 @@ function onOpen() {
     .addItem('Проверить новые email в Promouser', 'validateNewEmail')
     .addItem('Загрузить готовые контакты в рассылку', 'uploadReadyEmail')
     .addToUi();
+  SpreadsheetApp.getUi().createMenu('Телеграм')
+    .addItem('Проверить новые телефоны в Promouser', 'validateNewPhones')
+    .addItem('Выгрузить готовые контакты', 'exportTelegramReady')
+    .addItem('Выгрузить телефоны для записной книжки', 'exportTelegramAddressBook')
+    .addToUi();
 }
 
-function validateNewEmail() { showCompanyEmailAction_('email'); }
-function uploadReadyEmail() { showCompanyEmailAction_('mailing'); }
+function validateNewEmail() { showCompanyAction_('email', 'Email', 'Проверка новых email'); }
+function uploadReadyEmail() { showCompanyAction_('mailing', 'Email', 'Загрузка готовых контактов в Coldy'); }
+function validateNewPhones() { showCompanyAction_('telegram', 'Телеграм', 'Проверка новых телефонов'); }
+function exportTelegramReady() { showCompanyAction_('telegramReady', 'Телеграм', 'Выгрузка готовых контактов'); }
+function exportTelegramAddressBook() { showCompanyAction_('telegramAddressBook', 'Телеграм', 'Выгрузка телефонов для записной книжки'); }
 
-function showCompanyEmailAction_(action) {
-  var book = SpreadsheetApp.getActiveSpreadsheet(), sheet = book.getSheetByName('Email');
+function showCompanyAction_(action, tab, title) {
+  var book = SpreadsheetApp.getActiveSpreadsheet(), sheet = book.getSheetByName(tab);
+  if (!sheet && tab === 'Телеграм') sheet = book.getSheetByName('Телефоны');
   if (sheet) book.setActiveSheet(sheet);
   var project = '', id = book.getId();
   if (sheet && sheet.getLastColumn()) {
@@ -24,6 +33,6 @@ function showCompanyEmailAction_(action) {
     });
   }
   var src = 'https://seainkk.github.io/-/?validate=' + encodeURIComponent(id) + '&amp;action=' + action + (project ? '&amp;project=' + project : '');
-  var html = HtmlService.createHtmlOutput('<!doctype html><html lang="ru"><meta charset="utf-8"><style>html,body,iframe{width:100%;height:100%;margin:0;border:0;display:block}</style><iframe title="Действия с email" referrerpolicy="no-referrer" src="' + src + '"></iframe></html>').setWidth(1030).setHeight(650);
-  SpreadsheetApp.getUi().showModalDialog(html, action === 'email' ? 'Проверка новых email' : 'Загрузка готовых контактов в Coldy');
+  var html = HtmlService.createHtmlOutput('<!doctype html><html lang="ru"><meta charset="utf-8"><style>html,body,iframe{width:100%;height:100%;margin:0;border:0;display:block}</style><iframe title="' + title + '" referrerpolicy="no-referrer" src="' + src + '"></iframe></html>').setWidth(1030).setHeight(650);
+  SpreadsheetApp.getUi().showModalDialog(html, title);
 }

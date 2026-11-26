@@ -6,7 +6,7 @@
   const card=()=>window.RegistrySegmentCard?.getFilters();
   const channels={all:'Все каналы',email:'Email',telegram:'Telegram'};
   const owners={all:'Компании и ЛПР',companies:'Компании',lpr:'ЛПР'};
-  const queues={all:'Все контакты',ready:'Готово к запуску',inCampaign:'Уже в рассылке',email:'Проверка Email',emailReview:'Разобрать проверенные email',telegram:'Проверка Telegram',ownership:'Проверка принадлежности'};
+  const queues={all:'Все контакты',ready:'Готово к запуску',inCampaign:'Уже в рассылке',email:'Проверка Email',emailReview:'Разобрать проверенные email',telegram:'Проверка Telegram',telegramReview:'Ручная проверка Telegram',telegramBook:'Записная книжка',ownership:'Проверка принадлежности'};
   function elem(tag,text){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;return node;}
   function button(text,click){const node=elem('button',text);node.type='button';node.className='br-button';node.addEventListener('click',click);return node;}
   function field(text,input){const label=elem('label');label.append(document.createTextNode(text+' '),input);return label;}

@@ -12,6 +12,7 @@ function previewSegmentRecords_(request) {
     var collected = segmentRecordsCollect_(context, bindings);
     targets.directory = targetKind !== 'lpr' && (targets.directory || collected.records.some(function (record) { return record.routeKind !== 'lpr' && !!record.directory; }));
     var masters = segmentRecordsReadMasters_(targets, true);
+    if (masters.companies.descriptor.newMaster) targets.companyTelegram = true;
     if (!targets.directory && masters.companies.descriptor.newMaster) {
       targets.directory = true;
       masters.companies.descriptor = segmentRecordsMaster_(targets, 'companies', false, true).descriptor;
@@ -25,6 +26,15 @@ function previewSegmentRecords_(request) {
       companies: companyStages.companies, companyMarkers: companyStages.markers, people: planned.people, markers: planned.markers,
       counts: planned.counts, review: planned.review, sample: planned.sample, warnings: collected.warnings, mode: 'registry', materializeContacts: true, prepareOnConfirm: true
     };
+    if (targets.companyTelegram && targetKind !== 'lpr') {
+      var foreign = new Set();
+      collected.records.forEach(function (record) {
+        if (targetKind === 'auto' && record.routeKind !== 'companies') return;
+        (record.general.phones || []).forEach(function (value) { var number = contactSyncForeignPhone_(value); if (number) foreign.add(number); });
+      });
+      plan.counts.telegramForeignPhonesSkipped = foreign.size;
+      if (foreign.size) plan.warnings.push(contactSyncTelegramForeignWarning_(foreign.size));
+    }
     if (Object.keys(collected.history || {}).length) plan.workingHistory = segmentSelectionAccepted_(collected.history, masters, planned);
     var origins = segmentEmailOrigins_(collected.records, masters, planned);
     if (Object.keys(origins).length) plan.emailOrigins = origins;
@@ -167,6 +177,7 @@ function segmentRecordsTargets_(context, segmentId, create, deferMasters, newDir
       var tags = scope.metadata.appProperties || {};
       companyMasterBound = tags.registrySegmentMasterSheetId !== undefined;
       if (tags.registrySegmentDirectoryMode) targets.directory = true;
+      targets.companyTelegram = tags.registryCompanyEmailSchema === '2' || tags.registryCompanyTelegramSchema === '2';
     }
   });
   if (create && !deferMasters) {

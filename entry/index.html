@@ -48,7 +48,9 @@
     const $=(id)=>document.getElementById(id);
     const params=new URL(window.location.href).searchParams;
     const target=params.get('validate'),action=params.get('action'),project=params.get('project');
-    const validRoute=(action===null||['email','mailing'].includes(action))&&(project===null||['numshield','neosender'].includes(project));
+    const actionTitles={email:'Проверить новые email',mailing:'Загрузить готовые email в рассылку',telegram:'Проверить новые телефоны',
+      telegramReady:'Выгрузить готовые контакты',telegramAddressBook:'Выгрузить телефоны для записной книжки'};
+    const validRoute=(action===null||Object.hasOwn(actionTitles,action))&&(project===null||['numshield','neosender'].includes(project));
     const validationFile=validRoute&&target&&/^[A-Za-z0-9_-]{10,200}$/.test(target)?target:null;
     let validationOpened=false;
     let accessKey=null,currentFrame=null,loadingTimer=null,ready=false;
@@ -158,7 +160,7 @@
       $('entry-validation-access').hidden=true;
       if(!accessKey){
         if(validationFile){
-          const title=action==='mailing'?'Загрузить готовые email в рассылку':action==='email'?'Проверить новые email':'Проверить новые контакты';
+          const title=actionTitles[action]||'Проверить новые контакты';
           showState('locked',title,'Для доступа к выбранной таблице вставьте обычную закрытую ссылку вашей команды.',false);
           $('entry-validation-access').hidden=false;
         }else showState('locked','Для входа нужна закрытая ссылка','Откройте полную ссылку, которую вам передал владелец сервиса.',false);

@@ -91,6 +91,7 @@ function segmentCardTabs_(context, scope, kind) {
     return segmentFindSheet_(book, Number(tags[key]));
   }
   var email = tab('registryContactEmailSheetId', 'Email'), phone = tab('registryContactPhoneSheetId', 'Телефоны');
+  if (!phone && kind === 'companies' && !tags.registryContactStateId && tags.registryContactPhoneSheetId === undefined) phone = book.getSheetByName('Телеграм');
   if (email && phone && email.getSheetId() === phone.getSheetId()) fail_('SEGMENT_TARGET_CHANGED', 'Двум каналам назначен один рабочий лист.');
   return {email: email, telegram: phone};
 }
@@ -166,7 +167,7 @@ function segmentCardRevision_(context, scope, campaigns) {
     });
     return [entry.binding,status];
   });
-  scope.cardRevision = digest_(JSON.stringify(['segment-contact-card-v3',scopeKey,validation,campaigns.credential,states]));
+  scope.cardRevision = digest_(JSON.stringify(['segment-contact-card-v4',scopeKey,validation,campaigns.credential,states]));
   scope.revisionCampaigns = campaigns;
   return scope.cardRevision;
 }
@@ -199,7 +200,7 @@ function segmentCardFilter_(input) {
   }
   if (input.query !== undefined && (typeof input.query !== 'string' || input.query.length > 300)) fail_('INVALID_REQUEST', 'Сократите поисковый запрос.');
   return {channel: option(input.channel, ['all', 'email', 'telegram'], 'all'), owner: option(input.owner, ['all', 'companies', 'lpr'], 'all'),
-    queue: option(input.queue, ['all', 'email', 'emailReview', 'telegram', 'ownership', 'ready', 'inCampaign'], 'all'), query: String(input.query || '').trim().toLowerCase(),
+    queue: option(input.queue, ['all', 'email', 'emailReview', 'telegram', 'telegramBook', 'telegramReview','ownership', 'ready', 'inCampaign'], 'all'), query: String(input.query || '').trim().toLowerCase(),
     offset: number(input.offset, 0, 0, 1000000), limit: number(input.limit, 50, 1, 200)};
 }
 
@@ -216,10 +217,12 @@ function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, 
   col('review', ['Проверить принадлежность']); col('validation', ['Валидация']); col('type', ['Тип контакта','Тип телефона']);
   col('origin', ['Исходный столбец email']); col('originRows', ['Исходные строки','Строки в Лист1']); col('history', ['История контакта']);
   indices.companyEmail = channel === 'email' && owner === 'companies' && companyEmailWorkflowHeaders_(headers);
+  indices.companyTelegram = channel === 'telegram' && owner === 'companies' && companyTelegramWorkflowHeaders_(headers);
+  if (indices.companyTelegram) { col('value',['Контакт']); col('nickname',['Nickname_TG']); }
   if (indices.companyEmail) col('rawResult', ['Результат валидации']);
   col('membership', [COLDY_CAMPAIGNS.headers[0]]);
   if (indices.value === undefined && (channel === 'email' || indices.handle === undefined)) fail_('SEGMENT_CARD_SCHEMA', 'В рабочем листе отсутствует столбец контакта.');
-  var statusHeaders = indices.companyEmail ? ['Статус'] : CONTACT_MAILING_STATUS.headers;
+  var statusHeaders = indices.companyEmail || indices.companyTelegram ? ['Статус'] : CONTACT_MAILING_STATUS.headers;
   var manualCols = statusHeaders.map(function (header) { return map[pvHeader_(header)]; }).filter(function (index) { return index !== undefined; });
   var notes = channel === 'email' && campaigns.length ? head.getNotes()[0] : [];
   var layouts = channel === 'email' ? campaigns.map(function (campaign) {
@@ -262,6 +265,11 @@ function segmentCardIdentity_(channel, raw, handleCell) {
 function segmentCardGroupRow_(groups, channel, owner, line, map, cols, manualCols, note, validation, layouts, source) {
   function cell(i) { return i === undefined ? '' : String(line[i] || '').trim(); }
   var identity = segmentCardIdentity_(channel,cell(cols.value),cell(cols.handle));
+  if (cols.companyTelegram) {
+    var contact = companyTelegramContactCell_(cell(cols.value),cell(cols.type));
+    if (!cell(cols.value)) return;
+    identity = {kind:contact && contact.type === 'юзернейм' ? 'telegram_username':'telegram',valid:!!contact,value:contact ? contact.value : cell(cols.value)};
+  }
   if (!identity) return;
   var kind = identity.kind, validFormat = identity.valid, value = identity.value;
   var compound = channel + '|' + value.toLowerCase(), group = groups.get(compound);
@@ -281,13 +289,27 @@ function segmentCardGroupRow_(groups, channel, owner, line, map, cols, manualCol
     var status = cell(i), workflow = cols.companyEmail ? companyEmailWorkflowStatus_(status) : null;
     if (status) group.manual.add(status);
     if (!contactMailingStatusIsNew_(status)) group.manualNew = false;
-    if (workflow === 'Рассылка') group.inCampaign = true;
+    if (cols.companyTelegram) {
+      group.companyTelegram = true;
+      var tgStatus = companyTelegramWorkflowStatus_(status);
+      if (tgStatus === 'Готов' && validFormat) {
+        var nick = companyTelegramCsvUsername_(kind === 'telegram_username' ? value : cell(cols.nickname));
+        if (nick) group.workflowReady = true;
+        else group.missingUsername = true;
+      }
+      if (tgStatus === 'Записная книжка' && kind === 'telegram' && validFormat) group.addressBook = true;
+      if (tgStatus === 'Ручная проверка' || kind === 'telegram_username' && contactMailingStatusIsNew_(tgStatus)) group.telegramReview = true;
+      if (tgStatus === 'Не активен > 30 дней') group.telegramInactive = true;
+      if (tgStatus === 'Невалид') group.workflowInvalid = true;
+      else if (pvExcludedStatus_(status,true)) group.excluded = true;
+    } else if (workflow === 'Рассылка') group.inCampaign = true;
     else if (workflow === 'Невалид') group.workflowInvalid = true;
     else if (pvExcludedStatus_(status, true)) group.excluded = true;
   });
   var flag = cell(cols.review);
   group.ownership = group.ownership || !!flag && !/^(?:нет|no|false|0)$/i.test(flag);
   var phoneType = cell(cols.type).toLowerCase(), country = kind === 'telegram' && validFormat ? pvCountry_(value) : '';
+  if (cols.companyTelegram && kind === 'telegram' && validFormat) group.mobile = true;
   if (country && !/городск|стационар|fixed|landline/i.test(phoneType) && (country === 'RU' || country === 'KZ' || /мобил|mobile/i.test(phoneType))) group.mobile = true;
   var key = group.validationKey || (group.validationKey = pvKey_(kind, value)), bound = pvBinding_(note), status = cell(cols.validation) || cell(cols.rawResult);
   var cached = validation[key];
@@ -310,8 +332,8 @@ function segmentCardGroupRow_(groups, channel, owner, line, map, cols, manualCol
   [rowResult, cached && cached.result].forEach(function (result) {
     if (!result || !result.status) return;
     group.results.add(result.status);
-    if (result.review && (!cols.companyEmail || cached && cached.result === result)) group.review = true;
-    if (cols.companyEmail) return;
+    if (result.review && !cols.companyTelegram && (!cols.companyEmail || cached && cached.result === result)) group.review = true;
+    if (cols.companyEmail || cols.companyTelegram) return;
     var accepted = channel === 'email' ? pvEmailStatus_(result.status) === 'Валиден' : result.eligible === true && !!result.idTg;
     if (accepted) group.valid = true; else group.invalid = true;
   });
@@ -345,13 +367,18 @@ function segmentCardSnapshot_(groups, warnings) {
   groups.forEach(function (g) {
     var needsOwnership = g.ownership, blocked = g.excluded || g.blocked, completed = g.results.size > 0;
     var checkable = g.validFormat && (g.channel === 'email' || g.mobile), review = g.review || g.valid && g.invalid;
-    var available = g.validFormat && !review && !blocked && !needsOwnership && !g.inCampaign && !g.workflowInvalid && !g.workflowStale;
+    var tgConflict = !!(g.addressBook && g.workflowReady);
+    var available = g.validFormat && !review && !blocked && !needsOwnership && !g.inCampaign && !g.workflowInvalid && !g.workflowStale && !g.telegramInactive && !tgConflict;
     var legacyReady = g.valid && !g.invalid && !g.pending;
     var ready = available && (legacyReady || !!g.workflowReady);
     var needsCheck = checkable && !completed && !g.pending && g.manualNew && !needsOwnership && !blocked && !g.inCampaign && !g.workflowInvalid;
     var chooseStatus = !!g.workflowNew && completed && !g.workflowReady && available && !g.pending;
+    var addressBook = !!g.addressBook && available;
+    var telegramReview = tgConflict || !!(g.telegramReview || g.missingUsername) && available && !ready && !addressBook;
     var readiness = blocked ? 'Исключён' : needsOwnership ? 'Проверить принадлежность' : review ? 'Проверить историю контакта' :
-      g.inCampaign ? 'Уже в рассылке' : g.workflowInvalid ? 'Невалид' : ready ? 'Готов' : g.pending ? 'Проверка в обработке' :
+      g.inCampaign ? 'Уже в рассылке' : g.workflowInvalid ? 'Невалид' : g.telegramInactive ? 'Не активен > 30 дней' :
+      telegramReview ? (g.missingUsername ? 'Для рассылки нужен юзернейм' : 'Ручная проверка') :
+      addressBook ? 'Записная книжка' : ready ? 'Готов' : g.pending ? 'Проверка в обработке' :
       chooseStatus ? 'Выбрать «Готов» или «Фильтр»' : g.workflowStale && !needsCheck ? 'Проверить привязку результата' :
       completed ? g.companyEmail ? 'Проверить ручной статус' : 'Не прошёл проверку' :
       !g.validFormat ? 'Проверить формат' : !checkable ? 'Нужен мобильный телефон' : needsCheck ? 'Требует проверки' : 'Проверить ручной статус';
@@ -366,6 +393,8 @@ function segmentCardSnapshot_(groups, warnings) {
     if (g.channel === 'email' && !channelFacts.length) statuses.add('Рассылки не подключены');
     var channel = summary[g.channel]; channel.total++; if (ready) channel.ready++; if (needsCheck) channel.toCheck++;
     if (chooseStatus) channel.toReview = (channel.toReview || 0) + 1;
+    if (addressBook) channel.addressBook = (channel.addressBook || 0) + 1;
+    if (telegramReview) channel.toReview = (channel.toReview || 0) + 1;
     if (needsOwnership) summary.ownership++;
     if (g.inCampaign) summary.inCampaign++;
     if (g.channel === 'email' && g.owners.size === 2) summary.sharedEmail++;
@@ -373,7 +402,9 @@ function segmentCardSnapshot_(groups, warnings) {
       validationStatuses: Array.from(completed ? g.results : g.pendingLabels), readiness: readiness, ready: ready, needsCheck: needsCheck,
       needsOwnership: needsOwnership, inCampaign: g.inCampaign, sources: g.sources, coldyStatuses: Array.from(statuses), campaigns: campaigns, channelFacts: channelFacts};
     if (chooseStatus) row.needsStatus = true;
-    if (ready && g.companyEmail && g.owners.size === 2 && !(g.workflowReady && legacyReady))
+    if (addressBook) row.addressBook = true;
+    if (telegramReview) row.telegramReview = true;
+    if (ready && (g.companyEmail || g.companyTelegram) && g.owners.size === 2 && !(g.workflowReady && legacyReady))
       row.readyOwners = [g.workflowReady ? 'companies' : 'lpr'];
     rows.push(row);
   });
@@ -387,6 +418,8 @@ function segmentCardMatchingRows_(snapshot, filter) {
       (filter.queue === 'all' || filter.queue === 'ownership' && r.needsOwnership ||
         filter.queue === 'ready' && r.ready && (!r.readyOwners || filter.owner === 'all' || r.readyOwners.indexOf(filter.owner) >= 0) ||
         filter.queue === 'emailReview' && r.needsStatus && filter.owner !== 'lpr' ||
+        filter.queue === 'telegramBook' && r.addressBook && filter.owner !== 'lpr' ||
+        filter.queue === 'telegramReview' && r.telegramReview && filter.owner !== 'lpr' ||
         filter.queue === 'inCampaign' && r.inCampaign || filter.queue === r.channel && r.needsCheck) &&
       (!filter.query || [r.value].concat(r.ownerNames).some(function (value) { return value.toLowerCase().includes(filter.query); }));
   });

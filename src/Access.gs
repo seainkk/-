@@ -67,6 +67,7 @@ function callApp(request) {
         saveColdyBinding: typeof saveColdyBinding_ === 'function' ? saveColdyBinding_ : null,
         removeColdyBinding: typeof removeColdyBinding_ === 'function' ? removeColdyBinding_ : null,
         previewColdyWorkbookUpload: typeof previewColdyWorkbookUpload_ === 'function' ? previewColdyWorkbookUpload_ : null,
+        exportCompanyTelegramCsv: typeof exportCompanyTelegramCsv_ === 'function' ? exportCompanyTelegramCsv_ : null,
         startColdyWorkbookUpload: typeof startColdyWorkbookUpload_ === 'function' ? startColdyWorkbookUpload_ : null,
         previewColdyUpload: typeof previewColdyUpload_ === 'function' ? previewColdyUpload_ : null,
         startColdyUpload: typeof startColdyUpload_ === 'function' ? startColdyUpload_ : null,

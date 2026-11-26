@@ -123,11 +123,12 @@ test('a worksheet opens only its preview after a valid private link and authenti
 });
 
 test('an authenticated sheet link keeps the requested Email action and project inside the ready Google frame', () => {
-  for(const action of ['email','mailing'])for(const project of ['numshield','neosender']){
+  const titles={email:/email/,mailing:/рассылку/,telegram:/телефоны/,telegramReady:/готовые контакты/,telegramAddressBook:/записной книжки/};
+  for(const action of Object.keys(titles))for(const project of ['numshield','neosender']){
     const path='/-/?validate=workbook_123456&action='+action+'&project='+project;
     const f=fixture({path,hash:''}),sent=[];
     assert.equal(f.ids['entry-validation-access'].hidden,false);
-    assert.match(f.ids['entry-title'].textContent,action==='mailing'?/рассылку/:/email/);
+    assert.match(f.ids['entry-title'].textContent,titles[action]);
     f.ids['entry-private-link'].value='https://seainkk.github.io/-/#access_key='+KEY;
     f.ids['entry-validation-access'].listeners.get('submit')({preventDefault(){}});f.event('hashchange');
     const app=f.app();app.postMessage=(m,to)=>sent.push([m,to]);f.ready(app);f.ready(app);

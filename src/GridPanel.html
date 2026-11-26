@@ -16,9 +16,12 @@
     <button id="rg-grid-add-columns" class="rg-grid-button" type="button">＋ Столбец</button>
     <span class="rg-grid-toolbar-divider" aria-hidden="true"></span>
     <button id="rg-grid-new-contacts" class="rg-grid-button" type="button" disabled>Распределить контакты</button>
-    <label id="rg-grid-workflow-label" hidden>Статус email <select id="rg-grid-workflow-status" aria-label="Статус выбранного email"></select></label>
+    <label id="rg-grid-workflow-label" hidden>Статус контакта <select id="rg-grid-workflow-status" aria-label="Статус выбранного контакта"></select></label>
     <button id="rg-grid-email-check" class="rg-grid-button rg-grid-contact-button" type="button" hidden>Проверить новые email в Promouser</button>
     <button id="rg-grid-mail-open" class="rg-grid-button" type="button" hidden>Загрузить готовые контакты в рассылку</button>
+    <button id="rg-grid-telegram-check" class="rg-grid-button rg-grid-contact-button" type="button" hidden>Проверить новые телефоны</button>
+    <button id="rg-grid-telegram-ready" class="rg-grid-button" type="button" hidden>Выгрузить готовые контакты</button>
+    <button id="rg-grid-telegram-book" class="rg-grid-button" type="button" hidden>Выгрузить телефоны для записной книжки</button>
     <button id="rg-grid-bulk-open" class="rg-grid-button rg-grid-contact-button" type="button" disabled>Проверить новые контакты</button>
     <button id="rg-grid-validation-open" class="rg-grid-button" type="button">Валидация</button>
     <span id="rg-grid-readonly" class="rg-grid-readonly" hidden>Только просмотр</span>
@@ -44,6 +47,11 @@
     <label id="rg-grid-mail-consent" class="rg-grid-provider-choice" hidden><input id="rg-grid-mail-active" type="checkbox">Разрешаю добавить эти контакты в активную рассылку</label>
     <button type="button" id="rg-grid-mail-review" class="rg-grid-button" hidden>Проверить список рассылок</button>
     <button type="button" id="rg-grid-mail-start" class="rg-grid-button" hidden>Подтвердить загрузку</button>
+  </aside>
+  <aside id="rg-grid-telegram-export" class="rg-grid-validation" aria-labelledby="rg-grid-telegram-title" hidden>
+    <div class="rg-grid-validation-heading"><h2 id="rg-grid-telegram-title">Выгрузка для Numshield</h2><button type="button" class="rg-grid-button" id="rg-grid-telegram-close" aria-label="Закрыть выгрузку">✕</button></div>
+    <p id="rg-grid-telegram-summary" role="status" aria-live="polite"></p>
+    <a id="rg-grid-telegram-download" class="rg-grid-button" hidden>Скачать CSV</a>
   </aside>
   <aside id="rg-grid-validation" class="rg-grid-validation" aria-labelledby="rg-grid-validation-title" hidden>
     <div class="rg-grid-validation-heading"><h2 id="rg-grid-validation-title">Проверка новых контактов</h2><button id="rg-grid-validation-close" class="rg-grid-button" type="button" aria-label="Скрыть валидацию">✕</button></div>

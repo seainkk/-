@@ -72,6 +72,57 @@ const companyRow=(id,email,status='Новый контакт')=>[id,'1',email,'�
 const companyPreview=f=>f.c.previewPromouserValidation_({id:A,kind:'email',newContactsOnly:true,provider:'promouser'});
 const companyStart=(f,preview)=>f.c.startPromouserValidation_({id:A,kind:'email',previewToken:preview.previewToken,requestId:'company-email-confirmed'});
 
+const telegramHeaders=['Контакт','Тип контакта','ID компании','Статус','Валидация','ID_TG','Nickname_TG','Active_days_ago'];
+const telegramRow=(contact,type='телефон',status='Новый контакт',...result)=>[contact,type,'001',status,...result];
+const telegramPreview=f=>f.c.previewPromouserValidation_({id:A,kind:'telegram',newContactsOnly:true,provider:'promouser'});
+const telegramStart=(f,p)=>f.c.startPromouserValidation_({id:A,kind:'telegram',previewToken:p.previewToken,requestId:'telegram-confirmed'});
+
+test('company Telegram orders only new Russian mobiles, applies matched results, and sends incomplete reports to review',()=>{
+  const numbers=Array.from({length:9},(_,i)=>'+7999000000'+(i+1));
+  const rows=numbers.slice(0,6).map(n=>telegramRow(n));
+  rows.push(telegramRow('@group_name','юзернейм'),telegramRow('+77010000000'),telegramRow('+74950000000'),telegramRow('+79401234567'),telegramRow(numbers[6],'телефон','Готов'));
+  let paid=false;
+  const f=fixture({phoneRows:[telegramHeaders,...rows],transport:({url,request,response})=>{
+    if(url.endsWith('/balance'))return response({balance:'20'});
+    if(url.endsWith('/order')){assert.equal(Number(request.payload.type),6);return response({order_id:511,type:6});}
+    if(url.includes('/status?'))return response(paid?{order_id:511,cost:'0.4',status:'ready_paid',result:'https://promouser.com/results/511.txt'}:{order_id:511,cost:'0.4',status:'not_ready_unpaid'});
+    if(url.endsWith('/pay')){paid=true;return response({order_id:511,charged:'0.4',status:'success'});}
+    if(url.includes('/results/'))return response(JSON.stringify([
+      {phone:numbers[0],ID_TG:101,Nickname_TG:'known_name',Active_days_ago:30},
+      {phone:numbers[1],ID_TG:102,Active_days_ago:0},
+      {phone:numbers[2],ID_TG:103,Active_days_ago:31},
+      {phone:numbers[3],ID_TG:104,Nickname_TG:'hidden_days'},
+      {phone:numbers[4],status:'not found'},
+      {phone:numbers[5],status:'error'}
+    ]));
+    assert.fail('unexpected mocked provider request');
+  }});
+  f.configure({autoPayLimitUsd:5});
+  const p=telegramPreview(f);assert.equal(p.plannedCount,6);assert.equal(p.sample.every(r=>r.country==='RU'),true);
+  telegramStart(f,p);telegramStart(f,p);assert.deepEqual(plain(f.ledger().jobs[0].contacts.map(r=>r.value).sort()),numbers.slice(0,6));assert.equal(f.calls.fetch.length,0);
+  for(let i=0;i<12&&!['complete','result_review'].includes(f.ledger().jobs[0].state);i++){f.advance();f.tick(15000);}
+  assert.equal(f.ledger().jobs[0].state,'result_review');assert.equal(f.ledger().jobs[0].resultCount,5);
+  const tab=f.target(A,'Телефоны'),cells=col=>rows.map((_,i)=>tab.at(i+2,col).value);
+  assert.deepEqual(cells(4).slice(0,6),['Готов','Записная книжка','Не активен > 30 дней','Ручная проверка','Невалид','Ручная проверка']);
+  assert.deepEqual(cells(5).slice(0,6),['Валиден','Валиден','Валиден','Валиден','Невалид','Проверка не подтверждена']);
+  assert.equal(tab.at(2,6).value,'101');assert.equal(tab.at(2,7).value,'known_name');assert.equal(tab.at(2,8).value,'30');
+  const incomplete=f.c.pvCacheRead_(f.c.pvCache_(f.context,false))[f.c.pvKey_('telegram',numbers[5])];
+  assert.equal(incomplete.pending,undefined);assert.equal(incomplete.result.review,true);assert.equal(incomplete.result.status,'Проверка не подтверждена');
+  assert.equal(telegramPreview(f).plannedCount,0);assert.equal(f.calls.fetch.filter(c=>c.url.endsWith('/pay')).length,1);
+});
+
+test('saved Telegram checks apply without an order and a simultaneous manual decision survives the write',()=>{
+  const number='+79990000001', f=fixture({emailRows:[EH],phoneRows:[telegramHeaders,
+    telegramRow(number),telegramRow('+79990000002','телефон','Новый контакт','Telegram: активен','133','','3')],
+    beforeStatusWrite:(tab,row,col)=>{if(row===2)tab.put(row,col,'Ручная проверка');},
+    otherPhoneRows:[[...PH,'Валидация','ID_TG','Nickname_TG','Active_days_ago'],[number,'','','','','','Телефон','Telegram: активен','1234','saved_username','3']]});
+  f.queue(B);const p=telegramPreview(f);assert.equal(p.plannedCount,0);assert.equal(p.canStart,true);
+  telegramStart(f,p);const tab=f.target(A,'Телефоны');
+  assert.equal(tab.at(2,4).value,'Ручная проверка');assert.equal(tab.at(2,5).value,'Валиден');assert.equal(tab.at(2,6).value,'1234');
+  assert.equal(tab.at(3,4).value,'Записная книжка');assert.equal(tab.at(3,6).value,'133');
+  assert.equal(f.ledger().jobs.length,0);assert.equal(f.calls.fetch.length,0);
+});
+
 test('the company Email action validates only new addresses through the explicitly chosen Promouser, preserves manual work and fills each matching row',()=>{
   let paid=false;
   const f=fixture({emailRows:[companyHeaders,companyRow('01','bad@example.test'),companyRow('02','bad@example.test'),

@@ -167,14 +167,16 @@ function segmentLegacyRoom_(sheet, budget) {
 function segmentLegacyReport_(sheet, channel, bucket, budget) {
   if (!segmentLegacyRoom_(sheet, budget)) return false;
   if (sheet.getLastRow() === 0) return true;
-  var width = sheet.getLastColumn(), header = sheet.getRange(1, 1, 1, width).getDisplayValues()[0].map(pvHeader_);
+  var width = sheet.getLastColumn(), labels = sheet.getRange(1, 1, 1, width).getDisplayValues()[0], header = labels.map(pvHeader_);
+  var modernTelegram = channel === 'telegram' && companyTelegramWorkflowHeaders_(labels);
   function find(labels) {
     var keys = labels.map(pvHeader_), found = [];
     header.forEach(function (label, position) { if (keys.indexOf(label) >= 0) found.push(position); });
     return found.length > 1 ? -1 : found[0];
   }
   var primary = find(channel === 'email' ? ['Email','E-mail','Почта'] : ['Телефон','Мобильный телефон','Phone','Mobile']);
-  var handle = channel === 'telegram' ? find(['Telegram','Телеграм']) : undefined;
+  var handle = channel === 'telegram' && !modernTelegram ? find(['Telegram','Телеграм']) : undefined;
+  if (modernTelegram) primary = find(['Контакт']);
   if (primary === -1 || handle === -1) return false;
   if (primary === undefined && handle === undefined) return false;
   var columns = [primary, handle].filter(function (i) { return i !== undefined; }), left = Math.min.apply(null, columns), right = Math.max.apply(null, columns);
@@ -183,7 +185,13 @@ function segmentLegacyReport_(sheet, channel, bucket, budget) {
     if (Date.now() >= budget.deadline) return false;
     var rows = sheet.getRange(start, left + 1, Math.min(3000, bottom - start + 1), right - left + 1).getDisplayValues();
     rows.forEach(function (row) {
-      var raw = primary === undefined ? '' : row[primary - left], keys = segmentLegacyKeys_(channel === 'email' ? 'email' : 'phone', raw);
+      var raw = primary === undefined ? '' : row[primary - left];
+      if (modernTelegram) {
+        var contact = contactSyncTelegramContact_(raw);
+        if (contact) segmentLegacyAddRow_(bucket,[contact.key]);
+        return;
+      }
+      var keys = segmentLegacyKeys_(channel === 'email' ? 'email' : 'phone', raw);
       if (channel === 'telegram') {
         var handles = segmentLegacyKeys_('telegram', handle === undefined || !row[handle - left] ? raw : row[handle - left]);
         if (keys.length) handles.forEach(function (key) { bucket.aliases.add(key); }); else keys = handles;
@@ -275,22 +283,24 @@ function preparedSegmentAcceptedKeys_(eligible, existing, plan) {
   return accepted;
 }
 
-function preparedSegmentTally_(accepted, occurrences, current, existing) {
+function preparedSegmentTally_(accepted, occurrences, current, existing, companyTelegramKeys) {
+  function canonical(key) { return companyTelegramKeys && companyTelegramKeys.has(key) && /^phone:9\d{9}$/.test(key) ? 'phone:7' + key.slice(6) : key; }
   ['companies','lpr'].forEach(function (owner) {
     existing[owner].forEach(function (row) {
       ['emails','phones','telegrams'].forEach(function (field) {
         var channel = field === 'emails' ? 'email' : field === 'phones' ? 'phone' : 'telegram';
         var bucket = field === 'emails' ? current.email : current.telegram;
-        segmentRecordsList_(row[field], channel).forEach(function (item) { bucket.keys.add(preparedSegmentContactKey_(field, item)); });
+        segmentRecordsList_(row[field], channel).forEach(function (item) { var key = preparedSegmentContactKey_(field,item); if (key) bucket.keys.add(canonical(key)); });
       });
     });
   });
-  var added = 0, duplicates = 0;
-  accepted.forEach(function (key) {
+  var added = 0, duplicates = 0, counts = new Map();
+  accepted.forEach(function (key) { var target = canonical(key); counts.set(target,(counts.get(target) || 0) + (occurrences.get(key) || 1)); });
+  counts.forEach(function (count,key) {
     var bucket = key.indexOf('email:') === 0 ? current.email : current.telegram;
     var present = bucket.keys.has(key) || bucket.aliases.has(key);
     if (!present) added++;
-    duplicates += occurrences.get(key) - (present ? 0 : 1);
+    duplicates += count - (present ? 0 : 1);
   });
   return {contactsAdded:added,contactDuplicates:duplicates};
 }
@@ -305,6 +315,7 @@ function preparedSegmentFinalCounts_(context, targets, records, masters, plan, t
       ['emails','phones','telegrams'].forEach(function (field) {
         (value[field] || []).forEach(function (item) {
           var key = preparedSegmentContactKey_(field, item); if (!key) return;
+          if (targets.companyTelegram && owner === 'companies' && field === 'phones' && !contactSyncTelegramContact_(item)) return;
           if (!eligible[owner].has(key)) eligible[owner].set(key,new Set());
           eligible[owner].get(key).add(ref);
           if (!evidence.has(key)) evidence.set(key,new Set());
@@ -332,7 +343,7 @@ function preparedSegmentFinalCounts_(context, targets, records, masters, plan, t
     var after = segmentRecordsTargetGuard_(context,targets.folder,id).metadata;
     if (uncertain || String(after.version || after.modifiedTime || '') !== String(metadata.version || metadata.modifiedTime || '')) return {};
   }
-  return preparedSegmentTally_(accepted,occurrences,current,existing);
+  return preparedSegmentTally_(accepted,occurrences,current,existing,targets.companyTelegram && eligible.companies);
 }
 
 function preparedSegmentDelta_(context, model, comparison, draft, working) {
@@ -355,6 +366,8 @@ function preparedSegmentDelta_(context, model, comparison, draft, working) {
       existing = target.existing; current = target.working;
     }
     if (Date.now() >= deadline) return unavailable('Google Таблицы не успели вернуть рабочие листы. Повторите предпросмотр.');
+    var companyTags = scope && scope.files.companies && scope.files.companies.metadata.appProperties || {};
+    var telegram = !segmentId || companyTags.registryCompanyEmailSchema === '2' || companyTags.registryCompanyTelegramSchema === '2', foreign = new Set();
     var reports = preparedSegmentReportKeys_(working || model), routes = new Map();
     (model.sourceSheets || []).forEach(function (leaf) { routes.set(leaf.sheetId, leaf.section); });
     var eligible = {companies:new Map(),lpr:new Map()};
@@ -369,6 +382,10 @@ function preparedSegmentDelta_(context, model, comparison, draft, working) {
             var key = preparedSegmentContactKey_(field, value);
             if (!key || !reports.has(key)) return false;
             if (owner === role) {
+              if (telegram && owner === 'companies' && field === 'phones' && !contactSyncTelegramContact_(value)) {
+                var number = contactSyncForeignPhone_(value); if (number) foreign.add(number);
+                return true; // Keep the full number in the company master.
+              }
               var refs = eligible[owner].get(key);
               if (!refs) { refs = new Set(); eligible[owner].set(key, refs); }
               refs.add(segmentRecordsSourceLabel_(ref));
@@ -394,14 +411,16 @@ function preparedSegmentDelta_(context, model, comparison, draft, working) {
       if (entry.needsReview) review++;
       reports.set(key, Math.max(reports.get(key), (entry.sourceRefs || []).length));
     });
-    var totals = preparedSegmentTally_(accepted,reports,current,existing);
+    var totals = preparedSegmentTally_(accepted,reports,current,existing,telegram && eligible.companies);
     if (segmentId) {
       var fresh = authorize_();
       if (fresh.rootId !== context.rootId) fail_('OUTSIDE_REGISTRY', 'Привязка реестра изменилась.');
       if (!segmentLegacySameFiles_(scope, segmentCardFiles_(fresh, segmentId))) return unavailable('Рабочие таблицы изменились во время сверки. Пересчитайте предпросмотр.');
     }
-    return {available:true, companiesAdded:plan.counts.companiesAdded, companiesUpdated:plan.counts.companiesUpdated,
+    var result = {available:true, companiesAdded:plan.counts.companiesAdded, companiesUpdated:plan.counts.companiesUpdated,
       peopleAdded:plan.counts.peopleAdded, peopleUpdated:plan.counts.peopleUpdated, contactsAdded:totals.contactsAdded, contactDuplicates:totals.contactDuplicates, review:review};
+    if (foreign.size) result.telegramForeignPhonesSkipped = foreign.size;
+    return result;
   } catch (error) {
     if (error.registryCode && /OUTSIDE|UNAUTHORIZED|INVALID_REQUEST|FORBIDDEN|ACCESS|GRID_PROTECTED|PROTECTED_FILE/.test(error.registryCode)) throw error;
     return unavailable('Не удалось полностью сопоставить записи с рабочими листами. Проверьте доступ к таблицам и повторите предпросмотр.');

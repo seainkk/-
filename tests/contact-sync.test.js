@@ -247,7 +247,7 @@ test('curated records carry every owner decision into the segment and a replay p
   assert.deepEqual(plain(second.slice(0, 6)), [id('b'), '1', email, 'Второе решение', 'Фильтр', 'provider B']);
   assert.equal(first[col('Валидация')], 'valid'); assert.equal(second[col('Валидация')], 'invalid');
   const mobile = dst.target('phone').data;
-  assert.equal(mobile[1][0], 'фильтр'); assert.equal(mobile[1][mobile[0].indexOf('Active_days_ago')], '34');
+  assert.equal(mobile[1][mobile[0].indexOf('Статус')], 'Не активен > 30 дней'); assert.equal(mobile[1][mobile[0].indexOf('Active_days_ago')], '34');
   first[col('Комментарий')] = 'Ручное решение'; first[col('Статус')] = 'Готов';
   dst.context.contactSyncInstallWorkingHistory_(FILE, 'companies', segment, accepted.companies);
   assert.equal(first[col('Статус')], 'Готов'); assert.equal(first[col('Комментарий')], 'Ручное решение');
@@ -280,7 +280,9 @@ test('new company Email tabs link to both workbook actions using the project of 
       const url='https://seainkk.github.io/-/?validate='+FILE+'&action='+action+'&project='+projectId;
       assert.equal(links.filter(link=>link===url).length,1);
     }
-    assert.equal(Object.values(f.target('phone').links).some(link=>link.includes('action=')),false);
+    const tgLinks=Object.values(f.target('phone').links);
+    for(const action of ['telegram','telegramReady','telegramAddressBook'])
+      assert.equal(tgLinks.filter(link=>link==='https://seainkk.github.io/-/?validate='+FILE+'&action='+action+'&project='+projectId).length,1);
   }
 });
 
@@ -294,13 +296,18 @@ test('contact sync appends literal phone-list errors from an owned source only o
   assert.equal(f.book.tabs[0].data[1][1], '#ERROR!'); assert.equal(f.calls.provider.length, 0);
 });
 
-test('local five- and six-digit subscribers keep leading zeroes and all company owners on repeated contact sync', () => {
+test('legacy company workbooks keep local subscribers, leading zeroes and all owners across sync', () => {
   const f = fixture({realExtractor:true, rows:[
     ['ID компании','Компания','Телефон'],
     ['C-' + 'a'.repeat(24),'Альфа','0-12-34; 56-78-90; +79991234567'],
     ['C-' + 'b'.repeat(24),'Бета','01234']
   ]});
   f.context.enrollContactWorkbook_(f.scope,FILE,{sourceSheetIds:[0],role:'segment-companies',section:'companies',segmentId:SOURCES});
+  const previous = f.state(); delete previous.companyEmailSchema; delete previous.companyTelegramSchema;
+  const legacy = f.target('phone'); legacy.data[0] = Array.from(f.context.contactSyncHeaders_('phone',previous));
+  previous.schemas.phone = {headers:legacy.data[0],columns:Object.fromEntries(legacy.data[0].map((name,i)=>[name,i])),validationLinkVersion:1};
+  delete f.resources.get(FILE).appProperties.registryCompanyEmailSchema; delete f.resources.get(FILE).appProperties.registryCompanyTelegramSchema;
+  f.saveState(previous);
   assert.equal(f.finish('short_company_numbers').counts.addedPhone, 3);
   const [headers, ...rows] = f.target('phone').data, index = label => headers.indexOf(label);
   const find = value => rows.find(row => row[index('Телефон')] === value);
@@ -313,6 +320,59 @@ test('local five- and six-digit subscribers keep leading zeroes and all company 
   assert.equal(f.finish('repeat_short_company_numbers').counts.addedPhone, 0);
   assert.equal(f.context.contactSyncKey_('phone','+01234'), '');
   assert.equal(f.context.contactSyncKey_('phone','12.12.22'), '');
+});
+
+test('company Telegram keeps only Russian mobiles and usernames per ID, reports unique foreign numbers and preserves manual work on replay', () => {
+  const rows = [['ID компании','Компания','Телефон','Telegram'],
+    ['00123','Альфа','8 (999) 123-45-67; 9991234567; +7 701 123 45 67; +44 7700 900123; +7 (812) 123-45-67; +7 (940) 123-45-67','@Example_User'],
+    ['00234','Бета','+79991234567; +447700900123; 89401234567; 9401234567','https://t.me/example_user']];
+  const f = fixture({realExtractor:true,rows});
+  f.context.enrollContactWorkbook_(f.scope,FILE,{sourceSheetIds:[0],role:'segment-companies',section:'companies',segmentId:SOURCES});
+  const ready = f.finish('company_telegram_channels'); assert.equal(ready.counts.telegramForeignPhonesSkipped,3);
+  assert.ok(ready.warnings.some(w => /иностранные номера: 3/.test(w)));
+  const sheet=f.target('phone'), [headers,...data]=sheet.data;
+  assert.deepEqual(plain(headers.slice(0,8)), ['Контакт','Тип контакта','ID компании','Статус','Валидация','ID_TG','Nickname_TG','Active_days_ago']);
+  assert.deepEqual(plain(data.map(row=>row.slice(0,5))), [
+    ['+79991234567','телефон','00123','Новый контакт',''],['@example_user','юзернейм','00123','Новый контакт','Ручная проверка'],
+    ['+79991234567','телефон','00234','Новый контакт',''],['@example_user','юзернейм','00234','Новый контакт','Ручная проверка']]);
+  data[3][3] = 'Готов'; data[3][4] = 'Проверено вручную';
+  const column=headers.indexOf('Комментарий'); data[0][column]='проверено вручную'; data[0][3]='Записная книжка';
+  sheet.data.splice(2,1); // Deliberately remove the first company's username.
+  assert.equal(f.finish('repeat_company_telegram').counts.addedTelegram,0);
+  assert.deepEqual(plain(sheet.data[3].slice(3,5)), ['Готов','Проверено вручную']);
+  assert.equal(sheet.data.length,4); assert.equal(sheet.data[1][column],'проверено вручную'); assert.equal(sheet.data[1][3],'Записная книжка');
+  const typed=headers.map(()=> ''); typed[0]='@typed_into_sheet'; typed[1]='юзернейм'; typed[2]='00234'; sheet.data.push(typed);
+  const changed=f.invoke('getContactWorkspace_',{id:FILE,prepareNewContactStatuses:true});
+  assert.equal(changed.mailingStatusChanged,true); assert.deepEqual(plain(typed.slice(3,5)),['Новый контакт','Ручная проверка']);
+  assert.equal(f.invoke('getContactWorkspace_',{id:FILE,prepareNewContactStatuses:true}).mailingStatusChanged,false);
+});
+
+test('upgrading an existing company Email v2 workbook keeps the Telegram GID, history, manual and foreign legacy rows', () => {
+  const source=[['ID компании','Компания','Телефон','Telegram'],['00123','Альфа','+79991112233; +447700900123','@sample_user']];
+  const f=fixture({realExtractor:true,rows:source});
+  f.context.enrollContactWorkbook_(f.scope,FILE,{sourceSheetIds:[0],role:'segment-companies',section:'companies',segmentId:SOURCES});
+  const old=f.state(); delete old.companyTelegramSchema; delete f.resources.get(FILE).appProperties.registryCompanyTelegramSchema;
+  const sheet=f.target('phone'), gid=sheet.getSheetId(), headers=Array.from(f.context.contactSyncHeaders_('phone',old)).concat(['Личная заметка']);
+  const row=(values)=>headers.map(name=>values[name]||'');
+  sheet.data.splice(0,Infinity,headers,
+    row({'Телефон':'+79991112233','ID компании':'00123','Статус рассылки':'фильтр','Личная заметка':'сохранить','ID_TG':'911'}),
+    row({'Telegram':'@sample_user','ID компании':'00123','Статус рассылки':'Новый контакт'}),
+    row({'Телефон':'+447700900123','ID компании':'00123','Статус рассылки':'фильтр'}));
+  old.schemas.phone={headers:headers.slice(0,-1),columns:Object.fromEntries(headers.slice(0,-1).map((name,i)=>[name,i])),validationLinkVersion:1};
+  f.saveState(old); const tags = f.resources.get(FILE).appProperties;
+  assert.equal(tags[f.context.CONTACT_SYNC.mailingStatusProperty], f.context.contactSyncMailingTargetsStamp_(old.targets));
+  assert.equal(f.context.contactSyncMailingStatusNeeded_(tags),true);
+  const firstOpen=f.invoke('getContactWorkspace_',{id:FILE,prepareMailingStatus:true});
+  assert.equal(firstOpen.mailingStatusChanged,true); assert.equal(firstOpen.companyTelegramSchema,2);
+  assert.equal(f.context.contactSyncMailingStatusNeeded_(f.resources.get(FILE).appProperties),false);
+  const calls=f.calls.raw.length; assert.equal(f.invoke('getContactWorkspace_',{id:FILE,prepareMailingStatus:true}).mailingStatusChanged,false); assert.equal(calls,f.calls.raw.length);
+  const result=f.finish('migrate_company_telegram');
+  assert.equal(f.target('phone').getSheetId(),gid); assert.equal(result.counts.addedPhone,0); assert.equal(result.counts.addedTelegram,0);
+  const col=name=>sheet.data[0].indexOf(name);
+  assert.deepEqual(sheet.data.slice(1).map(r=>r[col('Контакт')] || ''),['+79991112233','@sample_user','']);
+  assert.deepEqual(sheet.data.slice(1).map(r=>r[col('Статус')]),['фильтр','Новый контакт','фильтр']);
+  assert.equal(sheet.data[2][col('Валидация')],'Ручная проверка');
+  assert.equal(sheet.data[1][col('ID_TG')],'911');assert.equal(sheet.data[1][col('Личная заметка')],'сохранить');
 });
 
 test('company Email counts are distinct per source ID and update on existing and new rows across imports', () => {
@@ -378,7 +438,7 @@ test('enrollment replaces a copied workbook link and preserves a manual formula 
 });
 
 test('a segment import upgrades a legacy validation heading once per channel without restoring one the team removed', () => {
-  const f = fixture(), action = 'Проверить новые контакты';
+  const f = fixture(), action = 'Проверить новые телефоны в Promouser';
   f.context.enrollContactWorkbook_(f.scope, FILE, {sourceSheetIds:[0], role:'segment-companies', section:'companies', segmentId:SOURCES});
   const prior = f.state(), email = f.target('email'), phone = f.target('phone'), emailAction = 'Проверить новые email в Promouser';
   for (const sheet of [email, phone]) {
@@ -396,8 +456,8 @@ test('a segment import upgrades a legacy validation heading once per channel wit
   };
   complete('upgrade_old_contact_targets');
   const phonePosition = phone.data[0].indexOf(action);
-  assert.ok(phonePosition >= 0); assert.equal(phone.links['1:' + (phonePosition + 1)], 'https://seainkk.github.io/-/?validate=' + FILE);
-  assert.equal(f.state().schemas.phone.validationLinkVersion, 1);
+  assert.ok(phonePosition >= 0); assert.equal(phone.links['1:' + (phonePosition + 1)], 'https://seainkk.github.io/-/?validate=' + FILE + '&action=telegram&project=numshield');
+  assert.equal(f.state().schemas.phone.validationLinkVersion, 3);
   assert.equal(email.data[0].includes(emailAction), false);
   phone.data[0][phonePosition] = ''; delete phone.links['1:' + (phonePosition + 1)];
   complete('sync_after_removing_link');
@@ -627,7 +687,7 @@ test('segment contact materialization resumes committed batches without validati
   for (const [kind, label] of [['email', 'Email'], ['phone', 'Телефон']]) {
     const [headers, ...contacts] = f.target(kind).data;
     assert.equal(contacts.length, 1001); assert.equal(new Set(contacts.map(row => row[headers.indexOf(label)])).size, 1001);
-    assert.ok(contacts.every(row => row[headers.indexOf(kind === 'email' ? 'Статус' : 'Статус рассылки')] === 'Новый контакт'));
+    assert.ok(contacts.every(row => row[headers.indexOf('Статус')] === 'Новый контакт'));
   }
   const writes = f.calls.raw.length; assert.equal(step(), true); assert.equal(f.calls.raw.length, writes);
 });
