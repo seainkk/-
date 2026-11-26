@@ -170,7 +170,7 @@ def main():
             page.evaluate("view=>RegistryProject.show(view,{ready:false,preview:true,epoch:2})",view)
             section=page.locator('#pj-'+view+'-view')
             expect(section).to_be_visible()
-            assert section.evaluate('el=>el.inert')
+            expect(section.locator('#pj-'+view+'-refresh')).to_be_disabled()
             assert 'Подключите' not in section.inner_text()
             assert 'Existing campaign' not in section.inner_text()
         assert page.evaluate('backend.calls.length')==count_before
@@ -186,6 +186,47 @@ RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refr
         page.evaluate("backend.holdMethods=[];release('getProjectAnalytics')");idle()
         expect(page.locator('#pj-segment')).to_contain_text('Segment A')
         page.evaluate("RegistryProject.lock()");expect(section).to_be_hidden()
+
+        # Local choices are actionable while Google's bootstrap is pending. No provider request
+        # is dispatched until the same project's server access is confirmed.
+        page.evaluate("""window.directory={state:'ready',preview:true,expiresAt:Date.now()+60000,
+          segments:[{id:'segment-a',name:'Known segment'}]};
+          RegistryProject.configure({transport,peekSegments:()=>directory});
+          RegistryProject.show('analytics',{ready:false,preview:true,epoch:3})""")
+        before=page.evaluate('backend.calls.length')
+        page.locator('#pj-segment').select_option('segment-a')
+        forecast=page.locator('#pj-forecast')
+        forecast.locator('summary').click()
+        forecast.get_by_role('button',name='3 дня').click()
+        expect(forecast.locator('[data-forecast-days="3"]')).to_have_attribute('aria-pressed','true')
+        expect(forecast.locator('#pj-forecast-refresh')).to_be_disabled()
+        expect(page.locator('#pj-analytics-content')).to_be_hidden()
+        assert page.evaluate('backend.calls.length')==before
+        page.evaluate("""RegistryProject.show('analytics',{ready:true,epoch:3});void RegistryProject.refresh({opening:true})""")
+        idle()
+        expect(page.locator('#pj-segment')).to_have_value('segment-a')
+        expect(forecast.locator('[data-forecast-days="3"]')).to_have_attribute('aria-pressed','true')
+        assert forecast.evaluate('el=>el.open')
+        assert page.evaluate("n=>backend.calls.slice(n).some(c=>c.name==='getProjectSendingForecast')",before)
+        page.evaluate("RegistryProject.show('infrastructure',{ready:false,preview:true,epoch:4})")
+        before=page.evaluate('backend.calls.length')
+        page.locator('#pj-infrastructure-select').click()
+        search=page.locator('#pj-mailbox-search')
+        search.fill('first');page.locator('#pj-mailbox-cancel').click();expect(page.locator('#pj-mailbox-dialog')).to_be_hidden()
+        page.locator('#pj-infrastructure-select').click();search.fill('sender2');search.press('Enter')
+        expect(page.locator('#pj-mailbox-inventory')).to_be_disabled()
+        expect(page.locator('#pj-mailbox-save')).to_be_disabled()
+        assert page.evaluate('backend.calls.length')==before
+        page.evaluate("""backend.holdMethods=['getProjectInfrastructureSelection'];
+          RegistryProject.show('infrastructure',{ready:true,epoch:4});void RegistryProject.refresh({opening:true})""")
+        page.wait_for_function("backend.pending.some(x=>x.name==='getProjectInfrastructureSelection')")
+        search.fill('sender1');expect(page.locator('#pj-mailbox-inventory')).to_be_disabled()
+        page.evaluate("backend.holdMethods=[];release('getProjectInfrastructureSelection')");idle()
+        expect(search).to_have_value('sender1');expect(page.locator('#pj-mailbox-inventory')).to_be_enabled()
+        page.locator('#pj-mailbox-inventory').click();idle()
+        expect(page.locator('[data-monitoring-account="account-1"]')).to_be_visible()
+        page.evaluate("RegistryProject.lock()")
+        expect(page.locator('#pj-mailbox-dialog')).to_be_hidden();expect(search).to_have_value('')
 
         # A fresh preview avoids a second RPC until its TTL expires. Manual refresh updates it on demand.
         reset(setup='backend.completionTtl=700;')

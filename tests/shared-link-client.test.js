@@ -185,9 +185,9 @@ test('the embedded Sheets dialog exchanges messages with its actual Pages ancest
   const wrapper={parent:pages,postMessage(){assert.fail('the Google wrapper received a message');}};
   const window={top:sheets,parent:wrapper,location:{ancestorOrigins:[wrapperOrigin,origin,outerOrigin]},RegistryGrid:{open:options=>opened.push(options)}};
   const context=vm.createContext({window,projectNames:{numshield:'Намшилд',neosender:'Нео Сендер'},activeProjectId:'numshield',accessReady:false,
-    $:()=>project,importing:false,sourceSaving:false,segmentSaving:false,segmentEditor:null,coldySession:null,providerSession:null,coldyMailings:null,
+    $:()=>project,pendingDirectoryOpen:null,activeView:'sources',importing:false,sourceSaving:false,segmentSaving:false,segmentEditor:null,coldySession:null,providerSession:null,coldyMailings:null,
     workspaceRpc(){},armViewTimer(){},updateControls(){},switchProject(){context.activeProjectId=project.value;}});
-  vm.runInContext(['entryWindow','postEntryMessage','notifyEntry','sendEntryCatalog','receiveEntryMessage','openEntryWorkbook','openGridWorkbook'].map(source).join('\n'),context);
+  vm.runInContext(['entryWindow','postEntryMessage','notifyEntry','sendEntryCatalog','receiveEntryMessage','previewCardOpen','cancelDirectoryOpen','openEntryWorkbook','openGridWorkbook'].map(source).join('\n'),context);
   const message={type:'bases-registry-open-validation',id:'workbook_123456',projectId:'neosender',workbookAction:'mailing'};
   const receive=(source,from,data=message)=>context.receiveEntryMessage({source,origin:from,data});
   receive(pages,origin);assert.equal(opened.length,0);

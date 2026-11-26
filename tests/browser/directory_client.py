@@ -2,6 +2,7 @@
 import sys
 
 sys.dont_write_bytecode = True
+
 from playwright.sync_api import expect, sync_playwright
 from performance_client import FIXTURE, HTML, ROOT
 from segment_card import DATA as CARD_DATA
@@ -41,7 +42,10 @@ def main():
         errors = []
         host.on('pageerror',lambda e: errors.append(str(e)))
 
+        stamp=0
+
         def boot():
+            nonlocal stamp
             if host.url.startswith(ORIGIN):
                 host.evaluate("localStorage.removeItem('registry.activeProject')")
             host.goto('about:blank')
@@ -49,14 +53,17 @@ def main():
             host.wait_for_function('window.scope?.projectId==="numshield"')
             frame = host.frame(url=ORIGIN+'/-/app.html')
             frame.wait_for_function("backend.pending.some(p=>p.method==='getAppBootstrap')")
+            stamp=frame.evaluate("Date.now()-1000")
             return frame
 
         def send(message):
             host.evaluate('m=>send(m)',message)
 
+
+
         def offer(kind,items,**fields):
             send(dict(type='bases-registry-fast-directory',kind=kind,items=items,
-                      checkedAt=1700000000000,complete=True,**fields))
+                      checkedAt=stamp,complete=True,**fields))
 
         def choose(kind,id,serial):
             send(dict(type='bases-registry-fast-open',kind=kind,id=id,serial=serial))
@@ -113,20 +120,38 @@ def main():
             expect(app.locator('#br-view-segments')).to_have_attribute('aria-pressed','true')
             offer('segments',[])
             expect(app.locator('#br-segments-empty-title')).to_contain_text('пока нет сегментов')
-            send(dict(type='bases-registry-fast-expired',kind='segments',checkedAt=1700000000000))
+            send(dict(type='bases-registry-fast-expired',kind='segments',checkedAt=stamp))
             expect(app.locator('#br-segments-empty-title')).to_contain_text('Загружаем сегменты')
-            send(dict(type='bases-registry-fast-directory',kind='segments',complete=False,checkedAt=1700000000001,items=[]))
+            send(dict(type='bases-registry-fast-directory',kind='segments',complete=False,checkedAt=stamp+1,items=[]))
             expect(app.locator('#br-segments-empty-title')).to_contain_text('Уточняем список')
-            send(dict(type='bases-registry-fast-directory',kind='segments',complete=True,checkedAt=1700000000002,items=[segment]))
-            send(dict(type='bases-registry-fast-expired',kind='segments',checkedAt=1700000000001))
+            send(dict(type='bases-registry-fast-directory',kind='segments',complete=True,checkedAt=stamp+2,items=[segment]))
+            send(dict(type='bases-registry-fast-expired',kind='segments',checkedAt=stamp+1))
             expect(app.locator('#br-segments-rows')).to_contain_text(segment['name'])
             app.evaluate("""() => {
               const normal=api.getSegmentContactCard;
               api.getSegmentContactCard=p=>{const page=normal(p);page.rows=page.rows.slice(0,1);page.nextOffset=1;return page;};
             }""")
+            opener=app.locator('[data-segment="existing-segment"] .br-segment-row-name')
+            opener.evaluate("""button=>{
+              button.addEventListener('click',()=>{
+                const start=performance.now();
+                window.addEventListener('segment-card-update',()=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
+                  if(!document.querySelector('#sc-view').hidden)window.coldCardPaint=performance.now()-start;
+                })),{once:true});
+              },{capture:true,once:true});
+            }""")
+            opener.click()
             choose('segments',segment['id'],1)
-            choose('segments',segment['id'],1)
-            # The card RPC authorizes independently; its first page stays out of the DOM until bootstrap.
+            # Show the actual card and its filters while the independently authorized page stays private.
+            expect(app.locator('#sc-view')).to_be_visible()
+            expect(app.locator('#sc-title')).to_have_text(segment['name'])
+            expect(app.locator('#br-segments-view')).to_be_hidden()
+            expect(app.locator('#sc-query')).to_be_enabled()
+            expect(app.locator('#sc-add')).to_be_disabled()
+            expect(app.locator('#br-action-back')).to_be_visible()
+            app.wait_for_function('Number.isFinite(window.coldCardPaint)')
+            paint=app.evaluate('window.coldCardPaint')
+            assert paint<2000,paint
             app.wait_for_function("backend.calls.some(c=>c.name==='getSegmentContactCard')&&backend.active===1")
             expect(app.locator('#sc-rows tr')).to_have_count(0)
             finish(app,'getAppBootstrap')
@@ -141,8 +166,45 @@ def main():
             app.locator('#br-project').select_option('neosender')
             host.wait_for_function("scope.projectId==='neosender'")
             send(dict(type='bases-registry-fast-directory',kind='segments',epoch=old_epoch,projectId='numshield',
-                      complete=True,checkedAt=1700000000000,items=[dict(segment,name='Чужой проект')]))
+                      complete=True,checkedAt=stamp,items=[dict(segment,name='Чужой проект')]))
             expect(app.locator('body')).not_to_contain_text('Чужой проект')
+
+            app = boot()
+            offer('segments',[segment])
+            choose('segments',segment['id'],1)
+            app.locator('[data-sc-channel=telegram]').click()
+            app.locator('#sc-owner').select_option('companies')
+            query=app.locator('#sc-query')
+            query.fill('79990000002')
+            query.press('Enter')
+            expect(app.locator('#sc-rows tr')).to_have_count(0)
+            assert app.evaluate("backend.calls.filter(c=>c.name==='getSegmentContactCard').length===1")
+            finish(app,'getAppBootstrap')
+            expect(app.locator('#sc-rows')).to_contain_text('+79990000002')
+            expect(app.locator('#sc-rows tr')).to_have_count(1)
+            expect(app.locator('[data-sc-channel=telegram]')).to_have_attribute('aria-pressed','true')
+            expect(app.locator('#sc-owner')).to_have_value('companies')
+            expect(query).to_be_focused()
+            assert app.evaluate("backend.calls.filter(c=>c.name==='getSegmentContactCard').length===2 && !backend.calls.some(c=>c.name==='getSourceBases')")
+
+            for cancel_method in ('back','expired','replaced','navigate'):
+                app = boot()
+                offer('segments',[segment])
+                choose('segments',segment['id'],1)
+                expect(app.locator('#sc-view')).to_be_visible()
+                if cancel_method=='back':
+                    app.locator('#br-action-back').click()
+                elif cancel_method=='expired':
+                    send(dict(type='bases-registry-fast-expired',kind='segments',checkedAt=stamp))
+                elif cancel_method=='replaced':
+                    send(dict(type='bases-registry-fast-directory',kind='segments',checkedAt=stamp+1,complete=True,items=[]))
+                else:
+                    app.locator('#br-view-retarget').click()
+                expect(app.locator('#sc-view')).to_be_hidden()
+                expect(app.locator('#sc-title')).to_be_empty()
+                finish(app,'getAppBootstrap')
+                expect(app.locator('#sc-rows tr')).to_have_count(0)
+                expect(app.locator('#sc-view')).to_be_hidden()
 
             app = boot()
             offer('segments',[segment])
@@ -186,7 +248,7 @@ def main():
         finally:
             context.close()
             browser.close()
-    print('PASS: scoped directories, early click, cancellation, pending catalog, project changes and revocation.')
+    print(f'PASS: cold card shell and filters in {paint:.0f} ms with bootstrap held, selection, cancellation, expiry, project changes and revocation.')
 
 
 if __name__ == '__main__':

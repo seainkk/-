@@ -38,6 +38,56 @@ api.saveSegmentExport=p=>{if(!backend.snapshotRetry){backend.snapshotRetry=p.req
 """
 
 
+def check_directory_preview(browser):
+    page=browser.new_page()
+    page.set_content(''.join((ROOT/'src'/(part+'.html')).read_text(encoding='utf8')
+                              for part in ['SegmentCardPanel','SegmentCardClient','SegmentSelectionsClient']))
+    page.evaluate("""()=>{window.backend={};window.api={getSegmentsDashboard:()=>({state:'ready',
+      items:[{id:'existing-segment',files:[{id:'existing-segment-companies'}]}]})};"""+DATA+"}")
+    page.evaluate("""()=>{
+      window.authorized=false;window.reads=[];
+      RegistrySegmentCard.configure({active:()=>authorized,error:e=>e,rpc:(method,p,valid)=>{
+        reads.push(p);
+        if(!authorized||!valid())throw Error('premature read');
+        return Promise.resolve(api[method](p));
+      }});
+      RegistrySegmentCard.acceptDashboard(api.getSegmentsDashboard({includeCardPreview:true}));
+      RegistrySegmentCard.preview('existing-segment','Кухни','Намшилд / Клиенты');
+      RegistrySegmentCard.show(true);
+    }""")
+    expect(page.locator('#sc-title')).to_have_text('Кухни')
+    expect(page.locator('#sc-summary')).to_contain_text('Email · —')
+    expect(page.locator('#sc-table-wrap thead')).to_be_visible()
+    expect(page.locator('#sc-add')).to_be_disabled()
+    expect(page.locator('#sc-coldy')).to_be_disabled()
+    page.locator('[data-sc-channel="telegram"]').click()
+    page.locator('#sc-owner').select_option('companies')
+    page.locator('[data-sc-state="ready"]').click()
+    query=page.locator('#sc-query')
+    query.fill('79990')
+    page.evaluate('RegistrySegmentCard.refresh({automatic:true})')
+    page.evaluate('RegistrySegmentCard.acceptDashboard(api.getSegmentsDashboard({includeCardPreview:true}))')
+    expect(page.locator('#sc-rows')).to_be_empty()
+    assert page.evaluate('reads.length')==0
+    page.evaluate("""async ()=>{
+      authorized=true;
+      const first=Promise.resolve({page:api.getSegmentContactCard(RegistrySegmentCard.firstPageRequest('existing-segment'))});
+      RegistrySegmentCard.select('existing-segment','Кухни','Намшилд / Клиенты',first);
+      await RegistrySegmentCard.refresh({opening:true});
+    }""")
+    expect(query).to_have_value('79990')
+    expect(query).to_be_focused()
+    expect(page.locator('#sc-add')).to_be_enabled()
+    expect(page.locator('#sc-rows tr')).to_have_count(1)
+    expect(page.locator('#sc-rows tr')).to_contain_text('+79990000001')
+    assert page.evaluate("reads.length===1&&reads[0].query==='79990'&&reads[0].channel==='telegram'&&reads[0].owner==='companies'")
+    page.evaluate("authorized=false;RegistrySegmentCard.preview('existing-segment','Кухни','Намшилд');RegistrySegmentCard.show(true)")
+    expect(page.locator('#sc-rows')).to_be_empty()
+    page.evaluate("RegistrySegmentCard.clear()")
+    expect(page.locator('#sc-view')).to_be_hidden()
+    page.close()
+
+
 def main():
     html=HTML.replace(FIXTURE,FIXTURE+DATA,1)
     for part in ('SegmentCardPanel','SegmentCardClient','SegmentSelectionsClient'):
@@ -45,6 +95,7 @@ def main():
     with sync_playwright() as pw:
         launch={'channel':'chrome'} if sys.platform=='win32' else {'executable_path':'/usr/bin/chromium'}
         browser=pw.chromium.launch(**launch, headless=True)
+        check_directory_preview(browser)
         page=browser.new_page()
         errors=[]
         page.on('pageerror',lambda error: errors.append(str(error)))

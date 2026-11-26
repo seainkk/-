@@ -106,6 +106,22 @@ function preparedFixture() {
   return {...f,values,cache,disk,context,dashboard,rebuild:(guard=()=>context)=>plain(c.segmentCardRefreshSnapshot_(context,segment,guard))};
 }
 
+test('prepared scope verifies both assigned books in one Drive listing and falls back on an incomplete response',()=>{
+  const f=preparedFixture();f.rebuild();
+  const allowed=[companies,lpr], reads=[];
+  const individual=f.c.contactSyncMetadata_;f.c.contactSyncMetadata_=id=>{reads.push(id);return individual(id);};
+  let files=allowed.map(id=>({...f.meta[id],trashed:false})),listCount=0;
+  f.c.Drive.Files.list=()=>{listCount++;return {files};};
+  assert.equal(f.run({prepared:true,limit:2}).prepared,true);
+  assert.equal(listCount,1);assert.deepEqual(reads,[]);
+  f.c.Drive.Files.list=()=>({nextPageToken:'more',files});
+  assert.equal(f.run({prepared:true,limit:2}).prepared,true);assert.deepEqual(reads.sort(),allowed.sort());
+  f.meta[lpr].parents=['different_segment'];reads.length=0;
+  assert.throws(()=>f.run({prepared:true,limit:2}),{registryCode:'OUTSIDE_SEGMENTS'});
+  files=[{...f.meta[companies],trashed:false}];f.c.Drive.Files.list=()=>({files});
+  assert.throws(()=>f.run({prepared:true,limit:2}),{registryCode:'OUTSIDE_SEGMENTS'});
+});
+
 test('company Email queues respect manual approvals, all duplicate exclusions and separate provider events',()=>{
   const headers=['ID компании','Почт на компанию','Email','Статус','Результат валидации','Проверить принадлежность','Валидация'];
   const data=[

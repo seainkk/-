@@ -55,22 +55,46 @@ function segmentCardBuild_(context, scope, campaigns, validation, validationKeys
 
 function segmentCardChanged_() { fail_('SEGMENT_CARD_CHANGED', 'Данные сегмента изменились. Откройте список заново.'); }
 
-function segmentCardFiles_(context, segmentId, includeHistory) {
+function segmentCardFiles_(context, segmentId, mode) {
   registryRequireSegment_(context, segmentId);
   var folder = segmentFolder_(context, segmentSourceFolder_(context), segmentId, true);
-  var storage = sourceBasesStorage_(context), storageMeta = contactSyncMetadata_(storage.public.id);
-  var tracking = segmentTrackingStorage_(context,storage,false,includeHistory !== true), files = {companies:null,lpr:null};
-  tracking.tables.forEach(function (table) {
-    if (table.segmentId !== segmentId) return;
+  var storage = sourceBasesStorage_(context), prepared = mode === 'prepared', history = mode === true;
+  var storageVersion = prepared ? null : contactSyncVersion_(contactSyncMetadata_(storage.public.id));
+  var tracking = segmentTrackingStorage_(context,storage,false,!history), files = {companies:null,lpr:null};
+  var tables = tracking.tables.filter(function (table) { return table.segmentId === segmentId; });
+  var metadata = prepared && tables.length > 1 ? segmentCardPreparedMetadata_(segmentId) : null;
+  tables.forEach(function (table) {
     var fileId = table.fileId;
     if (fileId === storage.public.id || fileId === REGISTRY_CONFIG.defaultSourceBasesStorageId)
       fail_('GRID_PROTECTED', 'Служебная таблица не может быть рабочей таблицей сегмента.');
-    var meta = contactSyncMetadata_(fileId);
+    var meta = metadata && metadata.get(fileId) || contactSyncMetadata_(fileId);
     if (!segmentCardFileMatches_(meta, fileId, segmentId, table.kind, context.rootId))
       fail_('OUTSIDE_SEGMENTS', 'Назначенная рабочая таблица больше не принадлежит этому сегменту.');
     files[table.kind] = {id: fileId, name: meta.name, version: contactSyncVersion_(meta), metadata: meta};
   });
-  return {folder:folder,storage:storage,tracking:includeHistory === true ? tracking : null,storageVersion:contactSyncVersion_(storageMeta),files:files};
+  return {folder:folder,storage:storage,tracking:history ? tracking : null,storageVersion:storageVersion,files:files};
+}
+
+// A prepared page verifies the assignment ledger and both current parents, but does
+// not rebuild a revision from the service book. Batch the two Drive metadata reads.
+function segmentCardPreparedMetadata_(segmentId) {
+  if (typeof Drive === 'undefined' || !Drive.Files || !Drive.Files.list) return null;
+  var page;
+  try {
+    page = Drive.Files.list({q:"trashed=false and mimeType='" + REGISTRY_CONFIG.spreadsheetMime + "' and '" + id_(segmentId) + "' in parents",
+      fields:'nextPageToken,incompleteSearch,files(id,name,mimeType,parents,trashed,appProperties,version,modifiedTime)',
+      pageSize:100,supportsAllDrives:true,includeItemsFromAllDrives:true});
+  } catch (unavailable) { return null; }
+  if (!page || page.incompleteSearch || page.nextPageToken || !Array.isArray(page.files)) return null;
+  var result = new Map();
+  for (var i = 0; i < page.files.length; i++) {
+    var file = page.files[i];
+    if (!file || file.trashed !== false || typeof file.name !== 'string' ||
+        file.mimeType !== REGISTRY_CONFIG.spreadsheetMime || !Array.isArray(file.parents) ||
+        file.parents.length !== 1 || file.parents[0] !== segmentId || result.has(file.id)) return null;
+    result.set(file.id,file);
+  }
+  return result;
 }
 
 function segmentCardFileMatches_(meta, fileId, segmentId, kind, rootId) {
