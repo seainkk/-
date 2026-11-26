@@ -133,7 +133,7 @@ function contactPreviewSourceSheets_(context, fileId, sheets) {
 function contactPreviewMapping_(header) {
   var mapping = { companyColumns: [], emailColumns: [], phoneColumns: [], unmappedContactColumns: [] };
   var emailNames = ['email', 'emails', 'emailадрес', 'emailадреса', 'emailкомпании', 'корпоративныйemail', 'личныйemail', 'рабочийemail', 'почты', 'почта', 'почтаосновная', 'почтадоп', 'почтадополнительная', 'доппочта', 'элпочта', 'электроннаяпочта', 'электронныйадрес', 'email1', 'email2', 'email3', 'emailдоп', 'emailосновной', 'почтыкомпании', 'контактныйemail', 'личнаяпочта', 'корпоративнаяпочта'];
-  var phoneNames = ['phone', 'phones', 'mobile', 'mobiles', 'телефон', 'телефоны', 'мобильныйтелефон', 'мобильныетелефоны', 'городскойтелефон', 'городскиетелефоны', 'основнойтелефон', 'дополнительныйтелефон', 'телосновной', 'телдоп', 'телдополнительный', 'доптелефон', 'доптел', 'рабочийтелефонкомпания', 'рабочийтелефон', 'телефоныкомпании', 'мобильный', 'контактныйтелефон', 'номераизссылоксоцсетей'];
+  var phoneNames = ['phone', 'phones', 'mobile', 'mobiles', 'mobilephone', 'mobilephones', 'cellphone', 'cellphones', 'мобтел', 'мобтелефон', 'мобтелефоны', 'телефон', 'телефоны', 'мобильныйтелефон', 'мобильныетелефоны', 'городскойтелефон', 'городскиетелефоны', 'основнойтелефон', 'дополнительныйтелефон', 'телосновной', 'телдоп', 'телдополнительный', 'доптелефон', 'доптел', 'рабочийтелефонкомпания', 'рабочийтелефон', 'телефоныкомпании', 'мобильный', 'контактныйтелефон', 'номераизссылоксоцсетей'];
   header.forEach(function (label, index) {
     var key = contactPreviewHeader_(String(label || '').replace(/\([^)]*не\s+провер[^)]*\)/gi, '')), column = { index: index, label: contactPreviewLabel_(label) };
     if (key==='исходныйстолбецemail') return;

@@ -4,6 +4,7 @@ var REGISTRY_CONFIG = Object.freeze({
   sharedAccessKeyHash: 'yiKUzWNsQOzwMnF4Fw2_f-9Esxm9ooCyyptJsjYeBG0',
   defaultRootFolderId: '1WKcvDDKqYBo94eXsYc5vKp6OPtOzv6Wh',
   defaultSegmentsFolderId: '1sQ8WrTgdEOPTPYLIwoBwHb6gL_ULT4yu',
+  companyWorkbookTemplateId: '1KxI1gZCsT9g5LC3skxyxaINvbcY4FaLa_2C28EJlS8I',
   segmentsFolderName: 'Аутричи',
   defaultSourceBasesFolderId: '1deuP0ovOC70PrElQKZjSjuvSMgPF0J7r',
   sourceBasesFolderName: 'Исходные базы',
@@ -31,6 +32,21 @@ var CONTACT_MAILING_STATUS = Object.freeze({
   initial: 'Новый контакт',
   values: ['Новый контакт', 'в рассылке', 'фильтр']
 });
+
+var COMPANY_EMAIL_STATUS = Object.freeze({
+  values: ['Новый контакт', 'Готов', 'Рассылка', 'Фильтр', 'Невалид']
+});
+
+function companyEmailWorkflowHeaders_(headers) {
+  return ['ID компании', 'Почт на компанию', 'Email', 'Статус', 'Результат валидации'].every(function (name) { return headers.indexOf(name) >= 0; });
+}
+
+function companyEmailWorkflowStatus_(value) {
+  var original = String(value == null ? '' : value).trim(), lower = original.toLowerCase();
+  if (!lower || contactMailingStatusIsNew_(lower)) return CONTACT_MAILING_STATUS.initial;
+  if (lower === 'в рассылке' || lower === 'запущен') return 'Рассылка';
+  return COMPANY_EMAIL_STATUS.values.filter(function (item) { return item.toLowerCase() === lower; })[0] || original;
+}
 
 /** Visible working fields; technical ownership fields are retained after these. */
 var WORKING_CONTACT_COLUMNS = Object.freeze({
@@ -68,18 +84,20 @@ function contactMailingStatusFromHistory_(history) {
   return statuses.indexOf('фильтр') >= 0 ? 'фильтр' : statuses.indexOf('в рассылке') >= 0 ? 'в рассылке' : CONTACT_MAILING_STATUS.initial;
 }
 
-function contactMailingStatusDropdown_(range, preserve, mask) {
+function contactMailingStatusDropdown_(range, preserve, mask, companyEmail) {
   if (typeof SpreadsheetApp.newDataValidation !== 'function') return;
-  var rule = SpreadsheetApp.newDataValidation().requireValueInList(CONTACT_MAILING_STATUS.values, true).setAllowInvalid(false).build();
+  var allowed = companyEmail ? COMPANY_EMAIL_STATUS.values : CONTACT_MAILING_STATUS.values;
+  var rule = SpreadsheetApp.newDataValidation().requireValueInList(allowed, true).setAllowInvalid(false).build();
   if (!preserve) { range.setDataValidation(rule); return; }
   var rules = range.getDataValidations(), values = range.getDisplayValues(), formulas = range.getFormulas(), changed = false;
   rules.forEach(function (entry, index) {
     var value = values[index][0];
-    if (mask && !mask[index][0] || formulas[index][0] || value && CONTACT_MAILING_STATUS.values.indexOf(value) < 0) return;
+    if (mask && !mask[index][0] || formulas[index][0] || value && allowed.indexOf(value) < 0) return;
     var old = entry[0];
     var legacy = old && typeof old.getCriteriaType === 'function' &&
       old.getCriteriaType() === SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST && !old.getAllowInvalid() &&
-      !old.getHelpText() && JSON.stringify(old.getCriteriaValues()[0]) === JSON.stringify(['новый','в рассылке','фильтр']) && old.getCriteriaValues()[1] !== false;
+      !old.getHelpText() && (JSON.stringify(old.getCriteriaValues()[0]) === JSON.stringify(['новый','в рассылке','фильтр']) ||
+        companyEmail && JSON.stringify(old.getCriteriaValues()[0]) === JSON.stringify(CONTACT_MAILING_STATUS.values)) && old.getCriteriaValues()[1] !== false;
     if (!old || legacy) {
       entry[0] = rule; changed = true;
     }

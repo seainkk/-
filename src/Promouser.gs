@@ -56,14 +56,20 @@ function getValidationState_(request) {
 /** Local-only preview. No provider requests, contact edits or payment consent. */
 function previewPromouserValidation_(request) {
   return api_(function () {
-    var input = pvInput_(request, ['id', 'kind','newContactsOnly']), kind = pvValidationKind_(input.kind), scope = gridFile_(id_(input.id), true);
+    var input = pvInput_(request, ['id', 'kind','newContactsOnly','provider']), kind = pvValidationKind_(input.kind), scope = gridFile_(id_(input.id), true);
     var onlyNew = pvNewOnlyOption_(input.newContactsOnly);
+    if (input.provider !== undefined && (input.provider !== 'promouser' || kind !== 'email' || !onlyNew))
+      fail_('INVALID_REQUEST', 'Выбор Promouser доступен для новых адресов на вкладке Email.');
     return locked_(function () {
       var fresh = gridFile_(input.id, true, scope.context.rootId), state = pvLedger_(fresh.context, input.id, true);
       pvUpdateTargets_(state, {});
-      var snapshot = pvPreviewSnapshot_(fresh.context, state, kind, onlyNew), token = pvUuid_();
+      var snapshot = pvPreviewSnapshot_(fresh.context, state, kind, onlyNew, input.provider), token = pvUuid_();
       var settings = pvSettings_(fresh.context);
       var preview = { token: token, kind: kind, newContactsOnly:onlyNew, rootId: fresh.context.rootId, fileId: input.id, sourceHash: snapshot.sourceHash, keys: snapshot.keys, credentialHash: settings.key ? digest_(settings.key) : '', autoPayLimitUsd:settings.autoPayLimitUsd, createdAt: Date.now(), expiresAt: Date.now() + PROMOUSER.previewMillis };
+      if (input.provider) {
+        preview.provider = input.provider;
+        preview.preferredAtStart = pvEmailPreferred_(fresh.context);
+      }
       state.validationPreviews = (state.validationPreviews || []).filter(function (item) { return item.expiresAt > Date.now(); }).slice(-9).concat([preview]);
       pvSave_(fresh.context, state);
       return { previewToken: token, kind: kind, counts: snapshot.counts, sample: snapshot.sample, plannedCount:snapshot.keys.length, autoPayLimitUsd:settings.autoPayLimitUsd, canStart: snapshot.canStart };
@@ -75,16 +81,17 @@ function startPromouserValidation_(request) {
   return api_(function () {
     var input = pvInput_(request, ['id', 'kind', 'previewToken', 'requestId']), kind = pvValidationKind_(input.kind); pvRequestId_(input.requestId);
     var scope = gridFile_(id_(input.id), true);
-    var newContactKind, recovered = locked_(function () {
+    var newContactKind, provider, recovered = locked_(function () {
       var state = pvLedger_(scope.context, input.id, false), preview = pvFindPreview_(state, input.previewToken, kind, input.requestId);
       if (preview.started) return pvPublic_(scope.context, state);
       pvCheckPreview_(scope.context, state, preview, kind);
       if (preview.newContactsOnly) newContactKind = kind;
+      provider = preview.provider;
       return null;
     });
     if (recovered) return recovered;
     // Queueing may apply existing cached results, but cannot approve any job.
-    queueWorkbookValidation_(scope.context, input.id, {newContactKind:newContactKind});
+    queueWorkbookValidation_(scope.context, input.id, {newContactKind:newContactKind, provider:provider});
     return locked_(function () {
       var fresh = gridFile_(input.id, true, scope.context.rootId), state = pvLedger_(fresh.context, input.id, false), preview = pvFindPreview_(state, input.previewToken, kind, input.requestId);
       if (preview.started) return pvPublic_(fresh.context, state);
@@ -95,11 +102,15 @@ function startPromouserValidation_(request) {
         if (job.kind !== kind || job.manualStartApproved || job.paid || pvJobFinished_(job.state) || !job.contacts.length || !job.contacts.every(function (contact) { return allowed[contact.key]; })) return;
         if (['queued', 'waiting_shared', 'awaiting_quote', 'awaiting_payment'].indexOf(job.state) === -1) return;
         job.manualStartApproved = true; job.newContactsOnly = preview.newContactsOnly === true;
+        if (preview.provider) {
+          job.provider = preview.provider;
+          job.preferredAtStart = preview.preferredAtStart;
+        }
         if (job.newContactsOnly) job.approvedAutoPayLimitUsd = preview.autoPayLimitUsd;
         job.startApproval = { method: 'preview', requestId: input.requestId, previewToken: preview.token, at: Date.now() }; approved.push(job.jobId);
         job.contacts.forEach(function (contact) { approvedKeys.add(contact.key); });
       });
-      if (preview.newContactsOnly && (!approved.length || approvedKeys.size !== preview.keys.length)) fail_('PV_PREVIEW_STALE','Состав заказов изменился. Обновите предпросмотр новых контактов.');
+      if (preview.newContactsOnly && (approvedKeys.size !== preview.keys.length || !approved.length && !preview.provider)) fail_('PV_PREVIEW_STALE','Состав заказов изменился. Обновите предпросмотр новых контактов.');
       preview.started = { requestId: input.requestId, jobIds: approved, at: Date.now() };
       state.validationStarts = (state.validationStarts || []).slice(-99).concat([{ requestId: input.requestId, previewToken: preview.token, kind: kind }]);
       pvSave_(fresh.context, state);
@@ -134,13 +145,18 @@ function pvNewContactRows_(rows, kind) {
   return rows.filter(function (row) { return (row.kind === 'email' ? 'email' : 'telegram') === kind && !blocked.has(row.key); });
 }
 function pvEmailPreferred_(context) { return typeof emailValidationProvider_ === 'function' ? emailValidationProvider_(context) : 'promouser'; }
-function pvCancelUnsent_(context, state, cache, map, rows, kind) {
+function pvEmailProviderAllowed_(preferred, approval) {
+  return approval && approval.provider === 'promouser' && approval.newContactsOnly && approval.kind === 'email' ?
+    approval.preferredAtStart === preferred : preferred === 'promouser';
+}
+function pvCancelUnsent_(context, state, cache, map, rows, kind, provider) {
   if (state.lease && state.lease.until > Date.now()) return false;
-  var coldEmail = pvEmailPreferred_(context) !== 'promouser', changed = false;
+  var preferred = pvEmailPreferred_(context), changed = false;
   state.jobs.forEach(function (job) {
     if (job.state !== 'queued' || job.orderId || kind && job.kind !== kind) return;
     var obsolete = rows && !job.manualStartApproved && !pvContactsStillPresent_(rows, job.contacts);
-    if (!(job.kind === 'email' && coldEmail) && !obsolete) return;
+    var wrongProvider = job.kind === 'email' && !pvEmailProviderAllowed_(preferred,job) && !(provider && !job.manualStartApproved);
+    if (!wrongProvider && !obsolete) return;
     job.state = 'cancelled'; job.message = obsolete ? 'Контакты изменились до запуска. Подготовлена новая очередь.' : 'Для новых email выбран другой валидатор.';
     changed = true;
     pvCacheRelease_(cache, map, job.contacts, state.fileId, job.jobId);
@@ -158,16 +174,19 @@ function pvFindPreview_(state, token, kind, requestId) {
 }
 function pvCheckPreview_(context, state, preview, kind) {
   if (preview.rootId !== context.rootId || preview.fileId !== state.fileId || preview.expiresAt <= Date.now()) fail_('PV_PREVIEW_STALE', 'Предпросмотр устарел. Посмотрите актуальные контакты перед запуском.');
-  var settings = pvSettings_(context); pvRequireKey_(settings);
-  if (!settings.enabled) fail_('PV_PAUSED', 'Включите подключение Promouser перед запуском проверки.');
-  if (preview.credentialHash !== digest_(settings.key)) fail_('PV_PREVIEW_STALE', 'Подключение изменилось. Обновите предпросмотр.');
+  var settings = pvSettings_(context);
+  if (!preview.provider || preview.keys.length) {
+    pvRequireKey_(settings);
+    if (!settings.enabled) fail_('PV_PAUSED', 'Включите подключение Promouser перед запуском проверки.');
+  }
+  if (preview.credentialHash !== (settings.key ? digest_(settings.key) : '')) fail_('PV_PREVIEW_STALE', 'Подключение изменилось. Обновите предпросмотр.');
   if (preview.newContactsOnly && preview.autoPayLimitUsd !== settings.autoPayLimitUsd) fail_('PV_PREVIEW_STALE','Изменился лимит оплаты. Обновите предпросмотр.');
-  if (kind === 'email' && pvEmailPreferred_(context) !== 'promouser') fail_('PV_PROVIDER_CHANGED', 'Для новых email выбран другой валидатор.');
-  var current = pvPreviewSnapshot_(context, state, kind, preview.newContactsOnly);
+  if (kind === 'email' && !pvEmailProviderAllowed_(pvEmailPreferred_(context),preview)) fail_('PV_PROVIDER_CHANGED', 'Выбор сервиса проверки email изменился. Обновите предпросмотр.');
+  var current = pvPreviewSnapshot_(context, state, kind, preview.newContactsOnly, preview.provider);
   if (current.sourceHash !== preview.sourceHash || preview.newContactsOnly && JSON.stringify(current.keys) !== JSON.stringify(preview.keys)) fail_('PV_PREVIEW_STALE', 'Контакты или вкладки изменились. Обновите предпросмотр.');
 }
-function pvPreviewSnapshot_(context, state, kind, onlyNew) {
-  var targets = pvTargets_(context, state, false,onlyNew), cache = pvCache_(context, false), cacheMap = pvCacheRead_(cache), seen = Object.create(null), completed = Object.create(null), pending = Object.create(null), counts = { new: 0, checked: 0, cached: 0, inProgress: 0, unknownCountry: 0, telegramWithoutPhone: 0, invalid: 0 }, keys = [], sample = [], source = [];
+function pvPreviewSnapshot_(context, state, kind, onlyNew, provider) {
+  var targets = pvTargets_(context, state, false,onlyNew,kind), cache = pvCache_(context, false), cacheMap = pvCacheRead_(cache), seen = Object.create(null), completed = Object.create(null), pending = Object.create(null), counts = { new: 0, checked: 0, cached: 0, inProgress: 0, unknownCountry: 0, telegramWithoutPhone: 0, invalid: 0 }, keys = [], sample = [], source = [];
   if (onlyNew) targets.rows = pvNewContactRows_(targets.rows,kind);
   state.jobs.forEach(function (job) { if (job.state !== 'cancelled') job.contacts.forEach(function (contact) { pending[contact.key] = job; }); });
   targets.rows.forEach(function (row) { if (row.completed && !row.changed && !row.invalid) completed[row.key] = true; });
@@ -198,7 +217,15 @@ function pvPreviewSnapshot_(context, state, kind, onlyNew) {
   });
   keys.sort();
   var settings = pvSettings_(context);
-  return { sourceHash: digest_(JSON.stringify([context.rootId, state.fileId, state.targets, kind, source])), keys: keys, counts: counts, sample: sample, canStart: !!settings.key && settings.enabled && (kind !== 'email' || pvEmailPreferred_(context) === 'promouser') && keys.length > 0 };
+  // Applying a cached invalid result can move its row from New to Invalid during queueing.
+  // The explicit action binds all billable addresses/rows through the second approval check.
+  if (provider) {
+    var billable = new Set(keys);
+    source = source.filter(function (entry) { return billable.has(entry[2]); });
+  }
+  var canOrder = !!settings.key && settings.enabled && (kind !== 'email' || !!provider || pvEmailPreferred_(context) === 'promouser');
+  return { sourceHash: digest_(JSON.stringify([context.rootId, state.fileId, state.targets, kind, source])), keys: keys, counts: counts, sample: sample,
+    canStart: keys.length ? canOrder : !!provider && counts.cached > 0 };
 }
 
 /** The contact sync calls this only after it has durably completed its own work. */
@@ -208,10 +235,10 @@ function queueWorkbookValidation_(context, fileId, options) {
     var fresh = gridFile_(fileId, true, scope.context.rootId), state = pvLedger_(fresh.context, fileId, true);
     pvUpdateTargets_(state, options || {});
     var kind = options && options.newContactKind;
-    var targets = pvTargets_(fresh.context, state, true,kind), cache = pvCache_(fresh.context, true), cacheMap = pvCacheRead_(cache);
+    var targets = pvTargets_(fresh.context, state, true,kind,kind), cache = pvCache_(fresh.context, true), cacheMap = pvCacheRead_(cache);
     if (kind) targets.rows = pvNewContactRows_(targets.rows,kind);
     var existing = Object.create(null), pending = Object.create(null), collected = Object.create(null), updates = [], settings = pvSettings_(fresh.context);
-    pvCancelUnsent_(fresh.context, state, cache, cacheMap, targets.rows,kind);
+    pvCancelUnsent_(fresh.context, state, cache, cacheMap, targets.rows,kind,options && options.provider);
     state.jobs.forEach(function (job) {
       if (job.state !== 'cancelled') job.contacts.forEach(function (contact) { pending[contact.key] = true; });
     });
@@ -226,7 +253,7 @@ function queueWorkbookValidation_(context, fileId, options) {
       }
       if (cacheMap[row.key] && cacheMap[row.key].result) { updates.push({ row: row, result: cacheMap[row.key].result }); return; }
       if (pending[row.key]) return;
-      if (row.kind === 'email' && pvEmailPreferred_(fresh.context) !== 'promouser') return;
+      if (row.kind === 'email' && !(options && options.provider === 'promouser') && pvEmailPreferred_(fresh.context) !== 'promouser') return;
       if (row.kind === 'telegram_username') {
         updates.push({ row: row, pending: 'Нужен телефон', details: 'Promouser проверяет Telegram по номеру телефона.' }); return;
       }
@@ -293,7 +320,7 @@ function processWorkbookValidation_(context, fileId, options) {
   // explicit interface commands still queue, including before API configuration.
   if (!options || !options.forceQueue) {
     var settings = pvSettings_(scope.context), state = pvLedger_(scope.context, fileId, false);
-    if (state && pvEmailPreferred_(scope.context) !== 'promouser' && !(state.lease && state.lease.until > Date.now()) && state.jobs.some(function (job) { return job.kind === 'email' && job.state === 'queued' && !job.orderId; })) {
+    if (state && pvEmailPreferred_(scope.context) !== 'promouser' && !(state.lease && state.lease.until > Date.now()) && state.jobs.some(function (job) { return job.kind === 'email' && job.state === 'queued' && !job.orderId && !pvEmailProviderAllowed_(pvEmailPreferred_(scope.context),job); })) {
       state = locked_(function () {
         var fresh = gridFile_(fileId, true, context.rootId), current = pvLedger_(fresh.context, fileId, false), cache = pvCache_(fresh.context, true), map = pvCacheRead_(cache);
         if (pvCancelUnsent_(fresh.context, current, cache, map, null)) { pvCacheFlush_(fresh.context, cache); pvSave_(fresh.context, current); }
@@ -343,7 +370,7 @@ function pvAdvance_(context, fileId, intent) {
     var job = pvChoose_(state, settings, intent, Date.now());
     pvSave_(fresh.context, state);
     if (!job) return { state: state };
-    var before = pvTargets_(fresh.context, state, false,job.newContactsOnly);
+    var before = pvTargets_(fresh.context, state, false,job.newContactsOnly,job.kind);
     if ((job.state === 'queued' || job.state === 'awaiting_payment') && !pvContactsStillPresent_(before.rows, job.contacts, job.newContactsOnly && job.kind)) {
       job.state = 'cancelled'; job.message = 'Контакты изменились до отправки или оплаты. Повторите проверку новых контактов.';
       pvCacheRelease_(cache, cacheMap, job.contacts, state.fileId, job.jobId); pvCacheFlush_(fresh.context, cache);
@@ -392,7 +419,7 @@ function pvAdvance_(context, fileId, intent) {
     var dispatchSettings = pvSettings_(authorize_());
     if (!dispatchSettings.enabled) fail_('PV_PAUSED', 'Автоматическая проверка Promouser отключена.');
     if (!dispatchSettings.key || digest_(dispatchSettings.key) !== claim.job.credentialHash) fail_('PV_CREDENTIAL_CHANGED', 'Ключ Promouser изменился перед отправкой запроса.');
-    if (claim.action === 'create' && claim.job.kind === 'email' && pvEmailPreferred_(authorize_()) !== 'promouser') fail_('PV_PROVIDER_CHANGED', 'Для новых email выбран другой валидатор.');
+    if (claim.action === 'create' && claim.job.kind === 'email' && !pvEmailProviderAllowed_(pvEmailPreferred_(authorize_()),claim.job)) fail_('PV_PROVIDER_CHANGED', 'Выбор сервиса проверки email изменился.');
     if (claim.action === 'create' && !claim.job.manualStartApproved) fail_('PV_MANUAL_START_REQUIRED', 'Запустите проверку после предпросмотра контактов.');
     var current = pvLedger_(context, fileId, false), currentJob = current && current.jobs.filter(function (item) { return item.jobId === claim.job.jobId; })[0];
     if (!pvLeaseMatches_(current, currentJob, claim.token)) fail_('PV_UNCERTAIN', 'Срок выполнения запроса истёк. Повторное создание или списание отключено.');
@@ -400,7 +427,7 @@ function pvAdvance_(context, fileId, intent) {
         !pvAutoPay_(Object.assign({},currentJob,{state:'awaiting_payment'}),dispatchSettings))
       fail_('PV_PAYMENT_LIMIT_CHANGED','Оплата требует подтверждения стоимости заказа.');
     if (claim.job.newContactsOnly && (claim.action === 'create' || claim.action === 'pay') &&
-        !pvContactsStillPresent_(pvTargets_(context,current,false,true).rows,claim.job.contacts,claim.job.kind))
+        !pvContactsStillPresent_(pvTargets_(context,current,false,true,claim.job.kind).rows,claim.job.contacts,claim.job.kind))
       fail_('PV_CONTACT_CHANGED','Статус контактов изменился. Обновите предпросмотр.');
     settings = dispatchSettings;
     if (claim.action === 'create') response = pvCreateOrder_(settings, claim.job);
@@ -516,7 +543,7 @@ function pvAccept_(context, state, job, action, response) {
     item.orderId = job.orderId; item.checkedAt = pvNow_();
     pvCachePut_(context, cache, cacheMap, key, job.kind, item);
   });
-  var current = pvTargets_(context, state, false,job.newContactsOnly);
+  var current = pvTargets_(context, state, false,job.newContactsOnly,job.kind);
   current.rows.forEach(function (row) {
     if ((!row.completed || row.changed) && allowed[row.key] && cacheMap[row.key] && cacheMap[row.key].result) updates.push({ row: row, result: cacheMap[row.key].result });
   });
@@ -529,7 +556,7 @@ function pvAccept_(context, state, job, action, response) {
   job.parseWarnings = parsed.warnings;
 }
 
-function pvTargets_(context, state, ensure, verifyTargets) {
+function pvTargets_(context, state, ensure, verifyTargets, onlyKind) {
   gridFile_(state.fileId, !!ensure, context.rootId);
   var book = SpreadsheetApp.openById(state.fileId), targets = state.targets || {}, sheets = book.getSheets();
   if (verifyTargets) {
@@ -542,20 +569,29 @@ function pvTargets_(context, state, ensure, verifyTargets) {
   if (!email || !phone || email.getSheetId() === phone.getSheetId()) fail_('PV_TARGETS_REQUIRED', 'Сначала распределите контакты на вкладки Email и Телефоны.');
   var rows = [], layout = [], excluded = new Set();
   [{ sheet: email, kind: 'email', wanted: PROMOUSER.emailHeaders }, { sheet: phone, kind: 'telegram', wanted: PROMOUSER.phoneHeaders }].forEach(function (entry) {
+    if (onlyKind && entry.kind !== onlyKind) return;
     var sheet = entry.sheet, usedRows = sheet.getLastRow(), width = sheet.getLastColumn();
     if (usedRows > PROMOUSER.maxRows || width > PROMOUSER.maxColumns) fail_('PV_LIMIT', 'Таблица контактов превышает лимит одной проверки.');
-    var headers = width ? sheet.getRange(1, 1, 1, width).getDisplayValues()[0].map(String) : [], map = pvHeaderMap_(headers);
+    var headers = width ? sheet.getRange(1, 1, 1, width).getDisplayValues()[0].map(String) : [];
+    var companyEmail = entry.kind === 'email' && companyEmailWorkflowHeaders_(headers);
+    function mapHeaders() {
+      var result = pvHeaderMap_(headers);
+      if (companyEmail) result[pvHeader_('Результат проверки')] = result[pvHeader_('Результат валидации')];
+      return result;
+    }
+    var map = mapHeaders();
     var missing = entry.wanted.filter(function (name) { return map[pvHeader_(name)] === undefined; });
     if (ensure && missing.length) {
       var before = headers.length; headers = headers.concat(missing);
       if (headers.length > PROMOUSER.maxColumns) fail_('PV_LIMIT', 'Недостаточно места для колонок проверки.');
       pvEnsureGrid_(sheet, 1, headers.length);
       sheetWriteRawStrings_(state.fileId, sheet.getSheetId(), 1, before + 1, [missing]);
-      map = pvHeaderMap_(headers); width = headers.length;
+      map = mapHeaders(); width = headers.length;
     }
     var emailColumn = pvFindHeader_(map, ['email', 'e-mail', 'почта']), phoneColumn = pvFindHeader_(map, ['телефон', 'мобильный телефон', 'phone', 'mobile']), telegramColumn = pvFindHeader_(map, ['telegram', 'телеграм']);
     var statusColumn = map[pvHeader_('Валидация')], count = Math.max(0, usedRows - 1);
     var values = count ? sheet.getRange(2, 1, count, width).getDisplayValues() : [];
+    var workFormulas = companyEmail && count ? sheet.getRange(2,map[pvHeader_('Статус')]+1,count,1).getFormulas() : [];
     var notes = count && statusColumn !== undefined && typeof sheet.getRange(2, statusColumn + 1, count, 1).getNotes === 'function' ? sheet.getRange(2, statusColumn + 1, count, 1).getNotes() : Array.from({ length: count }, function () { return ['']; });
     layout.push({ sheet: sheet, map: map, width: width, kind: entry.kind });
     values.forEach(function (line, index) {
@@ -573,7 +609,8 @@ function pvTargets_(context, state, ensure, verifyTargets) {
       var changed = !!bound && bound !== key, completed = !!status && !pvPendingStatus_(status);
       var legacy = !bound && !status ? pvLegacyResult_(kind, line, map) : null;
       if (legacy) { completed = true; status = legacy.status; }
-      rows.push({ fileId: state.fileId, sheetId: sheet.getSheetId(), row: index + 2, value: value, key: key, kind: kind, country: country, invalid: invalid, map: map, status: status, note: note, bound: bound, changed: changed, completed: completed, legacyResult: legacy, values: line });
+      rows.push({ fileId: state.fileId, sheetId: sheet.getSheetId(), row: index + 2, value: value, key: key, kind: kind, country: country, invalid: invalid, map: map, status: status, note: note, bound: bound, changed: changed, completed: completed, legacyResult: legacy, values: line,
+        companyEmail:companyEmail, statusFormula:!!(workFormulas[index] && workFormulas[index][0]) });
     });
   });
   return { rows: rows.filter(function (row) { return !excluded.has(row.key); }), layout: layout };
@@ -600,7 +637,8 @@ function pvApply_(context, state, updates) {
     var missing = ['Валидатор', 'Проверка Coldy'].filter(function (header) { return map[pvHeader_(header)] === undefined; });
     if (missing.length) { if (width + missing.length > PROMOUSER.maxColumns) fail_('PV_LIMIT', 'Недостаточно места для колонок проверки.'); pvEnsureGrid_(sheet, 1, width + missing.length); sheetWriteRawStrings_(state.fileId, sheet.getSheetId(), 1, width + 1, [missing]); }
   }
-  var current = pvTargets_(context, state, false), byLocation = Object.create(null), cells = [], requests = [];
+  var kinds = new Set(updates.map(function (update) { return update.row.kind === 'email' ? 'email' : 'telegram'; }));
+  var current = pvTargets_(context, state, false, false, kinds.size === 1 ? Array.from(kinds)[0] : null), byLocation = Object.create(null), cells = [], requests = [];
   current.rows.forEach(function (row) { byLocation[row.sheetId + ':' + row.row] = row; });
   updates.forEach(function (update) {
     var wanted = update.row, row = byLocation[wanted.sheetId + ':' + wanted.row];
@@ -608,6 +646,13 @@ function pvApply_(context, state, updates) {
     var fields = pvUpdateFields_(row, update);
     Object.keys(fields).forEach(function (header) {
       var column = row.map[pvHeader_(header)]; if (column === undefined) return;
+      if (header === 'Статус') {
+        // A teammate can mark a row Ready/Filter in native Sheets between the read and the batch.
+        requests.push({findReplace:{find:'^\\s*(новый контакт|новый)\\s*$',replacement:'Невалид',searchByRegex:true,
+          matchCase:false,matchEntireCell:true,includeFormulas:false,
+          range:{sheetId:row.sheetId,startRowIndex:row.row-1,endRowIndex:row.row,startColumnIndex:column,endColumnIndex:column+1}}});
+        return;
+      }
       var cell = { userEnteredValue: { stringValue: String(fields[header] === null || fields[header] === undefined ? '' : fields[header]) } }, mask = 'userEnteredValue';
       if (header === 'Валидация') { cell.note = pvBoundNote_(row.note, row.key); mask += ',note'; }
       if (String(row.values[column] || '') === cell.userEnteredValue.stringValue && (header !== 'Валидация' || cell.note === row.note)) return;
@@ -630,6 +675,9 @@ function pvApply_(context, state, updates) {
 
 function pvUpdateFields_(row, update) {
   var fields = update.result ? pvResultCells_(row.kind, update.result) : { 'Валидация': update.pending || 'Ожидает проверки', 'Дата проверки': '', 'Результат проверки': update.details || '', 'Заказ Promouser': '' };
+  var result = update.result;
+  if (row.companyEmail && !row.statusFormula && result && !result.review && pvEmailStatus_(result.status) === 'Невалиден' &&
+      contactMailingStatusIsNew_(row.values[row.map[pvHeader_('Статус')]])) fields['Статус'] = 'Невалид';
   if (row.kind === 'email' && update.result && !update.result.provider && !row.changed) delete fields['Провайдер'];
   if (row.changed) (row.kind === 'email' ? PROMOUSER.emailHeaders.concat(['Валидатор', 'Проверка Coldy']) : PROMOUSER.phoneHeaders).forEach(function (header) { if (!Object.prototype.hasOwnProperty.call(fields, header)) fields[header] = ''; });
   return fields;

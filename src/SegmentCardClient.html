@@ -92,7 +92,10 @@
     const shared=summary.sharedEmail;
     if(shared>0)el('summary').firstElementChild.append(node('small','Общие для компаний и ЛПР · '+count(shared)));
     message('warnings',(s.data.warnings||[]).join(' '));el('queues').replaceChildren();el('validation').replaceChildren();
-    for(const [queue,label,amount] of [['all','Все контакты',null],['email','Проверить новые email',summary.email.toCheck],['telegram','Проверить Telegram по мобильным',summary.telegram.toCheck],['ownership','Разобрать принадлежность',summary.ownership]]){
+    const queues=[['all','Все контакты',null],['email','Проверить новые email',summary.email.toCheck]];
+    if(summary.email.toReview)queues.push(['emailReview','Разобрать проверенные email',summary.email.toReview]);
+    queues.push(['telegram','Проверить Telegram по мобильным',summary.telegram.toCheck],['ownership','Разобрать принадлежность',summary.ownership]);
+    for(const [queue,label,amount] of queues){
       const item=action(label+(amount===null?'':' · '+count(amount)),()=>changeFilters({queue,channel:'all'}));
       item.dataset.scQueue=queue;item.setAttribute('aria-pressed',String(s.queue===queue));el('queues').append(item);
     }
@@ -341,7 +344,7 @@
     return {segmentId:s.id,name:s.name,channel:s.channel,owner:s.owner,queue:s.queue,query:s.query,revision:s.data.revision};
   }
   function setFilters({channel='all',owner='all',queue='all',query=''}={}){
-    if(!['all','email','telegram'].includes(channel)||!['all','companies','lpr'].includes(owner)||!['all','ready','inCampaign','email','telegram','ownership'].includes(queue))return;
+    if(!['all','email','telegram'].includes(channel)||!['all','companies','lpr'].includes(owner)||!['all','ready','inCampaign','email','emailReview','telegram','ownership'].includes(queue))return;
     changeFilters({channel,owner,queue,query:String(query).trim().slice(0,120)});
   }
   window.RegistrySegmentCard={configure,clear,acceptDashboard,select,show,refresh,dismiss:()=>window.RegistrySegmentSelections?.dismiss?.()||dismiss(),id:()=>current?.id,getFilters,setFilters};

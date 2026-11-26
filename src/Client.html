@@ -39,7 +39,23 @@
   function sharedKeyFromHash(hash){const match=typeof hash==='string'?hash.match(/^#?access_key=([A-Za-z0-9_-]{43})$/):null;return match&&match[0]===hash?match[1]:null;}
   function sharedRequest(method,payload,key,projectId){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Для входа нужна полная закрытая ссылка.');const request={method,accessKey:key,projectId};if(payload!==undefined)request.payload=payload;return request;}
   function sharedUrl(key){if(typeof key!=='string'||key.length!==43||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return 'https://seainkk.github.io/-/#access_key='+key;}
-  function notifyEntry(state,catalogPending){try{if(window.top!==window){const message={type:'bases-registry-'+state};if(catalogPending===true)message.catalogPending=true;window.top.postMessage(message,'https://seainkk.github.io');}}catch(ignored){}}
+  function entryWindow(){
+    if(window.top===window)return null;
+    try{
+      const origins=window.location?.ancestorOrigins;
+      if(!origins)return window.top;
+      let frame=window;
+      for(let i=0;i<origins.length;i++){
+        const parent=frame.parent;
+        if(!parent||parent===frame)return null;
+        if(origins[i]==='https://seainkk.github.io')return parent;
+        frame=parent;
+      }
+    }catch(ignored){}
+    return null;
+  }
+  function postEntryMessage(message){entryWindow()?.postMessage(message,'https://seainkk.github.io');}
+  function notifyEntry(state,catalogPending){const message={type:'bases-registry-'+state};if(catalogPending===true)message.catalogPending=true;postEntryMessage(message);}
   function catalogNames(items,checkedAt){
     if(!Array.isArray(items)||items.length>200||!Number.isSafeInteger(checkedAt)||checkedAt<=0)return null;
     const names=[];
@@ -52,8 +68,7 @@
     return {items:names,checkedAt};
   }
   function sendEntryCatalog(preview){
-    if(!accessReady||window.top===window)return;
-    window.top.postMessage({type:'bases-registry-catalog',items:preview?.items??null,checkedAt:preview?.checkedAt??0},'https://seainkk.github.io');
+    if(accessReady)postEntryMessage({type:'bases-registry-catalog',items:preview?.items??null,checkedAt:preview?.checkedAt??0});
   }
   function useFullCatalog(result){
     sourceData=result;catalogPreview=null;acceptSavedCatalog=false;lastSourceLoaded=Date.now();sourceRefreshError=null;
@@ -146,7 +161,7 @@
   function projectSwitchBlocked(){return busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||recoveringOrigins||window.RegistryProject?.hasPending?.()||formIsOpen();}
   async function startSharedAccess(switching){
     if(switching!==true&&requesting())return;lockAccess(null);const startupEpoch=accessEpoch;busy=true;renderAccess();updateControls();
-    if(activeView==='sources'&&window.top!==window)window.top.postMessage({type:'bases-registry-catalog-hint',epoch:startupEpoch},'https://seainkk.github.io');
+    if(activeView==='sources')postEntryMessage({type:'bases-registry-catalog-hint',epoch:startupEpoch});
     try{const key=await readSharedKey();if(startupEpoch!==accessEpoch)return;if(!key)throw new Error('[LINK_ACCESS_REQUIRED] В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const epoch=accessEpoch;
       // Discovery can write service metadata. Only prefetch a visible catalog
       // with a free transport, and accept it after the key is confirmed.
@@ -580,10 +595,21 @@
     const run=async()=>{while(workspaceMutationBlocked()){if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');await new Promise(resolve=>setTimeout(resolve,25));}if(!accessReady||epoch!==accessEpoch)throw new Error('Доступ закрыт.');if(canDispatch&&!canDispatch())return null;return rpc(method,payload);};
     const task=workspaceRpcQueue.catch(()=>{}).then(run);workspaceRpcQueue=task.catch(()=>{});return task;
   }
-  function openGridWorkbook(id,validateNew=false){
+  function openGridWorkbook(id,validateNew=false,workbookAction){
     if(!accessReady||importing||sourceSaving||segmentSaving||segmentEditor||coldySession||providerSession||coldyMailings?.busy)return;
     if(!window.RegistryGrid?.open){notice('Редактор таблиц ещё загружается. Обновите страницу.','error');return;}
-    window.RegistryGrid.open({id,validateNew,transport:workspaceRpc,openSettings:resume=>openServiceSettings(null,resume),onScopeError:message=>notice(message,'error'),onClose:()=>{render();armViewTimer();flushPendingView();}});armViewTimer();updateControls();
+    window.RegistryGrid.open({id,validateNew,workbookAction,projectId:activeProjectId,transport:workspaceRpc,openSettings:resume=>openServiceSettings(null,resume),onScopeError:message=>notice(message,'error'),onClose:()=>{render();armViewTimer();flushPendingView();}});armViewTimer();updateControls();
+  }
+  function openEntryWorkbook(data){
+    const {id,projectId,workbookAction}=data;
+    if(!accessReady||typeof id!=='string'||!/^[A-Za-z0-9_-]{10,200}$/.test(id)||
+      (workbookAction!==undefined&&!['email','mailing'].includes(workbookAction))||
+      (projectId!==undefined&&!Object.hasOwn(projectNames,projectId)))return;
+    if(projectId&&projectId!==activeProjectId){
+      $('br-project').value=projectId;switchProject();
+      if(activeProjectId!==projectId){notice('Завершите текущее действие и снова откройте ссылку из таблицы.','error');return;}
+    }
+    openGridWorkbook(id,workbookAction===undefined,workbookAction);
   }
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
   function sourceFocused(){return !!document.activeElement?.closest?.('.br-source-fields');}
@@ -1644,7 +1670,7 @@
     const next=canGoBack();
     $('br-back-row').hidden=!next||gridIsOpen()||!!root.querySelector('dialog[open]');
     $('br-segment-resume-row').hidden=!accessReady||!suspendedSegment||gridIsOpen();
-    if(next!==backAvailable||force){backAvailable=next;if(window.top!==window)window.top.postMessage({type:'bases-registry-navigation',canBack:next},'https://seainkk.github.io');}
+    if(next!==backAvailable||force){backAvailable=next;postEntryMessage({type:'bases-registry-navigation',canBack:next});}
   }
   function goBack(){
     if(!accessReady)return;
@@ -1672,18 +1698,17 @@
     if(event.key!=='Escape'||event.defaultPrevented||event.isComposing||root.querySelector('dialog[open]')||!canGoBack())return;
     event.preventDefault();goBack();syncBack();
   });
-  window.addEventListener('message',event=>{
-    if(window.top===window||event.source!==window.top||event.origin!=='https://seainkk.github.io')return;
-    if(event.data?.type==='bases-registry-open-validation'&&accessReady&&typeof event.data.id==='string'&&/^[A-Za-z0-9_-]{10,200}$/.test(event.data.id)){
-      openGridWorkbook(event.data.id,true);return;
-    }
+  function receiveEntryMessage(event){
+    if(event.origin!=='https://seainkk.github.io'||!event.source||event.source!==entryWindow())return;
+    if(event.data?.type==='bases-registry-open-validation'){openEntryWorkbook(event.data);return;}
     if(event.data?.type==='bases-registry-catalog-hint'&&event.data.epoch===accessEpoch&&event.data.available===true){entryCatalogEpoch=accessEpoch;return;}
     if(event.data?.type==='bases-registry-back'){goBack();syncBack(true);return;}
     if(event.data?.type!=='bases-registry-saved-catalog'||!acceptSavedCatalog||!accessReady||sourceData||catalogPreview||activeView!=='sources')return;
     const preview=catalogNames(event.data.items,event.data.checkedAt);
     if(!preview||preview.checkedAt<Date.now()-86400000||preview.checkedAt>Date.now()+300000)return;
     catalogPreview=preview;acceptSavedCatalog=false;renderSources();updateControls();
-  });
+  }
+  window.addEventListener('message',receiveEntryMessage);
   $('br-origin-recover').addEventListener('click',recoverSourceOrigins);
   $('br-origin-form').addEventListener('submit',saveSourceOrigin);
   $('br-origin-close').addEventListener('click',()=>{closeSourceOrigin();flushPendingView();});

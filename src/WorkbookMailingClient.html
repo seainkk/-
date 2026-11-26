@@ -1,0 +1,150 @@
+<script>
+(() => {
+  'use strict';
+  const el = name => document.getElementById('rg-grid-mail-' + name);
+  const statuses = {Active:'Активна', Draft:'Черновик', Paused:'Приостановлена'};
+  const receipts = new Map();
+  let ctx, preview, pending, job, busy = false, retry = false, uncertain = false, serial = 0, timer;
+  const opened = () => ctx?.valid() && !el('panel').hidden;
+  const existing = () => el('mode').value === 'existing';
+  const slot = () => 'outreach.ready-upload.v1/' + ctx.segmentId + '/' + ctx.id;
+  function saveRequest(value) {
+    pending = value;
+    if (value) receipts.set(slot(),value);
+    else receipts.delete(slot());
+    try {
+      if (value) sessionStorage.setItem(slot(), JSON.stringify(value));
+      else sessionStorage.removeItem(slot());
+    } catch (_) { /* Embedded Sheets dialogs can block session storage. */ }
+  }
+  function counts(data) {
+    const box = el('counts');
+    box.replaceChildren();
+    for (const [field,label] of [['eligible','Готовы к загрузке'],['notReady','Другой статус'],['invalid','Невалидные'],['excluded','Исключены'],['alreadyLoaded','Уже загружены'],['ownershipReview','Спорная принадлежность'],['blacklist','Не отправляем'],['created','Добавлены'],['alreadyInCampaign','Уже в рассылке'],['workspaceDuplicate','Дубли'],['uncertain','Требуют сверки']]) {
+      if (!Number.isSafeInteger(data?.[field]) || !data[field] && field !== 'eligible') continue;
+      const pair = document.createElement('div'), title = document.createElement('dt'), value = document.createElement('dd');
+      title.textContent = label; value.textContent = String(data[field]); pair.append(title,value); box.append(pair);
+    }
+  }
+  function render() {
+    const locked = busy || !!pending || !!job;
+    el('existing').hidden = !existing(); el('new').hidden = existing();
+    el('mode').disabled = locked; el('name').disabled = locked; el('campaign').disabled = locked;
+    el('preview').hidden = !!pending || !!job;
+    el('preview').disabled = locked || !(existing() ? el('campaign').value : el('name').value.trim());
+    const active = preview?.campaign?.status === 'Active';
+    el('consent').hidden = !active || !!pending || !!job;
+    el('start').hidden = uncertain || (job?.state === 'processing' && !retry) || (!pending && (!preview?.canUpload || !!job));
+    el('start').disabled = busy || !pending && active && !el('active').checked;
+    el('start').textContent = retry ? 'Продолжить тот же запрос' : existing() ? 'Подтвердить загрузку' : 'Создать рассылку и загрузить';
+    el('review').hidden = !uncertain;
+  }
+  function clearPreview() {
+    preview = null; el('active').checked = false;
+    el('sample').replaceChildren(); counts(null);
+  }
+  function hide() {
+    if (!el('panel') || el('panel').hidden) return false;
+    el('panel').hidden = true; clearTimeout(timer); ++serial; busy = false;
+    return true;
+  }
+  function reset() {
+    hide(); clearTimeout(timer); ++serial; ctx = null; job = null; pending = null;
+    if (el('panel')) { clearPreview(); el('name').value = ''; el('campaign').replaceChildren(); el('status').textContent = ''; }
+  }
+  async function catalog() {
+    const n = ++serial, valid = () => opened() && serial === n;
+    el('campaign').replaceChildren(new Option('Выберите рассылку', ''));
+    busy = true; el('status').textContent = 'Получаем рассылки проекта из Coldy…'; render();
+    // A user may choose to create a new campaign while the catalog is loading.
+    el('mode').disabled = false;
+    try {
+      const result = await ctx.call('listColdyCampaigns',{segmentId:ctx.segmentId,refresh:true},valid);
+      if (!valid()) return;
+      for (const c of result.campaigns || []) el('campaign').append(new Option(c.name + (statuses[c.status] ? ' · ' + statuses[c.status] : ''),c.id));
+      el('status').textContent = result.state === 'not_configured' ? 'Подключите Coldy в настройках сервиса.' :
+        result.campaigns?.length ? '' : 'Доступных рассылок пока нет. Можно создать новую.';
+    } catch (error) { if (valid()) el('status').textContent = error.message; }
+    finally { if (valid()) { busy = false; render(); } }
+  }
+  function open(context) {
+    reset(); ctx = context; retry = false; uncertain = false;
+    pending = receipts.get(slot()) || null;
+    try {
+      const receipt = JSON.parse(sessionStorage.getItem(slot()) || 'null');
+      if (receipt?.id === ctx.id && typeof receipt.requestId === 'string' && typeof receipt.previewToken === 'string') pending = receipt;
+    } catch (_) {}
+    el('panel').hidden = false; el('mode').value = pending?.mode === 'new' ? 'new' : 'existing'; el('close').focus({preventScroll:true});
+    if (pending) {
+      retry = true; el('status').textContent = 'Для этой таблицы есть подтверждённая загрузка. Продолжите её, чтобы проверить результат.'; render();
+    } else void catalog();
+  }
+  async function check() {
+    if (!opened() || busy || pending) return;
+    const n = ++serial, valid = () => opened() && serial === n;
+    const payload = existing() ? {id:ctx.id,mode:'existing',campaignId:el('campaign').value} : {id:ctx.id,mode:'new',name:el('name').value.trim()};
+    clearPreview(); busy = true; el('status').textContent = 'Сверяем адреса со статусом «Готов»…'; render();
+    try {
+      await ctx.flush(); if (!valid()) return;
+      const result = await ctx.call('previewColdyWorkbookUpload',payload,valid);
+      if (!valid()) return;
+      preview = result; counts(result.counts);
+      for (const row of result.sample || []) {
+        const line = document.createElement('li'); line.textContent = [row.email,row.company].filter(Boolean).join(' · '); el('sample').append(line);
+      }
+      el('status').textContent = (result.canUpload ? 'К загрузке в «' + result.campaign.name + '»: ' + result.counts.eligible + '.' : 'Подходящих адресов для загрузки нет.') +
+        ((result.warnings || []).length ? ' ' + result.warnings.join(' ') : '');
+    } catch (error) { if (valid()) el('status').textContent = error.message; }
+    finally { if (valid()) { busy = false; render(); } }
+  }
+  async function send() {
+    if (!opened() || busy || uncertain) return;
+    if (!pending) {
+      if (!preview?.canUpload || preview.campaign.status === 'Active' && !el('active').checked) return;
+      saveRequest({id:ctx.id,previewToken:preview.previewToken,requestId:ctx.requestId(),allowActive:el('active').checked,mode:el('mode').value});
+    }
+    const n = ++serial, valid = () => opened() && serial === n;
+    const resume = job?.state === 'processing';
+    busy = true; retry = false; render(); el('status').textContent = 'Загружаем подтверждённые адреса…';
+    try {
+      const result = await ctx.call(resume ? 'continueColdyUpload' : 'startColdyWorkbookUpload',resume ?
+        {segmentId:job.segmentId,bindingId:job.bindingId,jobId:job.jobId,requestId:job.requestId} :
+        {id:pending.id,previewToken:pending.previewToken,requestId:pending.requestId,allowActive:pending.allowActive},valid);
+      if (!valid()) return;
+      job = result; counts(job.counts);
+      el('status').textContent = [job.progress?.label,job.progress ? job.progress.completed + ' из ' + job.progress.total : '',...(job.warnings || [])].filter(Boolean).join(' · ');
+      if (job.state === 'processing') {
+        const due = typeof job.nextActionAt === 'number' ? job.nextActionAt : Date.parse(job.nextActionAt);
+        const wait = Number.isFinite(due) ? Math.max(350,due - Date.now()) : 350;
+        timer = setTimeout(send,Number.isFinite(wait) ? wait : 1000);
+      } else {
+        saveRequest(null); ctx.refresh();
+      }
+    } catch (error) {
+      if (valid()) {
+        el('status').textContent = error.message; retry = true;
+        if (/\[COLDY_CREATE_UNCERTAIN\]/.test(error.message)) uncertain = true;
+        if (/\[(COLDY_SOURCE_CHANGED|COLDY_BINDING_CHANGED|COLDY_CAMPAIGN_ACTIVE)\]/.test(error.message) && !existing()) {
+          uncertain = true; el('status').textContent += ' Проверьте, появилась ли новая рассылка в Coldy.';
+        } else if (/\[(COLDY_SOURCE_CHANGED|COLDY_BINDING_CHANGED|COLDY_CAMPAIGN_ACTIVE|COLDY_PREVIEW_CHANGED|COLDY_PREVIEW_EXPIRED|COLDY_NOTHING_NEW)\]/.test(error.message)) {
+          saveRequest(null); job = null; clearPreview(); retry = false;
+        }
+      }
+    } finally { if (valid()) { busy = false; render(); } }
+  }
+  window.RegistryWorkbookMailing = {open,hide,reset};
+  if (!el('panel')) return;
+  el('close').onclick = () => { hide(); document.getElementById('rg-grid-mail-open').focus(); };
+  el('mode').onchange = () => {
+    if (pending) return;
+    ++serial; busy = false; clearPreview(); el('status').textContent = ''; render();
+    if (existing()) void catalog();
+  };
+  function changed() { clearPreview(); el('status').textContent = ''; render(); }
+  el('name').oninput = changed; el('campaign').onchange = changed; el('active').onchange = render;
+  el('preview').onclick = check; el('start').onclick = send;
+  el('review').onclick = () => {
+    saveRequest(null); job = null; uncertain = false; retry = false; clearPreview(); el('mode').value = 'existing'; void catalog();
+  };
+})();
+</script>

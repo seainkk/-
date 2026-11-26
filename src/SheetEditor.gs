@@ -15,6 +15,13 @@ function getGridWorkbook_(request) {
     // Keep the final access check after all metadata and cell reads.
     scope = gridFile_(input.id, false, scope.context.rootId);
     var result = { id: scope.file.getId(), name: name, url: spreadsheetUrl_(scope.file.getId()), canEdit: scope.canEdit, sheets: metadata };
+    if (scope.tags && scope.tags.registrySegmentMasterKind === 'companies' && scope.tags.registrySegmentMasterRoot === scope.context.rootId && scope.tags.registrySegmentMasterSegment) {
+      result.companyEmailSegment = scope.tags.registrySegmentMasterSegment;
+      if (scope.tags.registryCompanyEmailSchema === '2' && /^\d+$/.test(scope.tags.registryContactEmailSheetId || '')) {
+        result.companyEmailSheetId = Number(scope.tags.registryContactEmailSheetId);
+        result.companyEmailStatuses = COMPANY_EMAIL_STATUS.values;
+      }
+    }
     if (input.includeInitialRange) {
       if (initial) initial.canEdit = scope.canEdit;
       result.initialRange = initial;

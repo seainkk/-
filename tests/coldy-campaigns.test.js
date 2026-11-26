@@ -30,7 +30,7 @@ function fixture(options = {}) {
     Utilities: { getUuid: () => 'uuid-' + String(++uuid).padStart(24, '0') },
     SpreadsheetApp: { openById: id => { if (!books.has(id)) throw new Error('missing workbook'); return books.get(id); } },
   });
-  for (const filename of ['Config.gs', 'Code.gs', 'SegmentActions.gs', 'Promouser.gs', 'Coldy.gs', 'ColdyCampaigns.gs']) vm.runInContext(readFileSync(new URL('../src/' + filename, import.meta.url), 'utf8'), context, { filename });
+  for (const filename of ['Config.gs', 'Code.gs', 'SegmentActions.gs', 'Promouser.gs', 'Coldy.gs', 'ColdyCampaigns.gs', 'ColdyWorkbookUpload.gs']) vm.runInContext(readFileSync(new URL('../src/' + filename, import.meta.url), 'utf8'), context, { filename });
   const properties = new Map();
   context.authorize_ = () => { if (!state.access) context.fail_('LINK_ACCESS_REQUIRED', 'link revoked'); return { rootId: state.rootId, properties: {getProperty:key=>properties.get(key),setProperty:(key,value)=>properties.set(key,value)} }; };
   context.digest_ = digest;
@@ -59,7 +59,11 @@ function fixture(options = {}) {
   context.gridFile_ = (id, write, expectedRoot) => {
     context.authorize_(); calls.guards.push({ id, write }); const file = files.get(id);
     if (!file || file.rootId !== state.rootId || expectedRoot && expectedRoot !== state.rootId || file.moved) context.fail_('OUTSIDE_REGISTRY', 'file moved');
-    if (write && !file.canEdit) context.fail_('GRID_READ_ONLY', 'read-only'); return { context: context.authorize_(), canEdit: file.canEdit };
+    if (write && !file.canEdit) context.fail_('GRID_READ_ONLY', 'read-only');
+    return { context:context.authorize_(), canEdit:file.canEdit, file:{getParents:()=>{
+      const parents = [{getId:()=>file.segmentId,isTrashed:()=>false}];
+      return {hasNext:()=>parents.length>0,next:()=>parents.shift()};
+    }} };
   };
   context.getContactWorkspace_ = ({ id }) => {
     context.gridFile_(id, false); calls.workspaces.push(id); const file = files.get(id);
@@ -103,6 +107,82 @@ function fixture(options = {}) {
   return { context, calls, state, storage, campaigns, leads, files, books, companySheet, lprSheet, bind, preview, start, advance };
 }
 const posts = f => f.calls.api.filter(call => call.method === 'POST');
+
+function readyWorkbook(options={}) {
+  const f=fixture(options);
+  f.companySheet.data.splice(0, f.companySheet.data.length,
+    ['ID компании','Почт на компанию','Email','Комментарий','Статус','Провайдер','Результат валидации','Валидация'],
+    ['one','1','shared@example.test','важно','Готов','Mail','valid','Валиден'],
+    ['two','1','shared@example.test','','готов','Mail','valid','Валиден'],
+    ['three','1','new@example.test','','Новый контакт','Mail','valid','Валиден'],
+    ['four','1','filtered@example.test','','Фильтр','Mail','valid','Валиден'],
+    ['five','1','bad@example.test','','Готов','Mail','invalid','Невалиден']);
+  f.prepare=(fields={})=>plain(f.context.previewColdyWorkbookUpload_({id:COMPANIES,mode:'existing',campaignId:CAMPAIGN,...fields}));
+  f.confirm=(p, allowActive=false, id='workbook-upload-123')=>plain(f.context.startColdyWorkbookUpload_({id:COMPANIES,previewToken:p.previewToken,allowActive,requestId:id}));
+  return f;
+}
+
+test('workbook ready upload deduplicates providers, marks both confirmed rows and preserves manual data and other sources',()=>{
+  const f=readyWorkbook({lpr:[valid('lpr@example.test',{manual:'Готов'})]});
+  f.bind({includeCompanies:true,includeLpr:true});
+  const p=f.prepare();
+  assert.equal(p.counts.eligible,1);assert.equal(p.counts.notReady,1);assert.equal(p.counts.invalid,1);
+  assert.equal(p.counts.excluded,1);assert.deepEqual(posts(f),[]);
+  const done=f.confirm(p);
+  assert.equal(done.state,'complete');assert.equal(done.counts.created,1);
+  assert.deepEqual(posts(f)[0].payload.items.map(row=>row.email),['shared@example.test']);
+  assert.deepEqual(f.companySheet.data.slice(1).map(row=>row[4]),['Рассылка','Рассылка','Новый контакт','Фильтр','Готов']);
+  assert.equal(f.companySheet.data[1][3],'важно');assert.equal(f.lprSheet.data[1][5],'Готов');
+  assert.deepEqual(f.confirm(p),done);assert.equal(posts(f).length,1);
+});
+
+test('creation is confirmed once and a second submission or an ambiguous response cannot create another campaign',()=>{
+  const createdId='550e8400-e29b-41d4-a716-446655440055';
+  const f=readyWorkbook({api:({method,path,payload,campaigns})=>{
+    if(method==='POST'&&path==='/campaigns'){const c={id:createdId,name:payload.name,status:'Draft'};campaigns.set(c.id,c);return c;}
+  }});
+  const p=f.prepare({mode:'new',campaignId:undefined,name:'Новая рассылка'});
+  assert.equal(posts(f).length,0);assert.equal(f.confirm(p).counts.created,1);assert.equal(f.confirm(p).state,'complete');
+  assert.deepEqual(posts(f).map(c=>c.path),['/campaigns','/leads/bulk']);
+  assert.equal(posts(f)[1].payload.campaign,createdId);
+  const lost=readyWorkbook({api:({method,path})=>{if(method==='POST'&&path==='/campaigns')throw Error('timeout');}});
+  const noAck=lost.prepare({mode:'new',campaignId:undefined,name:'Без ответа'});
+  assert.throws(()=>lost.confirm(noAck),/COLDY_CREATE_UNCERTAIN/);assert.throws(()=>lost.confirm(noAck),/COLDY_CREATE_UNCERTAIN/);
+  const fresh=lost.prepare({mode:'new',campaignId:undefined,name:'Без ответа'});
+  assert.throws(()=>lost.confirm(fresh,false,'another-upload-request'),/COLDY_CREATE_UNCERTAIN/);
+  assert.deepEqual(posts(lost).map(c=>c.path),['/campaigns']);
+});
+
+test('manual approval, source freshness and current workbook permissions guard external changes',()=>{
+  const f=readyWorkbook({status:'Active'}),p=f.prepare();
+  assert.throws(()=>f.confirm(p),/COLDY_CAMPAIGN_ACTIVE/);assert.equal(posts(f).length,0);
+  assert.equal(f.confirm(p,true).state,'complete');
+  const changed=readyWorkbook(),plan=changed.prepare({mode:'new',campaignId:undefined,name:'Изменения'});
+  changed.companySheet.data[1][4]='Фильтр';
+  assert.throws(()=>changed.confirm(plan),/COLDY_SOURCE_CHANGED/);assert.equal(posts(changed).length,0);
+  changed.companySheet.data[1][4]='Готов';changed.companySheet.data[1][0]='другая компания';
+  assert.throws(()=>changed.confirm(plan),/COLDY_SOURCE_CHANGED/);assert.equal(posts(changed).length,0);
+  changed.files.get(COMPANIES).moved=true;
+  assert.throws(()=>changed.confirm(plan),/OUTSIDE_REGISTRY/);
+  const blocked=readyWorkbook();
+  assert.throws(()=>blocked.context.previewColdyWorkbookUpload_({id:LPR,mode:'existing',campaignId:CAMPAIGN}),/COLDY_TARGETS_REQUIRED/);
+});
+
+test('unconfirmed workspace duplicates and blacklist skips keep their workflow status',()=>{
+  const f=readyWorkbook({api:({method,path,payload})=>{if(method==='POST'&&path==='/leads/bulk')return {created:0,leads:[],skipped_items:payload.items.map((lead,index)=>({index,email:lead.email,reason:'workspace_duplicate'}))};}});
+  const done=f.confirm(f.prepare());
+  assert.equal(done.counts.workspaceDuplicate,1);assert.equal(f.companySheet.data[1][4],'Готов');assert.equal(f.companySheet.data[2][4],'готов');
+  assert.ok(f.companySheet.data[1].some(cell=>String(cell).includes('не подтверждена')));
+});
+
+test('manual status changes during upload survive even when Coldy acknowledges the address',()=>{
+  const f=readyWorkbook({api:({method,path})=>{
+    if(method==='POST'&&path==='/leads/bulk')f.companySheet.data[1][4]='Фильтр';
+  }});
+  assert.equal(f.confirm(f.prepare()).counts.created,1);
+  assert.equal(f.companySheet.data[1][4],'Фильтр');
+  assert.equal(f.companySheet.data[2][4],'Рассылка');
+});
 
 test('segment mailing settings return only saved local campaigns without loading the Coldy directory', () => {
   const f = fixture();

@@ -9,12 +9,13 @@ from performance_client import FIXTURE, HTML, ROOT
 DATA = """
 const cardRows=[
   {value:'both@example.test',channel:'email',owners:['companies','lpr'],ownerNames:['Компания','Представитель'],manualStatuses:['фильтр'],readiness:'Исключён вручную',validationStatuses:['Валиден'],ready:false,inCampaign:true,coldyStatuses:['Отправлено писем: 2'],channelFacts:[{campaign:'Тестовая кампания',statuses:['Отправлено писем: 2']}],campaigns:['Тестовая кампания'],sources:[{name:'Рабочая таблица',url:'https://docs.google.com/spreadsheets/d/synthetic/edit#gid=2&range=A3',column:'Рабочая почта'}]},
-  {value:'+79990000001',channel:'telegram',owners:['companies'],ownerNames:['=SUM(1)'],manualStatuses:['Новый контакт'],readiness:'Готов',validationStatuses:['Проверен'],ready:true,inCampaign:false,coldyStatuses:[],campaigns:[]}
+  {value:'+79990000001',channel:'telegram',owners:['companies'],ownerNames:['=SUM(1)'],manualStatuses:['Новый контакт'],readiness:'Готов',validationStatuses:['Проверен'],ready:true,inCampaign:false,coldyStatuses:[],campaigns:[]},
+  {value:'review@example.test',channel:'email',owners:['companies'],ownerNames:['Компания'],manualStatuses:['Новый контакт'],readiness:'Выбрать «Готов» или «Фильтр»',needsStatus:true,validationStatuses:['Валиден'],ready:false,inCampaign:false,coldyStatuses:[],campaigns:[]}
 ];
 api.getSegmentContactCard=p=>{
-  const filtered=cardRows.filter(r=>(p.channel==='all'||p.channel===r.channel)&&(p.owner==='all'||r.owners.includes(p.owner))&&(p.queue==='all'||(p.queue==='ready'&&r.ready)||(p.queue==='inCampaign'&&r.inCampaign))&&(!p.query||r.value.includes(p.query)));
+  const filtered=cardRows.filter(r=>(p.channel==='all'||p.channel===r.channel)&&(p.owner==='all'||r.owners.includes(p.owner))&&(p.queue==='all'||(p.queue==='ready'&&r.ready)||(p.queue==='inCampaign'&&r.inCampaign)||(p.queue==='emailReview'&&r.needsStatus))&&(!p.query||r.value.includes(p.query)));
   const rows=filtered.slice(p.offset,p.offset+p.limit).map(row=>({...row,...(p.prepared?{sources:[]}: {})}));
-  return {segmentId:p.segmentId,name:'Пилот',revision:'v1',prepared:!!p.prepared,checkedAt:'2026-11-26T00:00:00Z',summary:{email:{total:1,ready:0,toCheck:0},telegram:{total:1,ready:1,toCheck:0},sharedEmail:1,ownership:0},files:{companies:{id:p.segmentId+'-companies',name:'Компании'}},warnings:[],total:filtered.length,offset:p.offset,nextOffset:p.offset+rows.length<filtered.length?p.offset+rows.length:null,rows};
+  return {segmentId:p.segmentId,name:'Пилот',revision:'v1',prepared:!!p.prepared,checkedAt:'2026-11-26T00:00:00Z',summary:{email:{total:2,ready:0,toCheck:0,toReview:1},telegram:{total:1,ready:1,toCheck:0},sharedEmail:1,ownership:0},files:{companies:{id:p.segmentId+'-companies',name:'Компании'}},warnings:[],total:filtered.length,offset:p.offset,nextOffset:p.offset+rows.length<filtered.length?p.offset+rows.length:null,rows};
 };
 const segmentDashboard=api.getSegmentsDashboard;
 api.getSegmentsDashboard=p=>{
@@ -64,7 +65,7 @@ def main():
         expect(page.locator('#sc-status')).to_contain_text('Карточка собрана')
         page.wait_for_function("backend.pending.some(r=>r.method==='getSegmentContactCard'&&r.payload.prepared)")
         page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")
-        expect(rows).to_have_count(2)
+        expect(rows).to_have_count(3)
         assert page.evaluate("backend.calls.filter(c=>/Coldy|LegacyPreview|Promouser/.test(c.name)).length")==0
         expect(rows.first.locator('td').nth(2)).to_have_text('фильтр')
         expect(rows.first.locator('td').nth(4)).to_contain_text('Отправлено писем: 2')
@@ -99,6 +100,9 @@ def main():
         saved.get_by_role('button',name='Свернуть').click()
         page.locator('#sc-prepare').click()
         expect(page.locator('#sc-prep-panel')).to_be_visible()
+        page.locator('[data-sc-queue="emailReview"]').click()
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text('review@example.test')
         page.locator('#sc-prep-panel [data-sc-dismiss]').click()
         page.locator('#sc-secondary summary').click()
         page.locator('#sc-origins').click()
@@ -129,7 +133,7 @@ def main():
         page.wait_for_function("backend.pending.some(r=>r.method==='getSegmentContactCard')")
         expect(rows).to_have_count(0)
         page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")
-        expect(rows).to_have_count(2)
+        expect(rows).to_have_count(3)
         assert not errors,errors
         browser.close()
 

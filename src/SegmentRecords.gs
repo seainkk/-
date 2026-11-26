@@ -101,11 +101,17 @@ function segmentRecordsCompany_(record) {
   };
 }
 
+// Keep CRM and spreadsheet identifiers as text, including leading zeros.
+function segmentRecordsCompanyId_(value) {
+  var id = segmentRecordsText_(value);
+  return id && id.length <= 200 && !/[\x00-\x1f\x7f]/.test(id) ? id : '';
+}
+
 function segmentRecordsCompanyKeys_(record) {
   var keys = [], inn = segmentRecordsInn_(record.inn), ogrn = segmentRecordsOgrn_(record.ogrn), name = segmentRecordsName_(record.name), city = segmentRecordsCity_(record.city), domain = segmentRecordsDomain_(record.website);
   if (inn) keys.push('inn:' + inn);
   if (ogrn) keys.push('ogrn:' + ogrn);
-  if (/^C-[A-Za-z0-9_-]{20,43}$/.test(record.id || '')) keys.push('id:' + record.id);
+  if (segmentRecordsCompanyId_(record.id)) keys.push('id:' + record.id);
   if (domain && name) keys.push('site:' + domain + '|' + name + '|' + city);
   if (name && city) keys.push('name-city:' + name + '|' + city);
   if (name) keys.push('exact:' + segmentRecordsHash_([name, city, domain, segmentRecordsList_(record.emails, 'email').sort(), segmentRecordsList_(record.phones, 'phone').sort(), segmentRecordsList_(record.telegrams, 'telegram').sort()]));
@@ -151,7 +157,20 @@ function segmentRecordsPlanner_(input) {
   var seenSourceMarkers = Object.create(null), acceptedCompanies = 0, acceptedPeople = 0;
   function issue(kind, reason, source, value) { review.push({ kind: kind, reason: reason, source: segmentRecordsSource_(source), name: segmentRecordsText_(value) }); }
   function mergeCompany(record, incoming) {
-    var directory = Object.assign({ directoryNames: incoming.name, directoryCities: incoming.city, directorySites: incoming.website, directoryEmails: incoming.emails, directoryTelegram: incoming.telegrams }, incoming.directory || {});
+    var directory = Object.assign({directoryNames: incoming.name, directoryCities: incoming.city, directorySites: incoming.website,
+      directoryEmails: incoming.emails, directoryTelegram: incoming.telegrams}, incoming.directory || {});
+    if (input.directory && incoming.phones) {
+      // Explicitly typed source columns retain their original formatting and meaning, including international numbers.
+      var declared = new Set(preparedDataPhones_([directory.directoryMobile, directory.directoryLandlines].filter(Boolean).join('; ')).map(function (phone) { return phone.value; }));
+      var generic = preparedDataPhones_(incoming.phones).filter(function (phone) { return !declared.has(phone.value); });
+      generic.forEach(function (phone) {
+        var field = phone.kind === 'mobile' ? 'directoryMobile' : phone.kind === 'landline' ? 'directoryLandlines' : '';
+        if (field && !declared.has(phone.value)) {
+          directory[field] = [directory[field], phone.value].filter(Boolean).join('\n');
+          declared.add(phone.value);
+        }
+      });
+    }
     if (input.directory) SOURCE_DIRECTORY_FIELDS.forEach(function (field) {
       var key = field[0], value = segmentRecordsFieldValue_(key, directory[key]);
       if (!value || (record._formulaFields && record._formulaFields[key]) || record[key] === value) return;
@@ -172,7 +191,7 @@ function segmentRecordsPlanner_(input) {
   }
   function resolveCompany(incoming, targetKind) {
     var keys = segmentRecordsCompanyKeys_(incoming), matches = [], hardConflict = false;
-    var explicitId = /^C-[A-Za-z0-9_-]{20,43}$/.test(incoming.id || '') ? incoming.id : '';
+    var explicitId = segmentRecordsCompanyId_(incoming.id);
     if (!keys.length) return null;
     var strongKeys = keys.filter(function (key) { return /^(?:inn|ogrn|id):/.test(key); });
     function findCandidates(selected, strong) {

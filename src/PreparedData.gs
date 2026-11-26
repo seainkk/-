@@ -267,7 +267,7 @@ function preparedDataExcludedColumn_(label) {
   var key = contactPreviewHeader_(label);
   if (/^доп(?:олнительный)?тел(?:ефон)?непроверялина(?:тг|телеграм)$/.test(key)) return false;
   if (key==='исходныйстолбецemail') return true;
-  return /валид|результат|статус|отправител|sender|провер|колво|количество|дубль|повтор|кампан|рассылк|reply/.test(key) || /^(?:переносвлпр|перенесеновлпр|добавленовлпр|idлпр|идлпр|идентификаторлпр)$/.test(key) || /^(?:id|ид)(?:$|[a-zа-я])|(?:id|ид)$/.test(key) || /^(?:инн|inn|огрн|огрнип|ogrn|ogrnip|кпп|окпо|бик|счет|расчетныйсчет|индекс|дата|датасоздания|датарождения|date|birthdate|count|companyid|personid)/.test(key);
+  return /валид|результат|статус|отправител|sender|провер|колво|количество|дубль|повтор|кампан|рассылк|reply/.test(key) || /^(?:айди|айдикомпании|кодкомпании|companycode|переносвлпр|перенесеновлпр|добавленовлпр|idлпр|идлпр|идентификаторлпр)$/.test(key) || /^(?:id|ид)(?:$|[a-zа-я])|(?:id|ид)$/.test(key) || /^(?:инн|inn|огрн|огрнип|ogrn|ogrnip|кпп|окпо|бик|счет|расчетныйсчет|индекс|дата|датасоздания|датарождения|date|birthdate|count|companyid|personid)/.test(key);
 }
 function preparedDataDateLike_(value) {
   var match = String(value || '').trim().match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/);
@@ -748,7 +748,7 @@ function preparedWorkingLists_(model, sourceId) {
   (model.models || []).forEach(function (leaf) {
     var source = leaf.source;
     if (sourceId && source.hasHeader && source.section === 'companies' && (leaf.records || []).length &&
-        !source.headers.some(function (header) { return /^(companyid|idкомпании|идкомпании|companykey)$/.test(contactPreviewHeader_(header)); })) {
+        !sourceRecordsColumns_(source.headers,'companies').some(function (column) { return column.company === 'id'; })) {
       var ids = Array(source.rowCount).fill('');
       ids[source.headerIndex] = 'ID компании';
       sourceIds.set(source.sheetId, ids);

@@ -304,7 +304,7 @@ function processColdyCampaignUploads_(context, item) {
     var result = coldyCampaignWithLease_(current, segmentId, bindings[index].id, function (binding, ledger) {
       if (!binding.autoUpload) return { processed: 0 };
       if (ledger.job && ledger.job.state === 'processing') return coldyCampaignAdvance_(current, binding, ledger);
-      var collected = coldyCampaignCollect_(current, binding, ledger);
+      var collected = coldyCampaignCollect_(current, Object.assign({},binding,{automatic:true}), ledger);
       if (!collected.contacts.length) return { processed: 0 };
       var campaign = coldyCampaignRead_(current, binding.campaignId);
       if (!coldyCampaignCanUpload_(campaign, binding)) return { processed: 0 };
@@ -418,13 +418,22 @@ function coldyCampaignHasMembership_(value, campaignId) {
   return String(value || '').split('\n').some(function (label) { return label.trim().endsWith(suffix); });
 }
 
+// Applies to the manually approved company workflow. Exclusions and campaign membership
+// are checked across all rows for the same canonical address by the caller.
+function coldyReadyEmailState_(email, manual, raw, changed, cachedResult) {
+  if (changed || pvEmailStatus_(raw) === 'Невалиден' || cachedResult && pvEmailStatus_(cachedResult.status) === 'Невалиден') return 'invalid';
+  return manual === 'готов' && email.length <= 254 && !/[\u0000-\u001f\u007f]/.test(email) ? 'ready' : 'notReady';
+}
+
 function coldyCampaignCollect_(context, binding, ledger) {
   coldyCampaignScope_(context, binding.segmentId);
   var validationCache = locked_(function () { return coldyCampaignReviewCache_(context); });
   var targets = segmentRecordsTargets_(context, binding.segmentId, false), rows = [], counts = { eligible: 0, alreadyLoaded: 0, notValidated: 0, invalid: 0, ownershipReview: 0, total: 0, workspaceDuplicate: 0, blacklist: 0 }, warnings = [], grouped = Object.create(null);
   ['companies', 'lpr'].forEach(function (kind) {
     if (kind === 'companies' && !binding.includeCompanies || kind === 'lpr' && !binding.includeLpr) return;
-    var fileId = targets.tables[kind], workspace = getContactWorkspace_({ id: fileId });
+    var fileId = targets.tables[kind];
+    if (binding.workbookId && fileId !== binding.workbookId) return;
+    var workspace = getContactWorkspace_({ id: fileId });
     if (!workspace.enrolled || workspace.role !== 'segment-' + kind || workspace.segmentId !== binding.segmentId || !workspace.targets || !Number.isSafeInteger(workspace.targets.emailSheetId)) fail_('COLDY_TARGETS_REQUIRED', 'Сначала подготовьте списки Email в рабочих таблицах сегмента.');
     if (workspace.job && !workspace.job.error) fail_('COLDY_CONTACT_SYNC_BUSY', 'Дождитесь распределения новых контактов по вкладкам.');
     gridFile_(fileId, false, context.rootId);
@@ -432,12 +441,18 @@ function coldyCampaignCollect_(context, binding, ledger) {
     if (width > COLDY_CAMPAIGNS.maxColumns || count > COLDY_CAMPAIGNS.maxRows) fail_('COLDY_UPLOAD_LIMIT', 'Список Email превышает лимит обработки Coldy.');
     var headers = width ? sheet.getRange(1, 1, 1, width).getDisplayValues()[0] : [], map = pvHeaderMap_(headers), emailColumn = pvFindHeader_(map, ['Email', 'e-mail', 'почта']);
     if (emailColumn === undefined) fail_('COLDY_SCHEMA', 'В управляемой вкладке Email отсутствует колонка адреса.');
-    var statusColumn = pvFindHeader_(map, ['Валидация']), reviewColumn = pvFindHeader_(map, ['Проверить принадлежность']), ownerColumn = pvFindHeader_(map, ['Компания / ЛПР']), companyColumn = pvFindHeader_(map, ['Компания']), nameColumn = pvFindHeader_(map, ['ФИО', 'Имя', 'ЛПР']);
-    if (reviewColumn === undefined) fail_('COLDY_SCHEMA', 'В списке Email отсутствует отметка проверки принадлежности.');
-    var columns = {}, rowCount = Math.max(0, count - 1), workflowColumn = pvFindHeader_(map, ['Статус рассылки', 'Статус']);
+    var modern = typeof companyEmailWorkflowHeaders_ === 'function' && companyEmailWorkflowHeaders_(headers);
+    if (binding.automatic && (modern || kind === 'companies' && binding.workbookOnlyCompanies)) return;
+    var readyOnly = !!binding.workbookId || modern;
+    var statusColumn = pvFindHeader_(map, ['Результат валидации','Валидация']), reviewColumn = pvFindHeader_(map, ['Проверить принадлежность']), ownerColumn = pvFindHeader_(map, ['Компания / ЛПР']), companyColumn = pvFindHeader_(map, ['Компания']), nameColumn = pvFindHeader_(map, ['ФИО', 'Имя', 'ЛПР']);
+    if (reviewColumn === undefined && !readyOnly) fail_('COLDY_SCHEMA', 'В списке Email отсутствует отметка проверки принадлежности.');
+    var columns = {}, rowCount = Math.max(0, count - 1), workflowColumn = pvFindHeader_(map, modern ? ['Статус'] : ['Статус рассылки', 'Статус']);
+    if (readyOnly && workflowColumn === undefined) fail_('COLDY_SCHEMA', 'В списке Email отсутствует колонка статуса контакта.');
     var membershipColumn = pvFindHeader_(map, [COLDY_CAMPAIGNS.headers[0]]);
-    [emailColumn, statusColumn, reviewColumn, ownerColumn, companyColumn, nameColumn, workflowColumn, membershipColumn].forEach(function (column) { if (column !== undefined && columns[column] === undefined) columns[column] = rowCount ? sheet.getRange(2, column + 1, rowCount, 1).getDisplayValues() : []; });
-    var notes = rowCount && statusColumn !== undefined ? sheet.getRange(2, statusColumn + 1, rowCount, 1).getNotes() : [];
+    var companyIdColumn = readyOnly ? pvFindHeader_(map, ['ID компании']) : undefined;
+    [emailColumn, statusColumn, reviewColumn, ownerColumn, companyColumn, nameColumn, workflowColumn, membershipColumn, companyIdColumn].forEach(function (column) { if (column !== undefined && columns[column] === undefined) columns[column] = rowCount ? sheet.getRange(2, column + 1, rowCount, 1).getDisplayValues() : []; });
+    var bindingColumn = pvFindHeader_(map, ['Валидация','Результат валидации']);
+    var notes = rowCount && bindingColumn !== undefined ? sheet.getRange(2, bindingColumn + 1, rowCount, 1).getNotes() : [];
     columns[emailColumn].forEach(function (emailCell, index) {
       var email = pvEmail_(emailCell[0]); if (!email) return;
       if (ledger.emails[email]) { (grouped[email] || (grouped[email] = [])).push({ email: email }); return; }
@@ -445,12 +460,18 @@ function coldyCampaignCollect_(context, binding, ledger) {
       var status = cell(statusColumn).trim(), bound = pvBinding_(notes[index] && notes[index][0] || ''), changed = !!bound && bound !== pvKey_('email', email);
       var review = cell(reviewColumn).trim(), cached = validationCache[pvKey_('email', email)], cacheReview = !!(cached && cached.result && cached.result.review === true), acceptable = (!review || /^(?:нет|no|false|0)$/i.test(review)) && !cacheReview;
       var valid = !changed && email.length <= 254 && !/[\u0000-\u001f\u007f]/.test(email) && /^(?:валиден|валидный|valid|deliverable)$/i.test(status), completed = !!status && !pvPendingStatus_(status) && !changed;
+      var manual = cell(workflowColumn).trim().toLowerCase();
+      if (readyOnly) {
+        var readyState = coldyReadyEmailState_(email,manual,status,changed,cached && cached.result);
+        valid = readyState === 'ready';
+        completed = readyState === 'invalid';
+      }
       var row = { fileId: fileId, sheetId: sheet.getSheetId(), row: index + 2, email: email, valid: valid, completed: completed, review: !acceptable, excluded: pvExcludedStatus_(cell(workflowColumn), true),
         inCampaign: coldyCampaignHasMembership_(cell(membershipColumn), binding.campaignId),
         company: companyColumn === undefined ? kind === 'companies' && ownerColumn !== undefined ? cell(ownerColumn) : '' : cell(companyColumn),
-        name: nameColumn === undefined ? '' : cell(nameColumn), ownerLabel: ownerColumn === undefined ? '' : cell(ownerColumn),
-        fingerprintSource: JSON.stringify([fileId, sheet.getSheetId(), index + 2, email, status, bound, review]) };
+        name: nameColumn === undefined ? '' : cell(nameColumn), ownerLabel: ownerColumn === undefined ? '' : cell(ownerColumn) };
       row.fingerprintSource = JSON.stringify([fileId, sheet.getSheetId(), index + 2, email, status, bound, review, row.company, row.name, row.ownerLabel, cacheReview]);
+      if (readyOnly) { row.readyOnly = true; row.fingerprintSource += JSON.stringify([manual,cell(companyIdColumn)]); }
       rows.push(row); (grouped[email] || (grouped[email] = [])).push(row);
     });
   });
@@ -463,11 +484,15 @@ function coldyCampaignCollect_(context, binding, ledger) {
     if (entries.some(function (entry) { return entry.review; })) { counts.ownershipReview++; return; }
     if (entries.some(function (entry) { return entry.completed && !entry.valid; })) { counts.invalid++; return; }
     var validRows = entries.filter(function (entry) { return entry.valid; });
-    if (!validRows.length) { counts.notValidated++; return; }
+    if (!validRows.length) { if (entries.some(function (entry) { return entry.readyOnly; })) counts.notReady = (counts.notReady || 0) + 1; else counts.notValidated++; return; }
     var owners = {}; entries.forEach(function (entry) { var owner = (entry.ownerLabel || entry.company || entry.name || '').trim().toLowerCase(); if (owner) owners[owner] = true; });
     // The same address in company and person workbooks needs an explicit ownership decision.
-    if (Object.keys(owners).length > 1) { counts.ownershipReview++; return; }
-    var first = validRows[0]; contacts.push({ email: email, company: first.company.slice(0, 500), name: first.name.slice(0, 500), refs: validRows.map(function (row) { return { fileId: row.fileId, sheetId: row.sheetId, row: row.row, fingerprint: digest_(row.fingerprintSource) }; }) });
+    if (Object.keys(owners).length > 1 && !binding.workbookId) { counts.ownershipReview++; return; }
+    var first = validRows[0]; contacts.push({ email: email, company: Object.keys(owners).length > 1 ? '' : first.company.slice(0, 500), name: first.name.slice(0, 500), refs: validRows.map(function (row) {
+      var ref = { fileId: row.fileId, sheetId: row.sheetId, row: row.row, fingerprint: digest_(row.fingerprintSource) };
+      if (row.readyOnly) ref.readyOnly = true;
+      return ref;
+    }) });
   });
   if (contacts.length > COLDY_CAMPAIGNS.maxContacts) fail_('COLDY_UPLOAD_LIMIT', 'За одну загрузку можно подготовить до 20 000 адресов.');
   counts.eligible = contacts.length;
@@ -485,14 +510,18 @@ function coldyCampaignDispatchRows_(context, binding, contacts) {
     var workspace = getContactWorkspace_({ id: fileId }), kind = fileId === targets.tables.companies ? 'companies' : fileId === targets.tables.lpr ? 'lpr' : '';
     if (!kind || !workspace.enrolled || workspace.segmentId !== binding.segmentId || workspace.role !== 'segment-' + kind) fail_('COLDY_SOURCE_CHANGED', 'Связь базы сегмента изменилась перед загрузкой.');
     var sheet = gridSheet_(SpreadsheetApp.openById(fileId), workspace.targets.emailSheetId), width = sheet.getLastColumn(), headers = sheet.getRange(1, 1, 1, width).getDisplayValues()[0], map = pvHeaderMap_(headers);
-    var email = pvFindHeader_(map, ['Email', 'e-mail', 'почта']), status = pvFindHeader_(map, ['Валидация']), review = pvFindHeader_(map, ['Проверить принадлежность']), owner = pvFindHeader_(map, ['Компания / ЛПР']), company = pvFindHeader_(map, ['Компания']), name = pvFindHeader_(map, ['ФИО', 'Имя', 'ЛПР']);
-    if (email === undefined || status === undefined || review === undefined) fail_('COLDY_SOURCE_CHANGED', 'Колонки проверки Email изменились перед загрузкой.');
+    var email = pvFindHeader_(map, ['Email', 'e-mail', 'почта']), status = pvFindHeader_(map, ['Результат валидации','Валидация']), review = pvFindHeader_(map, ['Проверить принадлежность']), owner = pvFindHeader_(map, ['Компания / ЛПР']), company = pvFindHeader_(map, ['Компания']), name = pvFindHeader_(map, ['ФИО', 'Имя', 'ЛПР']);
+    var workflow = pvFindHeader_(map, typeof companyEmailWorkflowHeaders_ === 'function' && companyEmailWorkflowHeaders_(headers) ? ['Статус'] : ['Статус рассылки','Статус']);
+    var companyIdColumn = pvFindHeader_(map, ['ID компании']), bindingColumn = pvFindHeader_(map, ['Валидация','Результат валидации']);
+    if (email === undefined || byFile[fileId].some(function (entry) { return entry.ref.readyOnly ? workflow === undefined : status === undefined || review === undefined; })) fail_('COLDY_SOURCE_CHANGED', 'Колонки проверки Email изменились перед загрузкой.');
     byFile[fileId].forEach(function (entry) {
       if (entry.ref.sheetId !== sheet.getSheetId() || entry.ref.row > sheet.getLastRow()) fail_('COLDY_SOURCE_CHANGED', 'Строка контакта изменилась перед загрузкой.');
-      var line = sheet.getRange(entry.ref.row, 1, 1, width).getDisplayValues()[0], note = sheet.getRange(entry.ref.row, status + 1, 1, 1).getNotes()[0][0], value = pvEmail_(line[email]);
+      var line = sheet.getRange(entry.ref.row, 1, 1, width).getDisplayValues()[0], note = bindingColumn === undefined ? '' : sheet.getRange(entry.ref.row, bindingColumn + 1, 1, 1).getNotes()[0][0], value = pvEmail_(line[email]);
       var companyValue = company === undefined ? kind === 'companies' && owner !== undefined ? String(line[owner] || '') : '' : String(line[company] || '');
       var nameValue = name === undefined ? '' : String(line[name] || ''), ownerLabel = owner === undefined ? '' : String(line[owner] || '');
-      var fingerprint = digest_(JSON.stringify([fileId, sheet.getSheetId(), entry.ref.row, value, String(line[status] || '').trim(), pvBinding_(note), String(line[review] || '').trim(), companyValue, nameValue, ownerLabel, false]));
+      var identity = JSON.stringify([fileId, sheet.getSheetId(), entry.ref.row, value, String(line[status] || '').trim(), pvBinding_(note), String(line[review] || '').trim(), companyValue, nameValue, ownerLabel, false]);
+      if (entry.ref.readyOnly) identity += JSON.stringify([String(line[workflow] || '').trim().toLowerCase(),String(line[companyIdColumn] || '')]);
+      var fingerprint = digest_(identity);
       var memberships = pvFindHeader_(map, [COLDY_CAMPAIGNS.headers[0]]);
       if (coldyCampaignHasMembership_(line[memberships], binding.campaignId) || pvExcludedRow_(line, map, true) || value !== entry.contact.email || fingerprint !== entry.ref.fingerprint) fail_('COLDY_SOURCE_CHANGED', 'Контакт, его принадлежность или результат проверки изменились перед загрузкой.');
     });
@@ -500,11 +529,12 @@ function coldyCampaignDispatchRows_(context, binding, contacts) {
 }
 
 function coldyCampaignFingerprint_(collected) { return digest_(JSON.stringify(collected.contacts)); }
-function coldyCampaignCreateJob_(context, binding, ledger, contacts, requestId, requestHash) {
+function coldyCampaignCreateJob_(context, binding, ledger, contacts, requestId, requestHash, workbook) {
   var hash = coldyCredentialHash_(context), now = new Date().toISOString();
   ledger.job = { id: digest_('job|' + Utilities.getUuid()), state: 'processing', segmentId: binding.segmentId, bindingId: binding.id, campaignId: binding.campaignId, credentialHash: hash,
     bindingRevision: binding.revision, requestId: requestId, requestHash: requestHash, createdAt: now, contacts: contacts, cursor: 0, batch: null,
     counts: { created: 0, alreadyInCampaign: 0, workspaceDuplicate: 0, blacklist: 0, uncertain: 0 }, warnings: [] };
+  if (workbook) ledger.job.workbook = workbook;
   coldyCampaignSaveLedger_(context, binding, ledger);
 }
 function coldyCampaignUploadReceipt_(ledger, requestId, hash) {
@@ -522,6 +552,7 @@ function coldyCampaignJobDto_(job) {
 
 function coldyCampaignAdvance_(context, binding, ledger, initialCollected) {
   var job = ledger.job;
+  if (job.workbook) binding = Object.assign({}, binding, {workbookId:job.workbook.id, includeCompanies:true, includeLpr:false, allowActive:job.workbook.allowActive});
   coldyCampaignScope_(context, binding.segmentId);
   if (job.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED', 'Ключ Coldy изменился. Старая загрузка остановлена.');
   if (job.bindingRevision !== binding.revision) fail_('COLDY_BINDING_CHANGED', 'Настройки рассылки изменились. Проверьте прежнюю загрузку перед продолжением.');
@@ -556,10 +587,10 @@ function coldyCampaignAdvance_(context, binding, ledger, initialCollected) {
     coldyCampaignClaimGuard_(context, binding, ledger);
     var cache = coldyCampaignReviewCache_(context), seenFiles = {};
     items.forEach(function (contact) { contact.refs.forEach(function (ref) { if (!seenFiles[ref.fileId]) { seenFiles[ref.fileId] = true; gridFile_(ref.fileId, false, context.rootId); } }); });
-    return items.some(function (contact) { var known = cache[pvKey_('email', contact.email)]; return known && known.result && known.result.review === true; });
+    return items.some(function (contact) { var known = cache[pvKey_('email', contact.email)]; return known && known.result && (known.result.review === true || contact.refs.some(function (ref) { return ref.readyOnly; }) && pvEmailStatus_(known.result.status) === 'Невалиден'); });
   });
   if (excluded) { job.batch = null; job.warnings.push('Контакт получил отметку ручной проверки; загрузка остановлена до повторного отбора.'); coldyCampaignSaveLedger_(context, binding, ledger); return coldyCampaignJobDto_(job); }
-  try { result = coldyApi_(context, 'POST', '/leads/bulk', payload); }
+  try { result = coldyApi_(context, 'POST', '/leads/bulk', payload, {expectedCredentialHash:job.credentialHash}); }
   catch (error) {
     job.batch.state = 'uncertain';
     if (error && error.registryCode === 'COLDY_RATE_LIMIT') job.nextActionAt = Date.now() + Math.max(1000, Number(error.retryAfterMs) || 30000);
@@ -643,7 +674,7 @@ function coldyCampaignFinish_(context, binding, ledger) {
   coldyCampaignSaveLedger_(context, binding, ledger); return result;
 }
 
-/** Never write generic campaign/sent statuses or claim workspace duplicates are loaded. */
+/** Generic legacy statuses are preserved. A confirmed ready row moves to Рассылка. */
 function coldyCampaignApplyRows_(context, binding, ledger, contacts) {
   var targets = segmentRecordsTargets_(context, binding.segmentId, false), allowedFiles = {}, byFile = Object.create(null);
   if (binding.includeCompanies) allowedFiles[targets.tables.companies] = true;
@@ -679,11 +710,15 @@ function coldyCampaignApplyRows_(context, binding, ledger, contacts) {
       else group.end = row;
     });
     var columns = COLDY_CAMPAIGNS.headers.map(function (header) { return map[pvHeader_(header)]; });
+    var workflow = pvFindHeader_(map, typeof companyEmailWorkflowHeaders_ === 'function' && companyEmailWorkflowHeaders_(headers) ? ['Статус'] : ['Статус рассылки','Статус']);
+    if (refs.some(function (entry) { return entry.ref.readyOnly; }) && workflow !== undefined) columns.push(workflow);
     groups.forEach(function (group) {
       var height = group.end - group.start + 1, current = columns.map(function (column) { return sheet.getRange(group.start, column + 1, height, 1).getDisplayValues(); });
+      var workflowRange = columns.length === 4 ? sheet.getRange(group.start, workflow+1, height, 1) : null;
+      var formulas = workflowRange && typeof workflowRange.getFormulas === 'function' ? workflowRange.getFormulas() : [];
       // Read identity last. A moved/changed email never receives another contact's receipt.
       coldyCampaignScope_(context, binding.segmentId); gridFile_(fileId, true, context.rootId);
-      var emails = sheet.getRange(group.start, emailColumn + 1, height, 1).getDisplayValues(), values = [[], [], []], masks = [[], [], []];
+      var emails = sheet.getRange(group.start, emailColumn + 1, height, 1).getDisplayValues(), values = columns.map(function () { return []; }), masks = columns.map(function () { return []; });
       for (var index = 0; index < height; index++) {
         var entry = rows[group.start + index], eligible = !!entry && pvEmail_(emails[index][0]) === entry.email;
         var old = current.map(function (column) { return String(column[index][0] || ''); }), wanted = old.slice();
@@ -691,9 +726,12 @@ function coldyCampaignApplyRows_(context, binding, ledger, contacts) {
           var present = entry.record.outcome === 'created' || entry.record.outcome === 'alreadyInCampaign', names = old[0].split('\n').filter(Boolean), label = binding.campaignName + ' [' + binding.campaignId + ']';
           if (present && names.indexOf(label) === -1) names.push(label);
           wanted[0] = names.join('\n'); wanted[1] = { created: 'Загружен в Coldy', alreadyInCampaign: 'Уже в выбранной рассылке Coldy', workspaceDuplicate: 'Уже в рабочем пространстве Coldy; загрузка в выбранную рассылку не подтверждена', blacklist: 'Не отправляем · чёрный список Coldy; загрузка не подтверждена' }[entry.record.outcome]; wanted[2] = present ? entry.record.at : old[2];
+          if (entry.ref.readyOnly && present && !(formulas[index] && formulas[index][0]) && String(old[3] || '').trim().toLowerCase() === 'готов') wanted[3] = 'Рассылка';
         }
         columns.forEach(function (_column, position) { values[position].push([wanted[position]]); masks[position].push([eligible && wanted[position] !== old[position]]); });
       }
+      if (workflowRange && masks[3].some(function (line) { return line[0]; }))
+        contactMailingStatusDropdown_(workflowRange,true,masks[3],true);
       columns.forEach(function (column, position) { if (masks[position].some(function (line) { return line[0]; })) sheetWriteRawStrings_(fileId, sheet.getSheetId(), group.start, column + 1, values[position], masks[position]); });
     });
   });
