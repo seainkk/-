@@ -13,7 +13,17 @@ const cardRows=[
 ];
 api.getSegmentContactCard=p=>{
   const filtered=cardRows.filter(r=>(p.channel==='all'||p.channel===r.channel)&&(p.owner==='all'||r.owners.includes(p.owner))&&(p.queue==='all'||(p.queue==='ready'&&r.ready)||(p.queue==='inCampaign'&&r.inCampaign))&&(!p.query||r.value.includes(p.query)));
-  return {segmentId:p.segmentId,name:'Пилот',revision:'v1',checkedAt:'2026-11-26T00:00:00Z',summary:{email:{total:1,ready:0,toCheck:0},telegram:{total:1,ready:1,toCheck:0},sharedEmail:1,ownership:0},files:{companies:{id:'synthetic-c',name:'Компании'}},warnings:[],total:filtered.length,offset:p.offset,nextOffset:null,rows:filtered};
+  const rows=filtered.slice(p.offset,p.offset+p.limit).map(row=>({...row,...(p.prepared?{sources:[]}: {})}));
+  return {segmentId:p.segmentId,name:'Пилот',revision:'v1',prepared:!!p.prepared,checkedAt:'2026-11-26T00:00:00Z',summary:{email:{total:1,ready:0,toCheck:0},telegram:{total:1,ready:1,toCheck:0},sharedEmail:1,ownership:0},files:{companies:{id:p.segmentId+'-companies',name:'Компании'}},warnings:[],total:filtered.length,offset:p.offset,nextOffset:p.offset+rows.length<filtered.length?p.offset+rows.length:null,rows};
+};
+const segmentDashboard=api.getSegmentsDashboard;
+api.getSegmentsDashboard=p=>{
+  const result=segmentDashboard(p);
+  if(p?.includeCardPreview&&!backend.omitPreviews){
+    const id='existing-segment';
+    result.cardPreviews={[id]:{...api.getSegmentContactCard({segmentId:id,channel:'all',owner:'all',queue:'all',prepared:true,offset:0,limit:1}),preview:true}};
+  }
+  return result;
 };
 api.getSegmentLegacyPreview=p=>({segmentId:p.segmentId,sources:[{id:'legacy',name:'Старый оригинал'}],history:[{name:'Импорт контактов',kind:'Завершён'}],preview:p.sourceId?{source:{id:'legacy',name:'Старый оригинал'},complete:true,channels:{email:{added:12,existing:1,duplicates:2}},entities:{companies:13},warnings:[]}:null});
 api.refreshColdyMailings=p=>({campaigns:[{id:'test',name:'Тестовая кампания'}]});
@@ -38,14 +48,28 @@ def main():
         page.set_content(html)
         page.locator('#br-view-segments').click()
         segment=page.locator('[data-segment="existing-segment"]')
-        segment.locator('.br-segment-row-name').click()
+        page.evaluate("backend.holdMethods=['getSegmentContactCard']")
+        opening=segment.locator('.br-segment-row-name').evaluate("""button=>{
+          const start=performance.now();
+          button.click();
+          return new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(()=>done({
+            ms:performance.now()-start,first:document.querySelector('#sc-rows tr td')?.textContent
+          }))));
+        }""")
+        assert opening['first'] and 'both@example.test' in opening['first'] and opening['ms']<2000,opening
+        print('Authorized dashboard preview, click to painted row: %.0f ms'%opening['ms'],flush=True)
         rows=page.locator('#sc-rows tr')
+        expect(rows).to_have_count(1)
+        expect(page.locator('#sc-status')).to_contain_text('Карточка собрана')
+        page.wait_for_function("backend.pending.some(r=>r.method==='getSegmentContactCard'&&r.payload.prepared)")
+        page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")
         expect(rows).to_have_count(2)
         assert page.evaluate("backend.calls.filter(c=>/Coldy|LegacyPreview|Promouser/.test(c.name)).length")==0
         expect(rows.first.locator('td').nth(2)).to_have_text('фильтр')
         expect(rows.first.locator('td').nth(4)).to_contain_text('Отправлено писем: 2')
         rows.first.locator('summary').click()
         expect(rows.first.locator('a')).to_have_attribute('href','https://docs.google.com/spreadsheets/d/synthetic/edit#gid=2&range=A3')
+        assert page.evaluate("backend.calls.some(c=>c.name==='getSegmentContactCard'&&c.p.limit===1&&c.p.revision==='v1'&&!c.p.prepared)")
         page.locator('[data-sc-state="inCampaign"]').click()
         expect(rows).to_have_count(1)
         expect(rows.first).to_contain_text('both@example.test')
@@ -59,6 +83,7 @@ def main():
             csv=path.read_text(encoding='utf-8-sig')
             assert csv.count('"+79990000001"')==1 and 'both@example.test' not in csv and "'=SUM(1)" in csv
         assert page.evaluate("backend.calls.filter(c=>c.name==='saveSegmentExport').length")==0
+        assert page.evaluate("backend.calls.some(c=>c.name==='getSegmentContactCard'&&c.p.limit===200&&!c.p.prepared&&c.p.revision==='v1')")
         saved=page.locator('#sc-saved-actions')
         saved.locator('summary').click()
         saved.locator('[name="filterName"]').fill('Готовые Telegram')
@@ -93,10 +118,17 @@ def main():
         page.evaluate("backend.holdMethods=['getSegmentContactCard']")
         page.locator('[data-sc-channel="telegram"]').click()
         page.wait_for_function("backend.pending.some(p=>p.method==='getSegmentContactCard')")
+        page.evaluate("backend.omitPreviews=true")
         page.locator('#br-project').select_option('neosender')
-        page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")
+        page.evaluate("releaseRpc('getSegmentContactCard')")
         expect(page.locator('#sc-view')).to_be_hidden()
         expect(page.locator('#sc-rows')).to_be_empty()
+        page.locator('#br-view-segments').click()
+        segment.locator('.br-segment-row-name').click()
+        page.wait_for_function("backend.pending.some(r=>r.method==='getSegmentContactCard')")
+        expect(rows).to_have_count(0)
+        page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")
+        expect(rows).to_have_count(2)
         assert not errors,errors
         browser.close()
 

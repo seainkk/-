@@ -11,7 +11,7 @@
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,readPending=0,mutationGeneration=0,pendingView=null,formMode=null;
   let sourceData=null,sourceTimer=null,lastSourceAttempt=0,lastSourceLoaded=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
   let sourceProbeAt=0,sourceCheckedAt=0,sourceProbe=null;
-  let catalogPreview=null,acceptSavedCatalog=false,fullSourceCatalog=false;
+  let catalogPreview=null,acceptSavedCatalog=false;
   let importOpen=false,importMode='file',importing=false,importFileSelection=0,registrySection='companies',liveUploadForm=null;
   let uploadEntryView='sources',uploadSegmentOptions=null;
   let preparedImport=null,preparedEpoch=0,preparedPollTimer=null,accessEpoch=0,workspaceRpcQueue=Promise.resolve();
@@ -33,7 +33,7 @@
   let segmentSection='clients';
   const sourceDrafts=new Map(),sourceMessages=new Map(),importRequests=new Map(),segmentRequests=new Map();
   const pendingSyncViews=new Set();let syncTimer=null;
-  let contactPreview=null,contactPreviewEpoch=0,segmentImportDestination=null,segmentReturnPending=null;
+  let segmentImportDestination=null,segmentReturnPending=null;
   const sourceFilters={query:'',contents:'',project:'',onlyUnassigned:false};
   const failure=(error)=>{const text=String(error?.message||error||'Неизвестная ошибка.');const match=text.match(/\[([A-Z_]+)\]\s*(.*)/s);return {code:match?.[1]||'ERROR',message:match?.[2]||text};};
   function sharedKeyFromHash(hash){const match=typeof hash==='string'?hash.match(/^#?access_key=([A-Za-z0-9_-]{43})$/):null;return match&&match[0]===hash?match[1]:null;}
@@ -109,7 +109,7 @@
     const main=root.querySelector('.br-main');if(main){main.hidden=!accessReady;main.inert=!accessReady;}root.querySelector('.br-view-nav').hidden=!accessReady;$('br-settings-open').hidden=!accessReady;$('br-user').textContent=accessReady?'Доступ по ссылке':'';root.dataset.access=accessReady?'ready':'locked';
   }
   function lockAccess(message,unavailable){
-    fullSourceCatalog=false;
+
     closeServiceSettings(false);
     mailingsBySegment.clear();renderedMailings=null;entryCatalogEpoch=-1;
     window.RegistrySegmentCard?.clear();if(activeView==='segmentCard')activeView='segments';
@@ -122,7 +122,7 @@
     $('br-unassigned').hidden=true;$('br-unassigned-rows').replaceChildren();$('br-upload-project').value='';
     accessEpoch++;dashboardRequest++;if(dashboardAnalysisTimer!==null){clearTimeout(dashboardAnalysisTimer);dashboardAnalysisTimer=null;}dashboardAnalysisLoading=false;dashboardLoading=false;mailingsLoading=false;sourceLoading=false;accessReady=false;accessKey='';window.RegistryProject?.lock?.();closeProviderSettings();closeColdySettings();coldyMailings=null;preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
     viewTrail.length=0;pendingImportExit=null;suspendedSegment=null;uploadSegmentOptions=null;uploadEntryView='sources';$('br-import-destination').replaceChildren();$('br-import-segment-name').value='';recoveringOrigins=false;$('br-origin-recovery-status').textContent='';closeSourceOrigin();$('br-origin-recovery').hidden=true;
-    contactPreview=null;contactPreviewEpoch++;segmentImportDestination=null;segmentReturnPending=null;renderContactPreview();
+    segmentImportDestination=null;segmentReturnPending=null;
     pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;lastSourceAttempt=0;lastDashboardAttempt=0;lastMailingsAttempt=0;
     if(message)notifyEntry(unavailable?'unavailable':'locked');accessReady=false;accessKey='';accessMessage=message||null;bootstrap=null;sourceData=null;dashboard=null;mailings=null;pendingView=null;importOpen=false;segmentEditor=null;formMode=null;sourceDrafts.clear();sourceMessages.clear();importRequests.clear();segmentRequests.clear();renderedSourceKey=null;renderedDashboardKey=null;clearViewTimer();$('br-upload-access').value='';$('br-segment-panel').hidden=true;$('br-segment-source-options').replaceChildren();$('br-segment-target').replaceChildren();$('br-segment-name').value='';segmentError=null;sourceRefreshError=null;dashboardError=null;mailingsError=null;$('br-import-file-form').reset();$('br-import-link-form').reset();showImportMessage(null,false);$('br-sources-folder').removeAttribute('href');$('br-sources-items').replaceChildren();$('br-segments-rows').replaceChildren();$('br-mailings-totals').replaceChildren();$('br-mailings-services').replaceChildren();notice(null);render();
   }
@@ -585,22 +585,13 @@
     if(!window.RegistryGrid?.open){notice('Редактор таблиц ещё загружается. Обновите страницу.','error');return;}
     window.RegistryGrid.open({id,validateNew,transport:workspaceRpc,openSettings:resume=>openServiceSettings(null,resume),onScopeError:message=>notice(message,'error'),onClose:()=>{render();armViewTimer();flushPendingView();}});armViewTimer();updateControls();
   }
-  function sourceInSection(item,section){const kinds=normalizeContents(item?.contents);return !kinds.length||kinds.includes(section);}
-  function renderRegistrySections(){
-    const catalog=sourceData||catalogPreview;
-    for(const section of ['companies','lpr']){const label=section==='companies'?'Компании':'ЛПР',count=(catalog?.items||[]).filter(item=>item.present!==false&&sourceInCurrentCatalog(item)&&sourceInSection(item,section)).length;const node=$('br-section-'+section);node.textContent=label+(catalog&&!catalog.partial?' · '+count:'');node.setAttribute('aria-pressed',String(registrySection===section));node.disabled=!accessReady||importOpen||gridIsOpen();}
-  }
-  function sourceInCurrentCatalog(item){return fullSourceCatalog||item.distribution==='unassigned';}
-  function setRegistrySection(section){if(!['companies','lpr'].includes(section)||importOpen||gridIsOpen())return;registrySection=section;sourceFilters.contents='';$('br-source-contents-filter').value='';renderedSourceKey=null;renderSources();updateControls();}
   function sourceItem(id){return sourceData?.items?.find((item)=>item.id===id);}
   function sourceFocused(){return !!document.activeElement?.closest?.('.br-source-fields');}
   function openRelatedSource(id,opener){
     const item=sourceItem(id);
     if(!accessReady||!item||item.present===false)return;
     const openSettings=Array.from($('br-sources-items').querySelectorAll('.br-source-settings[open] > summary'),summary=>summary.dataset.sourceFocus);
-    rememberView({view:'sources',scroll:window.scrollY,registrySection,fullSourceCatalog,filters:{...sourceFilters},focus:opener.dataset.sourceFocus,openSettings});
-    if(!sourceInCurrentCatalog(item))fullSourceCatalog=true;
-    if(!sourceInSection(item,registrySection))registrySection=normalizeContents(item.contents)[0];
+    rememberView({view:'sources',scroll:window.scrollY,registrySection,filters:{...sourceFilters},focus:opener.dataset.sourceFocus,openSettings});
     if(!sourceMatchesFilters(sourceData,item,sourceFilters))setSourceFilters();
     renderSources();updateControls();
     const row=$('br-sources-items').querySelector('[data-source-id="'+CSS.escape(id)+'"]');
@@ -683,47 +674,7 @@
       if(accessEpoch===session.epoch){sourceSaving=null;$('br-origin-close').disabled=false;$('br-origin-save').disabled=false;renderSources();updateControls();flushPendingView();}
     }
   }
-  function canPreviewContacts(item){return !!item&&item.present!==false&&item.mimeType==='application/vnd.google-apps.spreadsheet';}
-  function contactPreviewCount(counts,combined,fallback){const value=counts?.[combined];return Number.isSafeInteger(value)&&value>=0?value:counts?.[fallback];}
-  function contactPreviewSourceUrl(id,source){const fileId=typeof source?.fileId==='string'&&/^[A-Za-z0-9_-]{10,200}$/.test(source.fileId)?source.fileId:id;const sheetId=String(source?.sheetId??'');if(!/^\d+$/.test(sheetId))return nativeUrl(fileId);const row=source?.row;return nativeUrl(fileId,sheetId)+(Number.isSafeInteger(row)&&row>0?'&range=A'+row:'');}
-  function queueContactPreview(item,options={}){
-    if(!accessReady||!canPreviewContacts(item)||editingBlocked()||importOpen||segmentEditor)return;
-    if(contactPreview?.source.id===item.id&&(contactPreview.loading||contactPreview.queued))return;
-    contactPreview={epoch:++contactPreviewEpoch,source:{id:item.id,name:item.name||item.fileName||'База'},queued:true,loading:false,data:null,error:null,page:0};renderContactPreview();updateControls();
-    if(options.scroll)$('br-contact-preview').scrollIntoView({block:'start',behavior:'smooth'});
-    if(!options.defer)flushPendingView();
-  }
-  async function runContactPreview(){
-    const current=contactPreview;if(!current?.queued||requesting()||!accessReady)return;
-    current.queued=false;current.loading=true;renderContactPreview();updateControls();
-    try{const result=await rpc('previewSourceBaseContacts',{id:current.source.id});if(accessReady&&contactPreview===current&&current.epoch===contactPreviewEpoch){current.data=result;current.error=null;}}
-    catch(error){if(accessReady&&contactPreview===current&&current.epoch===contactPreviewEpoch)current.error=failure(error).message;}
-    finally{current.loading=false;if(contactPreview===current)renderContactPreview();updateControls();flushPendingView();}
-  }
-  function renderContactPreview(){
-    const panel=$('br-contact-preview');panel.hidden=!contactPreview;if(!contactPreview){$('br-contact-preview-title').textContent='Состав базы';$('br-contact-preview-health').textContent='';$('br-contact-preview-metrics').replaceChildren();$('br-contact-preview-target-label').replaceChildren();$('br-contact-preview-target-rows').replaceChildren();$('br-contact-preview-scope').textContent='Проверка по распознанным заголовкам; полный список — на вкладках Email и телефонов. Подсчёт не заменяет валидацию контактов.';$('br-contact-preview-coverage').textContent='';$('br-contact-preview-warnings').replaceChildren();$('br-contact-preview-sheet-list').replaceChildren();$('br-contact-preview-conflict-list').replaceChildren();$('br-contact-preview-conflicts-note').textContent='';$('br-contact-preview-page').textContent='';$('br-contact-preview-result').hidden=true;return;}
-    const current=contactPreview,data=current.data,health=$('br-contact-preview-health');$('br-contact-preview-title').textContent='Состав базы: '+current.source.name;panel.setAttribute('aria-busy',String(current.loading||current.queued));
-    health.classList.toggle('br-error',!!current.error);health.textContent=current.error?'Подсчёт не завершён: '+current.error:current.loading?'Считаем компании, email и телефоны…':current.queued?'Подсчёт запланирован. Откройте реестр; он начнётся после текущей операции и закрытия форм.':data?.state==='ready'?'Подсчёт найденных контактов завершён.':data?.state==='mapping_required'?'Нужно уточнить названия или назначение столбцов. Итоговые количества пока не определены.':data?'Анализ неполный. Показанные количества предварительные.':'';
-    $('br-contact-preview-refresh').disabled=current.loading||current.queued||editingBlocked()||importOpen||!!segmentEditor;
-    $('br-contact-preview-result').hidden=!data;if(!data)return;
-    const metrics=$('br-contact-preview-metrics');metrics.replaceChildren();
-    for(const [label,value] of [['Компании по ID/ИНН',data.companies?.unique],['Уникальных email',data.emails?.unique],['Уникальных телефонов',data.phones?.unique],['Из них мобильных',data.phones?.mobiles],['Email у нескольких компаний',contactPreviewCount(data.emails,'multiCompanyCombined','multiCompany')],['Телефонов у нескольких компаний',contactPreviewCount(data.phones,'multiCompanyCombined','multiCompany')]]){const box=document.createElement('div'),dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=metricNumber(value);box.append(dt,dd);metrics.append(box);}
-    const targetReady=data.target?.state==='ready',targetLabel=$('br-contact-preview-target-label'),targetRows=$('br-contact-preview-target-rows');targetLabel.replaceChildren();targetRows.replaceChildren();
-    $('br-contact-preview-scope').textContent='Проверка по распознанным заголовкам; полный список — на вкладках Email и телефонов. '+(targetReady?'Предварительный расчёт. Контакты ещё не перенесены; пригодность для рассылки проверяется отдельно.':'Сравнение с «Центром баз» недоступно: количество новых контактов пока не определено. Подсчёт не заменяет валидацию.');
-    if(targetReady){targetLabel.append(document.createTextNode('Сравнение с '));const link=document.createElement('a');link.href=nativeUrl(data.target.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent=String(data.target.name||'Центром баз');targetLabel.append(link);}else targetLabel.textContent='Сравнение с «Центром баз» недоступно. Показаны количества в исходном файле.';
-    for(const [label,counts] of [['Компании по ID/ИНН',data.companies],['Email',data.emails],['Телефоны',data.phones]]){const row=document.createElement('tr'),name=document.createElement('th');name.scope='row';name.textContent=label;row.append(name);for(const field of ['existingInTarget','newUnique','newUnambiguous']){const cell=document.createElement('td');cell.textContent=metricNumber(targetReady?counts?.[field]:null);row.append(cell);}targetRows.append(row);}
-    $('br-contact-preview-coverage').textContent='Просмотрено строк: '+metricNumber(data.scannedRows)+'. Найдено вхождений: email — '+metricNumber(data.emails?.occurrences)+', телефонов — '+metricNumber(data.phones?.occurrences)+'. Без данных о компании в исходнике: '+metricNumber(data.companies?.unresolvedRows)+' строк. Контакты с неопределённой принадлежностью'+(targetReady?' с учётом Центра баз':'')+': email — '+metricNumber(contactPreviewCount(data.emails,'unresolvedCombined','unresolved'))+', телефонов — '+metricNumber(contactPreviewCount(data.phones,'unresolvedCombined','unresolved'))+'. Наличие мобильного номера ещё не подтверждает наличие Telegram.';
-    const warnings=$('br-contact-preview-warnings');warnings.replaceChildren();for(const value of Array.isArray(data.warnings)?data.warnings:[]){const li=document.createElement('li');li.textContent=String(value);warnings.append(li);}warnings.hidden=!warnings.children.length;
-    const sheets=$('br-contact-preview-sheet-list');sheets.replaceChildren();for(const sheet of Array.isArray(data.sheets)?data.sheets:[]){const block=document.createElement('div'),title=document.createElement('strong');title.textContent=String(sheet.name||'Лист');const fields=document.createElement('p');fields.textContent='Строк учтено: '+metricNumber(sheet.rowsScanned)+'. '+[['Компания',sheet.companyColumns],['Email',sheet.emailColumns],['Телефоны',sheet.phoneColumns]].map(([label,columns])=>label+': '+(Array.isArray(columns)&&columns.length?columns.map(column=>String(column.label||'')).join(', '):'не распознаны')).join(' · ');block.append(title,fields);if(sheet.reason){const reason=document.createElement('p');reason.textContent=String(sheet.reason);block.append(reason);}sheets.append(block);}
-    renderContactConflicts();
-  }
-  function renderContactConflicts(){
-    const data=contactPreview?.data,conflicts=data?.conflicts||{},items=Array.isArray(conflicts.items)?conflicts.items:[],total=contactPreviewCount(conflicts,'totalCombined','total'),list=$('br-contact-preview-conflict-list'),count=items.length,pageSize=20;
-    $('br-contact-preview-conflicts').hidden=!total&&!count;list.replaceChildren();if(!contactPreview)return;
-    contactPreview.page=Math.max(0,Math.min(contactPreview.page,Math.max(0,Math.ceil(count/pageSize)-1)));const start=contactPreview.page*pageSize;
-    for(const conflict of items.slice(start,start+pageSize)){const li=document.createElement('li'),value=document.createElement('strong'),owners=document.createElement('p'),reason=document.createElement('p');reason.className='br-contact-preview-conflict-reason';reason.textContent=conflict.reason==='unknown_owner'?'Не определена компания':'У нескольких компаний';value.textContent=(conflict.type==='phone'?'Телефон: ':'Email: ')+String(conflict.value||'');owners.textContent='Компании: '+(Array.isArray(conflict.companies)?conflict.companies.map(company=>String(company.label||company.key||'Не определена')).join(' · '):'Не определены');if(!owners.textContent.replace('Компании: ','').trim())owners.textContent='Компания не определена';li.append(value,reason,owners);const links=document.createElement('div');links.className='br-contact-preview-source-links';for(const source of Array.isArray(conflict.sources)?conflict.sources:[]){const link=document.createElement('a');link.href=contactPreviewSourceUrl(contactPreview.source.id,source);link.target='_blank';link.rel='noopener noreferrer';link.textContent=(source.fileId&&source.fileId!==contactPreview.source.id?'Центр баз / ':'')+String(source.sheetName||'Лист')+(Number.isSafeInteger(source.row)&&source.row>0?', строка '+source.row:'');links.append(link);}li.append(links);list.append(li);}
-    list.start=start+1;$('br-contact-preview-conflicts-note').textContent='Всего контактов для ручной проверки: '+metricNumber(total)+'.'+(conflicts.truncated?' Часть сведений о спорных связях показана не полностью. Подробности проверяйте в исходной таблице.':'');$('br-contact-preview-pagination').hidden=count<=pageSize;$('br-contact-preview-page').textContent=count?(start+1)+'–'+Math.min(start+pageSize,count)+' из '+count:'';$('br-contact-preview-prev').disabled=start===0;$('br-contact-preview-next').disabled=start+pageSize>=count;
-  }
+  function canOpenSourceWorkbook(item){return !!item&&item.present!==false&&item.mimeType==='application/vnd.google-apps.spreadsheet';}
   function renderSourcesHealth(){
     const node=$('br-sources-health');node.classList.toggle('br-error',!!sourceRefreshError);
     if(sourceRefreshError){node.textContent=(sourceData||catalogPreview?'Не удалось обновить список. Показаны последние данные. ':'Не удалось загрузить исходные базы. ')+sourceRefreshError;return;}
@@ -737,15 +688,15 @@
       (sourceData?.revision?'Проверка изменений каждые 30 секунд.':'Список обновляется каждую минуту, пока раздел открыт.')+(checked?' Проверено в '+new Date(checked).toLocaleTimeString('ru-RU')+'.':'');
   }
   function renderCatalogPreview(){
-    const section=catalogPreview.items.filter(item=>sourceInCurrentCatalog(item)&&sourceInSection(item,registrySection)),query=sourceSearchText(sourceFilters.query);
+    const section=catalogPreview.items,query=sourceSearchText(sourceFilters.query);
     const matches=section.filter(item=>sourceSearchText(item.name).includes(query));
     $('br-sources-count').textContent=catalogPreview.partial?'Первые базы: '+matches.length:'Показано: '+matches.length+' из '+section.length;
     $('br-source-filters-reset').disabled=!query;$('br-source-filters-note').hidden=true;
     $('br-sources-folder').hidden=true;
     $('br-sources-empty').hidden=matches.length>0;
-    $('br-sources-empty-title').textContent=!fullSourceCatalog&&!matches.length&&!query?'Проверяем распределение баз…':catalogPreview.partial?'Продолжаем загрузку списка…':query?'По поиску ничего не найдено':'В этом разделе пока нет баз';
+    $('br-sources-empty-title').textContent=catalogPreview.partial?'Продолжаем загрузку списка…':query?'По поиску ничего не найдено':'В этом разделе пока нет баз';
     $('br-sources-empty-description').textContent=query?'Измените поисковый запрос.':'Проверяем актуальный список.';
-    const key=JSON.stringify(['preview',fullSourceCatalog,registrySection,query,matches]);
+    const key=JSON.stringify(['preview',registrySection,query,matches]);
     if(key===renderedSourceKey)return;renderedSourceKey=key;
     const rows=document.createDocumentFragment();
     for(const item of matches){
@@ -758,23 +709,19 @@
   }
   function renderSources(){
     $('br-sources-view').hidden=activeView!=='sources';if(activeView!=='sources')return;
-    $('br-sources-title').textContent=fullSourceCatalog?'Общий каталог баз':'Входящие базы';
-    const catalogToggle=$('br-source-catalog-toggle');catalogToggle.textContent=fullSourceCatalog?'Вернуться во входящие':'Общий каталог';
-    catalogToggle.setAttribute('aria-pressed',String(fullSourceCatalog));
-    $('br-source-unassigned-filter').parentElement.hidden=!fullSourceCatalog;
     const previewOnly=!!catalogPreview&&!sourceData;
-    $('br-source-project-filter').disabled=previewOnly;$('br-source-unassigned-filter').disabled=previewOnly;
-    if(previewOnly){$('br-origin-recovery').hidden=true;renderRegistrySections();renderSourcesHealth();renderCatalogPreview();return;}
-    const data=sourceData,sectionData=data?Object.assign({},data,{items:(data.items||[]).filter(item=>sourceInCurrentCatalog(item)&&sourceInSection(item,registrySection))}):data,selection=sourceFilterSelection(sectionData,sourceFilters,[...sourceDrafts.keys(),...projectDrafts.keys()]),items=selection.items,filtered=sourceFiltersActive(sourceFilters);renderRegistrySections();
+    $('br-source-contents-filter').disabled=previewOnly;$('br-source-project-filter').disabled=previewOnly;$('br-source-unassigned-filter').disabled=previewOnly;
+    if(previewOnly){$('br-origin-recovery').hidden=true;renderSourcesHealth();renderCatalogPreview();return;}
+    const data=sourceData,selection=sourceFilterSelection(data,sourceFilters,[...sourceDrafts.keys(),...projectDrafts.keys()]),items=selection.items,filtered=sourceFiltersActive(sourceFilters);
     $('br-sources-count').textContent=data?.source?'Показано: '+selection.matchedCount+' из '+selection.totalCount+(selection.pinnedIds.length?' · Дополнительно с несохранёнными изменениями: '+selection.pinnedIds.length:''):data?'Список недоступен':'Загружаем список…';
     $('br-source-filters-reset').disabled=!filtered;const filterNote=$('br-source-filters-note');filterNote.hidden=!selection.unknownAssociations;filterNote.textContent=selection.unknownAssociations?'Связи с сегментами недоступны для '+selection.unknownAssociations+' баз. Они не включены в фильтр «Без сегмента».':'';
     const folder=$('br-sources-folder');folder.hidden=!data?.source?.id;if(data?.source?.id)folder.href=folderUrl(data.source.id);
     renderSourcesHealth();
     const allItems=(data?.items||[]).filter(item=>item.present!==false);
-    $('br-origin-recovery').hidden=!fullSourceCatalog||!data?.canEdit||!allItems.length;
-    // A card in another section can be the parent or a selection of a visible card.
+    $('br-origin-recovery').hidden=!data?.canEdit||!allItems.length;
+    // Related files may be outside the current search results.
     const relatedItems=allItems.map(item=>[item.id,item.name,item.origin?.id]);
-    const key=JSON.stringify({state:data?.state,source:data?.source,storage:data?.storage,canEdit:data?.canEdit,associationsAvailable:data?.associationsAvailable,filters:sourceFilters,fullSourceCatalog,registrySection,items,relatedItems,projects:Array.from(projectDrafts),drafts:Array.from(sourceDrafts),messages:Array.from(sourceMessages),saving:sourceSaving,initial:!data?(sourceLoading?'loading':sourceRefreshError?'error':'empty'):''});if(key===renderedSourceKey)return;renderedSourceKey=key;
+    const key=JSON.stringify({state:data?.state,source:data?.source,storage:data?.storage,canEdit:data?.canEdit,associationsAvailable:data?.associationsAvailable,filters:sourceFilters,registrySection,items,relatedItems,projects:Array.from(projectDrafts),drafts:Array.from(sourceDrafts),messages:Array.from(sourceMessages),saving:sourceSaving,initial:!data?(sourceLoading?'loading':sourceRefreshError?'error':'empty'):''});if(key===renderedSourceKey)return;renderedSourceKey=key;
     const catalog=new Map(),selectionsByOrigin=new Map();
     for(const item of allItems){
       catalog.set(item.id,item);
@@ -787,14 +734,11 @@
     target.replaceChildren();
     const empty=$('br-sources-empty');empty.hidden=items.length>0;
     const states={source_missing:['Папка «Исходные базы» не найдена','Проверьте привязку папки у администратора. Реестр и сегменты остаются доступны.'],source_ambiguous:['Найдено несколько папок «Исходные базы»','Администратору нужно уточнить привязку папки.'],source_outside_registry:['Папка «Исходные базы» недоступна в реестре','Проверьте права доступа и привязку папки.']};
-    const unknownIncoming=!fullSourceCatalog&&allItems.some(item=>sourceInSection(item,registrySection)&&!['assigned','unassigned'].includes(item.distribution));
     let emptyText=states[data?.state];
     if(!emptyText){
       if(filtered&&data?.source&&selection.totalCount>0)emptyText=['По фильтрам ничего не найдено','Измените поиск или сбросьте фильтры.'];
       else if(!data)emptyText=[sourceLoading?'Загружаем список…':'Список ещё не загружен','Нажмите «Обновить», чтобы повторить загрузку.'];
-      else if(unknownIncoming)emptyText=['Распределение баз пока неизвестно','Обновите данные или откройте общий каталог.'];
-      else if(!fullSourceCatalog)emptyText=['Входящих баз пока нет','Загрузите новую базу. Ранее распределённые файлы доступны в общем каталоге.'];
-      else emptyText=['В этом разделе пока нет файлов','Загрузите базу или выберите другой раздел.'];
+      else emptyText=['В каталоге пока нет файлов','Загрузите первую базу.'];
     }
     $('br-sources-empty-title').textContent=emptyText[0];$('br-sources-empty-description').textContent=emptyText[1];
     for(const item of items){
@@ -814,16 +758,17 @@
       meta.append(link,type);
       if(item.projectIds?.length){const projects=document.createElement('span');projects.textContent=item.projectIds.map(id=>projectNames[id]).filter(Boolean).join(' · ');meta.append(projects);}
       identity.append(meta);
-      renderSourceRelations(row,meta,item,catalog,selectionsByOrigin.get(item.id)||[]);
-      if(canPreviewContacts(item)){
-        const actions=document.createElement('div');actions.className='br-source-preview-actions';
-        const work=button('br-primary','Работать с таблицей');work.dataset.gridSource=item.id;work.dataset.sourceFocus=item.id+'/grid';work.disabled=editingBlocked()||importOpen||!!segmentEditor;work.addEventListener('click',()=>openGridWorkbook(item.id));
-        const analyze=button('','Проверить связи компаний');analyze.title='Проверка по распознанным заголовкам; полный список — на вкладках Email и телефонов. ';analyze.dataset.previewSource=item.id;analyze.dataset.sourceFocus=item.id+'/preview';analyze.disabled=editingBlocked()||importOpen||!!segmentEditor;analyze.addEventListener('click',()=>queueContactPreview(sourceItem(item.id),{scroll:true}));
-        actions.append(work,analyze);head.append(actions);
+
+      if(canOpenSourceWorkbook(item)){
+        const work=button('br-catalog-name',item.name);work.title='Работать с таблицей';work.dataset.gridSource=item.id;work.dataset.sourceFocus=item.id+'/grid';work.disabled=editingBlocked()||importOpen||!!segmentEditor;work.addEventListener('click',()=>openGridWorkbook(item.id));
+        heading.replaceChildren(work);
+      }else{
+        const file=link.cloneNode(false);file.className='br-catalog-name';file.dataset.sourceFocus=item.id+'/name';file.textContent=item.name;heading.replaceChildren(file);
       }
       const draft=sourceDrafts.get(item.id),editable=sourceCanEdit(data,item),changedElsewhere=!!draft&&Number.isSafeInteger(item.revision)&&draft.expectedRevision!==item.revision;
       const settings=document.createElement('details');settings.className='br-source-settings';settings.open=openSettings.get(item.id)??!!draft;
-      const summary=document.createElement('summary');summary.textContent=draft?'Настройки базы · Есть изменения':'Настройки базы';summary.dataset.sourceFocus=item.id+'/settings';settings.append(summary);
+      const summary=document.createElement('summary');summary.textContent=draft?'Сведения · Есть изменения':'Сведения';summary.dataset.sourceFocus=item.id+'/settings';settings.append(summary);
+      renderSourceRelations(settings,meta,item,catalog,selectionsByOrigin.get(item.id)||[]);
       if(!item.origin&&item.originAvailable!==false&&editable&&item.mimeType==='application/vnd.google-apps.spreadsheet'){
         const attach=button('','Привязать исходную базу');attach.dataset.sourceFocus=item.id+'/origin';attach.disabled=!!draft||editingBlocked()||importOpen||!!segmentEditor;
         attach.addEventListener('click',()=>openSourceOrigin(sourceItem(item.id)));settings.append(attach);
@@ -854,7 +799,7 @@
       const associations=document.createElement('div');associations.className='br-source-associations';const known=sourceAssociationsKnown(data,item);const segments=Array.isArray(item.segments)?item.segments:[];
       const caption=document.createElement('p');caption.textContent=known?(segments.length?'Сегменты проекта «'+projectNames[activeProjectId]+'»:':'В проекте «'+projectNames[activeProjectId]+'» у базы пока нет сегментов.'):(item.associationWarning||'Связи с сегментами недоступны. Требуется проверка.');associations.append(caption);
       if(segments.length){const list=document.createElement('ul');for(const segment of segments){const li=document.createElement('li');const anchor=document.createElement('a');anchor.href=folderUrl(segment.id);anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent=segment.name;li.append(anchor);list.append(li);}associations.append(list);}
-      const add=button('','Добавить в сегмент');add.dataset.addSource=item.id;add.dataset.sourceFocus=item.id+'/segment';add.disabled=!readySource(item)||sourceDrafts.has(item.id)||requesting()||importOpen||!!segmentEditor;add.addEventListener('click',()=>openSegmentEditor({sourceId:item.id,fromCatalog:true}));associations.append(add);if(!readySource(item)||sourceDrafts.has(item.id)){const reason=document.createElement('span');reason.className='br-source-reason';reason.textContent=sourceDrafts.has(item.id)?'Сначала сохраните или отмените изменения.':'Доступно только для готовой базы Google Таблиц с указанным наполнением.';associations.append(reason);}row.append(associations,settings);target.append(row);
+      const add=button('','Добавить в сегмент');add.dataset.addSource=item.id;add.dataset.sourceFocus=item.id+'/segment';add.disabled=!readySource(item)||sourceDrafts.has(item.id)||requesting()||importOpen||!!segmentEditor;add.addEventListener('click',()=>openSegmentEditor({sourceId:item.id,fromCatalog:true}));associations.append(add);if(!readySource(item)||sourceDrafts.has(item.id)){const reason=document.createElement('span');reason.className='br-source-reason';reason.textContent=sourceDrafts.has(item.id)?'Сначала сохраните или отмените изменения.':'Доступно только для готовой базы Google Таблиц с указанным наполнением.';associations.append(reason);}settings.append(associations);row.append(settings);target.append(row);
     }
     if(focusKey){
       const controls=Array.from(target.querySelectorAll('[data-source-focus]'));
@@ -1031,8 +976,10 @@
       (!(options.background||options.automatic)||activeView==='segments'&&!document.hidden&&!formIsOpen()&&!viewMutationBlocked());
     if(options.background)dashboardAnalysisLoading=true;else dashboardLoading=true;lastDashboardAttempt=Date.now();updateControls();renderSegmentsHealth();
     try{
-      const result=await readRpc('getSegmentsDashboard',light?{includeAnalysis:false}:{},current);
+      const result=await readRpc('getSegmentsDashboard',light?{includeAnalysis:false,...(window.RegistrySegmentCard?{includeCardPreview:true}:{})}:{},current);
       if(!result||!current()||mutation!==mutationGeneration)return;
+      window.RegistrySegmentCard?.acceptDashboard?.(result);
+      delete result.cardPreviews;
       dashboard=result;dashboardError=null;lastDashboardLoaded=Date.now();
       if(segmentError?.code==='SEGMENT_CATEGORY_CONFLICT'&&segmentEditor){
         const item=segmentById(segmentEditor.id);
@@ -1562,11 +1509,11 @@
     window.RegistrySegmentCard?.show(accessReady&&activeView==='segmentCard');
     if(activeView==='mailings')$('br-mailings-back').textContent=viewTrail.at(-1)?.view==='segmentCard'?'← К карточке сегмента':'← К сегментам';
     for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).setAttribute('aria-pressed',String(activeView===view||view==='segments'&&['segmentCard','mailings'].includes(activeView)));
-    root.dataset.view=activeView;window.RegistryProject?.show?.(activeView,{ready:accessReady,epoch:accessEpoch});renderSources();renderSegments();renderMailings();renderContactPreview();renderRegistrySections();renderAccess();updateControls();
+    root.dataset.view=activeView;window.RegistryProject?.show?.(activeView,{ready:accessReady,epoch:accessEpoch});renderSources();renderSegments();renderMailings();renderAccess();updateControls();
   }
   function updateControls(){
     $('br-origin-recover').disabled=!sourceData?.canEdit||recoveringOrigins||requesting()||!accessReady;
-    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-settings-open').disabled=!accessReady||gridIsOpen()||!!window.RegistryProject?.hasPending?.();$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderRegistrySections();renderPreparedJobs();
+    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady;$('br-settings-open').disabled=!accessReady||gridIsOpen()||!!window.RegistryProject?.hasPending?.();$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=!accessReady||gridIsOpen();renderPreparedJobs();
     // Repeated state updates in another section must not walk hidden catalog cards.
     if(activeView==='sources'){
       const itemsById=new Map((sourceData?.items||[]).map(item=>[item.id,item]));
@@ -1580,9 +1527,7 @@
         if(add){add.disabled=!readySource(item)||!!draft||editing||importOpen||!!segmentEditor;add.title=importOpen?'Сначала закройте форму загрузки.':segmentEditor?'Сначала завершите работу с сегментом.':'';}
       }
     }
-    for(const analyze of root.querySelectorAll('[data-preview-source]'))analyze.disabled=editing||importOpen||!!segmentEditor;
     for(const work of root.querySelectorAll('[data-grid-source]'))work.disabled=editing||importOpen||!!segmentEditor;
-    $('br-contact-preview-refresh').disabled=!contactPreview||!!contactPreview.loading||!!contactPreview.queued||editing||importOpen||!!segmentEditor;
     $('br-import-open').disabled=importOpen||editing||!!segmentEditor||sourceData?.state!=='ready'||sourceData?.canEdit!==true;updateImportView();
     $('br-add-segment').disabled=editing||importOpen||!!segmentEditor||dashboard&&dashboard.state!=='ready';
     $('br-segments-import').disabled=editing||importOpen||!!segmentEditor;
@@ -1637,7 +1582,6 @@
     if(preparedImport?.continueQueued){advancePreparedBase(true);return;}
     if(preparedImport?.previewQueued&&importOpen&&activeView==='sources'){runPreparedPreview();return;}
     if(segmentEditor){renderSegmentSources();updateControls();if(segmentEditor.readingLists)return;if(segmentEditor.loadingLists){loadSegmentEditorLists();return;}if(segmentEditor.pendingSourceId){const id=segmentEditor.pendingSourceId;segmentEditor.pendingSourceId=null;chooseSegmentSource(id,true);return;}}
-    if(contactPreview?.queued&&activeView==='sources'&&syncTimer===null&&!formIsOpen()&&!sourceFocused()){runContactPreview();return;}
     updateControls();if(activeView==='segments'&&dashboard?.analysisPending===true&&!dashboardAnalysisLoading&&!dashboardLoading&&!formIsOpen())scheduleSegmentAnalysis();if(pendingView){const view=pendingView;pendingView=null;if(view===activeView){refreshActiveView({opening:true,preserveNotice:true});return;}}
     if(activeView==='sources'&&preparedJobsQueued&&!preparedJobsLoaded&&!preparedJobsLoading&&(sourceData||lastSourceAttempt)&&!formIsOpen()&&!sourceFocused()){runPreparedJobList();return;}
     if(syncTimer===null&&pendingSyncViews.has(activeView)&&!formIsOpen()&&!sourceFocused())refreshActiveView({sync:true,preserveNotice:true});
@@ -1672,7 +1616,7 @@
   function previousView(){
     const previous=viewTrail.pop();if(!previous)return false;
     if(previous.filters){
-      registrySection=previous.registrySection;fullSourceCatalog=previous.fullSourceCatalog===true;setSourceFilters(previous.filters);renderSources();updateControls();
+      registrySection=previous.registrySection;setSourceFilters(previous.filters);renderSources();updateControls();
       const cards=$('br-sources-items');
       for(const settings of cards.querySelectorAll('.br-source-settings')){
         if(previous.openSettings.includes(settings.querySelector('summary').dataset.sourceFocus))settings.open=true;
@@ -1694,7 +1638,7 @@
     return open.findLast(node=>node.contains(document.activeElement))||open.at(-1);
   }
   function canGoBack(){
-    return accessReady&&!!(originSession||settingsSession||providerSession||coldySession||gridIsOpen()||importOpen||segmentEditor&&!segmentEditor.closeRequested||activeView==='sources'&&contactPreview||activeView==='mailings'||viewTrail.length||visibleDetails());
+    return accessReady&&!!(originSession||settingsSession||providerSession||coldySession||gridIsOpen()||importOpen||segmentEditor&&!segmentEditor.closeRequested||activeView==='mailings'||viewTrail.length||visibleDetails());
   }
   function syncBack(force=false){
     const next=canGoBack();
@@ -1713,7 +1657,6 @@
       else closeSegmentEditor();
       return;
     }
-    if(activeView==='sources'&&contactPreview){$('br-contact-preview-close').click();return;}
     if(activeView==='segmentCard'&&window.RegistrySegmentCard?.dismiss())return;
     if(activeView==='mailings'&&coldyMailings?.preview&&!coldyMailings.busy&&!coldyMailings.step){$('br-coldy-upload-cancel').click();return;}
     const details=visibleDetails(viewTrail.at(-1)?.openSettings);if(details){details.open=false;details.querySelector('summary')?.focus();return;}
@@ -1796,12 +1739,6 @@
   $('br-import-destination').addEventListener('change',()=>{updateImportView();showImportMessage(null,false);});
   $('br-import-destination-refresh').addEventListener('click',()=>refreshSegments({forEditor:true}));
   $('br-import-cancel').addEventListener('click',()=>closePreparedImport());
-  $('br-source-catalog-toggle').addEventListener('click',()=>{
-    fullSourceCatalog=!fullSourceCatalog;
-    if(!fullSourceCatalog&&sourceFilters.onlyUnassigned)setSourceFilters({...sourceFilters,onlyUnassigned:false});
-    renderSources();updateControls();
-  });
-  $('br-section-companies').addEventListener('click',()=>setRegistrySection('companies'));$('br-section-lpr').addEventListener('click',()=>setRegistrySection('lpr'));
   $('br-prepared-sources').addEventListener('change',event=>{const check=event.target.closest('input[data-prepared-source]');if(check)choosePreparedSource(Number(check.dataset.preparedSource),check.checked);});
   $('br-prepared-recalculate').addEventListener('click',requestPreparedPreview);
   $('br-prepared-sheet').addEventListener('change',()=>{const current=preparedImport;if(!current||importing||current.confirmationRequested)return;const sheetId=Number($('br-prepared-sheet').value);if(!preparedSourceSelection(current).includes(sheetId))return;const hadPreview=!!current.preview;current.selectedSheetId=sheetId;current.preview=null;current.previewSelectionKey=null;current.error=null;current.previewQueued=hadPreview;current.previewTab=0;renderPreparedPreview();flushPendingView();});
@@ -1822,9 +1759,6 @@
   });
   $('br-import-file-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport(importMode==='paste'?'paste':'file',event.currentTarget);});$('br-import-link-form').addEventListener('submit',(event)=>{event.preventDefault();submitSourceImport('link',event.currentTarget);});
   $('br-import-reread').addEventListener('click',()=>refreshSourceBases({preserveNotice:true}));
-  $('br-contact-preview-close').addEventListener('click',()=>{contactPreview=null;contactPreviewEpoch++;renderContactPreview();updateControls();flushPendingView();});
-  $('br-contact-preview-refresh').addEventListener('click',()=>{if(contactPreview)queueContactPreview(Object.assign({mimeType:'application/vnd.google-apps.spreadsheet'},contactPreview.source));});
-  $('br-contact-preview-prev').addEventListener('click',()=>{if(contactPreview){contactPreview.page--;renderContactConflicts();}});$('br-contact-preview-next').addEventListener('click',()=>{if(contactPreview){contactPreview.page++;renderContactConflicts();}});
   window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving||preparedImport?.confirmationRequested||window.RegistryGrid?.hasPending?.()||window.RegistryProject?.hasPending?.()){event.preventDefault();event.returnValue='';}});
   try{if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;lockAccess(null);accessMessage='Ссылка изменилась. Проверяем доступ…';renderAccess();pendingAccessChange=true;flushPendingView();});}catch(ignored){}
   function peekProjectSegments(){

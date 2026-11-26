@@ -1,7 +1,8 @@
-"""Three-sheet import preview and registry-section checks against fake RPCs only."""
+"""Three-sheet import preview and unified catalog checks against fake RPCs only."""
 from pathlib import Path
 import sys
 from playwright.sync_api import expect, sync_playwright
+from performance_client import expand_source_details
 ROOT=Path(__file__).resolve().parents[2]
 FIXTURE=Path(__file__).with_name('performance-fixture.js').read_text(encoding='utf-8')
 GRID_STUB="""window.RegistryGrid={opened:[],open(o){this.opened.push(o.id);this.transport=o.transport;this.closed=o.onClose;this.openedNow=true;},isOpen(){return !!this.openedNow;},hasPending(){return false;},lock(){this.openedNow=false;this.locked=true;}};"""
@@ -13,17 +14,18 @@ def check_source_card(page):
     status = card.locator('[data-source-field="status"]')
     badge = card.locator('.br-source-status')
 
-    expect(summary).to_have_text('Настройки базы')
+    expect(summary).to_have_text('Сведения')
     expect(status).to_be_hidden()
     expect(card.locator('h2')).to_be_visible()
     expect(badge).to_have_text('Готова к добавлению')
-    expect(card.locator('[data-grid-source]')).to_be_visible()
-    expect(card.locator('[data-preview-source]')).to_be_visible()
-    expect(card.locator('[data-add-source]')).to_be_enabled()
-    expect(card.get_by_role('link', name='Существующий сегмент')).to_be_visible()
+    expect(card.get_by_role('button', name='Готовая база компаний')).to_be_visible()
+    expect(card.locator('h2 [data-grid-source]')).to_be_visible()
+    expect(card.locator('[data-add-source]')).to_be_hidden()
 
     summary.press('Enter')
     expect(status).to_be_visible()
+    expect(card.locator('[data-add-source]')).to_be_enabled()
+    expect(card.get_by_role('link', name='Существующий сегмент')).to_be_visible()
     status.press('ArrowUp')
     expect(status).to_have_value('rework')
     expect(status).to_be_focused()
@@ -51,10 +53,14 @@ def check_lineage(page):
     expect(page.get_by_role('table',name='Исходные базы, выборки и сегменты')).to_have_count(0)
 
     # External Sheets stay clickable, while an uploaded file has no invented Drive URL.
-    external = page.locator('[data-source-id="source-draft"] .br-source-relations')
+    draft = page.locator('[data-source-id="source-draft"]')
+    expand_source_details(draft)
+    external = draft.locator('.br-source-relations')
     expect(external.get_by_role('link',name='Внешний оригинал')).to_have_attribute(
         'href','https://docs.google.com/spreadsheets/d/external_fixture/edit')
-    upload = page.locator('[data-source-id="source-csv"] .br-source-relations')
+    csv = page.locator('[data-source-id="source-csv"]')
+    expand_source_details(csv)
+    upload = csv.locator('.br-source-relations')
     expect(upload.get_by_text('Выгрузка.csv',exact=False)).to_be_visible()
     expect(upload.get_by_role('link')).to_have_count(0)
 
@@ -74,25 +80,31 @@ def check_lineage(page):
     expect(card.get_by_text('Два региона',exact=False)).to_be_visible()
     expect(card.get_by_role('link',name='Существующий сегмент')).to_be_visible()
 
-    # The parent is in a different section and excluded by the current search.
+    # A parent excluded by search and type is reachable; Back restores the filters.
     search = page.locator('#br-source-search')
+    contents = page.locator('#br-source-contents-filter')
+    contents.select_option('companies')
     search.fill('Готовая база компаний')
     parent = page.locator('[data-source-id="source-lpr"]')
     expect(parent).to_have_count(0)
     initial_reads = page.evaluate('backend.sourceGets')
     card.locator('[data-related-source="source-lpr"]').click()
     expect(parent.locator('h2')).to_have_text('Готовая база ЛПР')
-    expect(page.locator('#br-section-lpr')).to_have_attribute('aria-pressed','true')
+    expect(contents).to_have_value('')
     expect(parent.locator('.br-source-role')).to_have_text('Исходная база')
+    expand_source_details(parent)
     expect(parent.locator('[data-related-source="source-mixed"]')).to_be_visible()
     page.locator('#br-action-back').click()
+    expect(parent.locator('.br-source-settings')).not_to_have_attribute('open','')
+    page.locator('#br-action-back').click()
     expect(search).to_have_value('Готовая база компаний')
-    expect(page.locator('#br-section-companies')).to_have_attribute('aria-pressed','true')
+    expect(contents).to_have_value('companies')
     expect(parent).to_have_count(0)
     card.locator('[data-related-source="source-lpr"]').click()
+    expand_source_details(parent)
     parent.locator('[data-related-source="source-companies"]').click()
     expect(card.locator('h2')).to_be_visible()
-    expect(page.locator('#br-section-companies')).to_have_attribute('aria-pressed','true')
+    expect(contents).to_have_value('')
     assert page.evaluate('backend.sourceGets') == initial_reads
 
 def main():
@@ -100,12 +112,11 @@ def main():
   launch={'channel':'chrome'} if sys.platform=='win32' else {'executable_path':'/usr/bin/chromium'}
   browser=p.chromium.launch(**launch,headless=True,args=['--no-sandbox'])
   page=browser.new_page(viewport={'width':1440,'height':1100});errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
-  def reset(saved=None,boot='',catalog=False):
+  def reset(saved=None,boot=''):
    import json
    init=boot+('backend.preparedDrafts='+json.dumps(saved)+';backend.importCount=1;' if saved else '')
    html=HTML.replace('<script>'+FIXTURE+GRID_STUB+'</script>','<script>'+FIXTURE+GRID_STUB+init+'</script>')
    page.goto('about:blank');page.set_content(html)
-   if catalog:page.locator('#br-source-catalog-toggle').click()
    page.wait_for_selector('[data-source-id="source-companies"]');page.wait_for_function('backend.active===0')
   def idle():page.wait_for_function('backend.active===0')
   def held(method):page.wait_for_function('(m)=>backend.pending.some(p=>p.method===m)',arg=method)
@@ -114,9 +125,8 @@ def main():
    page.locator('#br-import-open').click()
    page.locator('#br-import-destination').select_option('catalog')
   def stage_link(name='Кухни',section='companies'):
-   if section=='lpr':page.locator('#br-section-lpr').click()
-   open_catalog();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
-  reset(catalog=True,boot="""
+   open_catalog();page.locator('#br-import-mode-link').click();page.locator('#br-link-'+section).check();page.locator('#br-link-name').fill(name);page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();page.wait_for_function("document.querySelectorAll('#br-prepared-tabs button').length===3");idle()
+  reset(boot="""
    backend.sources.forEach(source=>source.originAvailable=true);
    backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});
    const origin=backend.sources[2];
@@ -125,12 +135,17 @@ def main():
    backend.sources[4].origin={id:'upload:'+'a'.repeat(43),name:'Выгрузка.csv',criteria:'',url:null};
   """)
   check_lineage(page)
-  reset(catalog=True,boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});")
+  reset(boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});")
   check_source_card(page)
-  assert page.locator('[data-source-id="source-lpr"]').count()==0
+  assert page.locator('[data-source-id="source-lpr"]').is_visible()
   assert page.locator('[data-source-id="source-mixed"]').is_visible()
-  page.locator('#br-section-lpr').click();assert page.locator('[data-source-id="source-lpr"]').is_visible();assert page.locator('[data-source-id="source-companies"]').count()==0;assert page.locator('[data-source-id="source-mixed"]').is_visible()
-  page.locator('#br-section-companies').click()
+  contents = page.locator('#br-source-contents-filter')
+  expect(contents).to_have_value('')
+  contents.select_option('lpr')
+  expect(page.locator('[data-source-id="source-lpr"]')).to_be_visible()
+  expect(page.locator('[data-source-id="source-companies"]')).to_have_count(0)
+  expect(page.locator('[data-source-id="source-mixed"]')).to_be_visible()
+  contents.select_option('')
   stage_link()
   assert page.evaluate('backend.importCount')==0,'Preview must not publish or create final file'
   assert page.locator('#br-prepared-tabs button').all_text_contents()==['Исходная база','Email','Телефоны']
@@ -150,7 +165,7 @@ def main():
   assert page.evaluate('RegistryGrid.accessSeenOnClose')=='locked', 'Grid close callback cannot resume the revoked app session'
   assert page.evaluate('backend.maxActiveReads <= 2 && backend.maxActiveWrites <= 1')
   # Blob staging uses the live enabled form and selected single category.
-  reset();page.locator('#br-section-lpr').click();open_catalog();page.locator('#br-upload-name').fill('ЛПР кухни');page.locator('#br-upload-file').set_input_files({'name':'people.csv','mimeType':'text/csv','buffer':b'name,email\nAlice,a@example.com'})
+  reset();open_catalog();page.locator('#br-upload-lpr').check();page.locator('#br-upload-name').fill('ЛПР кухни');page.locator('#br-upload-file').set_input_files({'name':'people.csv','mimeType':'text/csv','buffer':b'name,email\nAlice,a@example.com'})
   page.evaluate("backend.uploadSerializationDelay=35;backend.holdMethods=['uploadSourceBase']")
   page.locator('#br-upload-submit').click();held('uploadSourceBase')
   dispatch=page.evaluate('backend.dispatches.at(-1)');assert dispatch['form'] and dispatch['args']==1 and dispatch['file'] and dispatch['keyMatches'] and not dispatch['keyDisabled'], 'Deferred native serialization must retain the file and access key'
@@ -183,7 +198,8 @@ def main():
   assert page.evaluate("backend.calls.filter(c=>c.name==='continuePreparedBase').at(-1).p.requestId")==request_id
   assert page.evaluate('backend.importCount')==1
   assert page.locator('#br-prepared-jobs').is_hidden()
-  assert page.locator('#br-section-lpr').get_attribute('aria-pressed')=='true'
+  expect(page.locator('#br-source-contents-filter')).to_have_value('')
+  expect(page.locator('[data-source-id="prepared-source-1"]')).to_be_visible()
   page.evaluate('tick(60000)');idle();assert page.evaluate("backend.calls.filter(c=>c.name==='listPreparedJobs').length")==1
   # A job-list error does not prevent ordinary registry use.
   reset(boot='backend.failPreparedJobs=true;');idle();assert page.locator('[data-source-id="source-companies"]').is_visible();assert page.locator('#br-prepared-jobs').is_hidden()
@@ -197,6 +213,6 @@ def main():
   # Revocation clears staged preview contents and no late result restores them.
   reset();page.evaluate("backend.holdMethods=['previewPreparedBase']");open_catalog();page.locator('#br-import-mode-link').click();page.locator('#br-link-name').fill('Отзыв');page.locator('#br-link-url').fill('https://docs.google.com/spreadsheets/d/source_123456/edit');page.locator('#br-link-submit').click();page.wait_for_selector('#br-prepared-preview:not([hidden])');idle();page.locator('#br-prepared-recalculate').click();held('previewPreparedBase');page.evaluate('backend.revoked=true');release('previewPreparedBase');page.wait_for_selector('#bases-registry-app[data-access="locked"]');idle();assert page.locator('#br-prepared-table').inner_text()=='';assert page.evaluate('RegistryGrid.locked')
   assert not errors,errors
-  print('PASS: compact card settings and focus, two registry sections, live-form staging, single-sheet three-tab preview, confirm-only publish, cancellation, stale preview, chunk continuation, stable retry, Grid bridge, revocation and mobile/XSS safety; RPC concurrency1')
+  print('PASS: unified catalog, type filters, source details, lineage, focus, staged imports, single-sheet three-tab preview, confirmation, cancellation, retry and resume, Grid bridge, revocation and mobile/XSS safety')
   browser.close()
 if __name__=='__main__':main()

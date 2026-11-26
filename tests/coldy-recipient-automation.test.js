@@ -89,6 +89,18 @@ test('both project bindings update enrolled Email rows offline, and manual sheet
   assert.equal(rows[0].recipientSync.state,'synced');assert.ok(rows[0].recipientSync.lastSyncedAt);
 });
 
+test('a scoped minute tick can prepare cards offline with no Coldy connection or while another poll is busy',()=>{
+  const f=fixture(); f.enable();
+  f.r.coldySettings_=()=>({configured:false});
+  let runs=0;
+  f.r.segmentCardMaintenanceTick_=guard=>{assert.equal(guard().rootId,'root');runs++;};
+  f.tick('wrong');assert.equal(runs,0);
+  f.tick();assert.equal(runs,1);assert.equal(f.data.has(f.r.COLDY_INCOMING.lease),false);
+  f.props.setProperty(f.r.COLDY_INCOMING.lease,JSON.stringify({id:'other',until:f.state.now+60000}));
+  f.tick();assert.equal(runs,2);assert.equal(JSON.parse(f.props.getProperty(f.r.COLDY_INCOMING.lease)).id,'other');
+  assert.deepEqual(f.paths,[]);assert.deepEqual(f.writes,[]);
+});
+
 test('a timed-out worker exposes its real start and yields the next turn to the other binding',()=>{
   const f=fixture();f.enable();
   function status(binding){

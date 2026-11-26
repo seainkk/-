@@ -2,7 +2,7 @@
 import json
 import sys
 
-from performance_client import expand_segment_actions
+from performance_client import expand_segment_actions, expand_source_details
 from playwright.sync_api import expect, sync_playwright
 
 from performance_client import FIXTURE, HTML
@@ -245,7 +245,7 @@ def main():
         assert len(calls('importSegmentRecords')) == 2
         # Reusing the already registered mixed source keeps its sheet routes.
         page.locator('#br-view-sources').click()
-        page.get_by_role('button', name='Общий каталог').click()
+        expand_source_details(page.locator('[data-source-id="prepared-source-1"]'))
         page.locator('[data-add-source="prepared-source-1"]').click()
         page.locator('#br-segment-target').select_option('existing-segment')
         page.locator('#br-segment-submit').click()

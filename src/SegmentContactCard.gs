@@ -1,8 +1,14 @@
 /** Read-only view of the two registered contact workbooks. No enrollment, provider calls or repair. */
 function getSegmentContactCard_(request) {
   return api_(function () {
-    var input = segmentInput_(request, ['segmentId', 'channel', 'owner', 'queue', 'query', 'offset', 'limit', 'revision']);
+    var input = segmentInput_(request, ['segmentId', 'channel', 'owner', 'queue', 'query', 'offset', 'limit', 'revision', 'prepared']);
     var context = authorize_(), segmentId = id_(input.segmentId), filter = segmentCardFilter_(input);
+    if (input.prepared !== undefined && typeof input.prepared !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный режим чтения карточки.');
+    if (input.prepared === true) {
+      var prepared = segmentCardPreparedPage_(context, segmentId, filter, input.revision);
+      if (prepared) return prepared;
+      if (typeof segmentCardMaintenanceRequest_ === 'function') segmentCardMaintenanceRequest_(context, segmentId);
+    }
     var data = segmentCardData_(context, segmentId, input.revision), result = segmentCardPage_(data.snapshot, filter);
     segmentCardOriginals_(context, data.scope, result.rows);
     result.segmentId = segmentId; result.name = data.scope.folder.getName(); result.revision = data.revision;
@@ -14,8 +20,9 @@ function getSegmentContactCard_(request) {
   });
 }
 
-function segmentCardData_(context, segmentId, revision) {
-  var scope = segmentCardFiles_(context, segmentId), campaigns = segmentCardCampaigns_(context, segmentId);
+function segmentCardData_(context, segmentId, revision, scope, campaigns) {
+  scope = scope || segmentCardFiles_(context, segmentId);
+  campaigns = campaigns || segmentCardCampaigns_(context, segmentId);
   var version = segmentCardRevision_(context, scope, campaigns);
   if (revision !== undefined && revision !== version) segmentCardChanged_();
   var snapshot = segmentCardReadCache_(version);
@@ -51,17 +58,22 @@ function segmentCardFiles_(context, segmentId) {
     var fileId = table.fileId;
     if (fileId === storage.public.id || fileId === REGISTRY_CONFIG.defaultSourceBasesStorageId)
       fail_('GRID_PROTECTED', 'Служебная таблица не может быть рабочей таблицей сегмента.');
-    var meta = contactSyncMetadata_(fileId), tags = meta.appProperties || {};
-    if (meta.id !== fileId || meta.trashed || meta.mimeType !== REGISTRY_CONFIG.spreadsheetMime ||
-        !meta.parents || meta.parents.length !== 1 || meta.parents[0] !== segmentId ||
-        (tags.registrySegmentMasterRoot && tags.registrySegmentMasterRoot !== context.rootId) ||
-        (tags.registrySegmentMasterSegment && tags.registrySegmentMasterSegment !== segmentId) ||
-        (tags.registrySegmentMasterKind && tags.registrySegmentMasterKind !== table.kind) ||
-        (tags.registryContactRoot && tags.registryContactRoot !== context.rootId) || tags.registryPrivateRole)
+    var meta = contactSyncMetadata_(fileId);
+    if (!segmentCardFileMatches_(meta, fileId, segmentId, table.kind, context.rootId))
       fail_('OUTSIDE_SEGMENTS', 'Назначенная рабочая таблица больше не принадлежит этому сегменту.');
     files[table.kind] = {id: fileId, name: meta.name, version: contactSyncVersion_(meta), metadata: meta};
   });
   return {folder: folder, storage: storage, tracking: tracking, storageVersion: contactSyncVersion_(storageMeta), files: files};
+}
+
+function segmentCardFileMatches_(meta, fileId, segmentId, kind, rootId) {
+  if (!meta || meta.id !== fileId || meta.trashed || meta.mimeType !== REGISTRY_CONFIG.spreadsheetMime ||
+      !meta.parents || meta.parents.length !== 1 || meta.parents[0] !== segmentId) return false;
+  var tags = meta.appProperties || {};
+  return (!tags.registrySegmentMasterRoot || tags.registrySegmentMasterRoot === rootId) &&
+    (!tags.registrySegmentMasterSegment || tags.registrySegmentMasterSegment === segmentId) &&
+    (!tags.registrySegmentMasterKind || tags.registrySegmentMasterKind === kind) &&
+    (!tags.registryContactRoot || tags.registryContactRoot === rootId) && !tags.registryPrivateRole;
 }
 
 function segmentCardTabs_(context, scope, kind) {
@@ -110,7 +122,8 @@ function segmentCardRevision_(context, scope, campaigns) {
   var states = campaigns.bindings.map(function (entry) {
     var file = entry.file;
     if (file && !contactSyncVersion_(file)) segmentCardChanged_();
-    return [entry.binding, file && [file.id, contactSyncVersion_(file)], entry.mark.state, entry.mark.lastSyncedAt];
+    // A successful no-change poll only advances the clock. The journal version covers recipient facts.
+    return [entry.binding, file && [file.id, contactSyncVersion_(file)], entry.mark.state, !!entry.mark.lastSyncedAt];
   });
   return digest_(JSON.stringify(['segment-contact-card-v1', context.rootId, registryProjectId_(), scope.folder.getId(),
     scope.storage.public.id, scope.storageVersion, files, campaigns.credential, states]));
@@ -370,7 +383,7 @@ function segmentCardReadCache_(revision) {
   } catch (error) { return null; }
 }
 
-function segmentCardWriteCache_(revision, snapshot) {
+function segmentCardWriteCache_(revision, snapshot, ttl) {
   try {
     var cache = CacheService.getScriptCache(), key = 'segment-card/' + revision;
     var json = JSON.stringify(snapshot), size = 20000;
@@ -382,6 +395,6 @@ function segmentCardWriteCache_(revision, snapshot) {
     if (count > 160) return;
     var batch = {};
     for (var i = 0; i < count; i++) batch[key + '/' + i] = json.slice(i * size, (i + 1) * size);
-    cache.putAll(batch, 180); cache.put(key, String(count), 180);
+    cache.putAll(batch, ttl || 180); cache.put(key, String(count), ttl || 180);
   } catch (error) { /* A cache eviction or size limit does not affect the read. */ }
 }

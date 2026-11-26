@@ -4,9 +4,28 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 const client=readFileSync(new URL('../src/Client.html',import.meta.url),'utf8');
 function source(name){let start=client.indexOf('function '+name+'(');assert.ok(start>=0,name);if(client.slice(start-6,start)==='async ')start-=6;let depth=0,quote=null,escape=false;for(let i=client.indexOf('{',start);i<client.length;i++){const ch=client[i];if(quote){if(escape)escape=false;else if(ch==='\\')escape=true;else if(ch===quote)quote=null;continue;}if(['"',"'",'`'].includes(ch)){quote=ch;continue;}if(ch==='{')depth++;if(ch==='}'&&!--depth)return client.slice(start,i+1);}throw Error('Unclosed '+name);}
-test('legacy mixed bases stay in both sections without changing stored metadata',()=>{const ctx=vm.createContext({});vm.runInContext(source('normalizeContents')+'\n'+source('sourceInSection'),ctx);const item={contents:['companies','lpr']};assert.equal(ctx.sourceInSection(item,'companies'),true);assert.equal(ctx.sourceInSection(item,'lpr'),true);assert.equal(ctx.sourceInSection({contents:['companies']},'lpr'),false);assert.equal(ctx.sourceInSection({contents:null},'lpr'),true,'Unavailable metadata never hides a file');assert.deepEqual(item.contents,['companies','lpr']);});
+test('all legacy bases appear once in the shared catalog and mixed bases match both type filters',()=>{
+  const ctx=vm.createContext({});
+  vm.runInContext(['sourceSearchText','normalizeContents','sourceAssociationsKnown','sourceMatchesFilters','sourceFilterSelection'].map(source).join('\n'),ctx);
+  const items=[{id:'mixed',contents:['companies','lpr']},{id:'company',contents:['companies']},{id:'unknown',contents:null}];
+  const select=contents=>Array.from(ctx.sourceFilterSelection({items},{contents},[]).items,item=>item.id);
+  assert.deepEqual(select(''),['mixed','company','unknown']);
+  assert.deepEqual(select('companies'),['mixed','company']);
+  assert.deepEqual(select('lpr'),['mixed']);
+  assert.deepEqual(items[0].contents,['companies','lpr']);
+});
 test('creation is permitted only for complete preview of the chosen sheet',()=>{const ctx=vm.createContext({});vm.runInContext(source('preparedCanConfirm'),ctx);const base={selectedSheetId:0,preview:{canConfirm:true,sheetId:0,previewToken:'snapshot'}};assert.equal(ctx.preparedCanConfirm(base),true);for(const preview of [{...base.preview,canConfirm:false},{...base.preview,sheetId:7},{...base.preview,previewToken:null}])assert.equal(ctx.preparedCanConfirm({...base,preview}),false);assert.equal(ctx.preparedCanConfirm(null),false);});
-test('a new import offers one section and fixed three-sheet preview, without the move operation',()=>{const html=readFileSync(new URL('../src/Index.html',import.meta.url),'utf8');assert.match(html,/id="br-section-companies"/);assert.match(html,/id="br-section-lpr"/);assert.match(html,/id="br-prepared-preview"/);assert.match(html,/id="br-prepared-confirm"[^>]*disabled/);assert.doesNotMatch(html,/name="br-link-transfer"/);for(const name of ['GridPanel','GridStyles','GridClient'])assert.ok(html.includes("include_('"+name+"')"));});
+test('source types are available as catalog filters and import destinations with an explicit preview confirmation',()=>{
+  const html=readFileSync(new URL('../src/Index.html',import.meta.url),'utf8');
+  const filter=html.match(/<select id="br-source-contents-filter">([\s\S]*?)<\/select>/)[1];
+  for(const type of ['companies','lpr']){
+    assert.ok(filter.includes('value="'+type+'"'));
+    for(const route of ['upload','link'])assert.ok(html.includes('id="br-'+route+'-'+type+'" type="radio"'));
+  }
+  assert.match(html,/id="br-prepared-preview"/);assert.match(html,/id="br-prepared-confirm"[^>]*disabled/);
+  assert.doesNotMatch(html,/name="br-link-transfer"/);
+  for(const name of ['GridPanel','GridStyles','GridClient'])assert.ok(html.includes("include_('"+name+"')"));
+});
 const tick=()=>new Promise(resolve=>setTimeout(resolve,5));
 async function until(predicate){for(let attempt=0;attempt<100;attempt++){if(predicate())return;await tick();}assert.fail('Expected transport transition did not occur');}
 function transportScope(overrides={}){

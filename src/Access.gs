@@ -27,6 +27,7 @@ function callApp(request) {
         saveSegmentExport: typeof saveSegmentExport_ === 'function' ? saveSegmentExport_ : null,
         getSegmentExport: typeof getSegmentExport_ === 'function' ? getSegmentExport_ : null,
         getSegmentContactCard: typeof getSegmentContactCard_ === 'function' ? getSegmentContactCard_ : null,
+        prepareSegmentCardSnapshot: typeof prepareSegmentCardSnapshot_ === 'function' ? prepareSegmentCardSnapshot_ : null,
         getSegmentLegacyPreview: typeof getSegmentLegacyPreview_ === 'function' ? getSegmentLegacyPreview_ : null,
         stagePreparedRows: typeof stagePreparedRows_ === 'function' ? stagePreparedRows_ : null,
         getServiceLimits: typeof getServiceLimits_ === 'function' ? getServiceLimits_ : null,

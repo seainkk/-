@@ -5,6 +5,8 @@
   const kinds={companies:'Компании',lpr:'ЛПР'},channels={email:'Email',telegram:'Telegram'};
   const count=value=>Number.isSafeInteger(value)?value.toLocaleString('ru-RU'):'—';
   const when=value=>value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК':'';
+  // First pages live only in this authorized frame. clear() also runs on every project/key change.
+  const firstPages=new Map(),pageLifetime=120000;
   let config,current=null;
   function node(tag,text){const item=document.createElement(tag);item.textContent=text;return item;}
   function action(label,fn){const item=node('button',label);item.type='button';item.className='br-button';item.addEventListener('click',fn);return item;}
@@ -12,19 +14,46 @@
   function message(id,text){el(id).textContent=text||'';el(id).hidden=!text;}
   function alive(state){return state&&state===current&&!el('view').hidden&&config.active();}
   function run(state,method,params,guard){return config.rpc(method,{segmentId:state.id,...params},()=>alive(state)&&(!guard||guard()));}
-  function clear(){
+  function resetView(){
     current=null;el('view').hidden=true;
     window.dispatchEvent(new Event('segment-card-clear'));
     for(const id of ['project','title','summary','warnings','queues','validation','coldy-status','campaigns','rows','status','files','sources','history','preview','origin-status','legacy-note','export-status'])el(id).replaceChildren();
   }
+  function clear(){firstPages.clear();resetView();}
+  function keepFirst(page){
+    if(!page?.segmentId||!page.revision||!page.summary?.email||!page.summary?.telegram||page.offset!==0||!Array.isArray(page.rows))return;
+    const saved=firstPages.get(page.segmentId);
+    if(saved&&saved.at+pageLifetime>Date.now()&&saved.page.revision===page.revision&&!saved.page.preview&&page.preview)return;
+    firstPages.delete(page.segmentId);
+    firstPages.set(page.segmentId,{page,at:Date.now()});
+    if(firstPages.size>12)firstPages.delete(firstPages.keys().next().value);
+  }
+  function acceptDashboard(data){
+    const items=new Map((data.state==='ready'?data.items||[]:[]).map(item=>[item.id,item]));
+    function scoped(id,page){
+      const item=items.get(id);if(!item)return false;
+      const files=new Set((item.files||[]).map(file=>file.id));
+      return Object.values(page?.files||{}).every(file=>!file?.id||files.has(file.id));
+    }
+    if(current&&!scoped(current.id,current.data))resetView();
+    for(const [id,saved] of firstPages)if(saved.at+pageLifetime<=Date.now()||!scoped(id,saved.page))firstPages.delete(id);
+    for(const [id,page] of Object.entries(data.cardPreviews||{}))if(page?.preview===true&&page.segmentId===id&&scoped(id,page))keepFirst(page);
+  }
+  function restoreFirst(s){
+    const saved=firstPages.get(s.id);
+    if(!saved||saved.at+pageLifetime<=Date.now())return;
+    s.data=saved.page;s.revision=s.data.revision;s.updated=saved.at;
+    s.pages.set(pageKey(s),s.data);
+    paintSummary(s);paintRows(s);
+  }
   function select(id,name,project){
     if(current?.id===id)return;
-    clear();current={id,name,project,channel:'all',owner:'all',queue:'all',query:'',offset:0,previous:[],seq:0,originSeq:0,coldSeq:0,
+    resetView();current={id,name,project,channel:'all',owner:'all',queue:'all',query:'',offset:0,previous:[],seq:0,originSeq:0,coldSeq:0,
       panel:null,data:null,pages:new Map(),catalog:null,comparisons:new Map(),loading:false,exporting:false,updated:0};
     el('title').textContent=name;el('project').textContent=project;el('owner').value='all';el('query').value='';el('secondary').open=false;
     el('table-wrap').hidden=true;el('pages').hidden=true;el('export').disabled=true;
     for(const id of ['warnings','export-status','legacy-note'])el(id).hidden=true;
-    paintPanels(current);paintFilters(current);
+    paintPanels(current);paintFilters(current);restoreFirst(current);
   }
   function show(visible){
     const hidden=!visible||!current;
@@ -32,6 +61,11 @@
       current.seq++;current.originSeq++;current.coldSeq++;current.loading=false;current.exporting=false;current.scanning=false;
       if(current.panel==='coldy'||current.panel==='origins')current.panel=null;
       window.dispatchEvent(new Event('segment-card-clear'));
+    }
+    if(!hidden&&el('view').hidden&&current.data&&current.updated+pageLifetime<=Date.now()){
+      current.data=null;current.pages.clear();current.offset=0;current.previous=[];
+      for(const id of ['rows','summary','warnings','queues','validation','status','legacy-note'])el(id).replaceChildren();
+      el('table-wrap').hidden=true;el('pages').hidden=true;el('export').disabled=true;
     }
     el('view').hidden=hidden;
     if(!hidden)paintPanels(current);
@@ -71,16 +105,7 @@
     for(const row of s.data.rows){
       const tr=document.createElement('tr'),addr=node('td',row.value),owner=node('td',row.owners.map(k=>kinds[k]).filter(Boolean).join(' · '));
       addr.append(node('small',channels[row.channel]));if(row.ownerNames?.length)owner.append(node('small',row.ownerNames.join(', ')));
-      if(row.sources?.length){
-        const details=document.createElement('details');details.append(node('summary','Источники · '+count(row.sources.length)));
-        for(const src of row.sources){
-          if(!/^https:\/\/docs\.google\.com\/spreadsheets\/d\/[A-Za-z0-9_-]+(?:\/|$)/.test(src.url||''))continue;
-          const origin=node('div','');origin.append(link(src.name,src.url));
-          if(src.column||src.sourceRows)origin.append(node('small',[src.column,src.sourceRows&&'Строки '+src.sourceRows].filter(Boolean).join(' · ')));
-          details.append(origin);
-        }
-        if(details.children.length>1)owner.append(details);
-      }
+      if(row.sources?.length||s.data.prepared)owner.append(sourceDetails(s,row,s.data.offset+fragment.childNodes.length));
       const manual=node('td',row.manualStatuses.join(' · ')||'—'),readiness=node('td',row.readiness);
       if(row.validationStatuses.length)readiness.append(node('small',row.validationStatuses.join(' · ')));
       const events=node('td','');
@@ -95,19 +120,66 @@
     body.replaceChildren(fragment);const {rows,total,offset,nextOffset}=s.data;
     el('table-wrap').hidden=!rows.length;el('pages').hidden=!s.previous.length&&nextOffset==null;
     el('prev').disabled=!s.previous.length;el('next').disabled=nextOffset==null;
-    message('status',(rows.length?'Показаны '+count(offset+1)+'–'+count(offset+rows.length)+' из '+count(total):'Контакты по этому отбору отсутствуют.')+(s.data.checkedAt?' · '+when(s.data.checkedAt):''));
+    const asOf=s.data.preparedAt||s.data.checkedAt;
+    message('status',(rows.length?'Показаны '+count(offset+1)+'–'+count(offset+rows.length)+' из '+count(total):'Контакты по этому отбору отсутствуют.')+(asOf?' · '+(s.data.prepared?'Карточка собрана ':'Проверено ')+when(asOf):''));
+  }
+  function sourceDetails(s,row,offset){
+    const details=document.createElement('details'),summary=node('summary','Источники'),list=document.createElement('div');
+    details.append(summary,list);
+    function paint(sources){
+      list.replaceChildren();
+      for(const src of sources||[]){
+        if(!/^https:\/\/docs\.google\.com\/spreadsheets\/d\/[A-Za-z0-9_-]+(?:\/|$)/.test(src.url||''))continue;
+        const origin=node('div','');origin.append(link(src.name,src.url));
+        if(src.column||src.sourceRows)origin.append(node('small',[src.column,src.sourceRows&&'Строки '+src.sourceRows].filter(Boolean).join(' · ')));
+        list.append(origin);
+      }
+      summary.textContent='Источники'+(list.children.length?' · '+count(list.children.length):'');
+    }
+    paint(row.sources);
+    if(!s.data.prepared)return details;
+    const page=s.data,filter={channel:s.channel,owner:s.owner,queue:s.queue,query:s.query,revision:page.revision,limit:1,offset};
+    const status=node('small','');let loaded=false,loading=false;
+    details.addEventListener('toggle',async()=>{
+      const valid=()=>alive(s)&&s.data===page&&details.isConnected;
+      if(!details.open||loading||loaded||!valid())return;
+      loading=true;status.textContent='Проверяем исходные строки…';list.append(status);
+      try{
+        const full=await run(s,'getSegmentContactCard',filter,valid);
+        if(!valid())return;
+        const found=full?.rows?.[0];
+        if(full.segmentId!==s.id||full.revision!==page.revision||found?.value!==row.value||found.channel!==row.channel)throw new Error('Карточка изменилась. Обновите её для проверки источников.');
+        paint(found.sources);if(!list.childNodes.length)list.append(node('small','Исходные строки не указаны.'));
+        loaded=true;
+      }catch(error){
+        if(!valid())return;
+        const failure=config.error(error);
+        if(discardRevoked(s,failure.code))message('status',failure.message);
+        else status.textContent=failure.message;
+      }
+      finally{loading=false;}
+    });
+    return details;
   }
   function firstPage(s){s.offset=0;s.previous=[];}
   function pageKey(s){return JSON.stringify([s.channel,s.owner,s.queue,s.query,s.offset]);}
+  function discardRevoked(s,code){
+    if(!['OUTSIDE_PROJECT','OUTSIDE_SEGMENTS','OUTSIDE_REGISTRY','ACCESS_DENIED','NOT_FOUND','SEGMENT_NOT_FOUND','GRID_PROTECTED','SEGMENT_TARGET_CHANGED','SOURCE_CHANGED','COLDY_BINDING_CHANGED','COLDY_SCOPE_CHANGED','COLDY_CREDENTIAL_CHANGED'].includes(code))return false;
+    firstPages.delete(s.id);s.pages.clear();s.data=null;s.catalog=null;s.comparisons.clear();s.originSeq++;s.coldSeq++;s.scanning=false;
+    for(const id of ['rows','summary','warnings','queues','validation','sources','history','files','campaigns','coldy-status','preview','legacy-note'])el(id).replaceChildren();
+    el('table-wrap').hidden=true;el('pages').hidden=true;el('export').disabled=true;
+    window.dispatchEvent(new Event('segment-card-clear'));
+    return true;
+  }
   async function refresh(options={}){
     const s=current;if(!alive(s))return;
     if(s.exporting||options.automatic&&(s.loading||s.panel||s.offset>0))return;
-    if(options.opening&&s.data&&s.updated&&Date.now()-s.updated<15000){el('export').disabled=false;window.dispatchEvent(new Event('segment-card-update'));return;}
+    if(options.opening&&s.data&&!s.data.preview&&s.updated&&Date.now()-s.updated<15000){el('export').disabled=false;window.dispatchEvent(new Event('segment-card-update'));return;}
     const seq=++s.seq;const valid=()=>alive(s)&&s.seq===seq;
     s.loading=true;el('export').disabled=true;el('prev').disabled=true;el('next').disabled=true;
-    if(!s.data||!options.automatic)message('status',s.data?'Обновляем контакты…':'Читаем контакты сегмента…');
+    if(!s.data)message('status','Читаем контакты сегмента…');
     try{
-      const response=await run(s,'getSegmentContactCard',{channel:s.channel,owner:s.owner,queue:s.queue,query:s.query,offset:s.offset,limit:60,...(s.offset?{revision:s.data.revision}:{})},valid);
+      const response=await run(s,'getSegmentContactCard',{channel:s.channel,owner:s.owner,queue:s.queue,query:s.query,offset:s.offset,limit:60,prepared:true,...(s.offset?{revision:s.revision}:{})},valid);
       if(!valid()||!response)return;
       if(response.segmentId!==s.id)throw new Error('Не удалось подтвердить сегмент.');
       if(s.revision&&s.revision!==response.revision){
@@ -115,13 +187,16 @@
         message('legacy-note','');el('preview').replaceChildren();
       }
       s.data=response;s.revision=response.revision;s.updated=Date.now();s.pages.set(pageKey(s),response);if(s.pages.size>12)s.pages.delete(s.pages.keys().next().value);paintSummary(s);paintRows(s);
+      if(!s.offset&&s.channel==='all'&&s.owner==='all'&&s.queue==='all'&&!s.query)keepFirst(response);
       window.dispatchEvent(new Event('segment-card-update'));
       if(s.panel==='origins'){if(s.catalog)paintCatalog(s);else void discover(s);}
       else if(!response.summary.email.total&&!s.catalog&&!s.scanning&&!s.originFailed)void discover(s,true);
     }catch(error){
       if(!valid())return;
-      if(s.offset&&config.error(error).code==='SEGMENT_CARD_CHANGED'){firstPage(s);return refresh();}
-      message('status',config.error(error).message+' Обновите карточку, чтобы повторить.');
+      const failure=config.error(error);
+      discardRevoked(s,failure.code);
+      if(s.offset&&failure.code==='SEGMENT_CARD_CHANGED'){firstPage(s);return refresh();}
+      message('status',failure.message+' Обновите карточку, чтобы повторить.');
     }finally{if(valid()){s.loading=false;el('export').disabled=!s.data||s.exporting;}}
   }
   function changeFilters(changes){
@@ -267,6 +342,6 @@
     if(!['all','email','telegram'].includes(channel)||!['all','companies','lpr'].includes(owner)||!['all','ready','inCampaign','email','telegram','ownership'].includes(queue))return;
     changeFilters({channel,owner,queue,query:String(query).trim().slice(0,120)});
   }
-  window.RegistrySegmentCard={configure,clear,select,show,refresh,dismiss:()=>window.RegistrySegmentSelections?.dismiss?.()||dismiss(),id:()=>current?.id,getFilters,setFilters};
+  window.RegistrySegmentCard={configure,clear,acceptDashboard,select,show,refresh,dismiss:()=>window.RegistrySegmentSelections?.dismiss?.()||dismiss(),id:()=>current?.id,getFilters,setFilters};
 })();
 </script>
