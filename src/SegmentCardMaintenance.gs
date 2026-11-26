@@ -14,6 +14,19 @@ function segmentCardMaintenanceKey_(project, id) {
   return SEGMENT_CARD_MAINTENANCE.state + project + '_' + id;
 }
 
+function segmentCardMaintenanceLease_(properties) {
+  try { return JSON.parse(properties.getProperty(SEGMENT_CARD_MAINTENANCE.lease) || 'null'); }
+  catch (ignored) { return null; }
+}
+
+// The web app and the minute trigger both run as the deployer. Their short lease updates
+// can proceed while a registry/sheet writer holds the script lock.
+function segmentCardMaintenanceLock_(waitMillis, update) {
+  var lock = LockService.getUserLock();
+  if (!lock.tryLock(waitMillis)) return false;
+  try { return update(); } finally { lock.releaseLock(); }
+}
+
 function segmentCardMaintenanceTimer_(context) {
   var marker = coldyIncomingTimer_(context.properties);
   if (marker && marker.uid && marker.rootId === context.rootId && marker.verifier === SHARED_REQUEST_SCOPE_.keyHash) {
@@ -56,53 +69,63 @@ function segmentCardMaintenanceDue_(context) {
 
 function segmentCardMaintenanceBuild_(context, segmentId, outerGuard, scheduled) {
   var props = context.properties, project = registryProjectId_(), key = segmentCardMaintenanceKey_(project, segmentId);
-  var leaseKey = SEGMENT_CARD_MAINTENANCE.lease, id = Utilities.getUuid(), started = Date.now();
+  var leaseKey = SEGMENT_CARD_MAINTENANCE.lease, id = Utilities.getUuid();
   function scope() {
     var fresh = outerGuard();
     if (fresh.rootId !== context.rootId || !registryProjectScoped_() || registryProjectId_() !== project ||
         registrySegmentProject_(fresh, segmentId) !== project) fail_('OUTSIDE_PROJECT', 'Изменилась принадлежность сегмента к проекту.');
     return fresh;
   }
-  function claim() { return JSON.parse(props.getProperty(leaseKey) || 'null'); }
   function guard() {
-    var fresh = scope(), current = claim();
+    var fresh = scope(), current = segmentCardMaintenanceLease_(props);
     if (!current || current.id !== id || current.until <= Date.now()) fail_('BUSY', 'Другая задача обновляет карточки.');
     return fresh;
   }
-  var acquired = locked_(function () {
+  var acquired = segmentCardMaintenanceLock_(1500, function () {
     scope();
-    var previous = claim();
-    if (previous && previous.until > started) return false;
+    var previous = segmentCardMaintenanceLease_(props), now = Date.now();
+    if (previous && previous.until > now) return false;
     var state = segmentCardMaintenanceState_(props.getProperty(key), context.rootId);
-    state.attempt = started; state.next = started + SEGMENT_CARD_MAINTENANCE.leaseMillis;
-    props.setProperty(leaseKey, JSON.stringify({id:id, until:state.next}));
-    props.setProperty(key, JSON.stringify(state));
+    state.attempt = now; state.next = now + SEGMENT_CARD_MAINTENANCE.leaseMillis;
+    state.inProgress = true; state.background = !!scheduled;
+    var changes = {};
+    changes[key] = JSON.stringify(state);
+    changes[leaseKey] = JSON.stringify({id:id,key:key,until:state.next});
+    props.setProperties(changes);
     return true;
-  }, 1000);
+  });
   if (!acquired) return {state:'busy'};
-  var result, issue;
+  var result, issue, buildError;
   try {
-    result = segmentCardRefreshSnapshot_(guard(), segmentId, guard);
-    return {state:'ready', revision:result.revision, checkedAt:result.checkedAt, rebuilt:result.rebuilt};
+    result = segmentCardRefreshSnapshot_(guard(), segmentId, guard, scheduled === true);
   } catch (error) {
+    buildError = error;
     issue = /^[A-Z_]{1,60}$/.test(error.registryCode || '') ? error.registryCode : 'GOOGLE_ERROR';
-    throw error;
-  } finally {
-    locked_(function () {
-      var current = claim();
+  }
+  try {
+    segmentCardMaintenanceLock_(8000, function () {
+      var current = segmentCardMaintenanceLease_(props);
       if (!current || current.id !== id) return;
       try {
         scope();
         var state = segmentCardMaintenanceState_(props.getProperty(key), context.rootId);
+        state.inProgress = false;
         state.next = Date.now() + (issue === 'SEGMENT_CARD_CHANGED' ? 60000 : SEGMENT_CARD_MAINTENANCE.interval);
         if (issue) state.issue = issue; else {
           delete state.issue; state.checkedAt = result.checkedAt;
-          if (scheduled) state.lastBackgroundAt = new Date(Date.now()).toISOString();
+          if (scheduled) state.lastBackgroundAt = result.checkedAt;
         }
         props.setProperty(key, JSON.stringify(state));
       } finally { props.deleteProperty(leaseKey); }
-    }, 1000);
+    });
+  } catch (finishError) {
+    // The receipt commits readiness before cache warming and final queue bookkeeping.
+    // Preserve the original build error. Rethrow an actual loss of scope on success.
+    if (!buildError && finishError.registryCode) throw finishError;
   }
+  if (buildError) throw buildError;
+  scope();
+  return {state:'ready', revision:result.revision, checkedAt:result.checkedAt, rebuilt:result.rebuilt};
 }
 
 function segmentCardMaintenanceTick_(timerGuard) {
@@ -123,9 +146,16 @@ function prepareSegmentCardSnapshot_(request) {
       var props = context.properties, marker = coldyIncomingTimer_(props), beat = {};
       var current = marker && marker.uid && marker.rootId === context.rootId && marker.verifier === SHARED_REQUEST_SCOPE_.keyHash;
       if (current) { try { beat = JSON.parse(props.getProperty(coldyIncomingHeartbeatKey_(marker)) || '{}'); } catch (ignored) {} }
-      var state = segmentCardMaintenanceState_(props.getProperty(segmentCardMaintenanceKey_(registryProjectId_(), segmentId)), context.rootId);
-      return {state:state.checkedAt ? 'ready' : 'pending', checkedAt:state.checkedAt || null, lastBackgroundAt:state.lastBackgroundAt || null,
-        backgroundEnabled:!!current, heartbeatAt:beat && beat.at || null, lastError:state.issue || null};
+      var key = segmentCardMaintenanceKey_(registryProjectId_(), segmentId), state = segmentCardMaintenanceState_(props.getProperty(key), context.rootId);
+      var receipt = segmentCardSnapshotMeta_(context, segmentCardSnapshotSlot_(context, segmentId));
+      var lease = segmentCardMaintenanceLease_(props), now = Date.now(), busy = !!lease && lease.until > now;
+      var running = busy && lease.key === key, finished = receipt && Date.parse(receipt.checkedAt) >= (state.attempt || 0);
+      return {state:receipt && segmentCardSnapshotFresh_(receipt) ? 'ready' : 'pending', checkedAt:receipt && receipt.checkedAt || null,
+        lastBackgroundAt:receipt && receipt.lastBackgroundAt || state.lastBackgroundAt || null, backgroundEnabled:!!current,
+        heartbeatAt:beat && beat.at || null, lastError:finished ? null : state.issue || null,
+        refreshState:running ? (finished ? 'finishing' : 'running') : finished ? 'idle' : state.inProgress ? 'interrupted' : state.issue ? 'retrying' : 'scheduled',
+        attemptAt:state.attempt ? new Date(state.attempt).toISOString() : null, queueBusy:busy,
+        nextAttemptAt:state.next ? new Date(state.next).toISOString() : null};
     }
     var timer = segmentCardMaintenanceTimer_(context);
     var result = segmentCardMaintenanceBuild_(context, segmentId, authorize_);

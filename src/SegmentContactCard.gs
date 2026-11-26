@@ -27,8 +27,8 @@ function segmentCardData_(context, segmentId, revision, scope, campaigns) {
   if (revision !== undefined && revision !== version) segmentCardChanged_();
   var snapshot = segmentCardReadCache_(version);
   if (!snapshot) {
-    var groups = new Map(), warnings = [], validation = pvCacheRead_(pvCache_(context, false));
-    var facts = segmentCardCampaignFacts_(campaigns);
+    var groups = new Map(), warnings = [], validation = scope.validation || pvCacheRead_(pvCache_(context, false));
+    var facts = campaigns.bindings.map(segmentCardCampaignFact_);
     ['companies', 'lpr'].forEach(function (kind) {
       var label = kind === 'companies' ? 'Компании' : 'ЛПР';
       if (!scope.files[kind]) { warnings.push('Рабочая таблица «' + label + '» ещё не подключена.'); return; }
@@ -103,15 +103,25 @@ function segmentCardCampaigns_(context, segmentId) {
   return {credential: registry.credentialHash, bindings: bindings};
 }
 
-function segmentCardCampaignFacts_(campaigns) {
-  return campaigns.bindings.map(function (item) {
-    var b = item.binding, state = item.file ? coldyReadEnvelope_(item.scope, item.file).data : null;
-    var verified = state && state.bindingRevision === b.revision ? state : {};
-    var policy = verified.policy || {}, complete = item.mark.state === 'synced' && !!item.mark.lastSyncedAt &&
-      !verified.scan && Array.isArray(policy.emails) && policy.identity === digest_(JSON.stringify(policy.emails)) && verified.lastIdentity;
-    return {binding: b, checked: complete ? verified.checked || {} : {}, fingerprint: verified.lastIdentity,
-      known: new Set(policy.emails || []), blocked: new Set((policy.known || []).concat(policy.hits || [])), checkedAt: item.mark.lastSyncedAt || ''};
-  });
+function segmentCardCampaignFact_(item) {
+  if (item.fact) return item.fact;
+  var b = item.binding, state = item.file ? coldyReadEnvelope_(item.scope, item.file).data : null;
+  var verified = state && state.bindingRevision === b.revision ? state : {};
+  var policy = verified.policy || {}, complete = item.mark.state === 'synced' && !!item.mark.lastSyncedAt &&
+    !verified.scan && Array.isArray(policy.emails) && policy.identity === digest_(JSON.stringify(policy.emails)) && verified.lastIdentity;
+  item.fact = {binding:b, checked:complete ? verified.checked || {} : {}, fingerprint:verified.lastIdentity,
+    known:new Set(policy.emails || []), blocked:new Set((policy.known || []).concat(policy.hits || [])), checkedAt:item.mark.lastSyncedAt || ''};
+  return item.fact;
+}
+
+// A strong Drive version is a fast way to reuse a digest, not evidence that visible facts changed.
+function segmentCardDigestAtVersion_(inputs, compute) {
+  var key = 'card-content/' + digest_(JSON.stringify(inputs)), cache, value;
+  try { cache = CacheService.getScriptCache(); value = cache.get(key); } catch (ignored) {}
+  if (typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value)) return value;
+  value = digest_(JSON.stringify(compute()));
+  try { if (cache) cache.put(key,value,21600); } catch (ignored) {}
+  return value;
 }
 
 function segmentCardRevision_(context, scope, campaigns) {
@@ -119,14 +129,47 @@ function segmentCardRevision_(context, scope, campaigns) {
     var file = scope.files[kind]; if (file && !file.version) segmentCardChanged_(); return file ? [file.id, file.version] : null;
   });
   if (!scope.storageVersion) segmentCardChanged_();
-  var states = campaigns.bindings.map(function (entry) {
-    var file = entry.file;
-    if (file && !contactSyncVersion_(file)) segmentCardChanged_();
-    // A successful no-change poll only advances the clock. The journal version covers recipient facts.
-    return [entry.binding, file && [file.id, contactSyncVersion_(file)], entry.mark.state, !!entry.mark.lastSyncedAt];
+  var scopeKey = [context.rootId,registryProjectId_(),scope.folder.getId(),scope.storage.public.id,files];
+  var validation = segmentCardDigestAtVersion_(['validation',scopeKey,scope.storageVersion],function () {
+    scope.validation = pvCacheRead_(pvCache_(context,false));
+    if (!Object.keys(scope.validation).length) return [];
+    var keys = segmentCardValidationKeys_(context,scope,scopeKey);
+    return keys.filter(function (key) { return scope.validation[key]; }).map(function (key) {
+      var record = scope.validation[key], result = record.result || {};
+      return [key,!!record.pending,result.status || '',!!result.review,result.eligible === true,!!result.idTg];
+    });
   });
-  return digest_(JSON.stringify(['segment-contact-card-v1', context.rootId, registryProjectId_(), scope.folder.getId(),
-    scope.storage.public.id, scope.storageVersion, files, campaigns.credential, states]));
+  var states = campaigns.bindings.map(function (entry) {
+    var file = entry.file, version = file && contactSyncVersion_(file);
+    if (file && !version) segmentCardChanged_();
+    var status = segmentCardDigestAtVersion_(['campaign',scopeKey,campaigns.credential,entry.binding,file && [file.id,version],
+      entry.mark.state === 'synced' && !!entry.mark.lastSyncedAt],function () {
+      var fact = segmentCardCampaignFact_(entry);
+      var proofs = ['companies','lpr'].map(function (kind) {
+        var proof = fact.checked[kind], target = scope.files[kind];
+        return proof && target && proof.fingerprint === fact.fingerprint && proof.fileId === target.id && proof.version === target.version ? proof.sheetId : null;
+      });
+      return [proofs,proofs.some(function (p) { return p != null; }) ? Array.from(fact.known).sort() : [],Array.from(fact.blocked).sort()];
+    });
+    return [entry.binding,status];
+  });
+  return digest_(JSON.stringify(['segment-contact-card-v2',scopeKey,validation,campaigns.credential,states]));
+}
+
+function segmentCardValidationKeys_(context, scope, scopeKey) {
+  var version = digest_(JSON.stringify(['card-validation-keys',scopeKey])), saved = segmentCardReadCache_(version);
+  if (Array.isArray(saved)) return saved;
+  var keys = new Set();
+  ['companies','lpr'].forEach(function (kind) {
+    if (!scope.files[kind]) return;
+    var tabs = segmentCardTabs_(context,scope,kind);
+    ['email','telegram'].forEach(function (channel) {
+      if (tabs[channel]) segmentCardReadSheet_(null,tabs[channel],channel,kind,scope.files[kind],null,[],keys);
+    });
+  });
+  var sorted = Array.from(keys).sort();
+  segmentCardWriteCache_(version,sorted,21600);
+  return sorted;
 }
 
 function segmentCardFilter_(input) {
@@ -146,7 +189,7 @@ function segmentCardFilter_(input) {
     offset: number(input.offset, 0, 0, 1000000), limit: number(input.limit, 50, 1, 200)};
 }
 
-function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, campaigns) {
+function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, campaigns, keys) {
   var count = sheet.getLastRow() - 1, width = sheet.getLastColumn();
   if (count <= 0) return;
   if (count >= CONTACT_SYNC.maxTargetRows || width > CONTACT_SYNC.maxHeaderColumns) fail_('SEGMENT_CARD_LIMIT', 'Рабочий лист превышает допустимый для чтения размер.');
@@ -160,6 +203,19 @@ function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, 
   col('origin', ['Исходный столбец email']); col('originRows', ['Исходные строки','Строки в Лист1']); col('history', ['История контакта']);
   col('membership', [COLDY_CAMPAIGNS.headers[0]]);
   if (indices.value === undefined && (channel === 'email' || indices.handle === undefined)) fail_('SEGMENT_CARD_SCHEMA', 'В рабочем листе отсутствует столбец контакта.');
+  if (keys) {
+    // Only the contact columns determine which shared validations this segment consumes.
+    for (var at = 2; at < count + 2; at += 5000) {
+      var length = Math.min(5000,count + 2 - at);
+      var values = indices.value === undefined ? [] : sheet.getRange(at,indices.value+1,length,1).getDisplayValues();
+      var handles = channel !== 'telegram' || indices.handle === undefined ? [] : sheet.getRange(at,indices.handle+1,length,1).getDisplayValues();
+      for (var row = 0; row < length; row++) {
+        var identity = segmentCardIdentity_(channel,values[row] && values[row][0],handles[row] && handles[row][0]);
+        if (identity) keys.add(pvKey_(identity.kind,identity.value));
+      }
+    }
+    return;
+  }
   var manualCols = CONTACT_MAILING_STATUS.headers.map(function (header) { return map[pvHeader_(header)]; }).filter(function (index) { return index !== undefined; });
   var notes = channel === 'email' && campaigns.length ? head.getNotes()[0] : [];
   var layouts = channel === 'email' ? campaigns.map(function (campaign) {
@@ -185,17 +241,24 @@ function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, 
   }
 }
 
-function segmentCardGroupRow_(groups, channel, owner, line, map, cols, manualCols, note, validation, layouts, source) {
-  function cell(i) { return i === undefined ? '' : String(line[i] || '').trim(); }
-  var kind = channel === 'email' ? 'email' : 'telegram', raw = cell(cols.value);
+function segmentCardIdentity_(channel, raw, handleCell) {
+  raw = String(raw || '').trim();
+  var kind = channel === 'email' ? 'email' : 'telegram';
   var value = channel === 'email' ? pvEmail_(raw) : pvPhone_(raw);
   if (!value && channel === 'telegram') {
-    var handle = pvUsername_(cell(cols.handle)) || pvUsername_(raw);
+    handleCell = String(handleCell || '').trim();
+    var handle = pvUsername_(handleCell) || pvUsername_(raw);
     if (handle) { kind = 'telegram_username'; value = handle; }
-    if (!raw) raw = cell(cols.handle);
+    if (!raw) raw = handleCell;
   }
-  if (!value && !raw) return;
-  var validFormat = !!value; value = value || raw;
+  return value || raw ? {kind:kind,valid:!!value,value:value || raw} : null;
+}
+
+function segmentCardGroupRow_(groups, channel, owner, line, map, cols, manualCols, note, validation, layouts, source) {
+  function cell(i) { return i === undefined ? '' : String(line[i] || '').trim(); }
+  var identity = segmentCardIdentity_(channel,cell(cols.value),cell(cols.handle));
+  if (!identity) return;
+  var kind = identity.kind, validFormat = identity.valid, value = identity.value;
   var compound = channel + '|' + value.toLowerCase(), group = groups.get(compound);
   if (!group) {
     group = {channel: channel, value: value, owners: new Set(), names: new Set(), manual: new Set(), results: new Set(), pendingLabels: new Set(), facts: new Map(), sources: [],

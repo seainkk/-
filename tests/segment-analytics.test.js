@@ -219,6 +219,73 @@ test('light dashboard remains unknown and usable when the tracking journal is un
   assert.deepEqual(f.calls.opened, []);
 });
 
+test('light dashboard batches folders by level, paginates and never enumerates another project’s children', () => {
+  const sibling = 'second_segment_123456', other = 'other_project_segment_123456', nested = 'nested_folder_123456';
+  const properties = Object.fromEntries([SEGMENT,sibling,other].map(id=>['REGISTRY_SEGMENT_PROJECT_'+id,
+    JSON.stringify({rootId:ROOT,projectId:id===other?'neosender':'numshield'})]));
+  const f = fixture({properties});
+  vm.runInContext(readFileSync(sourceDir+'RegistryProjects.gs','utf8'),f.context);
+  const folder = 'application/vnd.google-apps.folder';
+  const item = (id,mimeType,parent) => ({id,name:id,mimeType,parents:[parent],trashed:false});
+  const queries = [];
+  f.context.Drive = {Files:{list:q=>{
+    queries.push(q.q);
+    if(q.q.includes("'" + SOURCE + "' in parents")) return q.pageToken
+      ? {files:[item(other,folder,SOURCE),item(sibling,folder,SOURCE)]}
+      : {files:[item(SEGMENT,folder,SOURCE)],nextPageToken:'page-2'};
+    if(q.q.includes("'" + nested + "' in parents"))return {files:[item('nested_book_123456',MIME,nested)]};
+    assert.ok(q.q.includes("'" + SEGMENT + "' in parents") && q.q.includes("'" + sibling + "' in parents"));
+    assert.ok(!q.q.includes(other));
+    return {files:[item(nested,folder,SEGMENT),item(SERVICE,MIME,SEGMENT),item('false_parent_123456',MIME,other)]};
+  }}};
+  const result = f.context.callApp({method:'getSegmentsDashboard',accessKey:TEST_ACCESS_KEY,projectId:'numshield',payload:{includeAnalysis:false}});
+  assert.equal(result.items.length,2);
+  assert.deepEqual(plain(result.items.find(i=>i.id===SEGMENT).files.map(i=>i.id)),['nested_book_123456']);
+  assert.ok(!JSON.stringify(result).includes(other));
+  assert.equal(queries.length,4);
+  assert.deepEqual(f.calls.metadataScans,[]);
+});
+
+test('a failed or incomplete batched listing restarts atomically and a denied listing releases no catalog', () => {
+  for (const outcome of ['timeout','incomplete','repeating','denied']) {
+    const f = fixture({files:[sourceFile()]});
+    const dummy = {id:'discard_partial_123456',name:'partial',parents:[SOURCE],mimeType:'application/vnd.google-apps.folder',trashed:false};
+    let reads = 0;
+    f.context.Drive = {Files:{list:()=>{
+      if(++reads===1)return {files:[dummy],nextPageToken:'more'};
+      if(outcome==='timeout')throw new Error('backendError');
+      if(outcome==='denied')throw new Error('403 Forbidden');
+      if(outcome==='repeating')return {files:[],nextPageToken:'more'};
+      return {files:[],incompleteSearch:true};
+    }}};
+    if(outcome==='denied') {
+      assert.throws(()=>f.dashboard({includeAnalysis:false}),/SOURCE_CHANGED/);
+      assert.deepEqual(f.calls.metadataScans,[]);
+    } else {
+      const result = f.dashboard({includeAnalysis:false});
+      assert.equal(result.items[0].id, SEGMENT);
+      assert.ok(!JSON.stringify(result).includes(dummy.id));
+      assert.equal(f.calls.metadataScans.length,2);
+    }
+  }
+});
+
+test('a light dashboard reads master assignments without historical import rows; a full read still validates both', () => {
+  const f = fixture(), schema=f.context.SEGMENT_ACTIONS_SCHEMA, seen=[];
+  const storage={public:{id:SERVICE},book:{getSheetByName:name=>({name})}};
+  f.context.sourceBasesReadRows_=(sheet)=>{
+    seen.push(sheet.name);
+    if(sheet.name===schema.loadsTab)throw Error('Historical journal unavailable');
+    return {rows:[[SEGMENT,'companies','assigned_book_123456']],lastRow:2};
+  };
+  const context={properties:f.context.PropertiesService.getScriptProperties()};
+  const assignments=f.context.segmentTrackingStorage_(context,storage,false,true);
+  assert.equal(assignments.tables[0].fileId,'assigned_book_123456');
+  assert.deepEqual(seen,[schema.tablesTab]);
+  assert.throws(()=>f.context.segmentTrackingStorage_(context,storage,false),/Historical journal unavailable/);
+  assert.deepEqual(seen,[schema.tablesTab,schema.tablesTab,schema.loadsTab]);
+});
+
 test('campaign counts use a single journal for visible segments and keep contact and launch metrics independent', () => {
   const other = 'other_project_segment_01', extra = 'second_project_segment_01';
   const f = fixture({
@@ -282,6 +349,20 @@ test('light dashboard rejects revoked keys and changed roots before returning it
     };
     assert.throws(() => f.dashboard({ includeAnalysis: false }), key === 'ROOT_FOLDER_ID' ? /SOURCE_CHANGED/ : /LINK_ACCESS_REQUIRED/);
   }
+});
+
+test('a project reassignment after building a preview removes both the list entry and its contacts', () => {
+  const prop='REGISTRY_SEGMENT_PROJECT_'+SEGMENT;
+  const owned=projectId=>JSON.stringify({rootId:ROOT,projectId});
+  const f=fixture({properties:{[prop]:owned('numshield')}});
+  vm.runInContext(readFileSync(sourceDir+'RegistryProjects.gs','utf8'),f.context);
+  f.context.segmentCardDashboardPreviews_=()=>{
+    f.propertyValues.set(prop,owned('neosender'));
+    return {[SEGMENT]:{segmentId:SEGMENT,preview:true,rows:[{value:'private@example.test'}]}};
+  };
+  const result=f.context.callApp({method:'getSegmentsDashboard',accessKey:TEST_ACCESS_KEY,projectId:'numshield',payload:{includeAnalysis:false,includeCardPreview:true}});
+  assert.deepEqual(plain(result.items),[]);
+  assert.deepEqual(plain(result.cardPreviews),{});
 });
 
 test('light dashboard rechecks the actual source ancestry after loading canonical assignments', () => {
