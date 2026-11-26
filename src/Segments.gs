@@ -208,8 +208,59 @@ function getSegmentNames_(context, folderRefs) {
   return { state: 'ready', source: descriptor, items: items.sort(byName_) };
 }
 
+/** Enumerate only previously verified parents. A whole level usually fits in one Drive request. */
+function segmentDashboardTree_(context, sourceId, ownership, serviceId) {
+  if (typeof Drive === 'undefined' || !Drive.Files || typeof Drive.Files.list !== 'function') return null;
+  var folderMime = 'application/vnd.google-apps.folder', bookMime = REGISTRY_CONFIG.spreadsheetMime;
+  var folders = [], books = [], visited = new Set([sourceId]), parents = [sourceId], depth = 0, count = 0;
+  while (parents.length) {
+    if (depth > REGISTRY_CONFIG.maxTreeDepth) fail_('REGISTRY_LIMIT', 'Слишком много уровней папок внутри сегментов.');
+    var next = [];
+    for (var start = 0; start < parents.length; start += 40) {
+      var group = parents.slice(start, start + 40), allowed = new Set(group);
+      var parentQuery = group.map(function (id) { return "'" + id_(id) + "' in parents"; }).join(' or ');
+      var query = {q:"trashed=false and (mimeType='" + folderMime + "' or mimeType='" + bookMime + "') and (" + parentQuery + ')',
+        fields:'nextPageToken,incompleteSearch,files(id,name,mimeType,parents,trashed)',pageSize:1000,
+        supportsAllDrives:true,includeItemsFromAllDrives:true};
+      var tokens = new Set();
+      for (;;) {
+        var page;
+        try { page = Drive.Files.list(query); }
+        catch (error) {
+          // Retry incomplete listings with folder iterators. Propagate permission failures.
+          if (/forbidden|permission|unauthori[sz]ed|not found|access denied|insufficient authentication|\b(401|403|404)\b/i.test(String(error.message || error)))
+            fail_('SOURCE_CHANGED', 'Доступ к папкам сегментов изменился. Обновите список.');
+          return null;
+        }
+        if (!page || page.incompleteSearch || !Array.isArray(page.files)) return null;
+        for (var i = 0; i < page.files.length; i++) {
+          var file = page.files[i];
+          if (!file || file.trashed !== false || (file.mimeType !== folderMime && file.mimeType !== bookMime)) continue;
+          // DriveApp preserves historical multi-parent behavior for older items.
+          if (!Array.isArray(file.parents) || file.parents.length !== 1) return null;
+          var parent = file.parents[0];
+          if (!allowed.has(parent) || visited.has(file.id) || file.id === serviceId) continue;
+          if (++count > REGISTRY_CONFIG.maxTreeEntries) fail_('REGISTRY_LIMIT', 'В папке сегментов превышен лимит папок и таблиц.');
+          visited.add(file.id);
+          var row = {id:id_(file.id),name:file.name,parentId:parent};
+          if (file.mimeType === bookMime) books.push(row);
+          else {
+            folders.push(row);
+            if (depth || !ownership || registrySegmentProject_(context, row.id, ownership) === registryProjectId_()) next.push(row.id);
+          }
+        }
+        if (!page.nextPageToken) break;
+        if (typeof page.nextPageToken !== 'string' || tokens.has(page.nextPageToken)) return null;
+        query.pageToken = page.nextPageToken; tokens.add(page.nextPageToken);
+      }
+    }
+    parents = next; depth++;
+  }
+  return {folders:folders,files:books};
+}
+
 /** Metadata for the Outreach subtree only; a large source catalog is unrelated. */
-function getSegmentsMetadata_(context, includePendingImports, includeCardParents) {
+function getSegmentsMetadata_(context, includePendingImports, includeCardParents, batch) {
   context = context || authorize_();
   var binding = segmentMetadataBinding_(context);
   if (binding.state !== 'ready') return binding;
@@ -217,6 +268,10 @@ function getSegmentsMetadata_(context, includePendingImports, includeCardParents
   var folders = [{ id: source.getId(), name: source.getName(), parentId: registry.id }], files = [], visited = Object.create(null), count = 0;
   var ownership = typeof registryProjectScoped_ === 'function' && registryProjectScoped_() ? context.properties.getProperties() : null;
   var serviceId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
+  if (batch) {
+    var tree = segmentDashboardTree_(context, source.getId(), ownership, serviceId);
+    if (tree) return buildSegments_(context, registry, folders.concat(tree.folders), tree.files, includePendingImports, includeCardParents);
+  }
   function visit(folder, depth) {
     if (visited[folder.getId()]) return;
     if (depth > REGISTRY_CONFIG.maxTreeDepth) fail_('REGISTRY_LIMIT', 'Слишком много уровней папок внутри сегментов.');

@@ -176,7 +176,9 @@
     if(s.exporting||options.automatic&&(s.loading||s.panel||s.offset>0))return;
     if(options.opening&&s.data&&!s.data.preview&&s.updated&&Date.now()-s.updated<15000){el('export').disabled=false;window.dispatchEvent(new Event('segment-card-update'));return;}
     const seq=++s.seq;const valid=()=>alive(s)&&s.seq===seq;
-    s.loading=true;el('export').disabled=true;el('prev').disabled=true;el('next').disabled=true;
+    s.loading=true;el('export').disabled=true;
+    // A refresh of the visible page can finish after the user has already moved on.
+    if(s.data?.offset!==s.offset){el('prev').disabled=true;el('next').disabled=true;}
     if(!s.data)message('status','Читаем контакты сегмента…');
     try{
       const response=await run(s,'getSegmentContactCard',{channel:s.channel,owner:s.owner,queue:s.queue,query:s.query,offset:s.offset,limit:60,prepared:true,...(s.offset?{revision:s.revision}:{})},valid);

@@ -11,11 +11,12 @@ function getSegmentsDashboard_(request) {
     var input = request === undefined ? {} : object_(request);
     if (Object.keys(input).some(function (key) { return ['includeAnalysis', 'includeCardPreview'].indexOf(key) < 0 || typeof input[key] !== 'boolean'; })) fail_('INVALID_REQUEST', 'Некорректный режим загрузки сегментов.');
     var previews = input.includeAnalysis === false && input.includeCardPreview === true;
-    var projection = getSegmentsMetadata_(context, true, previews);
+    var light = input.includeAnalysis === false;
+    var projection = getSegmentsMetadata_(context, true, previews, light);
     if (projection.state !== 'ready') return projection;
     if (projection.items.length && typeof segmentCardMaintenanceTimer_ === 'function') segmentCardMaintenanceTimer_(context);
     var campaigns = segmentDashboardMailings_(context, projection.items);
-    if (input.includeAnalysis === false) return segmentDashboardOverview_(context, projection, previews, campaigns);
+    if (light) return segmentDashboardOverview_(context, projection, previews, campaigns);
     var budget = segmentAnalysisBudget_(), trackingRequest = { loaded: false, snapshot: null };
     projection.items = projection.items.map(function (item) {
       return segmentAnalyzeItem_(context, projection.source, item, budget, trackingRequest);
@@ -59,7 +60,7 @@ function segmentDashboardMailings_(context, items) {
 /** Render the usable catalog before reading contact-presence data from books. */
 function segmentDashboardOverview_(context, projection, previews, campaigns) {
   var tracking;
-  try { tracking = segmentReadTrackingSnapshot_(context); }
+  try { tracking = segmentReadTrackingSnapshot_(context, true); }
   catch (error) { tracking = { available: false, tables: [], loads: [] }; }
   var kinds = Object.create(null);
   if (tracking && tracking.available === true) (tracking.tables || []).forEach(function (table) {
@@ -86,6 +87,15 @@ function segmentDashboardOverview_(context, projection, previews, campaigns) {
   var fresh = authorize_();
   if (fresh.rootId !== context.rootId) fail_('SOURCE_CHANGED', 'Привязка реестра изменилась. Обновите страницу.');
   registryFolder_(fresh, projection.source.id);
+  if (typeof registryProjectScoped_ === 'function' && registryProjectScoped_()) {
+    var properties = fresh.properties.getProperties();
+    projection.items = projection.items.filter(function (item) {
+      if (registrySegmentProject_(fresh, item.id, properties) === registryProjectId_()) return true;
+      if (projection.cardPreviews) delete projection.cardPreviews[item.id];
+      return false;
+    });
+    projection.unassigned = (projection.unassigned || []).filter(function (item) { return !registrySegmentProject_(fresh,item.id,properties); });
+  }
   projection.analysisPending = true;
   projection.generatedAt = new Date().toISOString();
   return projection;

@@ -60,6 +60,7 @@ def main():
         print('Authorized dashboard preview, click to painted row: %.0f ms'%opening['ms'],flush=True)
         rows=page.locator('#sc-rows tr')
         expect(rows).to_have_count(1)
+        expect(page.locator('#sc-next')).to_be_enabled()
         expect(page.locator('#sc-status')).to_contain_text('Карточка собрана')
         page.wait_for_function("backend.pending.some(r=>r.method==='getSegmentContactCard'&&r.payload.prepared)")
         page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")

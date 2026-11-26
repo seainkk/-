@@ -1,5 +1,8 @@
 /** A team's rebuildable read model. Sheets and provider journals remain authoritative. */
-var SEGMENT_CARD_SNAPSHOT = Object.freeze({schema: 1, pageSize: 12, dashboardLimit: 8, cacheSeconds: 21600, maxAge: 24 * 3600000});
+var SEGMENT_CARD_SNAPSHOT = Object.freeze({
+  schema:1, pageSize:60, compactSize:12, dashboardLimit:8, cacheSeconds:21600, maxAge:24 * 3600000,
+  dashboardChars:400000, cacheChars:95000
+});
 
 function segmentCardSnapshotSlot_(context, segmentId) {
   var projectId = registryProjectId_();
@@ -73,14 +76,26 @@ function segmentCardSnapshotUnpack_(encoded) {
   return JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(encoded), 'application/x-gzip', 'card.json.gz')).getDataAsString('UTF-8'));
 }
 
-function segmentCardSnapshotHeadKey_(slot, receipt) { return 'card-first/' + slot.owner + '/' + receipt.revision; }
+function segmentCardSnapshotHeadKey_(slot, receipt, legacy) {
+  return (legacy ? 'card-first/' : 'card-first-60/') + slot.owner + '/' + receipt.revision;
+}
+
+function segmentCardSnapshotCompact_(page) {
+  if (page.rows.length <= SEGMENT_CARD_SNAPSHOT.compactSize) return page;
+  var rows = page.rows.slice(0, SEGMENT_CARD_SNAPSHOT.compactSize);
+  return Object.assign({}, page, {rows:rows, nextOffset:rows.length});
+}
 
 function segmentCardSnapshotWarm_(slot, receipt, snapshot, scope) {
   var page = segmentCardSnapshotPage_(snapshot, segmentCardFilter_({limit:SEGMENT_CARD_SNAPSHOT.pageSize}), receipt, slot.segmentId, scope.folder.getName(), scope.files);
   page.preview = true;
-  var encoded = segmentCardSnapshotPack_(page);
-  // Cache is optional. An unusually large first page falls back to the normal paged route.
-  if (encoded.length <= 95000) CacheService.getScriptCache().put(segmentCardSnapshotHeadKey_(slot, receipt), encoded, SEGMENT_CARD_SNAPSHOT.cacheSeconds);
+  var encoded = JSON.stringify(page).length < SEGMENT_CARD_SNAPSHOT.dashboardChars ? segmentCardSnapshotPack_(page) : '';
+  if (!encoded || encoded.length > SEGMENT_CARD_SNAPSHOT.cacheChars) {
+    var compact = segmentCardSnapshotCompact_(page);
+    if (compact === page || JSON.stringify(compact).length >= SEGMENT_CARD_SNAPSHOT.dashboardChars) return;
+    encoded = segmentCardSnapshotPack_(compact);
+  }
+  if (encoded.length <= SEGMENT_CARD_SNAPSHOT.cacheChars) CacheService.getScriptCache().put(segmentCardSnapshotHeadKey_(slot, receipt), encoded, SEGMENT_CARD_SNAPSHOT.cacheSeconds);
 }
 
 function segmentCardSnapshotLoad_(context, slot, receipt) {
@@ -96,7 +111,7 @@ function segmentCardSnapshotLoad_(context, slot, receipt) {
 }
 
 /** The maintenance worker owns a per-segment lease. All durable writes target service storage. */
-function segmentCardRefreshSnapshot_(context, segmentId, guard) {
+function segmentCardRefreshSnapshot_(context, segmentId, guard, scheduled) {
   var slot = segmentCardSnapshotSlot_(context, segmentId);
   if (typeof guard !== 'function' || registrySegmentProject_(context, segmentId) !== slot.projectId) fail_('OUTSIDE_PROJECT', 'Сегмент не входит в проект фонового задания.');
   guard();
@@ -122,6 +137,8 @@ function segmentCardRefreshSnapshot_(context, segmentId, guard) {
   }
   guard();
   receipt.checkedAt = new Date().toISOString();
+  if (scheduled) receipt.lastBackgroundAt = receipt.checkedAt;
+  else if (previous && previous.lastBackgroundAt) receipt.lastBackgroundAt = previous.lastBackgroundAt;
   context.properties.setProperty(slot.key, JSON.stringify(receipt));
   if (snapshot) {
     segmentCardWriteCache_(revision, snapshot, SEGMENT_CARD_SNAPSHOT.cacheSeconds);
@@ -165,14 +182,17 @@ function segmentCardDashboardPreviews_(context, projection, tracking, registry) 
   projection.items.some(function (item) {
     if (registrySegmentProject_(context,item.id,properties) !== projectId) return false;
     var slot = segmentCardSnapshotSlot_(context,item.id), receipt = segmentCardSnapshotMeta_(context,slot,properties);
-    if (receipt && segmentCardSnapshotFresh_(receipt)) candidates.push({item:item,slot:slot,receipt:receipt,key:segmentCardSnapshotHeadKey_(slot,receipt)});
+    if (receipt && segmentCardSnapshotFresh_(receipt)) candidates.push({item:item,receipt:receipt,
+      key:segmentCardSnapshotHeadKey_(slot,receipt),legacyKey:segmentCardSnapshotHeadKey_(slot,receipt,true)});
     return candidates.length === SEGMENT_CARD_SNAPSHOT.dashboardLimit;
   });
   if (!candidates.length) return result;
   var heads;
-  try { heads = CacheService.getScriptCache().getAll(candidates.map(function (c) { return c.key; })); }
+  var keys = [];
+  candidates.forEach(function (c) { keys.push(c.key,c.legacyKey); });
+  try { heads = CacheService.getScriptCache().getAll(keys); }
   catch (ignored) { return result; }
-  candidates = candidates.filter(function (c) { return typeof heads[c.key] === 'string'; });
+  candidates = candidates.filter(function (c) { return !!(heads[c.key] || heads[c.legacyKey]); });
   if (!candidates.length) return result;
   var storageId = properties.SOURCE_BASES_STORAGE_ID || REGISTRY_CONFIG.defaultSourceBasesStorageId;
   var key = properties[COLDY.keyProperty], credential = key ? digest_(key) : '';
@@ -193,7 +213,7 @@ function segmentCardDashboardPreviews_(context, projection, tracking, registry) 
   if (fresh.rootId !== context.rootId || registryProjectId_() !== projectId) fail_('OUTSIDE_PROJECT', 'Доступ к проекту изменился.');
   if (segmentCardSnapshotCredential_(fresh.properties) !== credential ||
       (fresh.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId) !== storageId) return result;
-  var releasedChars = 0;
+  var choices = [];
   candidates.forEach(function (c) {
     if (registrySegmentProject_(fresh,c.item.id) !== projectId) return;
     var folder = metas.get(c.item.id);
@@ -207,14 +227,48 @@ function segmentCardDashboardPreviews_(context, projection, tracking, registry) 
     });
     if (!valid || segmentCardSnapshotCurrentAccess_(context,c.item.id,storageId,files,registry,credential) !== c.receipt.access) return;
     var page;
-    try { page = segmentCardSnapshotUnpack_(heads[c.key]); } catch (ignored) { return; }
-    if (!page || page.segmentId !== c.item.id || page.revision !== c.receipt.revision || !Array.isArray(page.rows) || page.rows.length > SEGMENT_CARD_SNAPSHOT.pageSize) return;
-    // Bound the complete dashboard response even if a few legitimate rows have exceptionally long histories.
-    var chars = JSON.stringify(page).length;
-    if (chars > 100000 || releasedChars + chars > 400000) return;
-    releasedChars += chars;
+    try { page = segmentCardSnapshotUnpack_(heads[c.key] || heads[c.legacyKey]); } catch (ignored) { return; }
+    if (!segmentCardSnapshotValidHead_(page,c.item.id,c.receipt,files)) return;
     page.checkedAt = c.receipt.checkedAt; page.name = c.item.name; page.files = segmentCardSnapshotPublicFiles_(files);
-    result[c.item.id] = page;
+    choices.push(page);
+  });
+  return segmentCardSnapshotFit_(choices, SEGMENT_CARD_SNAPSHOT.dashboardChars - JSON.stringify(projection).length - 20);
+}
+
+function segmentCardSnapshotValidHead_(page, segmentId, receipt, files) {
+  if (!page || !page.prepared || !page.preview || page.segmentId !== segmentId || page.revision !== receipt.revision ||
+      page.offset !== 0 || !Number.isSafeInteger(page.total) || page.total < 0 || !Array.isArray(page.rows)) return false;
+  var count = page.rows.length;
+  if (count !== Math.min(page.total,SEGMENT_CARD_SNAPSHOT.pageSize) && count !== Math.min(page.total,SEGMENT_CARD_SNAPSHOT.compactSize)) return false;
+  if (page.nextOffset !== (count < page.total ? count : null)) return false;
+  return page.rows.every(function (row) {
+    return row && (row.channel === 'email' || row.channel === 'telegram') && typeof row.value === 'string' &&
+      Array.isArray(row.sources) && row.sources.length && row.sources.every(function (source) {
+        if (!source || source.sourceType !== 'working' || (source.owner !== 'companies' && source.owner !== 'lpr') ||
+            !files[source.owner] || source.id !== files[source.owner].id || typeof source.url !== 'string') return false;
+        var base = spreadsheetUrl_(source.id);
+        return source.url.indexOf(base) === 0 && /^#gid=\d+&range=A[1-9]\d*$/.test(source.url.slice(base.length));
+      });
+  });
+}
+
+// Allocate a compact page to as many segments as possible before expanding any one of them.
+function segmentCardSnapshotFit_(pages, budget) {
+  var result = Object.create(null), upgrades = [];
+  var choices = pages.map(function (page) {
+    var compact = segmentCardSnapshotCompact_(page);
+    var compactChars = JSON.stringify(compact).length, extra = compact === page ? 0 : JSON.stringify(page).length - compactChars;
+    return {page:page, compact:compact, compactChars:compactChars, extra:extra};
+  }).sort(function (a,b) { return a.compactChars - b.compactChars; });
+  choices.forEach(function (choice) {
+    var id = choice.page.segmentId, cost = id.length + 4 + choice.compactChars;
+    if (cost > budget) return;
+    result[id] = choice.compact; budget -= cost;
+    if (choice.extra > 0) upgrades.push(choice);
+  });
+  upgrades.sort(function (a,b) { return a.extra - b.extra; }).forEach(function (choice) {
+    if (choice.extra > budget) return;
+    result[choice.page.segmentId] = choice.page; budget -= choice.extra;
   });
   return result;
 }

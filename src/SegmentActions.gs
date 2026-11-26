@@ -433,7 +433,7 @@ function segmentActionResult_(context, folder, tables) {
   return result;
 }
 
-function segmentTrackingStorage_(context, storage, create) {
+function segmentTrackingStorage_(context, storage, create, assignmentsOnly) {
   var book = storage.book, tablesSheet = book.getSheetByName(SEGMENT_ACTIONS_SCHEMA.tablesTab), loadsSheet = book.getSheetByName(SEGMENT_ACTIONS_SCHEMA.loadsTab);
   var initKey = 'SEGMENT_TRACKING_INIT_' + storage.public.id, pending = context.properties.getProperty(initKey) === 'pending';
   if (!tablesSheet && !loadsSheet && !create) return { tables: [], loads: [], tablesSheet: null, loadsSheet: null };
@@ -449,7 +449,6 @@ function segmentTrackingStorage_(context, storage, create) {
     } finally { SpreadsheetApp.flush(); }
   }
   var rawTables = sourceBasesReadRows_(tablesSheet, SEGMENT_ACTIONS_SCHEMA.tablesHeaders);
-  var rawLoads = sourceBasesReadRows_(loadsSheet, SEGMENT_ACTIONS_SCHEMA.loadsHeaders);
   var pairs = Object.create(null), fileIds = Object.create(null), leaves = Object.create(null), targets = Object.create(null);
   var tables = rawTables.rows.map(function (row, index) {
     if (row.every(function (value) { return value === ''; })) return null;
@@ -458,6 +457,9 @@ function segmentTrackingStorage_(context, storage, create) {
     pairs[key] = true; fileIds[fileId] = true;
     return { segmentId: segmentId, kind: kind, fileId: fileId, row: index + 2 };
   }).filter(Boolean);
+  // The dashboard needs the current master assignments. Historical import rows are for detailed analysis.
+  if (!create && assignmentsOnly === true) return {tables:tables, loads:[]};
+  var rawLoads = sourceBasesReadRows_(loadsSheet, SEGMENT_ACTIONS_SCHEMA.loadsHeaders);
   var loads = rawLoads.rows.map(function (row, index) {
     if (row.every(function (value) { return value === ''; })) return null;
     var sourceId = id_(row[0]), segmentId = id_(row[2]), targetFileId = id_(row[4]);
@@ -480,9 +482,9 @@ function segmentTrackingStorage_(context, storage, create) {
 }
 
 /** Read-only analytics contract: absence of both tabs means legacy, never init. */
-function segmentReadTrackingSnapshot_(context) {
+function segmentReadTrackingSnapshot_(context, assignmentsOnly) {
   try {
-    var tracking = segmentTrackingStorage_(context, sourceBasesStorage_(context), false);
+    var tracking = segmentTrackingStorage_(context, sourceBasesStorage_(context), false, assignmentsOnly);
     return { available: true, tables: tracking.tables, loads: tracking.loads };
   } catch (error) { return { available: false, tables: [], loads: [], warnings: ['Журнал листов сегмента недоступен. Проверка количества контактов ограничена.'] }; }
 }

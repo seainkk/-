@@ -142,6 +142,59 @@ test('prepared browsing enforces current ownership, master tags, provider assign
   assert.throws(()=>f.run({prepared:true}),{registryCode:'OUTSIDE_PROJECT'});
 });
 
+test('the prepared dashboard returns the complete first sixty rows and upgrades a twelve-row v76 cache without rereading Sheets',()=>{
+  const f=preparedFixture(), build=f.c.segmentCardSnapshot_;
+  f.c.segmentCardSnapshot_=(groups,warnings)=>{
+    const snapshot=build(groups,warnings), sample=snapshot.rows[0];
+    snapshot.rows=Array.from({length:100},(_,i)=>({...sample,value:'contact'+String(i).padStart(3,'0')+'@example.org'}));
+    return snapshot;
+  };
+  f.rebuild();
+  const page=f.dashboard()[segment];
+  assert.equal(page.rows.length,60);assert.equal(page.nextOffset,60);assert.equal(page.total,100);
+  assert.equal(f.run({prepared:true,offset:60,limit:60}).rows[0].value,'contact060@example.org');
+  const reads=f.state.reads;
+  const slot=f.c.segmentCardSnapshotSlot_(f.context,segment), receipt=JSON.parse(f.values[slot.key]);
+  const key=f.c.segmentCardSnapshotHeadKey_(slot,receipt), legacyKey=f.c.segmentCardSnapshotHeadKey_(slot,receipt,true);
+  f.cache.set(legacyKey,f.c.segmentCardSnapshotPack_(f.c.segmentCardSnapshotCompact_(page)));f.cache.delete(key);
+  assert.equal(f.dashboard()[segment].rows.length,12);assert.equal(f.dashboard()[segment].nextOffset,12);
+  assert.equal(f.rebuild().rebuilt,false);assert.equal(f.dashboard()[segment].rows.length,60);
+  assert.equal(f.state.reads,reads);assert.equal(f.state.diskWrites,1);
+  const malformed=structuredClone(page);malformed.rows[0].sources[0].id='unassigned';
+  f.cache.set(key,f.c.segmentCardSnapshotPack_(malformed));assert.deepEqual(f.dashboard(),{});
+  malformed.rows[0].sources[0].id=page.rows[0].sources[0].id;malformed.rows[0].sources[0].url='https://example.org';
+  f.cache.set(key,f.c.segmentCardSnapshotPack_(malformed));assert.deepEqual(f.dashboard(),{});
+  malformed.rows[0].sources=page.rows[0].sources;malformed.nextOffset=12;
+  f.cache.set(key,f.c.segmentCardSnapshotPack_(malformed));assert.deepEqual(f.dashboard(),{});
+});
+
+test('dashboard budget reserves twelve rows for other segments before promoting any page to sixty',()=>{
+  const {c}=preparedFixture();
+  function head(id,padding){
+    return {segmentId:id,offset:0,total:100,nextOffset:60,rows:Array.from({length:60},(_,i)=>({value:String(i),name:'я'.repeat(padding)}))};
+  }
+  const large=head('large',60),small=head('small',25);
+  const cost=(page)=>JSON.stringify(page).length+page.segmentId.length+4;
+  const budget=cost(c.segmentCardSnapshotCompact_(large))+cost(small);
+  for(const choices of [[large,small],[small,large]]){
+    const fitted=c.segmentCardSnapshotFit_(choices,budget);
+    assert.equal(fitted.large.rows.length,12);assert.equal(fitted.large.nextOffset,12);
+    assert.equal(fitted.small.rows.length,60);assert.equal(fitted.small.nextOffset,60);
+    assert.ok(cost(fitted.large)+cost(fitted.small)<=budget);
+  }
+});
+
+test('a first page exceeding the entry budget still produces a compact page with a valid next offset',()=>{
+  const f=preparedFixture(), build=f.c.segmentCardSnapshot_;
+  f.c.segmentCardSnapshot_=(groups,warnings)=>{
+    const snap=build(groups,warnings), sample=snap.rows[0];
+    snap.rows=Array.from({length:80},(_,i)=>({...sample,ownerNames:[i<12?'Краткое имя':'я'.repeat(12500)],value:String(i)}));
+    return snap;
+  };
+  f.rebuild();const page=f.dashboard()[segment];
+  assert.equal(page.rows.length,12);assert.equal(page.total,80);assert.equal(page.nextOffset,12);
+});
+
 test('stale snapshots are excluded, strict reads see edits immediately, and a lost lease leaves the receipt unpublished',()=>{
   const f=preparedFixture(), first=f.rebuild(), slot=f.c.segmentCardSnapshotSlot_(f.context,segment), originally=f.values[slot.key];
   f.meta[lpr].version='9';
@@ -162,12 +215,47 @@ test('a corrupted or superseded artifact never supplies contacts to the prepared
   f.cache.clear();assert.equal(f.rebuild().rebuilt,true);assert.equal(f.state.diskWrites,2);
 });
 
-test('a successful poll with unchanged recipients keeps the prepared content version',()=>{
+test('successful polls and suppression-cursor writes with unchanged facts keep the prepared and export revision',()=>{
   const f=preparedFixture(), version=f.rebuild().revision;
   f.c.coldyIncomingMark_=()=>({state:'synced',lastSyncedAt:'2026-11-27T00:00:00Z'});
   assert.equal(f.rebuild().rebuilt,false);assert.equal(f.state.diskWrites,1);
   f.c.coldyStoreFile_=()=>({id:'private_poll',version:'2'});
+  f.privateData.policy.cursor='next';f.privateData.policy.retryAt=123;
+  assert.equal(f.rebuild().rebuilt,false);assert.equal(f.run({revision:version}).revision,version);
+  f.privateData.policy.hits=['check@example.org'];f.c.coldyStoreFile_=()=>({id:'private_poll',version:'3'});
+  assert.throws(()=>f.run({revision:version}),{registryCode:'SEGMENT_CARD_CHANGED'});
   assert.notEqual(f.rebuild().revision,version);assert.equal(f.state.diskWrites,2);
+  assert.ok(f.run({query:'check@example'}).rows[0].coldyStatuses.includes('Не отправляем'));
+});
+
+test('scans without a complete proof never expose an absent-recipient assertion, and cursor-only advances do not cancel the build',()=>{
+  const f=preparedFixture(), confirmed=f.run({query:'check@example'});
+  assert.deepEqual(confirmed.rows[0].coldyStatuses,['Не найден в проверенной рассылке']);
+  f.privateData.scan={phase:'read',offset:3};let fileVersion=2, state='syncing';
+  f.c.coldyStoreFile_=()=>({id:'private_poll',version:String(fileVersion)});
+  f.c.coldyIncomingMark_=()=>({state,lastSyncedAt:'2026-11-26T01:00:00Z'});
+  assert.throws(()=>f.run({revision:confirmed.revision}),{registryCode:'SEGMENT_CARD_CHANGED'});
+  const refresh=f.c.segmentCardSnapshot_;
+  f.c.segmentCardSnapshot_=(groups,warnings)=>{f.privateData.scan.offset=20;fileVersion++;state='error';return refresh(groups,warnings);};
+  const pending=f.run({query:'check@example'});
+  assert.deepEqual(pending.rows[0].coldyStatuses,['Нет данных о сверке']);
+  assert.deepEqual(f.run({query:'check@example',revision:pending.revision}).rows[0].coldyStatuses,['Нет данных о сверке']);
+});
+
+test('other projects and unrelated shared validation results can change during a build, while this segment’s actual validation invalidates an export',()=>{
+  const f=preparedFixture(), build=f.c.segmentCardSnapshot_;
+  f.c.segmentCardSnapshot_=(groups,warnings)=>{
+    if(f.meta[service].version==='2'){
+      f.meta[service].version='3';
+      f.state.shared[f.c.pvKey_('email','other-project@example.org')]={result:{status:'Валиден'}};
+    }
+    return build(groups,warnings);
+  };
+  const current=f.run();assert.equal(f.run({revision:current.revision}).revision,current.revision);
+  f.meta[service].version='4';
+  f.state.shared[f.c.pvKey_('email','check@example.org')]={result:{status:'Валиден'}};
+  assert.throws(()=>f.run({revision:current.revision}),{registryCode:'SEGMENT_CARD_CHANGED'});
+  assert.ok(f.run({query:'check@example'}).rows[0].ready);
 });
 
 test('working card keeps manual marks, sheet evidence, ownership and Coldy facts separate across both lists', () => {
