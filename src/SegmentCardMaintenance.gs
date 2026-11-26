@@ -59,7 +59,7 @@ function segmentCardMaintenanceDue_(context) {
       var stateKey = segmentCardMaintenanceKey_(project, id);
       state = segmentCardMaintenanceState_(all[stateKey], context.rootId);
       var dirty = Number(all[stateKey + '_DIRTY']) || 0;
-      var due = Number(state.next) || 0;
+      var due = state.schema === SEGMENT_CARD_SNAPSHOT.schema ? Number(state.next) || 0 : 0;
       if (dirty > (Number(state.attempt) || 0)) due = Math.min(due, Math.max(dirty, (Number(state.attempt) || 0) + 60000));
       if (due <= now) items.push({segmentId:id,project:project,due:due});
     } catch (ignored) { /* Invalid or stale project membership cannot authorize this segment. */ }
@@ -93,6 +93,7 @@ function segmentCardMaintenanceBuild_(context, segmentId, outerGuard, scheduled,
     if (latestStart && now > latestStart) return false;
     if (previous && previous.until > now) return false;
     var state = segmentCardMaintenanceState_(props.getProperty(key), context.rootId);
+    state.schema = SEGMENT_CARD_SNAPSHOT.schema;
     state.attempt = now; state.next = now + SEGMENT_CARD_MAINTENANCE.leaseMillis;
     state.inProgress = true; state.background = !!scheduled; state.attemptId = id;
     var changes = {};

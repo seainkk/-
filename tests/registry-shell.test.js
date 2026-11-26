@@ -1,15 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { buildRegistryShell } from '../scripts/deploy.mjs';
+import { buildPages } from '../scripts/build-pages.mjs';
 
 const source = fileURLToPath(new URL('../src/', import.meta.url));
 const file = name => readFileSync(path.join(source, name),'utf8');
+
+test('Pages publishes the shared interface and its transport without server files or private data', async () => {
+  const output = await mkdtemp(path.join(tmpdir(), 'registry-pages-'));
+  try {
+    await buildPages(output);
+    assert.deepEqual((await readdir(output)).sort(), ['app.html','favicon.png','index.html']);
+    const app = await readFile(path.join(output,'app.html'),'utf8');
+    assert.equal(app.replace(file('PagesTransport.html') + '\n',''), await buildRegistryShell(source));
+    assert.ok(app.indexOf(file('PagesTransport.html')) < app.indexOf(file('Client.html')));
+    assert.match(app, /id="br-view-segments"/);
+    assert.doesNotMatch(app, /<\?|access_key=[\w-]{43}|function authorize_\(/);
+    await writeFile(path.join(output,'unrelated.txt'),'test');
+    await assert.rejects(buildPages(output), /папка только с файлами интерфейса/);
+  } finally { await rm(output,{recursive:true,force:true}); }
+});
 
 test('the published shell is byte-for-byte the authored Index with the existing runtime static includes', async () => {
   const used = [];

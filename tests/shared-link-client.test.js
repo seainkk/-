@@ -92,6 +92,33 @@ test('the upload dispatches one live form with its named key populated', async (
   assert.equal(f.context.networkPending, 0);
 });
 
+test('Pages dispatches one project-scoped RPC or form and rejects stale and revoked replies',async()=>{
+  const f=rpcFixture(), pending=[];
+  f.context.RegistryPagesTransport={run:(...args)=>new Promise((resolve,reject)=>pending.push({args,resolve,reject}))};
+  const form={tagName:'FORM'}, upload=f.context.rpc('uploadSourceBase',form);
+  assert.deepEqual(pending[0].args,['uploadSourceBase',form,'neosender',KEY]);
+  assert.equal(f.field.value,'');assert.equal(f.calls.length,0);
+  pending[0].resolve({ok:true});assert.equal((await upload).ok,true);
+  const read=f.context.rpc('getSourceBases');f.context.accessEpoch=1;
+  pending[1].resolve({old:true});await assert.rejects(read,/Доступ закрыт/);
+  const revoked=f.context.rpc('getAppBootstrap');pending[2].reject(new Error('[LINK_ACCESS_REQUIRED] Отозван доступ'));
+  await assert.rejects(revoked,/LINK_ACCESS_REQUIRED/);assert.equal(f.locks.length,1);assert.equal(f.context.networkPending,0);
+});
+
+test('Pages reads the fragment only from its own public entry, without Google URL lookups',async()=>{
+  const url='https://seainkk.github.io',window={location:new URL(url+'/-/app.html')};
+  const c=vm.createContext({window,RegistryPagesTransport:{},Promise});
+  vm.runInContext(source('sharedKeyFromHash')+'\n'+source('readSharedKey'),c);
+  for(const path of ['/-/','/-/index.html']){
+    window.parent={location:new URL(url+path+'?access_key=ignored#access_key='+KEY)};
+    assert.equal(await c.readSharedKey(),KEY);
+  }
+  for(const address of [url+'/other/#access_key='+KEY,url+'/-/?access_key='+KEY,'https://outside.example/-/#access_key='+KEY]){
+    window.parent={location:new URL(address)};assert.equal(await c.readSharedKey(),null);
+  }
+  window.parent=window;assert.equal(await c.readSharedKey(),null);
+});
+
 test('missing and revoked keys cannot silently continue data requests', async () => {
   const absent = rpcFixture('');
   await assert.rejects(absent.context.rpc('getSourceBases'), /закрытая ссылка/);

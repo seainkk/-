@@ -75,6 +75,16 @@ test('a changed segment, timed-out worker or racing prime cannot publish the old
   assert.throws(()=>r.prepareSegmentCardSnapshot_({segmentId:A}),e=>e.registryCode==='BUSY');
 });
 
+test('a previously scheduled segment can refresh immediately after the card format changes',()=>{
+  const {r,tests,ctx,tick,props}=fixture();
+  tick();tick();assert.equal(r.segmentCardMaintenanceDue_(ctx),null);
+  const key=r.segmentCardMaintenanceKey_('numshield',A), state=JSON.parse(props.getProperty(key));
+  assert.ok(state.next>tests.now);
+  state.schema--;props.setProperty(key,JSON.stringify(state));
+  assert.equal(r.segmentCardMaintenanceDue_(ctx).segmentId,A);
+  tick();assert.equal(r.segmentCardMaintenanceDue_(ctx),null);
+});
+
 test('dirty work arriving during a build survives completion; the original campaign result is not needed',()=>{
   const {r,tests,ctx,tick}=fixture();
   tests.onBuild=(id)=>{if(id===A){tests.now+=1000;r.segmentCardMaintenanceRequest_(ctx,id);}};

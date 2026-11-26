@@ -198,6 +198,26 @@ test('a prepared card predating the manual company workflow is rebuilt before it
   assert.equal(f.dashboard()[segment].prepared,true);
 });
 
+test('opening a prepared first page uses just its authorized first rows and an unchanged background check renews them',()=>{
+  const f=preparedFixture();f.rebuild();
+  const slot=f.c.segmentCardSnapshotSlot_(f.context,segment), receipt=JSON.parse(f.values[slot.key]);
+  const head=f.c.segmentCardSnapshotHeadKey_(slot,receipt), original=f.cache.get(head);
+  let renewals=0;
+  const cache=f.c.CacheService.getScriptCache();
+  f.c.CacheService.getScriptCache=()=>({...cache,put(k,v,ttl){
+    if(k===head){assert.equal(v,original);assert.equal(ttl,21600);renewals++;}
+    cache.put(k,v);
+  }});
+  f.rebuild();assert.equal(renewals,1);
+  const load=f.c.segmentCardSnapshotLoad_;let loads=0;
+  f.c.segmentCardSnapshotLoad_=(...args)=>{loads++;return load(...args);};
+  const result=f.run({prepared:true,limit:2});
+  assert.equal(result.preview,undefined);assert.ok(result.prepared);assert.equal(result.rows.length,2);
+  assert.equal(result.nextOffset,2);assert.equal(loads,0);assert.equal(f.state.diskReads,0);
+  f.run({prepared:true,channel:'telegram'});assert.equal(loads,1);
+  f.state.folderParent='outside';assert.deepEqual(f.dashboard(),{});
+});
+
 test('a cold maintenance build hashes each unique contact once and packs the full snapshot once, even without Apps Script cache',()=>{
   for(const cacheAvailable of [true,false]){
     const f=preparedFixture(), key=f.c.pvKey_, read=f.c.pvCacheRead_, pack=f.c.Utilities.gzip;

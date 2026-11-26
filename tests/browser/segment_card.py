@@ -138,6 +138,14 @@ def main():
         segment.locator('.br-segment-row-name').click()
         page.wait_for_function("backend.pending.some(r=>r.method==='getSegmentContactCard')")
         expect(rows).to_have_count(0)
+        page.evaluate("""() => {
+          backend.omitPreviews=false;
+          const response=api.getSegmentsDashboard({includeAnalysis:false,includeCardPreview:true});
+          window.RegistrySegmentCard.acceptDashboard(response);
+        }""")
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text('both@example.test')
+        expect(page.locator('#sc-status')).to_contain_text('Карточка собрана')
         page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")
         expect(rows).to_have_count(5)
         assert not errors,errors

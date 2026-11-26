@@ -37,7 +37,11 @@
     }
     if(current&&!scoped(current.id,current.data))resetView();
     for(const [id,saved] of firstPages)if(saved.at+pageLifetime<=Date.now()||!scoped(id,saved.page))firstPages.delete(id);
-    for(const [id,page] of Object.entries(data.cardPreviews||{}))if(page?.preview===true&&page.segmentId===id&&scoped(id,page))keepFirst(page);
+    for(const [id,page] of Object.entries(data.cardPreviews||{})){
+      if(page?.preview!==true||page.segmentId!==id||!scoped(id,page))continue;
+      keepFirst(page);
+      if(current?.id===id&&alive(current)&&!current.data&&!current.offset&&!current.query&&current.channel==='all'&&current.owner==='all'&&current.queue==='all')restoreFirst(current);
+    }
   }
   function restoreFirst(s){
     const saved=firstPages.get(s.id);

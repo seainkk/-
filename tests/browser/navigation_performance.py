@@ -13,15 +13,21 @@ def check_browser_history(browser):
     start = 'https://start.example.test/'
     entry = 'https://seainkk.github.io/-/#access_key=' + 'A' * 43
     shell = (ROOT / 'entry/index.html').read_text(encoding='utf-8')
+    adapter = """
+backend.holdMethods=['getAppBootstrap'];
+window.RegistryPagesTransport={run:(method,payload,projectId,accessKey)=>new Promise((resolve,reject)=>{
+  google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).callApp({method,payload,projectId,accessKey});
+})};
+"""
 
     def serve(route):
         url = route.request.url
         if url.startswith(start):
             body = '<a href="' + entry + '">Открыть</a>'
+        elif url == 'https://seainkk.github.io/-/app.html':
+            body = HTML.replace(FIXTURE,FIXTURE+adapter,1)
         elif url.startswith('https://seainkk.github.io/-/'):
             body = shell
-        elif url.startswith('https://script.google.com/macros/s/'):
-            body = HTML
         else:
             route.abort()
             return
@@ -32,11 +38,19 @@ def check_browser_history(browser):
     try:
         host.goto(start)
         host.get_by_role('link', name='Открыть').click()
-        expect(host.locator('body')).to_have_attribute('data-state', 'ready')
         app = host.frame_locator('#entry-frame-host iframe')
+        expect(app.locator('#br-view-segments')).to_be_enabled()
+        expect(app.locator('.br-main')).to_be_hidden()
+        expect(host.locator('body')).to_have_attribute('data-state', 'loading')
         app.locator('#br-view-segments').click()
+        frame = host.frame(url='https://seainkk.github.io/-/app.html')
+        frame.wait_for_function("backend.pending.some(p=>p.method==='getAppBootstrap')")
+        assert not frame.evaluate("backend.calls.some(p=>['getSegmentsDashboard','getSourceBases'].includes(p.name))")
+        frame.evaluate("backend.holdMethods=[];releaseRpc('getAppBootstrap')")
+        expect(host.locator('body')).to_have_attribute('data-state', 'ready')
         row = app.locator('[data-segment="existing-segment"]')
         expand_segment_actions(row)
+        assert not frame.evaluate("backend.calls.some(p=>p.name==='getSourceBases')")
         row.get_by_role('button', name='Выбрать готовый источник').click()
         host.wait_for_function('history.state?.basesRegistryBack===true')
         host.go_back(wait_until='commit')
@@ -45,6 +59,7 @@ def check_browser_history(browser):
         host.wait_for_function('history.state?.basesRegistryBack===true')
         host.go_back(wait_until='commit')
         expect(app.locator('#br-sources-view')).to_be_visible()
+        frame.wait_for_function("backend.calls.some(p=>p.name==='getSourceBases')")
         expect(app.locator('#br-action-back')).to_be_hidden()
         assert host.url == entry
         host.go_back(wait_until='commit')

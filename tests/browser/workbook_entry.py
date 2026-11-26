@@ -1,4 +1,4 @@
-"""Exercise the native Sheets dialog and its cross-origin Pages and Apps Script frames offline."""
+"""Exercise the native Sheets dialog and its embedded Pages app offline."""
 from pathlib import Path
 import re
 import sys
@@ -57,9 +57,7 @@ def main():
         contents = {
             'docs.google.com': frame('https://dialog-script.googleusercontent.com/native/' + action, True),
             'dialog-script.googleusercontent.com': frame((pages_url + action).replace('&','&amp;')),
-            'seainkk.github.io': pages,
-            'script.google.com': frame('https://app-script.googleusercontent.com/leaf', True),
-            'app-script.googleusercontent.com': leaf,
+            'seainkk.github.io': leaf if request.path == '/-/app.html' else pages,
         }
         if host in contents and route.request.resource_type == 'document':
             route.fulfill(status=200, content_type='text/html; charset=utf-8', body=contents[host])
@@ -78,7 +76,7 @@ def main():
             dialog = page.frame_locator('iframe').frame_locator('iframe')
             dialog.locator('#entry-private-link').fill('https://seainkk.github.io/-/#access_key=' + 'A'*43)
             dialog.locator('button[type=submit]').click()
-            app = dialog.frame_locator('#entry-frame-host iframe').frame_locator('iframe')
+            app = dialog.frame_locator('#entry-frame-host iframe')
             expect(app.locator('output')).to_have_text('synthetic_company_book/neosender/' + action + '/false')
             expect(dialog.locator('body')).to_have_attribute('data-state', 'ready')
             if label:
