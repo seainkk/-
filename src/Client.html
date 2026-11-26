@@ -178,7 +178,10 @@
   }
   function projectSwitchBlocked(){return busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading||recoveringOrigins||window.RegistryProject?.hasPending?.()||formIsOpen();}
   async function startSharedAccess(switching){
-    if(switching!==true&&requesting())return;lockAccess(null);const startupEpoch=accessEpoch;busy=true;renderAccess();updateControls();
+    if(switching!==true&&requesting())return;lockAccess(null);const startupEpoch=accessEpoch;busy=true;
+    const initialView=window.takeRegistryStartupView?.();
+    if(initialView&&initialView!==activeView)setView(initialView,{cached:true});
+    renderAccess();updateControls();
     if(globalThis.RegistryPagesTransport)postEntryMessage({type:'bases-registry-shell'});
     if(activeView==='sources')postEntryMessage({type:'bases-registry-catalog-hint',epoch:startupEpoch});
     try{const key=await readSharedKey();if(startupEpoch!==accessEpoch)return;if(!key)throw new Error('[LINK_ACCESS_REQUIRED] В ссылке нет ключа доступа. Откройте полную закрытую ссылку от владельца сервиса.');accessKey=key;const epoch=accessEpoch;

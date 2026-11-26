@@ -8,12 +8,14 @@ const assets = ['index.html', 'favicon.png'];
 
 export async function buildPages(destination) {
   const source = path.join(root, 'src');
-  const [shell, transport] = await Promise.all([
-    buildRegistryShell(source), readFile(path.join(source, 'PagesTransport.html'), 'utf8')
+  const [shell, transport, navigation] = await Promise.all([
+    buildRegistryShell(source), readFile(path.join(source, 'PagesTransport.html'), 'utf8'),
+    readFile(path.join(source, 'PagesNavigation.html'), 'utf8')
   ]);
+  const headEnd = shell.indexOf('</head>');
   const firstScript = shell.search(/<script\b/i);
-  if (firstScript < 0 || /<\?/.test(transport)) throw new Error('Не удалось собрать статический интерфейс Pages.');
-  const app = shell.slice(0, firstScript) + transport + '\n' + shell.slice(firstScript);
+  if (headEnd < 0 || firstScript < headEnd || /<\?/.test(transport + navigation)) throw new Error('Не удалось собрать статический интерфейс Pages.');
+  const app = shell.slice(0, headEnd) + navigation + '\n' + shell.slice(headEnd, firstScript) + transport + '\n' + shell.slice(firstScript);
   await mkdir(destination, { recursive: true });
   const publicFiles = new Set([...assets, 'app.html']);
   if ((await readdir(destination)).some(name => !publicFiles.has(name))) {

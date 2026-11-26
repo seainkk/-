@@ -1,4 +1,5 @@
 """Held-request navigation regressions. Local fakes only; no provider calls."""
+import json
 import sys
 sys.dont_write_bytecode = True
 
@@ -13,19 +14,43 @@ def check_browser_history(browser):
     start = 'https://start.example.test/'
     entry = 'https://seainkk.github.io/-/#access_key=' + 'A' * 43
     shell = (ROOT / 'entry/index.html').read_text(encoding='utf-8')
+    navigation = (ROOT / 'src/PagesNavigation.html').read_text(encoding='utf-8')
     adapter = """
 backend.holdMethods=['getAppBootstrap'];
 window.RegistryPagesTransport={run:(method,payload,projectId,accessKey)=>new Promise((resolve,reject)=>{
   google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).callApp({method,payload,projectId,accessKey});
 })};
 """
+    # The worker streams the real header and waits for a trusted click before
+    # delivering the remainder. A fully fulfilled route skips this parser state.
+    app_html = HTML.replace('</head>', navigation + '</head>').replace(FIXTURE, FIXTURE + adapter, 1)
+    header, end, rest = app_html.partition('</header>')
+    assert end
+    worker = """
+self.addEventListener('install',event=>event.waitUntil(self.skipWaiting()));
+self.addEventListener('activate',event=>event.waitUntil(self.clients.claim()));
+let resume;
+self.addEventListener('fetch',event=>{
+  if(new URL(event.request.url).pathname!=='/-/app.html')return;
+  const text=new TextEncoder();
+  const stream=new ReadableStream({start(controller){
+    controller.enqueue(text.encode(%s));
+    resume=()=>{controller.enqueue(text.encode(%s));controller.close();resume=null;};
+  }});
+  event.respondWith(new Response(stream,{headers:{'Content-Type':'text/html; charset=utf-8'}}));
+});
+self.addEventListener('message',event=>{if(event.data==='continue')resume?.();});
+""" % (json.dumps(header + end), json.dumps(rest))
 
     def serve(route):
         url = route.request.url
         if url.startswith(start):
             body = '<a href="' + entry + '">Открыть</a>'
-        elif url == 'https://seainkk.github.io/-/app.html':
-            body = HTML.replace(FIXTURE,FIXTURE+adapter,1)
+        elif url.endswith('/test-stream-worker.js'):
+            route.fulfill(status=200,content_type='text/javascript',body=worker)
+            return
+        elif url.endswith('/test-worker-registration.html'):
+            body = "<script>navigator.serviceWorker.register('./test-stream-worker.js');</script>"
         elif url.startswith('https://seainkk.github.io/-/'):
             body = shell
         else:
@@ -36,15 +61,25 @@ window.RegistryPagesTransport={run:(method,payload,projectId,accessKey)=>new Pro
     context.route('**/*', serve)
     host = context.new_page()
     try:
+        host.goto('https://seainkk.github.io/-/test-worker-registration.html')
+        host.wait_for_function('!!navigator.serviceWorker.controller')
         host.goto(start)
-        host.get_by_role('link', name='Открыть').click()
+        host.get_by_role('link', name='Открыть').click(no_wait_after=True)
         app = host.frame_locator('#entry-frame-host iframe')
-        expect(app.locator('#br-view-segments')).to_be_enabled()
+        segments = app.locator('#br-view-segments')
+        expect(segments).to_be_enabled()
+        frame = host.frame(url='https://seainkk.github.io/-/app.html')
+        assert frame.evaluate("!document.querySelector('#bases-registry-app').dataset.access && typeof backend==='undefined'")
+        segments.click()
+        expect(segments).to_have_attribute('aria-pressed','true')
+        app.locator('#br-view-analytics').click()
+        expect(segments).to_have_attribute('aria-pressed','false')
+        segments.click()
+        host.evaluate("navigator.serviceWorker.controller.postMessage('continue')")
+        frame.wait_for_function("typeof backend!=='undefined' && backend.pending.some(p=>p.method==='getAppBootstrap')")
+        expect(segments).to_have_attribute('aria-pressed','true')
         expect(app.locator('.br-main')).to_be_hidden()
         expect(host.locator('body')).to_have_attribute('data-state', 'loading')
-        app.locator('#br-view-segments').click()
-        frame = host.frame(url='https://seainkk.github.io/-/app.html')
-        frame.wait_for_function("backend.pending.some(p=>p.method==='getAppBootstrap')")
         assert not frame.evaluate("backend.calls.some(p=>['getSegmentsDashboard','getSourceBases'].includes(p.name))")
         frame.evaluate("backend.holdMethods=[];releaseRpc('getAppBootstrap')")
         expect(host.locator('body')).to_have_attribute('data-state', 'ready')
