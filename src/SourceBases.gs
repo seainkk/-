@@ -63,11 +63,45 @@ function getSourceBases_() {
   });
 }
 
+function sourceDirectoryResponse_(context, state, sourceId, files, complete) {
+  var items = (files || []).map(function (f) { return {id:f.id,name:f.name,workbook:f.workbook === true}; });
+  items.sort(function (a,b) { return byName_(a,b) || a.id.localeCompare(b.id); });
+  return {state:state,sourceId:sourceId || null,checkedAt:Date.now(),complete:complete === true,items:items,
+    revision:state === 'ready' ? digest_(JSON.stringify([context.rootId,sourceId,complete,items])) : null};
+}
+
+/** Full shared catalogue of file names. No service-sheet reads, synchronization or write lock. */
+function getSourceDirectory_(request) {
+  return api_(function () {
+    var context = authorize_();
+    if (request !== undefined && Object.keys(object_(request)).length) fail_('INVALID_REQUEST','Область исходных баз задаётся настройками реестра.');
+    var storage = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
+    try {
+      var binding = sourceBasesSource_(context);
+      if (binding.state !== 'ready') return sourceDirectoryResponse_(context,binding.state);
+      var files = sourceBasesDiscover_(context,binding.folder,true);
+      var fresh = authorize_();
+      if (fresh.rootId !== context.rootId || (fresh.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId) !== storage)
+        fail_('SOURCE_CHANGED','Привязка реестра изменилась. Обновите список.');
+      return sourceDirectoryResponse_(fresh,'ready',binding.source.id,files,true);
+    } catch (error) {
+      if (error.registryCode === 'SOURCE_LIMIT') return sourceDirectoryResponse_(context,'limit');
+      if (error.registryCode) throw error;
+      return sourceDirectoryResponse_(context,'unavailable');
+    }
+  });
+}
+
 // The preview shares only live names of direct children. A single bounded Drive
 // page proves that the sources folder itself belongs to the authorised root.
 // Custom nested bindings, large results and subfolders are filled by the full
 // catalogue already loading in parallel, without delaying entry for a tree scan.
 function sourceBasesStartupPreview_(context, root) {
+  var lists = sourceBasesStartupLists_(context,root,{includeSourcePreview:true});
+  return lists && lists.catalogPreview || null;
+}
+
+function sourceBasesStartupLists_(context, root, options) {
   if (typeof Drive.Files.list !== 'function') return null;
   var props = context.properties;
   var sourceId = (props.getProperty('SOURCE_BASES_FOLDER_ID') || '').trim() || REGISTRY_CONFIG.defaultSourceBasesFolderId;
@@ -94,24 +128,33 @@ function sourceBasesStartupPreview_(context, root) {
   if (fresh.rootId !== context.rootId ||
       ((fresh.properties.getProperty('SOURCE_BASES_FOLDER_ID') || '').trim() || REGISTRY_CONFIG.defaultSourceBasesFolderId) !== sourceId ||
       (fresh.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId) !== storageId) return null;
-  var types = {};
-  try {
-    var saved = CacheService.getScriptCache().get(sourceBasesPreviewTypesKey_(context.rootId, sourceId, storageId));
-    types = JSON.parse(saved) || {};
-  } catch (unavailable) { /* The list still works before types are known. */ }
-  var items = [];
+  var types = {}, files = [];
+  if (options.includeSourcePreview) {
+    try {
+      var saved = CacheService.getScriptCache().get(sourceBasesPreviewTypesKey_(context.rootId, sourceId, storageId));
+      types = JSON.parse(saved) || {};
+    } catch (unavailable) { /* The list still works before types are known. */ }
+  }
   page.files.forEach(function (item) {
     if (!liveChild(item, sourceId) || !/^[\w-]{10,200}$/.test(item.id) || item.id === storageId ||
         !item.mimeType || item.mimeType === folderMime || typeof item.name !== 'string' || !item.name) return;
-    var bits = types[item.id], contents = [];
-    if (bits === 1 || bits === 3) contents.push('companies');
-    if (bits === 2 || bits === 3) contents.push('lpr');
-    items.push({name:item.name, contents:contents});
+    files.push({id:item.id,name:item.name,workbook:item.mimeType === REGISTRY_CONFIG.spreadsheetMime});
   });
   var partial = !!page.nextPageToken || page.files.some(function (item) {
     return liveChild(item,sourceId) && item.mimeType === folderMime;
   });
-  return items.length ? {items:items.sort(byName_), checkedAt:Date.now(), partial:partial} : null;
+  var result = {};
+  if (options.includeSourceDirectory) result.sourceDirectory = sourceDirectoryResponse_(context,'ready',sourceId,files,!partial);
+  if (options.includeSourcePreview && files.length) {
+    var items = files.sort(byName_).map(function (file) {
+      var bits = types[file.id], contents = [];
+      if (bits === 1 || bits === 3) contents.push('companies');
+      if (bits === 2 || bits === 3) contents.push('lpr');
+      return {name:file.name,contents:contents};
+    });
+    result.catalogPreview = {items:items,checkedAt:Date.now(),partial:partial};
+  }
+  return result;
 }
 
 function sourceBasesPreviewTypesKey_(rootId, sourceId, storageId) {
@@ -225,13 +268,13 @@ function sourceBasesSource_(context) {
   return { state: 'ready', source: { id: folder.getId(), name: folder.getName(), url: segmentFolderUrl_(folder.getId()) }, folder: folder };
 }
 
-function sourceBasesDiscover_(context, source) {
+function sourceBasesDiscover_(context, source, namesOnly) {
   var files;
   if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.list === 'function' && typeof Drive.Files.get === 'function') {
-    files = sourceBasesDriveListing_(context, source);
+    files = sourceBasesDriveListing_(context, source, namesOnly);
   }
   // A missing files array is not sufficient evidence that a folder is empty.
-  if (!files) files = sourceBasesDiscoverLegacy_(context, source);
+  if (!files) files = sourceBasesDiscoverLegacy_(context, source, namesOnly);
   var current = authorize_(), binding = sourceBasesSource_(current);
   if (current.rootId !== context.rootId || binding.state !== 'ready' || binding.folder.getId() !== source.getId()) {
     fail_('SOURCE_CHANGED', 'Папка исходных баз изменилась. Обновите реестр.');
@@ -240,7 +283,7 @@ function sourceBasesDiscover_(context, source) {
 }
 
 /** One listing returns both metadata and actual parent IDs for every item on the page. */
-function sourceBasesDriveListing_(context, source) {
+function sourceBasesDriveListing_(context, source, namesOnly) {
   var sourceId = id_(source.getId()), storageId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
   var root = Drive.Files.get(sourceId, { fields:'id,mimeType,trashed,driveId', supportsAllDrives:true });
   if (!root || root.id !== sourceId || root.trashed || root.mimeType !== 'application/vnd.google-apps.folder') {
@@ -260,7 +303,7 @@ function sourceBasesDriveListing_(context, source) {
       var group = level.slice(start, start + 20), parents = new Set(group), tokens = new Set();
       checkFolders(group);
       var query = { q:"trashed = false and (" + group.map(function (id) { return "'" + id + "' in parents"; }).join(' or ') + ')',
-        pageSize:1000, fields:'nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,parents,trashed)',
+        pageSize:1000, fields:namesOnly ? 'nextPageToken,incompleteSearch,files(id,name,mimeType,parents,trashed)' : 'nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,parents,trashed)',
         supportsAllDrives:true, includeItemsFromAllDrives:true, corpora:root.driveId ? 'drive' : 'user' };
       if (root.driveId) query.driveId = root.driveId;
       do {
@@ -281,6 +324,7 @@ function sourceBasesDriveListing_(context, source) {
             folders.add(id); children.push(id);
           } else if (!files.has(id)) {
             if (files.size >= REGISTRY_CONFIG.maxSourceBaseRows) fail_('SOURCE_LIMIT','Исходных баз больше 5000. Список не был сохранён частично.');
+            if (namesOnly) { files.set(id,{id:id,name:item.name,workbook:item.mimeType === REGISTRY_CONFIG.spreadsheetMime}); return; }
             var info = item.webViewLink ? sourceBaseMetadataValues_(id,item.name,item.mimeType,item.webViewLink) :
               sourceBaseMetadata_(sourceBasesFile_(context,source,id));
             files.set(id,info);
@@ -298,7 +342,7 @@ function sourceBasesDriveListing_(context, source) {
   return Array.from(files.values()).sort(byName_);
 }
 
-function sourceBasesDiscoverLegacy_(context, source) {
+function sourceBasesDiscoverLegacy_(context, source, namesOnly) {
   var files = [], seenFiles = Object.create(null), seenFolders = Object.create(null), folderCount = 0;
   var sourceId = source.getId();
   var storageId = context.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId;
@@ -316,7 +360,7 @@ function sourceBasesDiscoverLegacy_(context, source) {
       var mimeType = file.getMimeType();
       if (mimeType === 'application/vnd.google-apps.folder') continue;
       seenFiles[fileId] = true;
-      files.push(sourceBaseMetadata_(file, fileId, mimeType));
+      files.push(namesOnly ? {id:fileId,name:file.getName(),workbook:mimeType === REGISTRY_CONFIG.spreadsheetMime} : sourceBaseMetadata_(file, fileId, mimeType));
       if (files.length > REGISTRY_CONFIG.maxSourceBaseRows) fail_('SOURCE_LIMIT', 'Исходных баз больше 5000. Список не был сохранён частично.');
     }
     var children = folder.getFolders();

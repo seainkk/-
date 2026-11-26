@@ -48,6 +48,70 @@ test('app startup rejects a trashed registry rather than showing stale project m
   assert.throws(() => context.getAppBootstrap(), /NOT_FOUND/);
 });
 
+function directorySetup() {
+  const {context}=setup(), source=context.REGISTRY_CONFIG.defaultSegmentsFolderId, mime='application/vnd.google-apps.folder';
+  vm.runInContext(readFileSync(new URL('../src/RegistryProjects.gs',import.meta.url),'utf8'),context);
+  const props={ROOT_FOLDER_ID:ROOT,SHARED_ACCESS_KEY_SHA256:TEST_ACCESS_HASH};
+  const ids=['segment_kitchens','segment_web_studios','segment_neo_only','segment_unassigned'];
+  for(const [i,id] of ids.slice(0,3).entries()) props['REGISTRY_SEGMENT_PROJECT_'+id]=JSON.stringify({rootId:ROOT,projectId:i===2?'neosender':'numshield'});
+  props['SEGMENT_CATEGORY_'+ids[0]]=JSON.stringify({category:'partners'});
+  const storage={getProperties:()=>({...props}),getProperty:k=>props[k]||null};
+  context.PropertiesService={getScriptProperties:()=>storage};
+  const folder=(id,name,parent)=>({id,name,parents:[parent],mimeType:mime,trashed:false});
+  const page={files:[folder(source,'Аутричи',ROOT),...ids.map((id,i)=>folder(id,['Кухни','Веб-студии','Сегмент другого проекта','Без проекта'][i],source)),
+    folder('nested_folder_id','Вложенная папка',ids[0]),{...folder('working_file_id','Таблица',source),mimeType:'application/vnd.google-apps.spreadsheet'},
+    {...folder('removed_segment','Удалён',source),trashed:true},null]};
+  let lists=0;
+  context.Drive={Files:{get(id,options){assert.equal(id,ROOT);return {...folder(ROOT,'Реестр','parent'),driveId:'team_drive'};},
+    list(options){lists++;assert.equal(options.driveId,'team_drive');assert.match(options.q,/mimeType='application\/vnd.google-apps.folder'/);
+      assert.doesNotMatch(options.fields,/appProperties|description|permissions/);return page;}}};
+  const call=(method='getSegmentDirectory',payload={},projectId='numshield',accessKey=TEST_ACCESS_KEY)=>JSON.parse(JSON.stringify(context.callApp({method,payload,projectId,accessKey})));
+  return {context,page,props,source,ids,call,folder,lists:()=>lists};
+}
+
+test('startup and standalone segment directory return only current project folder metadata with one bounded list each',()=>{
+  const f=directorySetup(), start=f.call('getAppBootstrap',{includeSegmentDirectory:true}).segmentDirectory;
+  assert.equal(f.lists(),1);assert.equal(start.state,'ready');assert.equal(start.projectId,'numshield');assert.equal(start.sourceId,f.source);
+  assert.equal(start.complete,true);assert.equal(typeof start.checkedAt,'number');assert.match(start.revision,/^[\w-]{43}$/);
+  assert.deepEqual(start.items,[{id:f.ids[1],name:'Веб-студии',category:'partners'},{id:f.ids[0],name:'Кухни',category:'partners'}]);
+  assert.equal(f.call().revision,start.revision);assert.equal(f.lists(),2);
+  const other=f.call('getSegmentDirectory',{},'neosender');
+  assert.deepEqual(other.items,[{id:f.ids[2],name:'Сегмент другого проекта',category:'clients'}]);assert.notEqual(other.revision,start.revision);
+  f.page.files.find(file=>file?.id===f.ids[0]).name='Новое имя';
+  assert.notEqual(f.call().revision,start.revision);
+  delete f.props['REGISTRY_SEGMENT_PROJECT_'+f.ids[1]];
+  assert.deepEqual(f.call().items.map(item=>item.id),[f.ids[0]]);
+  const before=f.lists();assert.throws(()=>f.call('getSegmentDirectory',{},'numshield','invalid'),/LINK_ACCESS_REQUIRED/);
+  assert.throws(()=>f.call('getSegmentDirectory',{sourceId:'another_folder'}),/INVALID_REQUEST/);
+  assert.throws(()=>f.call('getAppBootstrap',{includeSegmentDirectory:'true'}),/INVALID_REQUEST/);assert.equal(f.lists(),before);
+});
+
+test('a partial or failed directory cannot erase the catalogue, and a changed/revoked root cannot expose names',()=>{
+  const f=directorySetup();
+  f.page.nextPageToken='more';assert.equal(f.call().complete,false);
+  f.page.incompleteSearch=true;assert.deepEqual(f.call().items,[]);assert.equal(f.call().state,'unavailable');
+  delete f.page.incompleteSearch;delete f.page.nextPageToken;
+  f.context.Drive.Files.list=()=>{f.props.ROOT_FOLDER_ID='different_root';return f.page;};
+  assert.throws(()=>f.call(),/SOURCE_CHANGED/);
+  f.props.ROOT_FOLDER_ID=ROOT;
+  f.context.Drive.Files.list=()=>{f.props.SHARED_ACCESS_KEY_SHA256='a'.repeat(43);return f.page;};
+  assert.throws(()=>f.call(),/LINK_ACCESS_REQUIRED/);
+});
+
+test('a moved or ambiguous source fails closed; a legacy named source lists only its own direct folders',()=>{
+  const f=directorySetup(), fallback='legacy_source_folder';
+  const target=f.folder(fallback,'Аутричи',ROOT), first=f.folder(f.ids[0],'Наследованный сегмент',fallback);
+  f.page.files[0].parents=['other_root'];
+  f.context.segmentMetadataBinding_=()=>({state:'source_outside_registry'});
+  assert.deepEqual(f.call().items,[]);assert.equal(f.call().state,'source_outside_registry');
+  f.context.segmentMetadataBinding_=()=>({state:'source_ambiguous'});assert.equal(f.call().state,'source_ambiguous');
+  f.context.segmentMetadataBinding_=()=>({state:'ready',folder:{getId:()=>fallback,isTrashed:()=>false}});
+  f.context.insideRegistry_=()=>true;
+  f.context.Drive.Files.list=q=>q.q.includes("'"+fallback+"' in parents")?{files:[first,...f.page.files]}:{files:[target,...f.page.files]};
+  const result=f.call();assert.equal(result.sourceId,fallback);assert.deepEqual(result.items.map(item=>item.name),[first.name]);
+  f.context.insideRegistry_=()=>false;assert.equal(f.call().state,'source_outside_registry');
+});
+
 test('startup reads the exact live Drive folder and its title in one metadata request', () => {
   const { context, calls } = setup();
   const metadata = {id:ROOT, name:'Общие базы', mimeType:'application/vnd.google-apps.folder', trashed:false};
@@ -137,4 +201,21 @@ test('startup preview fails closed on changed bindings and allows entry when lis
   assert.throws(denied.read,/LINK_ACCESS_REQUIRED/);
   assert.equal(denied.gets.length+denied.lists.length,0);
   assert.throws(()=>f.context.getAppBootstrap({sourceId:f.source}),/INVALID_REQUEST/);
+});
+
+test('one verified Drive page supplies source directory IDs and the legacy name-only preview, distinguishing empty, partial and unavailable',()=>{
+  const f=previewSetup(), read=()=>JSON.parse(JSON.stringify(f.context.getAppBootstrap({includeSourceDirectory:true,includeSourcePreview:true})));
+  let result=read();
+  assert.deepEqual(result.sourceDirectory.items,[{id:f.file,name:'Новое название',workbook:false}]);
+  assert.deepEqual(result.catalogPreview.items,[{name:'Новое название',contents:[]}]);
+  assert.equal(f.lists.length,1);assert.equal(result.sourceDirectory.sourceId,f.source);assert.equal(result.sourceDirectory.complete,false);
+  const first=result.sourceDirectory.revision;
+  f.page.files.find(item=>item.id===f.file).mimeType=f.context.REGISTRY_CONFIG.spreadsheetMime;
+  result=read();assert.equal(result.sourceDirectory.items[0].workbook,true);assert.notEqual(result.sourceDirectory.revision,first);
+  f.page.files=f.page.files.filter(item=>item.id!=='child_folder_id');
+  assert.equal(read().sourceDirectory.complete,true);assert.notEqual(read().sourceDirectory.revision,first);
+  f.page.files=f.page.files.filter(item=>item.id!==f.file);
+  result=read();assert.deepEqual(result.sourceDirectory.items,[]);assert.equal(result.sourceDirectory.state,'ready');assert.equal(result.sourceDirectory.complete,true);
+  assert.equal(result.catalogPreview,undefined);assert.equal(typeof result.sourceDirectory.revision,'string');
+  f.page.incompleteSearch=true;result=read();assert.equal(result.sourceDirectory.state,'unavailable');assert.equal(result.sourceDirectory.complete,false);assert.equal(result.sourceDirectory.revision,null);
 });

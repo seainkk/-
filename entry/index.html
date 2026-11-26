@@ -4,6 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <!-- directory preconnect -->
+  <script>
+  /* directory reader bundle */
+  const directoryProject = "";
+  (() => {
+    if(!directoryProject||!window.RegistryDirectoryReader||window.location.origin!=='https://seainkk.github.io'||
+       !('credentialless' in HTMLIFrameElement.prototype)||new URL(window.location.href).searchParams.has('validate'))return;
+    const key=window.location.hash.match(/^#access_key=([\w-]{43})$/)?.[1];
+    if(!key)return;
+    let project='numshield';
+    try{if(window.localStorage.getItem('registry.activeProject')==='neosender')project='neosender';}catch{}
+    const controller=new AbortController();
+    const promise=window.RegistryDirectoryReader.read(directoryProject,key,project,controller.signal).catch(()=>({}));
+    window.takeEntryDirectoryRead=(activeKey,activeProject)=>{
+      delete window.takeEntryDirectoryRead;
+      if(activeKey===key&&activeProject===project)return {controller,promise};
+      controller.abort();return null;
+    };
+  })();
+  </script>
   <title>Центр мультиканального аутрича</title>
   <link rel="icon" type="image/png" sizes="64x64" href="./favicon.png">
   <style>
@@ -20,10 +40,21 @@
     #entry-validation-access{margin:12px 0}
     #entry-validation-access label{display:block;font-weight:600}
     #entry-validation-access input{display:block;box-sizing:border-box;width:100%;margin:6px 0 14px;padding:9px;border:1px solid var(--line);border-radius:8px;font:inherit}
+    body[data-directory-open=true] .entry-bar{display:flex}
+    body[data-directory-open=true] #entry-frame-host{position:fixed;inset:0;visibility:hidden;pointer-events:none}
+    #entry-directory-nav{display:flex;gap:8px;max-width:1200px;margin:18px auto;padding:0 24px}
+    #entry-directory-nav button{background:var(--soft);color:var(--ink)}
+    #entry-directory-nav [aria-pressed=true]{background:var(--blue-soft);color:var(--blue)}
+    #entry-preview-list button{border:0;background:transparent;padding:2px 0;text-align:left;color:var(--ink);font-weight:500}
+    #entry-preview-list button:hover{text-decoration:underline;color:var(--blue)}
   </style>
 </head>
 <body data-state="locked">
   <header class="entry-bar"><div class="entry-brand"><span class="entry-mark" aria-hidden="true"></span><span class="entry-wordmark">Центр <b>мультиканального аутрича</b></span></div></header>
+  <nav id="entry-directory-nav" aria-label="Разделы сервиса" hidden>
+    <button id="entry-view-sources" type="button" aria-pressed="true">Общий каталог</button>
+    <button id="entry-view-segments" type="button" aria-pressed="false">Сегменты</button>
+  </nav>
   <main id="entry-card" class="entry-card" aria-labelledby="entry-title">
     <span id="entry-spinner" class="entry-spinner" aria-hidden="true" hidden></span>
     <h1 id="entry-title">Для входа нужна закрытая ссылка</h1>
@@ -58,6 +89,117 @@
     let appWindow=null,appOrigin='',shellLoaded=false,canBack=false,backArmed=false,releasingBack=false;
     const catalogSlot='outreach.catalog.v1',catalogLifetime=86400000;
     let savedCatalog=null,deviceKey=null,catalogWrite=0,catalogReceived=false;
+    let directory=null,shown=null;
+
+    function handoff(){
+      if(directory)directory.front=false;
+      document.body.dataset.directoryOpen='false';$('entry-directory-nav').hidden=true;
+      shown=null;$('entry-preview').hidden=true;$('entry-preview-list').replaceChildren();
+    }
+    function releaseView(s){
+      if(!s.front||s.epoch===null||s.explicit&&!s.viewAck)return;
+      if(shown?.kind==='device'){if(s.deviceAck===shown.at)handoff();return;}
+      if(shown&&s.accepted[shown.kind]!==shown.at)return;
+      handoff();
+    }
+    function sendFast(s,type,fields){
+      if(directory!==s||s.epoch===null)return;
+      s.frame.contentWindow.postMessage({type:'bases-registry-fast-'+type,epoch:s.epoch,projectId:s.project,...fields},APP_ORIGIN);
+    }
+    function forward(s){
+      if(directory!==s||s.epoch===null)return;
+      if(s.explicit&&s.sentView!==s.viewSerial){s.sentView=s.viewSerial;sendFast(s,'view',{kind:s.kind,serial:s.viewSerial});}
+      for(const doc of Object.values(s.docs)){
+        if(doc.expiresAt<=Date.now()||s.sent[doc.kind]===doc.checkedAt)continue;
+        sendFast(s,'directory',{kind:doc.kind,items:doc.items,checkedAt:doc.checkedAt,complete:doc.complete});s.sent[doc.kind]=doc.checkedAt;
+      }
+      if(s.choice&&s.sent[s.kind]&&s.choice.serial!==s.sentChoice){
+        sendFast(s,'open',s.choice);s.sentChoice=s.choice.serial;
+      }
+      releaseView(s);
+    }
+    function renderDirectory(s){
+      if(!s.front||directory!==s)return;
+      document.body.dataset.directoryOpen='true';$('entry-directory-nav').hidden=false;
+      for(const kind of ['sources','segments'])$('entry-view-'+kind).setAttribute('aria-pressed',String(s.kind===kind));
+      const doc=s.docs[s.kind];
+      $('entry-preview-title').textContent=s.kind==='sources'?'Общий каталог':'Сегменты';
+      if(!doc&&s.kind==='sources'&&savedCatalog){renderPreview(savedCatalog);return;}
+      shown=doc?{kind:doc.kind,at:doc.checkedAt}:null;
+      const rows=[];
+      for(const item of doc?.items||[]){
+        const row=document.createElement('li'),button=document.createElement('button');
+        button.type='button';button.textContent=item.name;button.dataset.directoryKind=s.kind;button.dataset.directoryId=item.id;
+        button.addEventListener('click',()=>{
+          if(directory!==s||!s.front||s.docs[s.kind]!==doc||doc.expiresAt<=Date.now())return;
+          s.choice={kind:s.kind,id:item.id,serial:++s.serial};forward(s);
+        });
+        row.append(button);
+        if(item.category){const detail=document.createElement('small');detail.textContent=item.category==='partners'?' · Партнерка':' · Клиенты';row.append(detail);}
+        rows.push(row);
+      }
+      $('entry-preview-list').replaceChildren(...rows);
+      const stamp=doc?new Date(doc.checkedAt).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК':'';
+      $('entry-preview-time').textContent=doc?(rows.length?'Список на ':'Пустой список на ')+stamp:'';
+      $('entry-card').hidden=true;$('entry-preview').hidden=false;
+    }
+    function changeDirectory(kind){
+      const s=directory;if(!s?.front||s.kind===kind)return;
+      s.kind=kind;s.explicit=true;s.viewAck=false;s.choice=null;s.viewSerial=++s.serial;renderDirectory(s);forward(s);
+    }
+    async function loadDirectory(s,first){
+      const generation=++s.generation;
+      s.controller?.abort();
+      const early=first&&window.takeEntryDirectoryRead?.(accessKey,s.project);
+      const controller=s.controller=early?.controller||new AbortController();
+      let docs;
+      try{docs=await (early?.promise||window.RegistryDirectoryReader.read(directoryProject,accessKey,s.project,controller.signal));}catch{return;}
+      if(directory!==s||generation!==s.generation)return;
+      for(const doc of Object.values(docs)){
+        if(doc.expiresAt<=Date.now())continue;
+        s.docs[doc.kind]=doc;
+        s.timers.push(setTimeout(()=>{
+          if(directory!==s||s.docs[doc.kind]!==doc)return;
+          delete s.docs[doc.kind];delete s.sent[doc.kind];delete s.accepted[doc.kind];
+          if(s.choice?.kind===doc.kind)s.choice=null;
+          sendFast(s,'expired',{kind:doc.kind,checkedAt:doc.checkedAt});
+          if(s.front&&s.kind===doc.kind){renderDirectory(s);releaseView(s);}
+        },Math.max(0,doc.expiresAt-Date.now())));
+      }
+      renderDirectory(s);forward(s);
+    }
+    function openDirectory(frame){
+      if(!directoryProject||!window.RegistryDirectoryReader||validationFile)return;
+      let projectId='numshield';
+      try{if(window.localStorage.getItem('registry.activeProject')==='neosender')projectId='neosender';}catch{}
+      const s=directory={frame,project:projectId,epoch:null,front:true,kind:'sources',docs:{},accepted:{},sent:{},timers:[],generation:0,serial:0};
+      renderDirectory(s);void loadDirectory(s,true);
+    }
+    function directoryMessage(msg){
+      const s=directory;if(!s)return;
+      if(msg.type==='bases-registry-directory-scope'){
+        if(!Number.isSafeInteger(msg.epoch)||msg.epoch<0||!['numshield','neosender'].includes(msg.projectId))return;
+        if(s.epoch!==null&&(msg.epoch<s.epoch||msg.epoch===s.epoch&&msg.projectId!==s.project))return;
+        if(msg.epoch===s.epoch)return;
+        const changed=s.project!==msg.projectId;
+        if(s.epoch!==null||changed){s.choice=null;s.explicit=false;s.viewAck=false;handoff();}
+        s.epoch=msg.epoch;s.project=msg.projectId;s.accepted={};s.sent={};
+        if(changed){
+          s.docs={};s.timers.forEach(clearTimeout);s.timers=[];
+          void loadDirectory(s,false);
+        }
+        forward(s);return;
+      }
+      if(msg.epoch!==s.epoch||msg.projectId!==s.project||!['sources','segments'].includes(msg.kind))return;
+      if(msg.type==='bases-registry-fast-viewed'&&msg.serial===s.sentView&&msg.kind===s.kind){
+        s.viewAck=true;if(msg.visible===false){handoff();return;}
+      }else if(msg.type==='bases-registry-fast-presented'&&msg.checkedAt===s.sent[msg.kind]){
+        s.accepted[msg.kind]=msg.checkedAt;
+      }else if(['bases-registry-fast-opened','bases-registry-fast-open-rejected'].includes(msg.type)&&s.choice?.serial===msg.serial&&s.choice.kind===msg.kind&&s.choice.id===msg.id){
+        s.choice=null;handoff();return;
+      }
+      releaseView(s);
+    }
 
     function catalogData(data){
       if(!data||!Array.isArray(data.items)||data.items.length>200||!Number.isSafeInteger(data.checkedAt))return null;
@@ -79,9 +221,11 @@
       return window.crypto.subtle.importKey('raw',raw,'AES-GCM',false,['encrypt','decrypt']);
     }
     function clearPreview(){
-      savedCatalog=null;$('entry-preview').hidden=true;$('entry-preview-list').replaceChildren();$('entry-preview-time').textContent='';
+      savedCatalog=null;shown=null;$('entry-preview').hidden=true;$('entry-preview-list').replaceChildren();$('entry-preview-time').textContent='';
     }
     function renderPreview(data){
+      shown={kind:'device',at:data.checkedAt};
+      $('entry-preview-title').textContent='Общий каталог';
       const rows=data.items.map(item=>{const row=document.createElement('li');row.textContent=item.name;return row;});
       $('entry-preview-list').replaceChildren(...rows);
       const date=new Date(data.checkedAt).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'});
@@ -99,16 +243,16 @@
         const value=JSON.parse(stored),plain=await window.crypto.subtle.decrypt({name:'AES-GCM',iv:un64(value.iv)},cipherKey,un64(value.box));
         if(currentFrame!==frame||catalogReceived)return;
         savedCatalog=catalogData(JSON.parse(new TextDecoder().decode(plain)));
-        if(!savedCatalog)return;
+        if(!savedCatalog||directory?.docs.sources)return;
         if(ready)sendSavedCatalog();
         else if(shellLoaded)frame.contentWindow.postMessage({type:'bases-registry-startup-catalog',...savedCatalog},APP_ORIGIN);
-        else if(document.body.dataset.state==='loading')renderPreview(savedCatalog);
+        else if(document.body.dataset.state==='loading'&&(!directory||directory.front&&directory.kind==='sources'&&!directory.docs.sources))renderPreview(savedCatalog);
       }catch(ignored){/* Storage is optional, including in private browsing. */}
     }
     async function rememberCatalog(input){
       const frame=currentFrame,serial=++catalogWrite;catalogReceived=true;
       const data=catalogData(input);
-      if(!data){clearPreview();try{window.localStorage.removeItem(catalogSlot);}catch(ignored){}return;}
+      if(!data){if(shown?.kind==='device')clearPreview();else savedCatalog=null;try{window.localStorage.removeItem(catalogSlot);}catch(ignored){}return;}
       savedCatalog=data;
       try{
         const key=await deviceKey,iv=window.crypto.getRandomValues(new Uint8Array(12));
@@ -149,6 +293,8 @@
     }
     function clearFrame(releaseBack=false){
       validationOpened=false;
+      if(directory){directory.controller?.abort();directory.timers.forEach(clearTimeout);directory=null;}
+      handoff();
       catalogWrite++;deviceKey=null;catalogReceived=false;clearPreview();
       canBack=false;appWindow=null;appOrigin='';shellLoaded=false;
       if(releaseBack)syncBackEntry();else{backArmed=false;releasingBack=false;}
@@ -178,16 +324,26 @@
       frame.addEventListener('error',offline);
       frame.src=new URL('./app.html',window.location.href).href;currentFrame=frame;$('entry-frame-host').append(frame);
       $('entry-card').hidden=true;$('entry-frame-host').hidden=false;
+      openDirectory(frame);
       void restoreCatalog(frame,key);
       loadingTimer=setTimeout(()=>{if(!ready)offline();},45000);
     }
     window.addEventListener('message',(event)=>{
       if(event.origin!==APP_ORIGIN||!frameSource(event.source)||!event.data||typeof event.data!=='object')return;
       if(ready&&(event.source!==appWindow||event.origin!==appOrigin))return;
+      if(event.data.type==='bases-registry-directory-scope'||typeof event.data.type==='string'&&event.data.type.startsWith('bases-registry-fast-')){
+        directoryMessage(event.data);return;
+      }
+      if(event.data.type==='bases-registry-startup-catalog-presented'){
+        if(shown?.kind==='device'&&shown.at===event.data.checkedAt){
+          if(directory){directory.deviceAck=shown.at;releaseView(directory);}else handoff();
+        }
+        return;
+      }
       if(event.data.type==='bases-registry-shell'){
         if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}
-        shellLoaded=true;$('entry-preview').hidden=true;$('entry-card').hidden=true;
-        if(savedCatalog&&!ready)event.source.postMessage({type:'bases-registry-startup-catalog',...savedCatalog},APP_ORIGIN);
+        shellLoaded=true;$('entry-card').hidden=true;
+        if(savedCatalog&&!ready&&!directory?.docs.sources)event.source.postMessage({type:'bases-registry-startup-catalog',...savedCatalog},APP_ORIGIN);
         return;
       }
       if(event.data.type==='bases-registry-catalog-hint'&&Number.isSafeInteger(event.data.epoch)){
@@ -196,8 +352,10 @@
       }
       if(event.data.type==='bases-registry-ready'){
         appWindow=event.source;appOrigin=event.origin;
-        if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-preview').hidden=true;$('entry-frame-host').hidden=false;
+        if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}ready=true;document.body.dataset.state='ready';$('entry-card').hidden=true;$('entry-frame-host').hidden=false;
+        if(!shown&&!directory?.front)handoff();
         if(event.data.catalogPending)sendSavedCatalog();
+        else if(shown?.kind==='device'&&savedCatalog)event.source.postMessage({type:'bases-registry-startup-catalog',...savedCatalog},APP_ORIGIN);
         if(validationFile&&!validationOpened){
           const message={type:'bases-registry-open-validation',id:validationFile};
           if(action)message.workbookAction=action;
@@ -226,6 +384,8 @@
       if(!validationFile||!key){$('entry-message').textContent='Вставьте полную закрытую ссылку на этот сервис.';return;}
       window.location.hash='access_key='+key;
     });
+    $('entry-view-sources').addEventListener('click',()=>changeDirectory('sources'));
+    $('entry-view-segments').addEventListener('click',()=>changeDirectory('segments'));
     $('entry-retry').addEventListener('click',openEntry);window.addEventListener('hashchange',openEntry);window.addEventListener('popstate',popEntry);
     window.addEventListener('pointerup',syncBackEntry);window.addEventListener('keyup',syncBackEntry);
     window.addEventListener('pagehide',()=>clearFrame());window.addEventListener('pageshow',event=>{if(event.persisted)openEntry();});

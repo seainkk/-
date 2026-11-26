@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function admin() {
+      return get(/databases/$(database)/documents/directoryAdmin/publisher).data;
+    }
+    function publishing() {
+      let a = admin();
+      let p = /databases/$(database)/documents/directoryWrites/$(a.writer);
+      return a.enabled == true && getAfter(p).data.stamp == request.time &&
+        (!exists(p) || get(p).data.stamp != request.time);
+    }
+    function lease(d) {
+      return d.generatedAt is timestamp && d.expiresAt is timestamp &&
+        d.generatedAt <= request.time + duration.value(30,'s') &&
+        d.expiresAt > request.time && d.expiresAt <= d.generatedAt + duration.value(10,'m');
+    }
+    function knownList(id) { return id in ['catalog','segments-numshield','segments-neosender']; }
+    match /directoryWrites/{secret} {
+      allow create, update: if admin().enabled == true && secret == admin().writer &&
+        request.resource.data.keys().hasOnly(['stamp']) && request.resource.data.stamp == request.time;
+    }
+    match /directoryControl/active {
+      allow create, update: if publishing() &&
+        request.resource.data.keys().hasOnly(['verifier','capability','generatedAt','expiresAt']) &&
+        request.resource.data.verifier == admin().verifier &&
+        request.resource.data.capability.matches('^[A-Za-z0-9_-]{43}$') &&
+        lease(request.resource.data) &&
+        (!exists(/databases/$(database)/documents/directoryControl/active) || request.resource.data.generatedAt >= resource.data.generatedAt);
+    }
+    match /directoryViews/{cap}/lists/{id} {
+      function current(gate) {
+        let a = admin();
+        return a.enabled == true && gate.verifier == a.verifier &&
+          gate.capability == cap && request.time < gate.expiresAt;
+      }
+      allow get: if knownList(id) && current(get(/databases/$(database)/documents/directoryControl/active).data) &&
+        request.time < resource.data.expiresAt &&
+        resource.data.generatedAt == get(/databases/$(database)/documents/directoryControl/active).data.generatedAt;
+      allow create, update: if knownList(id) && publishing() &&
+        current(getAfter(/databases/$(database)/documents/directoryControl/active).data) &&
+        request.resource.data.keys().hasOnly(['schema','rowsJson','generatedAt','expiresAt']) &&
+        request.resource.data.schema == 1 && request.resource.data.rowsJson is string &&
+        request.resource.data.rowsJson.size() <= 850000 && lease(request.resource.data) &&
+        request.resource.data.generatedAt == getAfter(/databases/$(database)/documents/directoryControl/active).data.generatedAt &&
+        request.resource.data.expiresAt == getAfter(/databases/$(database)/documents/directoryControl/active).data.expiresAt;
+    }
+  }
+}

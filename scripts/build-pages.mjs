@@ -6,7 +6,8 @@ import { buildRegistryShell } from './deploy.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const assets = ['index.html', 'favicon.png'];
 
-export async function buildPages(destination) {
+export async function buildPages(destination, firebaseProject = process.env.FIREBASE_DIRECTORY_PROJECT || '') {
+  if (firebaseProject && !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(firebaseProject)) throw new Error('Некорректный идентификатор проекта Firebase.');
   const source = path.join(root, 'src');
   const [shell, transport, navigation] = await Promise.all([
     buildRegistryShell(source), readFile(path.join(source, 'PagesTransport.html'), 'utf8'),
@@ -21,8 +22,14 @@ export async function buildPages(destination) {
   if ((await readdir(destination)).some(name => !publicFiles.has(name))) {
     throw new Error('Для публикации нужна отдельная папка только с файлами интерфейса.');
   }
+  const entry = path.join(root,'entry');
+  const [index,reader] = await Promise.all([readFile(path.join(entry,'index.html'),'utf8'),readFile(path.join(entry,'directory.js'),'utf8')]);
   await Promise.all([
-    ...assets.map(name => copyFile(path.join(root, 'entry', name), path.join(destination, name))),
+    writeFile(path.join(destination,'index.html'),index
+      .replace('<!-- directory preconnect -->',firebaseProject?'<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>':'')
+      .replace('/* directory reader bundle */',()=>reader)
+      .replace('const directoryProject = "";',()=> 'const directoryProject = '+JSON.stringify(firebaseProject)+';')),
+    copyFile(path.join(entry,'favicon.png'),path.join(destination,'favicon.png')),
     writeFile(path.join(destination, 'app.html'), app)
   ]);
 }

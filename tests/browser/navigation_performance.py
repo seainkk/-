@@ -6,6 +6,7 @@ sys.dont_write_bytecode = True
 from performance_client import expand_segment_actions, expand_source_details
 from playwright.sync_api import expect, sync_playwright
 from performance_client import FIXTURE, HTML, ROOT
+from segment_card import DATA as CARD_DATA
 
 
 def check_browser_history(browser):
@@ -23,7 +24,9 @@ window.RegistryPagesTransport={run:(method,payload,projectId,accessKey)=>new Pro
 """
     # The worker streams the real header and waits for a trusted click before
     # delivering the remainder. A fully fulfilled route skips this parser state.
-    app_html = HTML.replace('</head>', navigation + '</head>').replace(FIXTURE, FIXTURE + adapter, 1)
+    app_html = HTML.replace('</head>', navigation + '</head>').replace(FIXTURE, FIXTURE + adapter + CARD_DATA, 1)
+    for part in ('SegmentCardPanel','SegmentCardClient','SegmentSelectionsClient'):
+        app_html = app_html.replace("<?!= include_('"+part+"'); ?>", (ROOT/'src'/(part+'.html')).read_text(encoding='utf-8'))
     header, end, rest = app_html.partition('</header>')
     assert end
     worker = """
@@ -81,9 +84,15 @@ self.addEventListener('message',event=>{if(event.data==='continue')resume?.();})
         expect(app.locator('.br-main')).to_be_hidden()
         expect(host.locator('body')).to_have_attribute('data-state', 'loading')
         assert not frame.evaluate("backend.calls.some(p=>['getSegmentsDashboard','getSourceBases'].includes(p.name))")
-        frame.evaluate("backend.holdMethods=[];releaseRpc('getAppBootstrap')")
+        frame.evaluate("backend.holdMethods=['getSegmentsDashboard'];releaseRpc('getAppBootstrap')")
         expect(host.locator('body')).to_have_attribute('data-state', 'ready')
         row = app.locator('[data-segment="existing-segment"]')
+        row.get_by_role('button',name='Существующий сегмент').click()
+        expect(app.locator('#sc-rows')).to_contain_text('both@example.test')
+        assert frame.evaluate("backend.calls.find(c=>c.name==='getAppBootstrap').p.includeSegmentDirectory && !backend.calls.some(c=>c.name==='getSegmentDirectory')")
+        assert frame.evaluate("backend.calls.some(c=>c.name==='getSegmentContactCard'&&c.projectId==='numshield'&&c.p.segmentId==='existing-segment')")
+        frame.evaluate("backend.holdMethods=[];releaseRpc('getSegmentsDashboard')")
+        app.locator('#br-action-back').click()
         expand_segment_actions(row)
         assert not frame.evaluate("backend.calls.some(p=>p.name==='getSourceBases')")
         row.get_by_role('button', name='Выбрать готовый источник').click()

@@ -6,6 +6,9 @@ function callApp(request) {
     var input = object_(request);
     if (Object.keys(input).some(function (name) { return ['method', 'payload', 'accessKey', 'projectId'].indexOf(name) === -1; })) fail_('INVALID_REQUEST', 'В запросе есть неизвестные поля.');
     return withSharedAccess_(input.accessKey, function () {
+      if(input.method==='getAppBootstrap' && typeof firebaseDirectoryArm_==='function') {
+        try { firebaseDirectoryArm_(input.accessKey); } catch(ignored) { /* Direct Google access remains available. */ }
+      }
       var methods = {
         getAppBootstrap: getAppBootstrap_, getBootstrap: getBootstrap_,
         createBase: createBase_, createFolder: createFolder_, renameItem: renameItem_,
@@ -22,6 +25,8 @@ function callApp(request) {
       // Explicit optional handlers keep isolated legacy fixtures usable; the
       // release check requires every feature module in the deployed project.
       var contactMethods = {
+        getSourceDirectory: typeof getSourceDirectory_ === 'function' ? getSourceDirectory_ : null,
+        getSegmentDirectory: typeof getSegmentDirectory_ === 'function' ? getSegmentDirectory_ : null,
         getSegmentSelections: typeof getSegmentSelections_ === 'function' ? getSegmentSelections_ : null,
         saveSegmentFilter: typeof saveSegmentFilter_ === 'function' ? saveSegmentFilter_ : null,
         saveSegmentExport: typeof saveSegmentExport_ === 'function' ? saveSegmentExport_ : null,

@@ -15,7 +15,7 @@ const file = name => readFileSync(path.join(source, name),'utf8');
 test('Pages publishes the shared interface and its transport without server files or private data', async () => {
   const output = await mkdtemp(path.join(tmpdir(), 'registry-pages-'));
   try {
-    await buildPages(output);
+    await buildPages(output,'directory-test');
     assert.deepEqual((await readdir(output)).sort(), ['app.html','favicon.png','index.html']);
     const app = await readFile(path.join(output,'app.html'),'utf8');
     const navigation = file('PagesNavigation.html');
@@ -23,6 +23,11 @@ test('Pages publishes the shared interface and its transport without server file
     assert.ok(app.indexOf(navigation) < app.indexOf('</head>'));
     assert.ok(app.indexOf(file('PagesTransport.html')) < app.indexOf(file('Client.html')));
     assert.match(app, /id="br-view-segments"/);
+    const entry=await readFile(path.join(output,'index.html'),'utf8');
+    assert.match(entry,/<link rel="preconnect" href="https:\/\/firestore.googleapis.com" crossorigin>/);
+    assert.match(entry,/const directoryProject = "directory-test";/);
+    assert.ok(entry.indexOf('takeEntryDirectoryRead')<entry.indexOf('<body'));
+    assert.doesNotMatch(entry,/access_key=[\w-]{43}|private_key|client_email|directoryViews\/[\w-]{43}/);
     assert.doesNotMatch(app, /<\?|access_key=[\w-]{43}|function authorize_\(/);
     await writeFile(path.join(output,'unrelated.txt'),'test');
     await assert.rejects(buildPages(output), /папка только с файлами интерфейса/);
