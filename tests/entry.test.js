@@ -280,6 +280,19 @@ test('warm entry shows both encrypted lists with original timestamps while fetch
   reply({ok:false,status:403});
   await until(()=>!storage.has(slot)&&!repeat.ids['entry-preview-list'].children.length);
   assert.equal(repeat.ids['entry-preview-time'].textContent,'');
+  for(const reason of ['google-locked','changed-key']){
+    const local=new Map([[slot,raw],[slot.replace('numshield','neosender'),raw]]);
+    const page=fixture({storage:local,firebase:first.firebase,fetch:()=>new Promise(()=>{})});
+    await until(()=>page.ids['entry-preview-list'].children.length===1);
+    if(reason==='google-locked'){
+      page.event('message',{source:page.app(),origin:PAGES_ORIGIN,data:{type:'bases-registry-locked'}});
+    }else{
+      page.window.location.hash='#access_key='+'X'.repeat(43);
+      page.event('hashchange');
+    }
+    assert.equal(local.size,0,reason);
+    assert.equal(page.ids['entry-preview-list'].children.length,0,reason);
+  }
 });
 
 test('cached ciphertext is bound to its link, Firebase project, selected project and original expiry even if clear envelope timestamps are forged',async()=>{
