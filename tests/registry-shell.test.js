@@ -18,7 +18,9 @@ test('Pages publishes the shared interface and its transport without server file
     await buildPages(output);
     assert.deepEqual((await readdir(output)).sort(), ['app.html','favicon.png','index.html']);
     const app = await readFile(path.join(output,'app.html'),'utf8');
-    assert.equal(app.replace(file('PagesTransport.html') + '\n',''), await buildRegistryShell(source));
+    const navigation = file('PagesNavigation.html');
+    assert.equal(app.replace(navigation + '\n','').replace(file('PagesTransport.html') + '\n',''), await buildRegistryShell(source));
+    assert.ok(app.indexOf(navigation) < app.indexOf('</head>'));
     assert.ok(app.indexOf(file('PagesTransport.html')) < app.indexOf(file('Client.html')));
     assert.match(app, /id="br-view-segments"/);
     assert.doesNotMatch(app, /<\?|access_key=[\w-]{43}|function authorize_\(/);

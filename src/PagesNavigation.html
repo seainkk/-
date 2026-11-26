@@ -1,0 +1,22 @@
+<script>
+(() => {
+  'use strict';
+  let selected = null;
+  function select(event) {
+    const button = event.target.closest?.('#bases-registry-app .br-view-nav > button');
+    if (!button || button.disabled) return;
+    const view = /^br-view-(sources|segments|analytics|infrastructure|retarget)$/.exec(button.id);
+    if (!view) return;
+    selected = view[1];
+    for (const sibling of button.parentElement.querySelectorAll('button')) {
+      sibling.setAttribute('aria-pressed', String(sibling === button));
+    }
+  }
+  document.addEventListener('click', select);
+  window.takeRegistryStartupView = () => {
+    document.removeEventListener('click', select);
+    delete window.takeRegistryStartupView;
+    return selected;
+  };
+})();
+</script>
