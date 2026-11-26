@@ -122,7 +122,7 @@ function getSegmentLegacyPreview_(request) {
   return api_(function () {
     var context = authorize_(), input = segmentInput_(request, ['segmentId','sourceId']), segmentId = id_(input.segmentId);
     registryRequireSegment_(context, segmentId);
-    var scope = segmentCardFiles_(context, segmentId), catalog = segmentLegacyCatalog_(context, scope, !input.sourceId);
+    var scope = segmentCardFiles_(context,segmentId,!input.sourceId), catalog = segmentLegacyCatalog_(context,scope,!input.sourceId);
     var result = { segmentId: segmentId, sources: Array.from(catalog.sources.values()).map(segmentLegacyPublic_).sort(byName_),
       history: catalog.history, warnings: catalog.warnings, preview: null };
     if (!input.sourceId) return result;

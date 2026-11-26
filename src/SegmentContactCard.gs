@@ -20,39 +20,46 @@ function getSegmentContactCard_(request) {
   });
 }
 
-function segmentCardData_(context, segmentId, revision, scope, campaigns) {
+function segmentCardData_(context, segmentId, revision, scope, campaigns, deferCache) {
   scope = scope || segmentCardFiles_(context, segmentId);
   campaigns = campaigns || segmentCardCampaigns_(context, segmentId);
   var version = segmentCardRevision_(context, scope, campaigns);
   if (revision !== undefined && revision !== version) segmentCardChanged_();
   var snapshot = segmentCardReadCache_(version);
   if (!snapshot) {
-    var groups = new Map(), warnings = [], validation = scope.validation || pvCacheRead_(pvCache_(context, false));
-    var facts = campaigns.bindings.map(segmentCardCampaignFact_);
-    ['companies', 'lpr'].forEach(function (kind) {
-      var label = kind === 'companies' ? 'Компании' : 'ЛПР';
-      if (!scope.files[kind]) { warnings.push('Рабочая таблица «' + label + '» ещё не подключена.'); return; }
-      var tabs = segmentCardTabs_(context, scope, kind);
-      ['email', 'telegram'].forEach(function (channel) {
-        if (!tabs[channel]) { warnings.push('В таблице «' + label + '» отсутствует рабочий лист «' + (channel === 'email' ? 'Email' : 'Телефоны') + '».'); return; }
-        segmentCardReadSheet_(groups, tabs[channel], channel, kind, scope.files[kind], validation, facts);
-      });
-    });
-    snapshot = segmentCardSnapshot_(groups, warnings);
+    snapshot = scope.draftSnapshot || segmentCardBuild_(context,scope,campaigns,scope.validation || pvCacheRead_(pvCache_(context,false)));
     // Never cache or serve a mix of revisions if a source changed during the bulk read.
-    if (version !== segmentCardRevision_(context, segmentCardFiles_(context, segmentId), segmentCardCampaigns_(context, segmentId))) segmentCardChanged_();
-    segmentCardWriteCache_(version, snapshot);
+    var latest = segmentCardFiles_(context,segmentId);
+    latest.validationMembership = scope.validationMembership;
+    latest.revisionDigests = scope.revisionDigests;
+    if (version !== segmentCardRevision_(context, latest, segmentCardCampaigns_(context, segmentId))) segmentCardChanged_();
+    if (!deferCache) segmentCardWriteCache_(version, snapshot);
   }
   return {scope: scope, campaigns: campaigns, revision: version, snapshot: snapshot};
 }
 
+function segmentCardBuild_(context, scope, campaigns, validation, validationKeys) {
+  var groups = new Map(), warnings = [], facts = campaigns.bindings.map(segmentCardCampaignFact_);
+  ['companies','lpr'].forEach(function (kind) {
+    var label = kind === 'companies' ? 'Компании' : 'ЛПР';
+    if (!scope.files[kind]) { warnings.push('Рабочая таблица «' + label + '» ещё не подключена.'); return; }
+    var tabs = segmentCardTabs_(context,scope,kind);
+    ['email','telegram'].forEach(function (channel) {
+      if (!tabs[channel]) { warnings.push('В таблице «' + label + '» отсутствует рабочий лист «' + (channel === 'email' ? 'Email' : 'Телефоны') + '».'); return; }
+      segmentCardReadSheet_(groups,tabs[channel],channel,kind,scope.files[kind],validation,facts);
+    });
+  });
+  if (validationKeys) groups.forEach(function (group) { validationKeys.push(group.validationKey); });
+  return segmentCardSnapshot_(groups,warnings);
+}
+
 function segmentCardChanged_() { fail_('SEGMENT_CARD_CHANGED', 'Данные сегмента изменились. Откройте список заново.'); }
 
-function segmentCardFiles_(context, segmentId) {
+function segmentCardFiles_(context, segmentId, includeHistory) {
   registryRequireSegment_(context, segmentId);
   var folder = segmentFolder_(context, segmentSourceFolder_(context), segmentId, true);
   var storage = sourceBasesStorage_(context), storageMeta = contactSyncMetadata_(storage.public.id);
-  var tracking = segmentTrackingStorage_(context, storage, false), files = {companies: null, lpr: null};
+  var tracking = segmentTrackingStorage_(context,storage,false,includeHistory !== true), files = {companies:null,lpr:null};
   tracking.tables.forEach(function (table) {
     if (table.segmentId !== segmentId) return;
     var fileId = table.fileId;
@@ -63,7 +70,7 @@ function segmentCardFiles_(context, segmentId) {
       fail_('OUTSIDE_SEGMENTS', 'Назначенная рабочая таблица больше не принадлежит этому сегменту.');
     files[table.kind] = {id: fileId, name: meta.name, version: contactSyncVersion_(meta), metadata: meta};
   });
-  return {folder: folder, storage: storage, tracking: tracking, storageVersion: contactSyncVersion_(storageMeta), files: files};
+  return {folder:folder,storage:storage,tracking:includeHistory === true ? tracking : null,storageVersion:contactSyncVersion_(storageMeta),files:files};
 }
 
 function segmentCardFileMatches_(meta, fileId, segmentId, kind, rootId) {
@@ -115,25 +122,31 @@ function segmentCardCampaignFact_(item) {
 }
 
 // A strong Drive version is a fast way to reuse a digest, not evidence that visible facts changed.
-function segmentCardDigestAtVersion_(inputs, compute) {
+function segmentCardDigestAtVersion_(memo, inputs, compute) {
   var key = 'card-content/' + digest_(JSON.stringify(inputs)), cache, value;
+  if (memo.has(key)) return memo.get(key);
   try { cache = CacheService.getScriptCache(); value = cache.get(key); } catch (ignored) {}
-  if (typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value)) return value;
-  value = digest_(JSON.stringify(compute()));
-  try { if (cache) cache.put(key,value,21600); } catch (ignored) {}
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
+    value = digest_(JSON.stringify(compute()));
+    try { if (cache) cache.put(key,value,21600); } catch (ignored) {}
+  }
+  memo.set(key,value);
   return value;
 }
 
 function segmentCardRevision_(context, scope, campaigns) {
+  // A fresh scope is always allocated for the independent final check.
+  if (scope.revisionCampaigns === campaigns && scope.cardRevision) return scope.cardRevision;
   var files = ['companies', 'lpr'].map(function (kind) {
     var file = scope.files[kind]; if (file && !file.version) segmentCardChanged_(); return file ? [file.id, file.version] : null;
   });
   if (!scope.storageVersion) segmentCardChanged_();
   var scopeKey = [context.rootId,registryProjectId_(),scope.folder.getId(),scope.storage.public.id,files];
-  var validation = segmentCardDigestAtVersion_(['validation',scopeKey,scope.storageVersion],function () {
+  var memo = scope.revisionDigests || (scope.revisionDigests = new Map());
+  var validation = segmentCardDigestAtVersion_(memo,['validation',scopeKey,scope.storageVersion],function () {
     scope.validation = pvCacheRead_(pvCache_(context,false));
     if (!Object.keys(scope.validation).length) return [];
-    var keys = segmentCardValidationKeys_(context,scope,scopeKey);
+    var keys = segmentCardValidationKeys_(context,scope,scopeKey,campaigns);
     return keys.filter(function (key) { return scope.validation[key]; }).map(function (key) {
       var record = scope.validation[key], result = record.result || {};
       return [key,!!record.pending,result.status || '',!!result.review,result.eligible === true,!!result.idTg];
@@ -142,7 +155,7 @@ function segmentCardRevision_(context, scope, campaigns) {
   var states = campaigns.bindings.map(function (entry) {
     var file = entry.file, version = file && contactSyncVersion_(file);
     if (file && !version) segmentCardChanged_();
-    var status = segmentCardDigestAtVersion_(['campaign',scopeKey,campaigns.credential,entry.binding,file && [file.id,version],
+    var status = segmentCardDigestAtVersion_(memo,['campaign',scopeKey,campaigns.credential,entry.binding,file && [file.id,version],
       entry.mark.state === 'synced' && !!entry.mark.lastSyncedAt],function () {
       var fact = segmentCardCampaignFact_(entry);
       var proofs = ['companies','lpr'].map(function (kind) {
@@ -153,23 +166,24 @@ function segmentCardRevision_(context, scope, campaigns) {
     });
     return [entry.binding,status];
   });
-  return digest_(JSON.stringify(['segment-contact-card-v2',scopeKey,validation,campaigns.credential,states]));
+  scope.cardRevision = digest_(JSON.stringify(['segment-contact-card-v2',scopeKey,validation,campaigns.credential,states]));
+  scope.revisionCampaigns = campaigns;
+  return scope.cardRevision;
 }
 
-function segmentCardValidationKeys_(context, scope, scopeKey) {
-  var version = digest_(JSON.stringify(['card-validation-keys',scopeKey])), saved = segmentCardReadCache_(version);
-  if (Array.isArray(saved)) return saved;
-  var keys = new Set();
-  ['companies','lpr'].forEach(function (kind) {
-    if (!scope.files[kind]) return;
-    var tabs = segmentCardTabs_(context,scope,kind);
-    ['email','telegram'].forEach(function (channel) {
-      if (tabs[channel]) segmentCardReadSheet_(null,tabs[channel],channel,kind,scope.files[kind],null,[],keys);
-    });
-  });
-  var sorted = Array.from(keys).sort();
-  segmentCardWriteCache_(version,sorted,21600);
-  return sorted;
+function segmentCardValidationKeys_(context, scope, scopeKey, campaigns) {
+  var version = digest_(JSON.stringify(['card-validation-keys',scopeKey]));
+  if (scope.validationMembership && scope.validationMembership.version === version) return scope.validationMembership.keys;
+  var keys = segmentCardReadCache_(version);
+  if (!Array.isArray(keys)) {
+    // Each contact group already computed its Promouser key. Reuse that same scan for the card.
+    keys = [];
+    scope.draftSnapshot = segmentCardBuild_(context,scope,campaigns,scope.validation,keys);
+    keys.sort();
+    segmentCardWriteCache_(version,keys,21600);
+  }
+  scope.validationMembership = {version:version,keys:keys};
+  return keys;
 }
 
 function segmentCardFilter_(input) {
@@ -189,7 +203,7 @@ function segmentCardFilter_(input) {
     offset: number(input.offset, 0, 0, 1000000), limit: number(input.limit, 50, 1, 200)};
 }
 
-function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, campaigns, keys) {
+function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, campaigns) {
   var count = sheet.getLastRow() - 1, width = sheet.getLastColumn();
   if (count <= 0) return;
   if (count >= CONTACT_SYNC.maxTargetRows || width > CONTACT_SYNC.maxHeaderColumns) fail_('SEGMENT_CARD_LIMIT', 'Рабочий лист превышает допустимый для чтения размер.');
@@ -203,19 +217,6 @@ function segmentCardReadSheet_(groups, sheet, channel, owner, file, validation, 
   col('origin', ['Исходный столбец email']); col('originRows', ['Исходные строки','Строки в Лист1']); col('history', ['История контакта']);
   col('membership', [COLDY_CAMPAIGNS.headers[0]]);
   if (indices.value === undefined && (channel === 'email' || indices.handle === undefined)) fail_('SEGMENT_CARD_SCHEMA', 'В рабочем листе отсутствует столбец контакта.');
-  if (keys) {
-    // Only the contact columns determine which shared validations this segment consumes.
-    for (var at = 2; at < count + 2; at += 5000) {
-      var length = Math.min(5000,count + 2 - at);
-      var values = indices.value === undefined ? [] : sheet.getRange(at,indices.value+1,length,1).getDisplayValues();
-      var handles = channel !== 'telegram' || indices.handle === undefined ? [] : sheet.getRange(at,indices.handle+1,length,1).getDisplayValues();
-      for (var row = 0; row < length; row++) {
-        var identity = segmentCardIdentity_(channel,values[row] && values[row][0],handles[row] && handles[row][0]);
-        if (identity) keys.add(pvKey_(identity.kind,identity.value));
-      }
-    }
-    return;
-  }
   var manualCols = CONTACT_MAILING_STATUS.headers.map(function (header) { return map[pvHeader_(header)]; }).filter(function (index) { return index !== undefined; });
   var notes = channel === 'email' && campaigns.length ? head.getNotes()[0] : [];
   var layouts = channel === 'email' ? campaigns.map(function (campaign) {
@@ -446,11 +447,11 @@ function segmentCardReadCache_(revision) {
   } catch (error) { return null; }
 }
 
-function segmentCardWriteCache_(revision, snapshot, ttl) {
+function segmentCardWriteCache_(revision, snapshot, ttl, packed) {
   try {
     var cache = CacheService.getScriptCache(), key = 'segment-card/' + revision;
-    var json = JSON.stringify(snapshot), size = 20000;
-    if (json.length > 80000) {
+    var json = packed ? 'z' + packed : JSON.stringify(snapshot), size = packed ? 70000 : 20000;
+    if (!packed && json.length > 80000) {
       json = 'z' + Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(json, 'application/json', 'segment.json')).getBytes());
       size = 70000;
     }

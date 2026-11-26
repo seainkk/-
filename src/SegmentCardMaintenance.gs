@@ -1,7 +1,8 @@
 /** Project-owned card snapshots share the existing incoming-only minute timer. */
 var SEGMENT_CARD_MAINTENANCE = Object.freeze({
   lease: 'SEGMENT_CARD_REFRESH_LEASE_V1', state: 'SEGMENT_CARD_REFRESH_V1_',
-  ownership: 'REGISTRY_SEGMENT_PROJECT_', interval: 5 * 60000, leaseMillis: 5 * 60000
+  ownership: 'REGISTRY_SEGMENT_PROJECT_', interval: 5 * 60000, leaseMillis: 5 * 60000,
+  stages: ['files','campaigns','revision','load','contacts','encode','persist','receipt','cache','complete']
 });
 
 function segmentCardMaintenanceState_(raw, root) {
@@ -67,7 +68,7 @@ function segmentCardMaintenanceDue_(context) {
   return items[0] || null;
 }
 
-function segmentCardMaintenanceBuild_(context, segmentId, outerGuard, scheduled) {
+function segmentCardMaintenanceBuild_(context, segmentId, outerGuard, scheduled, latestStart) {
   var props = context.properties, project = registryProjectId_(), key = segmentCardMaintenanceKey_(project, segmentId);
   var leaseKey = SEGMENT_CARD_MAINTENANCE.lease, id = Utilities.getUuid();
   function scope() {
@@ -81,13 +82,19 @@ function segmentCardMaintenanceBuild_(context, segmentId, outerGuard, scheduled)
     if (!current || current.id !== id || current.until <= Date.now()) fail_('BUSY', 'Другая задача обновляет карточки.');
     return fresh;
   }
+  guard.stage = function (name) {
+    if (SEGMENT_CARD_MAINTENANCE.stages.indexOf(name) < 0) return;
+    try { CacheService.getScriptCache().put('card-stage/' + id, JSON.stringify({name:name, at:Date.now()}), 900); }
+    catch (ignored) { /* Optional diagnostics never hold a build. */ }
+  };
   var acquired = segmentCardMaintenanceLock_(1500, function () {
     scope();
     var previous = segmentCardMaintenanceLease_(props), now = Date.now();
+    if (latestStart && now > latestStart) return false;
     if (previous && previous.until > now) return false;
     var state = segmentCardMaintenanceState_(props.getProperty(key), context.rootId);
     state.attempt = now; state.next = now + SEGMENT_CARD_MAINTENANCE.leaseMillis;
-    state.inProgress = true; state.background = !!scheduled;
+    state.inProgress = true; state.background = !!scheduled; state.attemptId = id;
     var changes = {};
     changes[key] = JSON.stringify(state);
     changes[leaseKey] = JSON.stringify({id:id,key:key,until:state.next});
@@ -98,6 +105,7 @@ function segmentCardMaintenanceBuild_(context, segmentId, outerGuard, scheduled)
   var result, issue, buildError;
   try {
     result = segmentCardRefreshSnapshot_(guard(), segmentId, guard, scheduled === true);
+    guard.stage('complete');
   } catch (error) {
     buildError = error;
     issue = /^[A-Z_]{1,60}$/.test(error.registryCode || '') ? error.registryCode : 'GOOGLE_ERROR';
@@ -128,11 +136,11 @@ function segmentCardMaintenanceBuild_(context, segmentId, outerGuard, scheduled)
   return {state:'ready', revision:result.revision, checkedAt:result.checkedAt, rebuilt:result.rebuilt};
 }
 
-function segmentCardMaintenanceTick_(timerGuard) {
+function segmentCardMaintenanceTick_(timerGuard, latestStart) {
   var previous = SHARED_REQUEST_SCOPE_, context = timerGuard(), next = segmentCardMaintenanceDue_(context);
   if (!next) return;
   SHARED_REQUEST_SCOPE_ = Object.assign({}, previous, {projectId:next.project});
-  try { return segmentCardMaintenanceBuild_(context, next.segmentId, timerGuard, true); }
+  try { return segmentCardMaintenanceBuild_(context, next.segmentId, timerGuard, true, latestStart); }
   finally { SHARED_REQUEST_SCOPE_ = previous; }
 }
 
@@ -150,11 +158,17 @@ function prepareSegmentCardSnapshot_(request) {
       var receipt = segmentCardSnapshotMeta_(context, segmentCardSnapshotSlot_(context, segmentId));
       var lease = segmentCardMaintenanceLease_(props), now = Date.now(), busy = !!lease && lease.until > now;
       var running = busy && lease.key === key, finished = receipt && Date.parse(receipt.checkedAt) >= (state.attempt || 0);
+      var stage = null;
+      if (state.attemptId) {
+        try { stage = JSON.parse(CacheService.getScriptCache().get('card-stage/' + state.attemptId)); } catch (ignored) {}
+        if (!stage || SEGMENT_CARD_MAINTENANCE.stages.indexOf(stage.name) < 0 || !Number.isFinite(stage.at)) stage = null;
+      }
       return {state:receipt && segmentCardSnapshotFresh_(receipt) ? 'ready' : 'pending', checkedAt:receipt && receipt.checkedAt || null,
         lastBackgroundAt:receipt && receipt.lastBackgroundAt || state.lastBackgroundAt || null, backgroundEnabled:!!current,
         heartbeatAt:beat && beat.at || null, lastError:finished ? null : state.issue || null,
         refreshState:running ? (finished ? 'finishing' : 'running') : finished ? 'idle' : state.inProgress ? 'interrupted' : state.issue ? 'retrying' : 'scheduled',
         attemptAt:state.attempt ? new Date(state.attempt).toISOString() : null, queueBusy:busy,
+        stage:stage && stage.name, stageStartedAt:stage && new Date(stage.at).toISOString(),
         nextAttemptAt:state.next ? new Date(state.next).toISOString() : null};
     }
     var timer = segmentCardMaintenanceTimer_(context);

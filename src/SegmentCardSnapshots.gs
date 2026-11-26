@@ -106,7 +106,7 @@ function segmentCardSnapshotLoad_(context, slot, receipt) {
       digest_(artifact.body) !== receipt.contentHash) return null;
   snapshot = segmentCardSnapshotUnpack_(artifact.body);
   if (!snapshot || !Array.isArray(snapshot.rows) || !snapshot.summary) return null;
-  segmentCardWriteCache_(receipt.revision, snapshot, SEGMENT_CARD_SNAPSHOT.cacheSeconds);
+  segmentCardWriteCache_(receipt.revision,snapshot,SEGMENT_CARD_SNAPSHOT.cacheSeconds,artifact.body);
   return snapshot;
 }
 
@@ -115,11 +115,17 @@ function segmentCardRefreshSnapshot_(context, segmentId, guard, scheduled) {
   var slot = segmentCardSnapshotSlot_(context, segmentId);
   if (typeof guard !== 'function' || registrySegmentProject_(context, segmentId) !== slot.projectId) fail_('OUTSIDE_PROJECT', 'Сегмент не входит в проект фонового задания.');
   guard();
-  var scope = segmentCardFiles_(context, segmentId), campaigns = segmentCardCampaigns_(context, segmentId);
+  var stage = guard.stage || function () {};
+  stage('files');
+  var scope = segmentCardFiles_(context, segmentId);
+  stage('campaigns');
+  var campaigns = segmentCardCampaigns_(context, segmentId);
+  stage('revision');
   var revision = segmentCardRevision_(context, scope, campaigns), previous = segmentCardSnapshotMeta_(context, slot);
   var access = segmentCardSnapshotAccess_(scope.storage.public.id, scope.files, campaigns.credential, campaigns.bindings.map(function (entry) { return entry.binding; }));
   var receipt, snapshot, rebuilt = !(previous && previous.revision === revision && previous.access === access);
   if (!rebuilt) {
+    stage('load');
     receipt = previous;
     var head;
     try { head = CacheService.getScriptCache().get(segmentCardSnapshotHeadKey_(slot, receipt)); } catch (ignored) { /* Read the durable copy. */ }
@@ -127,21 +133,26 @@ function segmentCardRefreshSnapshot_(context, segmentId, guard, scheduled) {
     if (snapshot === null) rebuilt = true;
   }
   if (rebuilt) {
-    var data = segmentCardData_(context, segmentId, revision, scope, campaigns);
+    stage('contacts');
+    var data = segmentCardData_(context,segmentId,revision,scope,campaigns,true);
     snapshot = data.snapshot;
+    stage('encode');
     var body = segmentCardSnapshotPack_(snapshot);
     receipt = {schema:SEGMENT_CARD_SNAPSHOT.schema, owner:slot.owner, revision:revision, access:access,
       contentHash:digest_(body), preparedAt:new Date().toISOString()};
     guard();
+    stage('persist');
     coldySave_(context, 'segmentcard', slot.owner, {revision:revision, body:body});
   }
   guard();
+  stage('receipt');
   receipt.checkedAt = new Date().toISOString();
   if (scheduled) receipt.lastBackgroundAt = receipt.checkedAt;
   else if (previous && previous.lastBackgroundAt) receipt.lastBackgroundAt = previous.lastBackgroundAt;
   context.properties.setProperty(slot.key, JSON.stringify(receipt));
   if (snapshot) {
-    segmentCardWriteCache_(revision, snapshot, SEGMENT_CARD_SNAPSHOT.cacheSeconds);
+    stage('cache');
+    if (rebuilt) segmentCardWriteCache_(revision,snapshot,SEGMENT_CARD_SNAPSHOT.cacheSeconds,body);
     try { segmentCardSnapshotWarm_(slot, receipt, snapshot, scope); } catch (ignored) { /* Drive still holds the snapshot. */ }
   }
   return {revision:revision, checkedAt:receipt.checkedAt, rebuilt:rebuilt};
@@ -163,6 +174,14 @@ function segmentCardPreparedPage_(context, segmentId, filter, revision) {
   if (fresh.rootId !== context.rootId || registrySegmentProject_(fresh, segmentId) !== slot.projectId) fail_('OUTSIDE_PROJECT', 'Доступ к сегменту изменился.');
   if (segmentCardSnapshotCredential_(fresh.properties) !== credential ||
       (fresh.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId) !== scope.storage.public.id) return null;
+  // Recover an evicted dashboard page from the authorized snapshot already in memory.
+  if (!filter.offset && !filter.query && filter.channel === 'all' && filter.owner === 'all' && filter.queue === 'all') {
+    try {
+      if (!CacheService.getScriptCache().get(segmentCardSnapshotHeadKey_(slot, receipt))) {
+        segmentCardSnapshotWarm_(slot, receipt, snapshot, scope);
+      }
+    } catch (ignored) { /* The requested page is still available. */ }
+  }
   return segmentCardSnapshotPage_(snapshot, filter, receipt, segmentId, scope.folder.getName(), scope.files);
 }
 
