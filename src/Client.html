@@ -84,23 +84,39 @@
       if(data.kind==='segments'){if(!Object.hasOwn(segmentCategories,row.category))return null;item.category=row.category;}
       items.push(item);ids.add(row.id);
     }
-    if(data.expiresAt!==undefined&&(!Number.isSafeInteger(data.expiresAt)||data.expiresAt<=Date.now()))return null;
-    return {state:'ready',checkedAt:data.checkedAt,expiresAt:data.expiresAt,complete:data.complete,items};
+    const expiresAt=data.expiresAt??data.checkedAt+600000;
+    if(!Number.isSafeInteger(expiresAt)||expiresAt<=Date.now()||expiresAt<=data.checkedAt||expiresAt>data.checkedAt+600000)return null;
+    return {state:'ready',checkedAt:data.checkedAt,expiresAt,complete:data.complete,items};
   }
   function previewShell(){
     return !!globalThis.RegistryPagesTransport&&!!accessKey&&busy&&!accessReady&&!accessMessage;
   }
+  function previewCardOpen(){return activeView==='segments'&&pendingDirectoryOpen?.preview===true;}
+  function cancelDirectoryOpen(){
+    const showing=previewCardOpen();
+    pendingDirectoryOpen=null;
+    if(showing){window.RegistrySegmentCard?.clear();render();}
+    else $('br-directory-cancel').hidden=true;
+  }
   function renderFastDirectory(){
     renderSources();renderSegments();updateControls();
     const cancel=$('br-directory-cancel');
-    cancel.hidden=!pendingDirectoryOpen||pendingDirectoryOpen.kind!==activeView||accessReady;
+    cancel.hidden=!pendingDirectoryOpen||pendingDirectoryOpen.kind!==activeView||previewCardOpen()||accessReady;
   }
   function chooseDirectoryItem(kind,id,serial){
     if(pendingDirectoryOpen?.kind===kind&&pendingDirectoryOpen.id===id)pendingDirectoryOpen.serial=serial;
-    else pendingDirectoryOpen={kind,id,serial};
-    startEarlyCardRead();
+    else{cancelDirectoryOpen();pendingDirectoryOpen={kind,id,serial};}
     if(activeView!==kind)setView(kind);
-    if(accessReady)applyDirectoryOpen();else{renderFastDirectory();syncBack();}
+    startEarlyCardRead();
+    if(accessReady){applyDirectoryOpen();return;}
+    const data=fastDirectories.segments,card=window.RegistrySegmentCard;
+    const item=kind==='segments'&&previewShell()&&data?.expiresAt>Date.now()&&data.items.find(row=>row.id===id);
+    if(item&&card?.preview&&!pendingDirectoryOpen.preview){
+      pendingDirectoryOpen.preview=true;segmentSection=segmentCategory(item);
+      card.preview(id,item.name,projectNames[activeProjectId]+' / '+segmentCategories[segmentSection]);
+      render();$('sc-title').focus({preventScroll:true});window.scrollTo(0,0);
+    }else renderFastDirectory();
+    syncBack();
   }
   function startEarlyCardRead(){
     const choice=pendingDirectoryOpen,card=window.RegistrySegmentCard;
@@ -117,10 +133,12 @@
     if(!choice||!accessReady||busy||choice.kind!==activeView||gridIsOpen()||formIsOpen())return;
     const {kind,id,serial}=choice;
     const live=kind==='sources'?(sourceData||sourceDirectory):(dashboard||segmentDirectory);
-    const item=(live||fastDirectories[kind])?.items?.find(row=>row.id===id&&row.present!==false);
+    const fallback=fastDirectories[kind];
+    const data=live||(fallback?.expiresAt>Date.now()?fallback:null);
+    const item=data?.items?.find(row=>row.id===id&&row.present!==false);
     if(!item||live&&live.state!=='ready'&&live.state!=='storage_unavailable'){
-      if(live&&(live.complete!==false||live.state!=='ready')){
-        pendingDirectoryOpen=null;notice(live.state==='ready'?'Выбранная строка отсутствует в актуальном списке.':'Не удалось подтвердить доступ к выбранной строке.','error');
+      if(!data||live&&(live.complete!==false||live.state!=='ready')){
+        cancelDirectoryOpen();notice(live?.state==='ready'?'Выбранная строка отсутствует в актуальном списке.':'Не удалось подтвердить доступ к выбранной строке.','error');
         if(serial)postEntryMessage({type:'bases-registry-fast-open-rejected',epoch:accessEpoch,projectId:activeProjectId,kind,id,serial});
       }
       return;
@@ -128,7 +146,7 @@
     if(kind==='sources'&&typeof item.workbook!=='boolean'&&!item.mimeType)return;
     pendingDirectoryOpen=null;
     if(kind==='segments'){
-      segmentSection=segmentCategory(item);openSegmentContactCard(id,choice.read);
+      segmentSection=segmentCategory(item);openSegmentContactCard(id,choice.read,choice.preview);
     }else{
       if(!sourceData&&!sourceLoading)pendingSyncViews.add('sources');
       if(item.workbook===true||canOpenSourceWorkbook(item))openGridWorkbook(id);
@@ -206,7 +224,7 @@
       $('br-access-title').textContent=$('br-view-'+activeView)?.textContent||'Открываем сервис…';
       $('br-access-message').textContent='Проверяем доступ к данным…';$('br-access-retry').hidden=busy;
     }else $('br-access-retry').hidden=false;
-    $('br-directory-cancel').hidden=!pendingDirectoryOpen||pendingDirectoryOpen.kind!==activeView||accessReady;
+    $('br-directory-cancel').hidden=!pendingDirectoryOpen||pendingDirectoryOpen.kind!==activeView||previewCardOpen()||accessReady;
   }
   function lockAccess(message,unavailable){
 
@@ -359,7 +377,7 @@
   }
   function openServiceSettings(provider,gridReturn){
     if(!(accessReady||previewShell())||settingsSession||providerSession||coldySession||gridIsOpen()&&!gridReturn||window.RegistryProject?.hasPending?.())return false;
-    pendingDirectoryOpen=null;
+    cancelDirectoryOpen();
     settingsSession={epoch:accessEpoch,coldy:{next:0},promouser:{next:0},gridReturn};
     for(const name of ['coldy','promouser'])renderLimit(name,null,accessReady?'Проверяем подключение…':'Проверяем доступ к настройкам…');
     $('br-settings-dialog').showModal();updateControls();
@@ -703,7 +721,7 @@
     if(!accessReady||typeof id!=='string'||!/^[A-Za-z0-9_-]{10,200}$/.test(id)||
       (workbookAction!==undefined&&!['email','mailing','telegram','telegramReady','telegramAddressBook'].includes(workbookAction))||
       (projectId!==undefined&&!Object.hasOwn(projectNames,projectId)))return;
-    pendingDirectoryOpen=null;
+    cancelDirectoryOpen();
     if(projectId&&projectId!==activeProjectId){
       $('br-project').value=projectId;switchProject();
       if(activeProjectId!==projectId){notice('Завершите текущее действие и снова откройте ссылку из таблицы.','error');return;}
@@ -1072,6 +1090,7 @@
   function useSegmentDirectory(result){
     if(result?.projectId!==activeProjectId||!Array.isArray(result.items))return;
     segmentDirectory=result;
+    if(!accessReady&&previewCardOpen()&&(result.state!=='ready'||result.complete===true&&!result.items.some(item=>item.id===pendingDirectoryOpen.id)))cancelDirectoryOpen();
     if(accessReady&&!dashboard&&activeView==='segments'){renderSegments();applyDirectoryOpen();}
     if(accessReady&&!dashboard&&activeView==='analytics')window.RegistryProject?.show?.(activeView,{ready:true,epoch:accessEpoch});
   }
@@ -1115,7 +1134,7 @@
     finally{if(epoch===accessEpoch){segmentSaving=false;updateControls();flushPendingView();}}
   }
   function renderSegments(){
-    $('br-segments-view').hidden=activeView!=='segments';if(activeView!=='segments')return;renderSegmentsHealth();
+    $('br-segments-view').hidden=activeView!=='segments'||previewCardOpen();if($('br-segments-view').hidden)return;renderSegmentsHealth();
     for(const category of Object.keys(segmentCategories))$('br-segment-category-'+category).setAttribute('aria-pressed',String(category===segmentSection));
     const data=dashboard||segmentDirectory||fastDirectories.segments,ready=data?.state==='ready',compact=!dashboard;
     const items=ready?data.items.filter(item=>segmentCategory(item)===segmentSection):[];
@@ -1188,10 +1207,10 @@
     }}
     finally{if(epoch!==accessEpoch||request!==dashboardRequest)return;dashboardLoading=false;dashboardAnalysisLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();if(dashboard?.analysisPending===true&&activeView==='segments'&&!formIsOpen())scheduleSegmentAnalysis();}
   }
-  function openSegmentContactCard(id,firstRead){
+  function openSegmentContactCard(id,firstRead,fromPreview=false){
     const item=segmentById(id)||(!dashboard&&!segmentDirectory&&fastDirectories.segments?.items.find(item=>item.id===id));if(!accessReady||!item||!window.RegistrySegmentCard)return;
     window.RegistrySegmentCard.select(id,item.name,projectNames[activeProjectId]+' / '+segmentCategories[segmentCategory(item)],firstRead);
-    setView('segmentCard');$('sc-title').focus({preventScroll:true});window.scrollTo(0,0);
+    setView('segmentCard');if(!fromPreview){$('sc-title').focus({preventScroll:true});window.scrollTo(0,0);}
   }
   function openSegmentMailings(id){
     segmentBackScroll=window.scrollY;mailingSegmentId=id;mailingsError=null;
@@ -1480,7 +1499,7 @@
   function openBaseUpload(view,segmentId){
     if((editingBlocked()&&!previewShell())||segmentEditor||importOpen||sourceData&&sourceData.canEdit!==true)return;
     if(suspendedSegment){resumeSegmentEditor();return;}
-    pendingDirectoryOpen=null;uploadEntryView=view;
+    cancelDirectoryOpen();uploadEntryView=view;
     if(['segments','segmentCard'].includes(view))setView('sources',{cached:true});
     importOpen=true;
     if(preparedImport?.completedResult){
@@ -1704,10 +1723,10 @@
   }
   function render(){
     $('br-sources-view').hidden=activeView!=='sources';$('br-segments-view').hidden=activeView!=='segments';$('br-mailings-view').hidden=activeView!=='mailings';$('br-retarget-view').hidden=activeView!=='retarget';
-    window.RegistrySegmentCard?.show(accessReady&&activeView==='segmentCard');
+    window.RegistrySegmentCard?.show(previewCardOpen()||accessReady&&activeView==='segmentCard');
     if(activeView==='mailings')$('br-mailings-back').textContent=viewTrail.at(-1)?.view==='segmentCard'?'← К карточке сегмента':'← К сегментам';
     for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).setAttribute('aria-pressed',String(activeView===view||view==='segments'&&['segmentCard','mailings'].includes(activeView)));
-    root.dataset.view=activeView;window.RegistryProject?.show?.(activeView,{ready:accessReady,preview:previewShell(),epoch:accessEpoch});renderSources();renderSegments();renderMailings();renderAccess();updateControls();
+    root.dataset.view=previewCardOpen()?'segmentCard':activeView;window.RegistryProject?.show?.(activeView,{ready:accessReady,preview:previewShell(),epoch:accessEpoch});renderSources();renderSegments();renderMailings();renderAccess();updateControls();
   }
   function updateControls(){
     $('br-origin-recover').disabled=!sourceData?.canEdit||recoveringOrigins||requesting()||!accessReady;
@@ -1825,7 +1844,7 @@
   }
   function rememberView(entry){viewTrail.push(entry);if(viewTrail.length>32)viewTrail.shift();}
   function setView(view,options={}){
-    if(pendingDirectoryOpen&&view!==pendingDirectoryOpen.kind)pendingDirectoryOpen=null;
+    if(pendingDirectoryOpen&&view!==pendingDirectoryOpen.kind)cancelDirectoryOpen();
     if(view==='segments'&&!options.fromFastEntry&&!fastDirectories.segments&&!accessReady&&busy&&accessKey&&bootstrapIncludesDirectory===false&&globalThis.RegistryPagesTransport)void fetchSegmentDirectory();
     if(view!==activeView&&!options.back)rememberView({view:activeView,scroll:window.scrollY,mailingSegmentId,cardId:window.RegistrySegmentCard?.id()});
     activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});if(view==='segments'&&dashboard?.analysisPending===true&&!formIsOpen())scheduleSegmentAnalysis();if(view==='sources'&&preparedJobsQueued)flushPendingView();
@@ -1867,7 +1886,11 @@
     if(!accessReady&&!previewShell())return;
     const dialog=providerSession?$('br-provider-dialog'):coldySession?$('br-coldy-dialog'):root.querySelector('dialog[open]');
     if(dialog){dialog.querySelector('button[id$="-close"]')?.click();return;}
-    if(pendingDirectoryOpen){pendingDirectoryOpen=null;renderFastDirectory();return;}
+    if(pendingDirectoryOpen){
+      const focus=previewCardOpen()?pendingDirectoryOpen.id+'/card':null;cancelDirectoryOpen();
+      if(focus)$('br-segments-rows').querySelector('[data-segment-focus="'+CSS.escape(focus)+'"]')?.focus({preventScroll:true});
+      return;
+    }
     if(gridIsOpen()){window.RegistryGrid.back?.();return;}
     if(importOpen){closePreparedImport(!!preparedImport&&!preparedImport.confirmationRequested);return;}
     if(segmentEditor&&!segmentEditor.closeRequested){
@@ -1880,7 +1903,7 @@
     const details=visibleDetails(viewTrail.at(-1)?.openSettings);if(details){details.open=false;details.querySelector('summary')?.focus();return;}
     if(!previousView()&&activeView==='mailings')setView('segments',{back:true,cached:true});
   }
-  $('br-directory-cancel').addEventListener('click',()=>{pendingDirectoryOpen=null;renderFastDirectory();syncBack();});
+  $('br-directory-cancel').addEventListener('click',()=>{cancelDirectoryOpen();syncBack();});
   $('br-action-back').addEventListener('click',()=>{goBack();syncBack();});
   $('br-segment-back').addEventListener('click',goBack);$('br-prepared-back').addEventListener('click',goBack);
   $('br-segment-resume').addEventListener('click',resumeSegmentEditor);
@@ -1901,7 +1924,7 @@
         lastDirectoryView=msg.serial;
         const available=['sources','segments','analytics','infrastructure','retarget'].includes(activeView)&&(!formIsOpen()||settingsSession&&!providerSession&&!coldySession)&&!gridIsOpen();
         if(available){
-          pendingDirectoryOpen=null;
+          cancelDirectoryOpen();
           if(msg.kind==='settings'){
             if(!settingsSession){
               if(['sources','segments','analytics','infrastructure','retarget'].includes(msg.returnView)&&activeView!==msg.returnView)setView(msg.returnView,{fromFastEntry:true,cached:true});
@@ -1927,7 +1950,7 @@
       if(msg.type==='bases-registry-fast-expired'){
         if(!fastDirectories[msg.kind]||fastDirectories[msg.kind].checkedAt!==msg.checkedAt)return;
         delete fastDirectories[msg.kind];
-        if(pendingDirectoryOpen?.kind===msg.kind)pendingDirectoryOpen=null;
+        if(pendingDirectoryOpen?.kind===msg.kind)cancelDirectoryOpen();
         if(activeView===msg.kind||msg.kind==='segments'&&activeView==='analytics')render();
         return;
       }
@@ -1935,13 +1958,21 @@
         const directory=readFastDirectory(msg);
         if(!directory||directory.checkedAt<(fastDirectories[msg.kind]?.checkedAt||0))return;
         fastDirectories[msg.kind]=directory;
+        if(pendingDirectoryOpen?.kind===msg.kind){
+          const item=directory.items.find(row=>row.id===pendingDirectoryOpen.id);
+          if(!item)cancelDirectoryOpen();
+          else if(previewCardOpen()){
+            segmentSection=segmentCategory(item);
+            window.RegistrySegmentCard.preview(item.id,item.name,projectNames[activeProjectId]+' / '+segmentCategories[segmentSection]);
+          }
+        }
         if(activeView===msg.kind)renderFastDirectory();
-        else if(accessReady&&activeView==='analytics'&&msg.kind==='segments')window.RegistryProject?.show?.(activeView,{ready:true,epoch:accessEpoch});
+        else if(activeView==='analytics'&&msg.kind==='segments')window.RegistryProject?.show?.(activeView,{ready:accessReady,preview:previewShell(),epoch:accessEpoch});
         postEntryMessage({type:'bases-registry-fast-presented',epoch:accessEpoch,projectId:activeProjectId,kind:msg.kind,checkedAt:directory.checkedAt,visible:activeView===msg.kind&&!gridIsOpen()&&!formIsOpen()});
       }else{
         if(!Number.isSafeInteger(msg.serial)||msg.serial<=lastDirectorySerial)return;
         lastDirectorySerial=msg.serial;
-        if(msg.id===null){pendingDirectoryOpen=null;if(!accessReady)renderFastDirectory();return;}
+        if(msg.id===null){cancelDirectoryOpen();syncBack();return;}
         if(!fastDirectories[msg.kind]?.items.some(item=>item.id===msg.id)||formIsOpen()||gridIsOpen())return;
         chooseDirectoryItem(msg.kind,msg.id,msg.serial);
       }
@@ -2001,7 +2032,7 @@
   $('br-provider-automation').addEventListener('click',toggleProviderAutomation);
   $('br-project').addEventListener('change',switchProject);$('br-source-project-filter').addEventListener('change',updateSourceFilters);
   $('br-source-search').addEventListener('input',updateSourceFilters);$('br-source-contents-filter').addEventListener('change',updateSourceFilters);$('br-source-unassigned-filter').addEventListener('change',updateSourceFilters);$('br-source-filters-reset').addEventListener('click',resetSourceFilters);
-  for(const view of ['sources','segments','retarget','analytics','infrastructure'])$('br-view-'+view)?.addEventListener('click',()=>{pendingDirectoryOpen=null;setView(view);});
+  for(const view of ['sources','segments','retarget','analytics','infrastructure'])$('br-view-'+view)?.addEventListener('click',()=>{cancelDirectoryOpen();setView(view);});
   $('br-refresh').addEventListener('click',()=>refreshActiveView({manual:true}));
   $('br-mailings-back').addEventListener('click',()=>{if(viewTrail.at(-1)?.view==='segmentCard'){previousView();return;}if(viewTrail.at(-1)?.view==='segments')viewTrail.pop();setView('segments',{back:true,cached:true});setTimeout(()=>{window.scrollTo(0,segmentBackScroll);Array.from(root.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===mailingSegmentId+'/mailings')?.focus({preventScroll:true});},0);});
   for(const category of Object.keys(segmentCategories))$('br-segment-category-'+category).addEventListener('click',()=>{if(!segmentEditor){segmentSection=category;renderSegments();updateControls();}});
@@ -2049,12 +2080,12 @@
   window.addEventListener('focus',()=>refreshActiveView({automatic:true}));document.addEventListener('visibilitychange',()=>{armViewTimer();if(!document.hidden)refreshActiveView({automatic:true});});window.addEventListener('beforeunload',(event)=>{clearViewTimer();if(importing||segmentSaving||preparedImport?.confirmationRequested||window.RegistryGrid?.hasPending?.()||window.RegistryProject?.hasPending?.()){event.preventDefault();event.returnValue='';}});
   try{if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler((event)=>{if(accessReady&&sharedKeyFromHash(event?.location?.hash)===accessKey)return;lockAccess(null);accessMessage='Ссылка изменилась. Проверяем доступ…';renderAccess();pendingAccessChange=true;flushPendingView();});}catch(ignored){}
   function peekProjectSegments(){
-    if(!accessReady||pendingSyncViews.has('segments'))return null;
-    if(dashboard){
+    if(!accessReady&&!previewShell()||pendingSyncViews.has('segments'))return null;
+    if(accessReady&&dashboard){
       if(dashboard.state!=='ready'||!lastDashboardLoaded||Date.now()-lastDashboardLoaded>60000)return null;
       return {state:dashboard.state,source:dashboard.source,loadedAt:lastDashboardLoaded,segments:dashboard.items.map(({id,name,category,url,coldyMailings})=>({id,name,category,url,previewNames:coldyMailings?.previewNames}))};
     }
-    const data=segmentDirectory||fastDirectories.segments;
+    const data=accessReady?(segmentDirectory||fastDirectories.segments):fastDirectories.segments;
     if(data?.state!=='ready'||data.complete!==true||!Number.isFinite(data.checkedAt)||Date.now()>=Math.min(data.checkedAt+600000,data.expiresAt??Infinity))return null;
     return {state:'ready',preview:true,loadedAt:data.checkedAt,expiresAt:Math.min(data.checkedAt+600000,data.expiresAt??Infinity),segments:data.items.map(({id,name,category})=>({id,name,category}))};
   }

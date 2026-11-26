@@ -168,7 +168,7 @@ function segmentCardPreparedPage_(context, segmentId, filter, revision) {
   if (!registryProjectScoped_()) return null;
   var slot = segmentCardSnapshotSlot_(context, segmentId), receipt = segmentCardSnapshotMeta_(context, slot);
   if (!receipt || !segmentCardSnapshotFresh_(receipt)) return null;
-  var scope = segmentCardFiles_(context, segmentId), credential = coldySettings_(context).credentialHash || '';
+  var scope = segmentCardFiles_(context, segmentId, 'prepared'), credential = coldySettings_(context).credentialHash || '';
   var registry = credential ? coldyCampaignRegistry_(context) : null;
   if (receipt.access !== segmentCardSnapshotCurrentAccess_(context,segmentId,scope.storage.public.id,scope.files,registry,credential)) return null;
   if (revision !== undefined && revision !== receipt.revision) segmentCardChanged_();

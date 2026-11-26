@@ -18,9 +18,9 @@ def main():
                         r'\(.*?(?=\n  (?:async )?function |\n  window\.addEventListener)', client,
                         re.MULTILINE | re.DOTALL).group(0) for name in names)
 
-    script = functions('entryWindow', 'postEntryMessage', 'notifyEntry', 'receiveEntryMessage', 'openGridWorkbook', 'openEntryWorkbook')
+    script = functions('entryWindow', 'postEntryMessage', 'notifyEntry', 'receiveEntryMessage', 'previewCardOpen', 'cancelDirectoryOpen', 'openGridWorkbook', 'openEntryWorkbook')
     leaf = """<!doctype html><meta charset=utf-8><output id=result></output><button id=download hidden>CSV</button><script>
-      let accessReady=true,activeProjectId='numshield';
+      let accessReady=true,activeProjectId='numshield',activeView='sources',pendingDirectoryOpen=null;
       const projectNames={numshield:'Намшилд',neosender:'Нео Сендер'},select={value:''};
       const $=()=>select,switchProject=()=>{activeProjectId=select.value};
       const importing=false,sourceSaving=false,segmentSaving=false,segmentEditor=null,coldySession=null,providerSession=null,coldyMailings=null;

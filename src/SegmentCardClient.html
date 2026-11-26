@@ -15,7 +15,7 @@
   function action(label,fn){const item=node('button',label);item.type='button';item.className='br-button';item.addEventListener('click',fn);return item;}
   function link(label,url){const item=node('a',label);item.href=url;item.target='_blank';item.rel='noopener noreferrer';return item;}
   function message(id,text){el(id).textContent=text||'';el(id).hidden=!text;}
-  function alive(state){return state&&state===current&&!el('view').hidden&&config.active();}
+  function alive(state){return state&&state===current&&!state.previewOnly&&!el('view').hidden&&config.active();}
   function run(state,method,params,guard){return config.rpc(method,{segmentId:state.id,...params},()=>alive(state)&&(!guard||guard()));}
   function resetView(){
     current=null;el('view').hidden=true;
@@ -47,6 +47,7 @@
     }
   }
   function restoreFirst(s){
+    if(s.previewOnly||!defaultFilters(s))return;
     const saved=firstPages.get(s.id);
     if(!saved||saved.at+pageLifetime<=Date.now())return;
     s.data=saved.page;s.revision=s.data.revision;s.updated=saved.at;
@@ -54,15 +55,31 @@
     paintSummary(s);paintRows(s);
     if(alive(s))window.dispatchEvent(new Event('segment-card-update'));
   }
-  function select(id,name,project,firstRead){
-    if(current?.id===id)return;
-    resetView();current={id,name,project,...initialFilters,firstRead,previous:[],seq:0,originSeq:0,coldSeq:0,
+  function defaultFilters(s){return Object.keys(initialFilters).every(key=>initialFilters[key]===s[key]);}
+  function privateActions(disabled){
+    for(const id of ['add','prepare','coldy','origins','mailings','settings'])el(id).disabled=disabled;
+  }
+  function openState(id,name,project,firstRead,previewOnly){
+    resetView();current={id,name,project,...initialFilters,firstRead,previewOnly,previous:[],seq:0,originSeq:0,coldSeq:0,
       panel:null,data:null,pages:new Map(),catalog:null,comparisons:new Map(),loading:false,exporting:false,updated:0};
     el('title').textContent=name;el('project').textContent=project;el('owner').value='all';el('query').value='';el('secondary').open=false;
     el('table-wrap').hidden=false;el('pages').hidden=true;el('export').disabled=true;
     for(const id of ['warnings','export-status','legacy-note'])el(id).hidden=true;
-    paintPanels(current);paintFilters(current);restoreFirst(current);
+    privateActions(previewOnly);paintPanels(current);paintFilters(current);restoreFirst(current);
     if(!current.data)paintSummary(current);
+    if(previewOnly)message('status','Проверяем доступ к контактам…');
+  }
+  function preview(id,name,project){
+    if(current?.id===id&&current.previewOnly&&current.project===project)return;
+    openState(id,name,project,null,true);
+  }
+  function select(id,name,project,firstRead){
+    if(current?.id!==id){openState(id,name,project,firstRead,false);return;}
+    if(!current.previewOnly)return;
+    // Promote the existing form in place, including a query entered while Google was responding.
+    const s=current;s.previewOnly=false;s.name=name;s.project=project;s.firstRead=firstRead;
+    el('title').textContent=name;el('project').textContent=project;
+    privateActions(false);message('status','Читаем контакты сегмента…');restoreFirst(s);
   }
   function show(visible){
     const hidden=!visible||!current,opening=!hidden&&el('view').hidden;
@@ -200,7 +217,7 @@
     if(s.data?.offset!==s.offset){el('prev').disabled=true;el('next').disabled=true;}
     if(!s.data)message('status','Читаем контакты сегмента…');
     try{
-      const firstRead=s.firstRead&&Object.keys(initialFilters).every(key=>initialFilters[key]===s[key])?s.firstRead:null;
+      const firstRead=s.firstRead&&defaultFilters(s)?s.firstRead:null;
       s.firstRead=null;
       let response;
       if(firstRead){
@@ -240,7 +257,11 @@
     }finally{if(valid()){s.loading=false;el('export').disabled=!s.data||s.exporting;}}
   }
   function changeFilters(changes){
-    const s=current;if(!alive(s))return;
+    const s=current;
+    if(s?.previewOnly&&!el('view').hidden){
+      Object.assign(s,changes);paintFilters(s);return;
+    }
+    if(!alive(s))return;
     Object.assign(s,changes);firstPage(s);s.exporting=false;message('export-status','');
     s.data=s.pages.get(pageKey(s))||null;
     if(s.data){paintSummary(s);paintRows(s);}
@@ -364,9 +385,10 @@
     finally{if(valid()){s.exporting=false;el('export').disabled=false;}}
   }
   function configure(options){
-    config=options;el('add').onclick=()=>config.add(current.id);el('prepare').onclick=()=>openPanel('prep');el('coldy').onclick=()=>openPanel('coldy');
-    el('origins').onclick=()=>openPanel('origins');el('mailings').onclick=()=>config.mailings(current.id);el('export').onclick=download;
-    el('settings').onclick=()=>config.settings(current.id);el('owner').onchange=()=>changeFilters({owner:el('owner').value});
+    config=options;el('add').onclick=()=>{if(alive(current))config.add(current.id);};el('prepare').onclick=()=>openPanel('prep');el('coldy').onclick=()=>openPanel('coldy');
+    el('origins').onclick=()=>openPanel('origins');el('mailings').onclick=()=>{if(alive(current))config.mailings(current.id);};el('export').onclick=download;
+    el('settings').onclick=()=>{if(alive(current))config.settings(current.id);};el('owner').onchange=()=>changeFilters({owner:el('owner').value});
+    el('query').oninput=()=>{if(current?.previewOnly)current.query=el('query').value.trim();};
     el('search').onsubmit=event=>{event.preventDefault();changeFilters({query:el('query').value.trim()});};
     for(const item of el('view').querySelectorAll('[data-sc-channel]'))item.onclick=()=>changeFilters({channel:item.dataset.scChannel,queue:['ready','inCampaign'].includes(current.queue)?current.queue:'all'});
     for(const item of el('view').querySelectorAll('[data-sc-state]'))item.onclick=()=>changeFilters({queue:current.queue===item.dataset.scState?'all':item.dataset.scState});
@@ -382,6 +404,6 @@
     if(!['all','email','telegram'].includes(channel)||!['all','companies','lpr'].includes(owner)||!['all','ready','inCampaign','email','emailReview','telegram','telegramReview','telegramBook','ownership'].includes(queue))return;
     changeFilters({channel,owner,queue,query:String(query).trim().slice(0,120)});
   }
-  window.RegistrySegmentCard={configure,clear,acceptDashboard,firstPageRequest,select,show,refresh,dismiss:()=>window.RegistrySegmentSelections?.dismiss?.()||dismiss(),id:()=>current?.id,getFilters,setFilters};
+  window.RegistrySegmentCard={configure,clear,acceptDashboard,firstPageRequest,preview,select,show,refresh,dismiss:()=>window.RegistrySegmentSelections?.dismiss?.()||dismiss(),id:()=>current?.id,getFilters,setFilters};
 })();
 </script>
