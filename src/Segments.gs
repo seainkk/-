@@ -148,6 +148,75 @@ function segmentFolderUrl_(folderId) {
   return 'https://drive.google.com/drive/folders/' + id_(folderId);
 }
 
+/** A project directory contains only the names of its direct live folders. */
+function getSegmentDirectory_(request) {
+  if (request !== undefined && Object.keys(object_(request)).length) fail_('INVALID_REQUEST','У списка сегментов нет параметров.');
+  return getAppBootstrap_({includeSegmentDirectory:true}).segmentDirectory;
+}
+
+function segmentDirectory_(context, root) {
+  if (!registryProjectScoped_()) fail_('OUTSIDE_PROJECT','Выберите проект для просмотра сегментов.');
+  var project = registryProjectId_(), folderMime = 'application/vnd.google-apps.folder';
+  var configured = (context.properties.getProperty('SEGMENTS_FOLDER_ID') || '').trim();
+  var expected = configured || REGISTRY_CONFIG.defaultSegmentsFolderId;
+  var result = {state:'unavailable',projectId:project,sourceId:null,checkedAt:Date.now(),revision:null,complete:false,items:[]};
+  if (expected === context.rootId || !/^[\w-]{10,200}$/.test(expected)) {
+    result.state = 'source_outside_registry'; return result;
+  }
+  if (typeof Drive === 'undefined' || !Drive.Files || typeof Drive.Files.list !== 'function') return result;
+  var limit = REGISTRY_CONFIG.maxTreeEntries;
+  function list(parents) {
+    var membership = parents.map(function (id) { return "'" + id_(id) + "' in parents"; }).join(' or ');
+    var query = {q:"trashed=false and mimeType='" + folderMime + "' and (" + membership + ')',
+      fields:'nextPageToken,incompleteSearch,files(id,name,mimeType,parents,trashed)',pageSize:1000,
+      supportsAllDrives:true,includeItemsFromAllDrives:true,corpora:root.driveId ? 'drive' : 'user'};
+    if (root.driveId) query.driveId = root.driveId;
+    try {
+      var page = Drive.Files.list(query);
+      if (page && !page.incompleteSearch && Array.isArray(page.files)) return page;
+    } catch (unavailable) { /* A transport failure cannot confirm an empty directory. */ }
+    return null;
+  }
+  function child(file, parent) {
+    return file && file.trashed === false && file.mimeType === folderMime && Array.isArray(file.parents) &&
+      file.parents.length === 1 && file.parents[0] === parent && typeof file.name === 'string' && file.name.trim() &&
+      typeof file.id === 'string' && /^[\w-]{10,200}$/.test(file.id);
+  }
+  // Prove the normal root -> Outreach -> segment edges together in one bounded metadata response.
+  var sourceId = expected, page = list([context.rootId,sourceId]);
+  if (!page) return result;
+  if (!page.files.some(function (f) { return child(f, context.rootId) && f.id === sourceId; })) {
+    // Existing registries may use a nested binding or a uniquely named fallback folder.
+    var binding;
+    try { binding = segmentMetadataBinding_(context); }
+    catch (error) { if (error.registryCode) throw error; return result; }
+    if (binding.state !== 'ready') { result.state = binding.state; return result; }
+    sourceId = binding.folder.getId();
+    if (sourceId !== expected || page.nextPageToken) {
+      page = list([sourceId]);
+      if (!page) return result;
+    }
+    if (binding.folder.isTrashed() || !insideRegistry_(binding.folder,context.rootId)) {
+      result.state = 'source_outside_registry'; return result;
+    }
+  }
+  var fresh = authorize_(), props = fresh.properties.getProperties();
+  if (fresh.rootId !== context.rootId || registryProjectId_() !== project || (props.SEGMENTS_FOLDER_ID || '').trim() !== configured)
+    fail_('SOURCE_CHANGED','Привязка сегментов изменилась. Обновите список.');
+  var seen = new Set(), items = [];
+  page.files.forEach(function (f) {
+    if (!child(f,sourceId) || f.id === sourceId || f.id === context.rootId || seen.has(f.id)) return;
+    seen.add(f.id);
+    if (registrySegmentProject_(fresh,f.id,props) !== project) return;
+    items.push({id:f.id,name:f.name,category:segmentCategory_(props[segmentCategoryKey_(f.id)],f.name)});
+  });
+  items.sort(function (a,b) { return byName_(a,b) || a.id.localeCompare(b.id); });
+  result.complete = !page.nextPageToken && items.length <= limit;
+  result.items = items.slice(0,limit); result.sourceId = sourceId; result.state = 'ready'; result.checkedAt = Date.now();
+  result.revision = digest_(JSON.stringify([context.rootId,sourceId,project,result.complete,result.items]));
+  return result;
+}
+
 /** Resolve current Outreach binding without reading the files below it. */
 function segmentMetadataBinding_(context) {
   var root = registryRoot_(context), registry = { id: root.getId(), name: root.getName() };

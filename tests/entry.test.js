@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { webcrypto } from 'node:crypto';
+import { hkdfSync, webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 const html = readFileSync(new URL('../entry/index.html', import.meta.url), 'utf8');
 const script = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map(match => match[1]).join('\n');
+const reader = readFileSync(new URL('../entry/directory.js',import.meta.url),'utf8');
 const KEY = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG';
 const PAGES_ORIGIN = 'https://seainkk.github.io';
 
@@ -36,11 +37,11 @@ test('the public entry and Apps Script shell identify the service and open one s
   assert.doesNotMatch(app, /id="br-source-catalog-toggle"/);
 });
 
-function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true, storage = new Map() } = {}) {
+function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true, storage = new Map(), fetch, firebase='' } = {}) {
   const events = new Map(), timers = new Map(), sequence = [], created = [];
   let timerId = 0;
   const location = new URL('https://seainkk.github.io' + path + hash);
-  const window = { location, crypto:webcrypto, localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},addEventListener(name, handler) { events.set(name, handler); } };
+  const window = { location, fetch, crypto:webcrypto, localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},addEventListener(name, handler) { events.set(name, handler); } };
   const states = [null], pushes = [], sent = [];
   let position = 0, backs = 0;
   window.history = {
@@ -70,7 +71,7 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
     }
     return node;
   }
-  const ids = Object.fromEntries(['entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host','entry-preview','entry-preview-list','entry-preview-time','entry-validation-access','entry-private-link'].map(id => [id, element()]));
+  const ids = Object.fromEntries(['entry-card', 'entry-title', 'entry-message', 'entry-spinner', 'entry-retry', 'entry-frame-host','entry-preview','entry-preview-title','entry-preview-list','entry-preview-time','entry-validation-access','entry-private-link','entry-directory-nav','entry-view-sources','entry-view-segments'].map(id => [id, element()]));
   const body = element('body');
   const document = {
     body, getElementById: id => ids[id],
@@ -79,12 +80,12 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
   function Frame() {}
   if (supported) Frame.prototype.credentialless = false;
   const context = vm.createContext({
-    window, document, URL, HTMLIFrameElement: Frame, TextEncoder, TextDecoder, btoa, atob, Uint8Array,
+    window, document, URL, HTMLIFrameElement: Frame, TextEncoder, TextDecoder, btoa, atob, Uint8Array, AbortController,
     navigator: { userActivation: activation },
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
-  vm.runInContext(script, context, { filename: 'entry/index.html' });
+  vm.runInContext(script.replace('/* directory reader bundle */',()=>reader).replace('const directoryProject = "";',()=> 'const directoryProject = '+JSON.stringify(firebase)+';'), context, { filename: 'entry/index.html' });
   const currentFrame = () => ids['entry-frame-host'].children[0];
   const app = () => currentFrame()?.contentWindow;
   return { ids, window, body, timers, sequence, created, currentFrame, activation, app, pushes, sent, get backs(){return backs;},
@@ -181,6 +182,8 @@ test('repeat entry decrypts only dated names for this link before Google respond
     assert.equal(page.body.dataset.state,'loading');
   }
   const active=repeat.ready();
+  assert.equal(repeat.ids['entry-preview'].hidden,false);
+  repeat.event('message',{origin:PAGES_ORIGIN,source:active,data:{type:'bases-registry-startup-catalog-presented',checkedAt:message.checkedAt,visible:true}});
   assert.equal(repeat.ids['entry-preview'].hidden,true);
   const offline=fixture({storage});
   offline.event('message',{source:offline.app(),origin:PAGES_ORIGIN,data:{type:'bases-registry-unavailable'}});
@@ -195,6 +198,88 @@ test('unsupported browsers receive a clear instruction instead of a credentialed
   assert.match(f.ids['entry-message'].textContent, /Chrome или Edge/);
   assert.equal(f.created.filter(node => node.tag === 'iframe').length, 0);
   assert.equal(f.timers.size, 0);
+});
+
+async function until(check) {
+  for(let i=0;i<100&&!check();i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.ok(check());
+}
+
+function directoryMock(transform) {
+  const calls=[],firebase='directory-test',stamp=Date.now();
+  async function fetch(url,options){
+    calls.push({url,options});
+    const {documents}=JSON.parse(options.body), project=documents[1].split('segments-')[1];
+    const found=(name,rows)=>({found:{name,fields:{schema:{integerValue:'1'},generatedAt:{timestampValue:new Date(stamp).toISOString()},
+      expiresAt:{timestampValue:new Date(stamp+600000).toISOString()},rowsJson:{stringValue:JSON.stringify(rows)}}}});
+    const docs=[found(documents[1],[{id:'test_segment_001',name:'Сегмент '+project,project,section:'partners'}]),
+      found(documents[0],[{id:'test_source_0001',name:'Тестовый источник',workbook:true,email:'private@example.test'}])];
+    return {ok:true,text:async()=>JSON.stringify(transform?await transform(docs,calls.length):docs)};
+  }
+  return {calls,firebase,stamp,fetch};
+}
+
+test('first document reads real directory rows with an origin-scoped capability and keeps them until the application acknowledges the selected view',async()=>{
+  const mock=directoryMock(),f=fixture(mock);
+  assert.equal(f.ids['entry-directory-nav'].hidden,false);
+  f.ids['entry-view-segments'].listeners.get('click')();
+  await until(()=>f.ids['entry-preview-list'].children.length===1);
+  const row=f.ids['entry-preview-list'].children[0].children[0];
+  assert.equal(row.textContent,'Сегмент numshield');assert.equal(row.dataset.directoryKind,'segments');
+  assert.equal(row.dataset.directoryId,'test_segment_001');
+  assert.equal(mock.calls.length,1);
+  const {url,options}=mock.calls[0];assert.match(url,/^https:\/\/firestore\.googleapis\.com\/v1\/projects\/directory-test\/databases\/\(default\)\/documents:batchGet$/);
+  const cap=Buffer.from(hkdfSync('sha256',KEY,'outreach-center/firebase-directory/v1',mock.firebase,32)).toString('base64url');
+  assert.ok(options.body.includes('/directoryViews/'+cap+'/lists/catalog'));assert.ok(!options.body.includes(KEY)&&!url.includes(cap));
+  assert.equal(options.credentials,'omit');assert.equal(options.cache,'no-store');assert.equal(options.referrerPolicy,'no-referrer');
+  assert.deepEqual(Object.entries(options.headers),[['Content-Type','text/plain;charset=UTF-8']]);
+  row.listeners.get('click')();
+  const messages=[],app=f.app();app.postMessage=data=>messages.push(structuredClone(data));
+  const send=data=>f.event('message',{origin:PAGES_ORIGIN,source:app,data});
+  send({type:'bases-registry-shell'});assert.equal(f.ids['entry-preview'].hidden,false);
+  f.ready();assert.equal(f.ids['entry-preview'].hidden,false);
+  const scope={epoch:2,projectId:'numshield'};
+  send({type:'bases-registry-directory-scope',...scope});
+  assert.deepEqual(messages.map(m=>m.type),['bases-registry-fast-view','bases-registry-fast-directory','bases-registry-fast-directory','bases-registry-fast-open']);
+  assert.deepEqual(messages.find(m=>m.kind==='sources').items,[{id:'test_source_0001',name:'Тестовый источник'}]);
+  assert.deepEqual(messages.find(m=>m.type==='bases-registry-fast-directory'&&m.kind==='segments').items,
+    [{id:'test_segment_001',name:'Сегмент numshield',category:'partners'}]);
+  assert.equal(messages.at(-1).id,row.dataset.directoryId);
+  send({type:'bases-registry-fast-viewed',...scope,kind:'segments',serial:messages[0].serial,visible:true});
+  assert.equal(f.ids['entry-preview'].hidden,false);
+  send({type:'bases-registry-fast-presented',...scope,kind:'segments',checkedAt:mock.stamp,visible:true});
+  assert.equal(f.ids['entry-preview'].hidden,true);assert.equal(f.ids['entry-directory-nav'].hidden,true);
+  assert.equal(f.ids['entry-preview-list'].children.length,0);
+});
+
+test('a delayed first-project response cannot expose rows or cover the active application after changing project',async()=>{
+  let release;const pending=new Promise(resolve=>{release=resolve;});
+  const mock=directoryMock(async(docs,n)=>{if(n===1)await pending;return docs;}),f=fixture(mock);
+  await until(()=>mock.calls.length===1);
+  const messages=[],app=f.app();app.postMessage=data=>messages.push(structuredClone(data));
+  const send=(projectId,epoch)=>f.event('message',{origin:PAGES_ORIGIN,source:app,data:{type:'bases-registry-directory-scope',projectId,epoch}});
+  send('numshield',1);send('neosender',2);
+  await until(()=>messages.some(m=>m.kind==='segments'));release();
+  await new Promise(resolve=>setTimeout(resolve,15));
+  assert.ok(messages.every(m=>m.epoch===2&&m.projectId==='neosender'));
+  assert.equal(messages.find(m=>m.kind==='segments').items[0].name,'Сегмент neosender');assert.equal(f.ids['entry-preview-list'].children.length,0);
+});
+
+test('missing, malformed, expired, or cross-project documents give way to Google and a truly empty catalogue is recognized',async()=>{
+  for(const mode of ['missing','invalid','expired','other','empty']){
+    const mock=directoryMock(docs=>{
+      const doc=docs[1],name=doc.found.name;
+      if(mode==='missing')return [{missing:name},{missing:docs[0].found.name}];
+      if(mode==='invalid')doc.found.fields.rowsJson.stringValue='{';
+      if(mode==='expired')doc.found.fields.expiresAt.timestampValue=new Date(Date.now()-10000).toISOString();
+      if(mode==='other')doc.found.name+='-unexpected';
+      if(mode==='empty')doc.found.fields.rowsJson.stringValue='[]';
+      return docs;
+    }),f=fixture(mock);
+    await until(()=>mock.calls.length===1);await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(f.ids['entry-preview-list'].children.length,0);
+    assert.equal(f.ids['entry-preview-time'].textContent.includes('Пустой список'),mode==='empty');
+  }
 });
 
 test('the static app opens immediately without sending the access key, workbook or project in its URL', () => {

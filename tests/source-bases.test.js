@@ -373,6 +373,36 @@ function installDriveListing(f, alter, driveId) {
   return calls;
 }
 
+test('shared source directory reads direct and nested file names across both projects with no sheet opens, write lock or per-file lookups',()=>{
+  const f=fixture({busy:true});
+  installDriveListing(f,page=>{page.files.forEach(item=>{delete item.webViewLink;});return page;});
+  const read=(projectId,payload={})=>plain(f.context.callApp({method:'getSourceDirectory',payload,projectId,accessKey:TEST_ACCESS_KEY}));
+  const first=read('numshield');
+  assert.equal(first.state,'ready');assert.equal(first.complete,true);assert.equal(first.sourceId,SOURCE);
+  assert.deepEqual(first.items.map(i=>i.id).sort(),[CSV,NATIVE,PDF,XLSX].sort());
+  assert.ok(first.items.every(i=>Object.keys(i).sort().join(',')==='id,name,workbook'));
+  assert.deepEqual(first.items.filter(i=>i.workbook).map(i=>i.id),[NATIVE]);
+  assert.equal(read('neosender').revision,first.revision);
+  assert.throws(()=>read('numshield',{root:OTHER}),/INVALID_REQUEST/);
+  assert.equal(f.calls.drive.some(c=>c.type==='file'),false);assert.deepEqual(f.calls.opens,[]);assert.deepEqual(f.calls.writes,[]);
+  assert.equal(f.calls.events.some(c=>c.kind==='lock'),false);
+  const before=first.items.find(i=>i.id===PDF);
+  f.files.get(PDF).name=before.name+' обновлено';
+  assert.notEqual(read('numshield').revision,first.revision);
+  f.folders.get(CHILD).parent=OTHER;
+  const after=read('numshield');
+  assert.ok(after.items.length<first.items.length);assert.ok(after.complete);
+});
+
+test('a changed service binding or a moved source cannot expose file names through the lightweight RPC',()=>{
+  const f=fixture({properties:{SOURCE_BASES_FOLDER_ID:OTHER}});
+  const read=()=>plain(f.context.callApp({method:'getSourceDirectory',accessKey:TEST_ACCESS_KEY}));
+  assert.equal(read().state,'source_outside_registry');assert.deepEqual(read().items,[]);
+  f.properties.set('SOURCE_BASES_FOLDER_ID',SOURCE);
+  installDriveListing(f,page=>{f.properties.set('SOURCE_BASES_STORAGE_ID','different_service_id');return page;});
+  assert.throws(read,/SOURCE_CHANGED/);assert.deepEqual(f.calls.opens,[]);assert.deepEqual(f.calls.writes,[]);
+});
+
 test('paged Drive listing preserves all catalog fields and bounds discovery operations on 1204 synthetic files', t=>{
   const f=fixture();
   for(let i=0;i<1200;i++)f.makeFile('batch_source_'+String(i).padStart(9,'0'),'База '+i,'text/csv',SOURCE);

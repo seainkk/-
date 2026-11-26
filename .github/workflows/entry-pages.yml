@@ -28,6 +28,8 @@ jobs:
         with:
           node-version: '22'
       - name: Build the static application
+        env:
+          FIREBASE_DIRECTORY_PROJECT: ${{ vars.FIREBASE_DIRECTORY_PROJECT }}
         run: node scripts/build-pages.mjs _site
       - name: Name this build artifact
         id: name

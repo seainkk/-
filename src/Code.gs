@@ -34,13 +34,14 @@ function getAppBootstrap_(request) {
   return api_(function () {
     var context = authorize_(), registry;
     var options = request === undefined ? {} : object_(request);
-    if (Object.keys(options).some(function (key) { return key !== 'includeSourcePreview'; }) ||
-        (options.includeSourcePreview !== undefined && typeof options.includeSourcePreview !== 'boolean')) {
+    if (Object.keys(options).some(function (key) {
+      return ['includeSourcePreview','includeSegmentDirectory','includeSourceDirectory'].indexOf(key) < 0 || typeof options[key] !== 'boolean';
+    })) {
       fail_('INVALID_REQUEST', 'Неизвестные параметры загрузки реестра.');
     }
     if (typeof Drive !== 'undefined' && Drive.Files && typeof Drive.Files.get === 'function') {
       var folder;
-      var fields = options.includeSourcePreview ? 'id,name,mimeType,trashed,driveId' : 'id,name,mimeType,trashed';
+      var fields = options.includeSourcePreview || options.includeSegmentDirectory || options.includeSourceDirectory ? 'id,name,mimeType,trashed,driveId' : 'id,name,mimeType,trashed';
       try { folder = Drive.Files.get(context.rootId, {fields:fields, supportsAllDrives:true}); }
       catch (error) { fail_('NOT_FOUND', 'Корневая папка реестра недоступна.'); }
       if (!folder || folder.id !== context.rootId || folder.trashed !== false || folder.mimeType !== 'application/vnd.google-apps.folder' || typeof folder.name !== 'string')
@@ -54,10 +55,15 @@ function getAppBootstrap_(request) {
       user: { email: '', isAdmin: false, accessMode: 'link' },
       registry: registry
     };
-    if (options.includeSourcePreview && folder && typeof sourceBasesStartupPreview_ === 'function') {
-      var preview = sourceBasesStartupPreview_(context, folder);
+    if (options.includeSourceDirectory) {
+      var startup = folder && sourceBasesStartupLists_(context,folder,options);
+      if (startup && startup.catalogPreview) result.catalogPreview = startup.catalogPreview;
+      result.sourceDirectory = startup && startup.sourceDirectory || sourceDirectoryResponse_(context,'unavailable');
+    } else if (options.includeSourcePreview && folder) {
+      var preview = sourceBasesStartupPreview_(context,folder);
       if (preview) result.catalogPreview = preview;
     }
+    if (options.includeSegmentDirectory) result.segmentDirectory = segmentDirectory_(context,folder || registry);
     return result;
   });
 }
