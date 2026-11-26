@@ -468,8 +468,9 @@ function coldyRecipientTick_(event){
       }
       // A subsequent tick can build a card while the previous Coldy poll finishes.
       // Direct sheet edits remain eligible when the provider is unavailable.
-      if(admitted && typeof segmentCardMaintenanceTick_==='function' && Date.now()-started<150000) {
-        try { segmentCardMaintenanceTick_(authorizedTimer); }
+      var latestCardStart=started+60000;
+      if(admitted && typeof segmentCardMaintenanceTick_==='function' && Date.now()<=latestCardStart) {
+        try { segmentCardMaintenanceTick_(authorizedTimer,latestCardStart); }
         catch(ignored){ /* The card scheduler records its own failure and retry. */ }
       }
     } finally {SHARED_REQUEST_SCOPE_=previous;}

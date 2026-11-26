@@ -121,8 +121,41 @@ test('prepared card survives cache eviction and serves the same filtered pages w
   assert.equal(page.prepared,true);assert.ok(Date.parse(page.checkedAt));assert.deepEqual(page.summary,baseline.summary);
   assert.equal(page.rows[0].value,baseline.rows[2].value);assert.ok(page.rows[0].sources.every(s=>s.sourceType==='working'));
   assert.equal(f.state.diskReads,1);assert.equal(f.state.reads,reads);assert.equal(f.state.privateReads,recipients);
+  assert.equal(f.dashboard()[segment],undefined);
+  f.run({prepared:true,limit:60});
+  assert.equal(f.dashboard()[segment].revision,result.revision);
   assert.equal(f.rebuild().rebuilt,false);assert.equal(f.state.diskWrites,1);assert.equal(f.dashboard()[segment].revision,result.revision);
   assert.doesNotMatch(JSON.stringify(f.values),/@example/);
+});
+
+test('a cold maintenance build hashes each unique contact once and packs the full snapshot once, even without Apps Script cache',()=>{
+  for(const cacheAvailable of [true,false]){
+    const f=preparedFixture(), key=f.c.pvKey_, read=f.c.pvCacheRead_, pack=f.c.Utilities.gzip;
+    let hashed=0, validationReads=0, fullCompressions=0, builds=0;
+    const build=f.c.segmentCardBuild_;
+    const tracking=f.c.segmentTrackingStorage_, trackingModes=[];
+    f.c.segmentTrackingStorage_=(...args)=>{trackingModes.push(args[3]);return tracking(...args);};
+    f.c.segmentCardBuild_=(...args)=>{builds++;return build(...args);};
+    f.c.pvKey_=(...args)=>{hashed++;return key(...args);};
+    f.c.pvCacheRead_=cache=>{validationReads++;return read(cache);};
+    f.c.Utilities.gzip=blob=>{
+      const object=JSON.parse(blob.getDataAsString());
+      if(object.rows&&!object.preview)fullCompressions++;
+      return pack(blob);
+    };
+    if(!cacheAvailable)f.c.CacheService={getScriptCache(){throw Error('unavailable');}};
+    f.rebuild();
+    const [artifact]=f.disk.values();
+    const snapshot=f.c.segmentCardSnapshotUnpack_(artifact.body);
+    assert.ok(snapshot.rows.length>0);
+    assert.equal(hashed,snapshot.rows.length,'one digest per unique contact');
+    assert.equal(builds,1,'one bulk read per working tab');assert.equal(validationReads,1);
+    assert.equal(f.state.privateReads,1,'unchanged Drive versions reuse verified facts until the final metadata check');
+    assert.equal(fullCompressions,1);assert.equal(f.state.diskWrites,1);
+    assert.ok(trackingModes.length>=2);assert.ok(trackingModes.every(assignmentsOnly=>assignmentsOnly===true));
+    const historyScope=f.c.segmentCardFiles_(f.context,segment,true);
+    assert.equal(trackingModes.at(-1),false);assert.ok(historyScope.tracking);
+  }
 });
 
 test('prepared browsing enforces current ownership, master tags, provider assignment and scope when cache is warm',()=>{

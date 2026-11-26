@@ -101,6 +101,16 @@ test('a scoped minute tick can prepare cards offline with no Coldy connection or
   assert.deepEqual(f.paths,[]);assert.deepEqual(f.writes,[]);
 });
 
+test('a long Coldy poll leaves card preparation to a fresh tick with the provider lease still occupied',()=>{
+  const f=fixture();f.enable();const starts=[];
+  f.r.segmentCardMaintenanceTick_=(guard,deadline)=>{guard();starts.push(deadline);};
+  f.r.coldySettings_=()=>{f.state.now+=60001;return {configured:false};};
+  f.tick();assert.deepEqual(starts,[]);
+  f.props.setProperty(f.r.COLDY_INCOMING.lease,JSON.stringify({id:'other',until:f.state.now+120000}));
+  const now=f.state.now;f.tick();assert.deepEqual(starts,[now+60000]);
+  assert.equal(JSON.parse(f.props.getProperty(f.r.COLDY_INCOMING.lease)).id,'other');
+});
+
 test('a timed-out worker exposes its real start and yields the next turn to the other binding',()=>{
   const f=fixture();f.enable();
   function status(binding){

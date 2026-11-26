@@ -35,7 +35,9 @@ function fixture(){
   r.segmentCardData_=()=>({snapshot:{rows:[],summary:{}}});
   r.segmentCardSnapshotPack_=()=> 'compressedBody';
   r.coldySave_=()=>{};
-  r.CacheService={getScriptCache:()=>({get:()=> 'cached'})};
+  const stages=new Map();
+  r.CacheService={getScriptCache:()=>({get:k=>k.startsWith('card-stage/')?stages.get(k)||null:'cached',
+    put(k,v,ttl){assert.equal(ttl,900);stages.set(k,v);}})};
   r.segmentCardWriteCache_=()=>{};
   r.segmentCardSnapshotWarm_=()=>{};
   r.segmentCardRefreshSnapshot_=(ctx,id,guard,scheduled)=>{
@@ -116,4 +118,28 @@ test('a rate or source failure keeps its code through finalizer contention; a mi
   assert.equal(status().lastError,'SEGMENT_CARD_CHANGED');assert.equal(status().refreshState,'retrying');
   delete tests.onBuild;assert.equal(r.prepareSegmentCardSnapshot_({segmentId:A}).state,'ready');
   assert.equal(status().lastError,null);assert.equal(status().lastBackgroundAt,null);
+});
+
+test('status reports only the current attempt stage while a slow service read is running or interrupted',()=>{
+  const {r,tests,tick,props}=fixture(), status=()=>r.prepareSegmentCardSnapshot_({segmentId:A,statusOnly:true});
+  tests.denied=wait=>wait===8000;
+  const name='private@example.org';
+  r.segmentCardData_=()=>{
+    const during=status();assert.equal(during.stage,'contacts');assert.equal(during.stageStartedAt,during.attemptAt);
+    throw new Error(name);
+  };
+  assert.throws(tick);
+  tests.now+=301000;delete tests.denied;
+  assert.equal(status().refreshState,'interrupted');assert.equal(status().stage,'contacts');assert.ok(!JSON.stringify(status()).includes(name));
+  // A new run must not surface an old attempt when its cache entry is unavailable.
+  r.CacheService={getScriptCache:()=>({get(){throw Error('unavailable');},put(){throw Error('unavailable');}})};
+  assert.equal(status().stage,null);assert.equal(status().stageStartedAt,null);
+  r.segmentCardData_=()=>({snapshot:{rows:[],summary:{}}});
+  assert.equal(r.prepareSegmentCardSnapshot_({segmentId:A}).state,'ready');
+  const saved=props.getProperty(r.segmentCardMaintenanceKey_('numshield',A));
+  tests.now+=301000;
+  const builds=tests.builds.length;
+  assert.equal(r.segmentCardMaintenanceTick_(r.authorize_,tests.now-1).state,'busy');
+  assert.equal(tests.builds.length,builds);
+  assert.equal(props.getProperty(r.segmentCardMaintenanceKey_('numshield',A)),saved);
 });
