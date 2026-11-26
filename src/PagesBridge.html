@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>Подключение Google Apps Script</title></head>
+<body><span hidden id="registry-bridge-channel" data-channel="<?= bridgeSession ?>"></span>
+<script>
+(() => {
+  'use strict';
+  const pages='https://seainkk.github.io',protocol='registry-pages-rpc-v1',channel=document.getElementById('registry-bridge-channel').dataset.channel;
+  function appAncestor() {
+    try {
+      let frame=window;
+      const origins=window.location.ancestorOrigins;
+      for(let i=0;origins&&i<origins.length;i++){
+        const parent=frame.parent;
+        if(!parent||parent===frame)return null;
+        if(origins[i]===pages)return parent;
+        frame=parent;
+      }
+    }catch(ignored){}
+    return null;
+  }
+  const app=appAncestor();
+  if(!app||!/^[a-f0-9-]{36}$/.test(channel))return;
+  let port=null,lastId=0;
+  function uploadForm(payload,projectId,accessKey) {
+    const fields=payload?.fields,file=payload?.file;
+    if(!fields||Object.getPrototypeOf(fields)!==Object.prototype||!file||!(file.bytes instanceof ArrayBuffer)||
+        !file.bytes.byteLength||file.bytes.byteLength>10*1024*1024||typeof file.name!=='string'||!file.name||
+        typeof file.type!=='string'||!Number.isSafeInteger(file.lastModified))throw new Error('Некорректный файл загрузки.');
+    const form=document.createElement('form');form.hidden=true;
+    const allowed=fields.flow==='prepared'?['flow','name','section','routeMode','status','requestId']:['name','baseType','contentsJSON','status','requestId'];
+    function add(name,value){
+      const input=document.createElement('input');input.type='hidden';input.name=name;input.value=value;form.append(input);
+    }
+    for(const [name,value] of Object.entries(fields)){
+      if(!allowed.includes(name)||typeof value!=='string')throw new Error('Некорректные поля загрузки.');
+      add(name,value);
+    }
+    add('projectId',projectId);add('accessKey',accessKey);
+    const transfer=new DataTransfer();
+    transfer.items.add(new File([file.bytes],file.name,{type:file.type,lastModified:file.lastModified}));
+    const input=document.createElement('input');input.type='file';input.name='file';input.files=transfer.files;form.append(input);
+    document.body.append(form);
+    return form;
+  }
+  function call(event) {
+    const m=event.data;
+    if(!m||m.protocol!==protocol||m.channel!==channel||m.type!=='call'||
+        !Number.isSafeInteger(m.id)||m.id<=lastId)return;
+    const id=m.id;lastId=id;
+    let form=null,timer=null,settled=false;
+    function finish(ok,value){
+      if(settled)return;
+      settled=true;clearTimeout(timer);form?.remove();
+      const result={protocol,channel,type:'result',id,ok};
+      if(ok)result.value=value;
+      else {
+        let message=String(value?.message||value||'Ошибка сервера Google.');
+        if(typeof m.accessKey==='string'&&m.accessKey)message=message.split(m.accessKey).join('…');
+        result.message=message.slice(0,2000);
+      }
+      try{port?.postMessage(result);}catch(ignored){} // The calling page may have closed.
+    }
+    try{
+      if(typeof m.accessKey!=='string'||m.accessKey.length!==43||!/^[\w-]{43}$/.test(m.accessKey)||
+          !['numshield','neosender'].includes(m.projectId)||typeof m.name!=='string'||!/^[a-z][a-zA-Z0-9]{1,90}$/.test(m.name))
+        throw new Error('Некорректный запрос или закрытая ссылка.');
+      timer=setTimeout(()=>finish(false,'Google не подтвердил результат. Проверьте состояние операции.'),380000);
+      const runner=google.script.run.withSuccessHandler(v=>finish(true,v)).withFailureHandler(e=>finish(false,e));
+      if(m.name==='uploadSourceBase'){
+        form=uploadForm(m.payload,m.projectId,m.accessKey);runner.uploadSourceBase(form);
+      }else{
+        const request={method:m.name,projectId:m.projectId,accessKey:m.accessKey};
+        if(m.payload!==undefined)request.payload=m.payload;
+        runner.callApp(request);
+      }
+    }catch(error){finish(false,error);}
+  }
+  window.addEventListener('message',event=>{
+    const m=event.data;
+    if(port||event.origin!==pages||event.source!==app||appAncestor()!==app||
+        m?.protocol!==protocol||m.type!=='connect'||m.channel!==channel||event.ports.length!==1)return;
+    port=event.ports[0];port.onmessage=call;
+    port.postMessage({protocol,channel,type:'connected'});
+  });
+  const announce=()=>{if(window.google?.script?.run)app.postMessage({protocol,channel,type:'hello'},pages);};
+  if(window.google?.script?.run)announce();else window.addEventListener('load',announce,{once:true});
+  window.addEventListener('pagehide',()=>{port?.close();port=null;});
+})();
+</script>
+</body></html>

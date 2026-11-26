@@ -154,6 +154,10 @@ function segmentCardRefreshSnapshot_(context, segmentId, guard, scheduled) {
     stage('cache');
     if (rebuilt) segmentCardWriteCache_(revision,snapshot,SEGMENT_CARD_SNAPSHOT.cacheSeconds,body);
     try { segmentCardSnapshotWarm_(slot, receipt, snapshot, scope); } catch (ignored) { /* Drive still holds the snapshot. */ }
+  } else if (head) {
+    // Keep the authorized first page available between visits while the timer checks unchanged inputs.
+    try { CacheService.getScriptCache().put(segmentCardSnapshotHeadKey_(slot, receipt),head,SEGMENT_CARD_SNAPSHOT.cacheSeconds); }
+    catch (ignored) { /* Cache entries are optional; the checked receipt still points to Drive. */ }
   }
   return {revision:revision, checkedAt:receipt.checkedAt, rebuilt:rebuilt};
 }
@@ -168,19 +172,39 @@ function segmentCardPreparedPage_(context, segmentId, filter, revision) {
   var registry = credential ? coldyCampaignRegistry_(context) : null;
   if (receipt.access !== segmentCardSnapshotCurrentAccess_(context,segmentId,scope.storage.public.id,scope.files,registry,credential)) return null;
   if (revision !== undefined && revision !== receipt.revision) segmentCardChanged_();
-  var snapshot = segmentCardSnapshotLoad_(context, slot, receipt);
-  if (!snapshot) return null;
+  var first = !filter.offset && !filter.query && filter.channel === 'all' && filter.owner === 'all' && filter.queue === 'all';
+  var page, validHead = false;
+  if (first) {
+    try {
+      var encoded = CacheService.getScriptCache().get(segmentCardSnapshotHeadKey_(slot, receipt));
+      if (encoded) {
+        var head = segmentCardSnapshotUnpack_(encoded);
+        validHead = segmentCardSnapshotValidHead_(head,segmentId,receipt,scope.files);
+        if (validHead && head.rows.length >= Math.min(filter.limit,head.total)) {
+          page = head;
+          delete page.preview;
+          page.rows = page.rows.slice(0,filter.limit);
+          page.nextOffset = page.rows.length < page.total ? page.rows.length : null;
+          page.checkedAt = receipt.checkedAt; page.preparedAt = receipt.preparedAt;
+          page.name = scope.folder.getName(); page.files = segmentCardSnapshotPublicFiles_(scope.files);
+        }
+      }
+    } catch (ignored) { /* Use the complete authorized snapshot below. */ }
+  }
+  var snapshot;
+  if (!page) {
+    snapshot = segmentCardSnapshotLoad_(context, slot, receipt);
+    if (!snapshot) return null;
+  }
   var fresh = authorize_();
   if (fresh.rootId !== context.rootId || registrySegmentProject_(fresh, segmentId) !== slot.projectId) fail_('OUTSIDE_PROJECT', 'Доступ к сегменту изменился.');
   if (segmentCardSnapshotCredential_(fresh.properties) !== credential ||
       (fresh.properties.getProperty('SOURCE_BASES_STORAGE_ID') || REGISTRY_CONFIG.defaultSourceBasesStorageId) !== scope.storage.public.id) return null;
   // Recover an evicted dashboard page from the authorized snapshot already in memory.
-  if (!filter.offset && !filter.query && filter.channel === 'all' && filter.owner === 'all' && filter.queue === 'all') {
-    try {
-      if (!CacheService.getScriptCache().get(segmentCardSnapshotHeadKey_(slot, receipt))) {
-        segmentCardSnapshotWarm_(slot, receipt, snapshot, scope);
-      }
-    } catch (ignored) { /* The requested page is still available. */ }
+  if (page) return page;
+  if (first && !validHead) {
+    try { segmentCardSnapshotWarm_(slot, receipt, snapshot, scope); }
+    catch (ignored) { /* The requested page is still available. */ }
   }
   return segmentCardSnapshotPage_(snapshot, filter, receipt, segmentId, scope.folder.getName(), scope.files);
 }

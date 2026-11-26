@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 const html = readFileSync(new URL('../entry/index.html', import.meta.url), 'utf8');
 const script = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map(match => match[1]).join('\n');
 const KEY = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG';
-const GOOGLE_ORIGIN = 'https://n-example-script.googleusercontent.com';
+const PAGES_ORIGIN = 'https://seainkk.github.io';
 
 test('Pages deploy retries consume the completed build artifact without uploading another one', () => {
   const workflow = readFileSync(new URL('../.github/workflows/entry-pages.yml', import.meta.url), 'utf8');
@@ -15,7 +15,7 @@ test('Pages deploy retries consume the completed build artifact without uploadin
   assert.match(build, /artifact_name=github-pages-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/);
   assert.match(build, /artifact_name: \$\{\{ steps\.name\.outputs\.artifact_name \}\}/);
   assert.match(build, /artifact_id: \$\{\{ steps\.upload\.outputs\.artifact_id \}\}/);
-  assert.match(build, /uses: actions\/upload-pages-artifact@v3\s+with:\s+name: \$\{\{ steps\.name\.outputs\.artifact_name \}\}\s+path: entry/);
+  assert.match(build, /uses: actions\/upload-pages-artifact@v3\s+with:\s+name: \$\{\{ steps\.name\.outputs\.artifact_name \}\}\s+path: _site/);
   assert.match(deploy, /needs: build/);
   assert.doesNotMatch(deploy, /upload-pages-artifact|run_attempt|GITHUB_RUN_ATTEMPT/i);
   assert.match(deploy, /ARTIFACT_ID: \$\{\{ needs\.build\.outputs\.artifact_id \}\}/);
@@ -64,7 +64,7 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
       focus() { node.focused = true; }, select() { node.selected = true; },
     };
     if (tag === 'iframe') {
-      node.contentWindow = { parent: window };
+      node.contentWindow = { parent: window,postMessage(data,origin){sent.push({type:data.type,origin});} };
       Object.defineProperty(node, 'credentialless', { get: () => node._credentialless, set(value) { sequence.push(['isolate', value]); node._credentialless = value; } });
       Object.defineProperty(node, 'src', { get: () => node._src, set(value) { sequence.push(['navigate', value]); node._src = value; } });
     }
@@ -86,16 +86,16 @@ function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', 
   });
   vm.runInContext(script, context, { filename: 'entry/index.html' });
   const currentFrame = () => ids['entry-frame-host'].children[0];
-  const app = () => ({ parent: currentFrame()?.contentWindow, postMessage(data, origin) { sent.push({ type: data.type, origin }); } });
+  const app = () => currentFrame()?.contentWindow;
   return { ids, window, body, timers, sequence, created, currentFrame, activation, app, pushes, sent, get backs(){return backs;},
     event(name, value) { return events.get(name)?.(value); },
     traverse(by) { assert.ok(position + by >= 0 && position + by < states.length); position += by; events.get('popstate')({ state: states[position] }); },
-    nav(source, canBack, origin = GOOGLE_ORIGIN) { events.get('message')({ origin, source, data: { type:'bases-registry-navigation', canBack } }); },
-    ready(source = app(), origin = GOOGLE_ORIGIN) { events.get('message')({ origin, source, data: { type: 'bases-registry-ready' } }); return source; },
+    nav(source, canBack, origin = PAGES_ORIGIN) { events.get('message')({ origin, source, data: { type:'bases-registry-navigation', canBack } }); },
+    ready(source = app(), origin = PAGES_ORIGIN) { events.get('message')({ origin, source, data: { type: 'bases-registry-ready' } }); return source; },
   };
 }
 
-test('missing, malformed and query-only credentials never create a Google iframe', () => {
+test('missing, malformed and query-only credentials never create an app iframe', () => {
   for (const hash of ['', '#access_key=', '#access_key=' + 'a'.repeat(42), '#access_key=' + KEY + '&other=1', '#access_key=' + '~'.repeat(43), '#other=' + KEY]) {
     const f = fixture({ hash });
     assert.equal(f.created.filter(node => node.tag === 'iframe').length, 0);
@@ -119,10 +119,10 @@ test('a worksheet opens only its preview after a valid private link and authenti
   f.ready(app,'https://other.example'); f.ready({parent:f.window,postMessage:() => assert.fail('foreign window received a worksheet selection')});
   assert.equal(calls.length,0);assert.equal(f.body.dataset.state,'loading');
   f.ready(app);f.ready(app);
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[{data:{type:'bases-registry-open-validation',id:'workbook_123456'},origin:GOOGLE_ORIGIN}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[{data:{type:'bases-registry-open-validation',id:'workbook_123456'},origin:PAGES_ORIGIN}]);
 });
 
-test('an authenticated sheet link keeps the requested Email action and project inside the ready Google frame', () => {
+test('an authenticated sheet link keeps the requested Email action and project inside the ready Pages app', () => {
   const titles={email:/email/,mailing:/рассылку/,telegram:/телефоны/,telegramReady:/готовые контакты/,telegramAddressBook:/записной книжки/};
   for(const action of Object.keys(titles))for(const project of ['numshield','neosender']){
     const path='/-/?validate=workbook_123456&action='+action+'&project='+project;
@@ -132,7 +132,7 @@ test('an authenticated sheet link keeps the requested Email action and project i
     f.ids['entry-private-link'].value='https://seainkk.github.io/-/#access_key='+KEY;
     f.ids['entry-validation-access'].listeners.get('submit')({preventDefault(){}});f.event('hashchange');
     const app=f.app();app.postMessage=(m,to)=>sent.push([m,to]);f.ready(app);f.ready(app);
-    assert.deepEqual(JSON.parse(JSON.stringify(sent)),[[{type:'bases-registry-open-validation',id:'workbook_123456',workbookAction:action,projectId:project},GOOGLE_ORIGIN]]);
+    assert.deepEqual(JSON.parse(JSON.stringify(sent)),[[{type:'bases-registry-open-validation',id:'workbook_123456',workbookAction:action,projectId:project},PAGES_ORIGIN]]);
   }
   for(const suffix of ['&action=other','&action=mailing&project=other']){
     const f=fixture({path:'/-/?validate=workbook_123456'+suffix});f.ready();
@@ -161,9 +161,9 @@ test('repeat entry decrypts only dated names for this link before Google respond
     {name:'Справочник',contents:['companies'],distribution:'unassigned',email:'excluded@example.test'},
     {name:'Уже распределена',contents:['companies'],distribution:'assigned'},
     {name:'Без подтверждённого статуса',contents:[]}]};
-  first.event('message',{source:first.app(),origin:GOOGLE_ORIGIN,data:message});
+  first.event('message',{source:{parent:first.app()},origin:PAGES_ORIGIN,data:message});
   assert.equal(storage.size,0);
-  first.event('message',{source,origin:GOOGLE_ORIGIN,data:message});
+  first.event('message',{source,origin:PAGES_ORIGIN,data:message});
   await until(()=>storage.size===1);
   const raw=[...storage.values()][0];
   assert.doesNotMatch(raw,/Справочник|excluded|access_key/);
@@ -175,17 +175,17 @@ test('repeat entry decrypts only dated names for this link before Google respond
   assert.equal(wrong.ids['entry-preview'].hidden,true);
   for(const [page,available] of [[repeat,true],[wrong,false]]){
     let hint;
-    const reader={parent:page.currentFrame().contentWindow,postMessage(data){hint=JSON.parse(JSON.stringify(data));}};
-    page.event('message',{source:reader,origin:GOOGLE_ORIGIN,data:{type:'bases-registry-catalog-hint',epoch:3}});
+    const reader=page.app();reader.postMessage=data=>{hint=JSON.parse(JSON.stringify(data));};
+    page.event('message',{source:reader,origin:PAGES_ORIGIN,data:{type:'bases-registry-catalog-hint',epoch:3}});
     assert.deepEqual(hint,{type:'bases-registry-catalog-hint',epoch:3,available});
     assert.equal(page.body.dataset.state,'loading');
   }
   const active=repeat.ready();
   assert.equal(repeat.ids['entry-preview'].hidden,true);
   const offline=fixture({storage});
-  offline.event('message',{source:offline.app(),origin:GOOGLE_ORIGIN,data:{type:'bases-registry-unavailable'}});
+  offline.event('message',{source:offline.app(),origin:PAGES_ORIGIN,data:{type:'bases-registry-unavailable'}});
   assert.equal(offline.body.dataset.state,'error');assert.equal(storage.size,1);
-  repeat.event('message',{source:active,origin:GOOGLE_ORIGIN,data:{type:'bases-registry-locked'}});
+  repeat.event('message',{source:active,origin:PAGES_ORIGIN,data:{type:'bases-registry-locked'}});
   assert.equal(storage.size,0);assert.equal(repeat.ids['entry-preview-list'].children.length,0);
 });
 
@@ -197,29 +197,29 @@ test('unsupported browsers receive a clear instruction instead of a credentialed
   assert.equal(f.timers.size, 0);
 });
 
-test('isolation and no-referrer are applied before the fixed Google app navigates', () => {
+test('the static app opens immediately without sending the access key, workbook or project in its URL', () => {
   const f = fixture(), frame = f.currentFrame(), url = new URL(frame.src);
-  assert.equal(frame.credentialless, true);
-  assert.equal(frame.attributes.credentialless, '');
+  assert.equal(frame.credentialless, undefined);
+  assert.equal(frame.attributes.credentialless, undefined);
   assert.equal(frame.referrerPolicy, 'no-referrer');
   assert.equal(frame.allow, 'clipboard-write');
-  assert.equal(url.origin, 'https://script.google.com');
-  assert.equal(url.pathname, '/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec');
+  assert.equal(url.origin, PAGES_ORIGIN);
+  assert.equal(url.pathname, '/-/app.html');
   assert.equal(url.search, '');
-  assert.equal(url.hash, '#access_key=' + KEY);
-  assert.deepEqual(f.sequence.slice(0, 3).map(event => event[0]), ['isolate', 'navigate', 'append']);
+  assert.equal(url.hash, '');
+  assert.deepEqual(f.sequence.slice(0, 2).map(event => event[0]), ['navigate', 'append']);
   assert.equal(f.body.dataset.state, 'loading');
-  assert.equal(f.ids['entry-frame-host'].hidden, true, 'unconfirmed Google screens stay behind the loading card');
+  assert.equal(f.ids['entry-frame-host'].hidden, false, 'the public navigation can paint before authorization');
 
 });
 
-test('only a Google-origin message from the current iframe subtree confirms readiness', () => {
+test('only the exact Pages app origin and direct child window can confirm readiness', () => {
   const f = fixture();
   f.ready({ parent: f.currentFrame().contentWindow }, 'https://script.google.com.attacker.invalid');
-  f.ready({ parent: f.window }, GOOGLE_ORIGIN);
-  f.ready({ get parent() { throw new Error('Cross-origin access denied'); } }, GOOGLE_ORIGIN);
+  f.ready({ parent: f.window }, PAGES_ORIGIN);
+  f.ready({ get parent() { throw new Error('Cross-origin access denied'); } }, PAGES_ORIGIN);
   assert.equal(f.body.dataset.state, 'loading');
-  f.ready({ parent: { parent: f.currentFrame().contentWindow } });
+  f.ready({ parent: f.currentFrame().contentWindow });assert.equal(f.body.dataset.state,'loading');f.ready();
   assert.equal(f.body.dataset.state, 'ready');
   assert.equal(f.ids['entry-card'].hidden, true);
   assert.equal(f.ids['entry-frame-host'].hidden, false);
@@ -230,7 +230,7 @@ test('only a Google-origin message from the current iframe subtree confirms read
 test('a rejected key clears the iframe and never publishes the private credential as text', () => {
   const f = fixture(), frame = f.currentFrame();
   const source = f.ready();
-  f.event('message', { origin: GOOGLE_ORIGIN, source, data: { type: 'bases-registry-locked' } });
+  f.event('message', { origin: PAGES_ORIGIN, source, data: { type: 'bases-registry-locked' } });
   assert.equal(f.body.dataset.state, 'locked');
   assert.equal(frame.removed, true);
   assert.equal(f.currentFrame(), undefined);
@@ -250,7 +250,7 @@ test('hash changes destroy the old isolation context; a missing key does not nav
   const next = f.currentFrame();
   assert.equal(old.removed, true);
   assert.notEqual(next, old);
-  assert.equal(new URL(next.src).hash, '#access_key=' + 'Z'.repeat(43));
+  assert.equal(new URL(next.src).hash, '');
   f.ready({ parent: old.contentWindow });
   assert.equal(f.body.dataset.state, 'loading', 'stale iframe messages cannot unlock the new frame');
   f.window.location.hash = '';
@@ -274,13 +274,22 @@ test('a timeout permits an explicit retry and never reports a loaded error page 
   assert.equal(f.body.dataset.state, 'loading');
 });
 
+test('a visible static shell stays open for a slow backend and cannot authorize data by itself',()=>{
+  const f=fixture(), frame=f.currentFrame(),source=f.app();
+  f.event('message',{origin:PAGES_ORIGIN,source,data:{type:'bases-registry-shell'}});
+  assert.equal(f.timers.size,0);
+  assert.equal(f.body.dataset.state,'loading');assert.equal(f.currentFrame(),frame);
+  f.nav(source,true);assert.equal(f.pushes.length,0);
+  f.ready(source);assert.equal(f.body.dataset.state,'ready');assert.equal(f.currentFrame(),frame);
+});
+
 test('browser Back sends one step to the ready child and re-arms only after its acknowledgement', () => {
   const f=fixture(), app=f.ready(), address=f.window.location.href;
   f.nav(app,false); assert.equal(f.pushes.length,0);
   f.nav(app,true); f.nav(app,true);
   assert.deepEqual(f.pushes,[{basesRegistryBack:true}]); assert.equal(f.window.location.href,address);
   f.traverse(-1);
-  assert.deepEqual(f.sent,[{type:'bases-registry-back',origin:GOOGLE_ORIGIN}]);
+  assert.deepEqual(f.sent,[{type:'bases-registry-back',origin:PAGES_ORIGIN}]);
   f.event('popstate',{state:null}); assert.equal(f.sent.length,1);
   f.nav(app,true); assert.equal(f.pushes.length,2);
   f.traverse(-1); f.nav(app,false);
@@ -300,15 +309,15 @@ test('going home removes the extra entry without sending a second back action', 
 });
 
 test('only the same ready origin and window can claim browser Back in the current frame', () => {
-  const f=fixture(), app=f.app(), sibling=f.app();
+  const f=fixture(), app=f.app(), sibling={parent:app};
   f.nav(app,true); assert.equal(f.pushes.length,0);
   f.ready(app); f.ready(sibling); f.nav(sibling,true); f.nav(app,true,'https://script.google.com');
-  f.nav(app,true,GOOGLE_ORIGIN+':8443'); f.nav(app,'true');
+  f.nav(app,true,PAGES_ORIGIN+':8443'); f.nav(app,'true');
   assert.equal(f.pushes.length,0);
   f.nav(app,true);
-  f.event('message',{source:sibling,origin:GOOGLE_ORIGIN,data:{type:'bases-registry-locked'}});
+  f.event('message',{source:sibling,origin:PAGES_ORIGIN,data:{type:'bases-registry-locked'}});
   assert.equal(f.body.dataset.state,'ready');
-  f.event('message',{source:app,origin:GOOGLE_ORIGIN,data:{type:'bases-registry-locked'}});
+  f.event('message',{source:app,origin:PAGES_ORIGIN,data:{type:'bases-registry-locked'}});
   f.traverse(-1); assert.equal(f.sent.length,0);
   f.window.location.hash='#access_key='+'Z'.repeat(43); f.event('hashchange');
   const next=f.ready(); f.nav(app,true); assert.equal(f.pushes.length,1);

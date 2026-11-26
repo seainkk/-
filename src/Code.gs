@@ -6,10 +6,16 @@
  * Prepared imports preserve their inputs. The explicit in-app editor writes
  * bounded, version-checked ranges only in registered working spreadsheets.
  */
-function doGet() {
+function doGet(e) {
   // Only a static shell is public. The fragment credential is checked by every RPC.
   try {
     var page;
+    if (e && e.parameter && e.parameter.bridge === '1') {
+      var bridge = HtmlService.createTemplateFromFile('PagesBridge');
+      var channel = e.parameter.channel;
+      bridge.bridgeSession = typeof channel === 'string' && channel.length === 36 && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(channel) ? channel : '';
+      return bridge.evaluate().setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    }
     try { page = HtmlService.createHtmlOutputFromFile('RegistryShell'); }
     catch (noBundle) { page = HtmlService.createTemplateFromFile('Index').evaluate(); } // Direct clasp push from src.
     page.setFaviconUrl('https://seainkk.github.io/-/favicon.png');

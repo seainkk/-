@@ -12,6 +12,7 @@
     .entry-bar{height:44px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 22px;border-bottom:1px solid var(--line);font-size:12px;background:var(--bg)}.entry-brand{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;letter-spacing:-.45px;line-height:1.18;min-width:0}.entry-mark{display:inline-block;width:17px;height:17px;border-radius:50%;background:radial-gradient(circle at 27% 22%,#a8d4ff 0,#6fa8ff 25%,#4753ff 69%,#3947f4 100%);box-shadow:inset 0 0 0 1px #4753ff12;flex:0 0 auto}.entry-wordmark b{font-weight:700;color:var(--blue)}
     .entry-card{margin:clamp(45px,13vh,140px) auto 36px;max-width:620px;padding:40px;border:1px solid #f0f0f3;border-radius:30px;background:var(--soft)}.entry-card h1{font-size:34px;line-height:1.18;margin:0 0 18px;font-weight:700;letter-spacing:-1.1px}.entry-card p{margin:0 0 24px;color:var(--muted);font-size:16px;line-height:1.6}.entry-help{font-size:13px}.entry-spinner{height:27px;width:27px;display:inline-block;border:3px solid #dfe2ff;border-top-color:var(--blue);border-radius:50%;animation:spin .85s linear infinite;margin-bottom:23px}@keyframes spin{to{transform:rotate(360deg)}}
     #entry-frame-host{height:calc(100dvh - 44px);min-height:400px}#entry-frame-host iframe{display:block;width:100%;height:100%;border:0;background:var(--bg)}
+    body:is([data-state=loading],[data-state=ready]) .entry-bar{display:none}body:is([data-state=loading],[data-state=ready]) #entry-frame-host{height:100dvh}
     #entry-preview{max-width:1200px;margin:32px auto;padding:0 24px}#entry-preview h1{font-size:clamp(26px,4vw,40px);letter-spacing:-1px;line-height:1.15;margin:0 0 8px}#entry-preview p{color:var(--muted);margin:0 0 20px}#entry-preview ul{padding:0;margin:0;list-style:none;display:block}#entry-preview li{padding:10px 8px;border-bottom:1px solid var(--line,#e4e4ed);overflow-wrap:anywhere}
     @media(max-width:640px){.entry-bar{padding:6px 12px;gap:8px}.entry-brand{font-size:12px;gap:6px;letter-spacing:-.35px}.entry-mark{width:14px;height:14px}.entry-card{margin:38px 16px;padding:28px 24px;border-radius:26px}.entry-card h1{font-size:29px;letter-spacing:-.8px}.entry-card p{font-size:15px;line-height:1.55}.entry-card button{padding:12px 20px;min-height:44px}.entry-spinner{margin-bottom:20px}}
     @media(max-width:359px){.entry-bar{padding-inline:10px;gap:6px}.entry-card{margin-inline:12px;padding:25px 21px}.entry-card h1{font-size:27px}}
@@ -44,7 +45,7 @@
   <script>
   (() => {
     'use strict';
-    const GOOGLE_APP_URL='https://script.google.com/macros/s/AKfycbxKxdFPQt4gGQAOrgyRUBNm1yQEhEyEeXTiPPZqYz2KsVEZNyD6gXrDRj78BhgybCv0WA/exec';
+    const APP_ORIGIN='https://seainkk.github.io';
     const $=(id)=>document.getElementById(id);
     const params=new URL(window.location.href).searchParams;
     const target=params.get('validate'),action=params.get('action'),project=params.get('project');
@@ -54,7 +55,7 @@
     const validationFile=validRoute&&target&&/^[A-Za-z0-9_-]{10,200}$/.test(target)?target:null;
     let validationOpened=false;
     let accessKey=null,currentFrame=null,loadingTimer=null,ready=false;
-    let appWindow=null,appOrigin='',canBack=false,backArmed=false,releasingBack=false;
+    let appWindow=null,appOrigin='',shellLoaded=false,canBack=false,backArmed=false,releasingBack=false;
     const catalogSlot='outreach.catalog.v1',catalogLifetime=86400000;
     let savedCatalog=null,deviceKey=null,catalogWrite=0,catalogReceived=false;
 
@@ -100,6 +101,7 @@
         savedCatalog=catalogData(JSON.parse(new TextDecoder().decode(plain)));
         if(!savedCatalog)return;
         if(ready)sendSavedCatalog();
+        else if(shellLoaded)frame.contentWindow.postMessage({type:'bases-registry-startup-catalog',...savedCatalog},APP_ORIGIN);
         else if(document.body.dataset.state==='loading')renderPreview(savedCatalog);
       }catch(ignored){/* Storage is optional, including in private browsing. */}
     }
@@ -118,9 +120,7 @@
     }
 
     function keyFromHash(value){const match=typeof value==='string'?value.match(/^#access_key=([A-Za-z0-9_-]{43})$/):null;return match?match[1]:null;}
-    function appUrl(key){if(typeof key!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(key))throw new Error('Закрытая ссылка недоступна.');return GOOGLE_APP_URL+'#access_key='+key;}
-    function googleOrigin(origin){try{const url=new URL(origin);return url.origin===origin&&!url.port&&url.protocol==='https:'&&(url.hostname==='script.google.com'||url.hostname==='script.googleusercontent.com'||/^[a-z0-9-]+-script\.googleusercontent\.com$/.test(url.hostname));}catch(error){return false;}}
-    function frameSource(source){if(!currentFrame||!source)return false;try{let node=source;for(let depth=0;node&&depth<8;depth++){if(node===currentFrame.contentWindow)return true;const parent=node.parent;if(!parent||parent===node)return false;node=parent;}}catch(error){return false;}return false;}
+    function frameSource(source){return !!currentFrame&&!!source&&source===currentFrame.contentWindow;}
     function isBackEntry(){return window.history.state?.basesRegistryBack===true;}
     function syncBackEntry(){
       if(!window.history||releasingBack)return;
@@ -150,7 +150,7 @@
     function clearFrame(releaseBack=false){
       validationOpened=false;
       catalogWrite++;deviceKey=null;catalogReceived=false;clearPreview();
-      canBack=false;appWindow=null;appOrigin='';
+      canBack=false;appWindow=null;appOrigin='';shellLoaded=false;
       if(releaseBack)syncBackEntry();else{backArmed=false;releasingBack=false;}
       if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}const old=currentFrame;currentFrame=null;if(old)old.remove();ready=false;$('entry-frame-host').hidden=true;
     }
@@ -170,16 +170,26 @@
       showState('loading','Открываем сервис…','Проверяем закрытую ссылку.',false);
       const frame=document.createElement('iframe');
       frame.title='Центр мультиканального аутрича';
-      // Set the isolation flag before navigation. It also isolates all nested Google frames.
-      frame.credentialless=true;frame.setAttribute('credentialless','');frame.referrerPolicy='no-referrer';frame.allow='clipboard-write';frame.setAttribute('allowfullscreen','');
-      frame.addEventListener('error',()=>{if(currentFrame===frame)showState('error','Не удалось подключить сервис','Проверьте подключение к интернету и повторите попытку.',true);});
-      frame.src=appUrl(accessKey);currentFrame=frame;$('entry-frame-host').append(frame);
+      frame.referrerPolicy='no-referrer';frame.allow='clipboard-write';frame.setAttribute('allowfullscreen','');
+      function offline(){
+        if(currentFrame!==frame)return;
+        clearFrame(true);showState('error','Не удалось открыть сервис','Проверьте соединение и повторите подключение.',true);
+      }
+      frame.addEventListener('error',offline);
+      frame.src=new URL('./app.html',window.location.href).href;currentFrame=frame;$('entry-frame-host').append(frame);
+      $('entry-card').hidden=true;$('entry-frame-host').hidden=false;
       void restoreCatalog(frame,key);
-      loadingTimer=setTimeout(()=>{if(currentFrame===frame&&!ready)showState('error','Подключение заняло больше времени','Повторите подключение. Если сервис снова не откроется, передайте владельцу этот экран.',true);},45000);
+      loadingTimer=setTimeout(()=>{if(!ready)offline();},45000);
     }
     window.addEventListener('message',(event)=>{
-      if(!googleOrigin(event.origin)||!frameSource(event.source)||!event.data||typeof event.data!=='object')return;
+      if(event.origin!==APP_ORIGIN||!frameSource(event.source)||!event.data||typeof event.data!=='object')return;
       if(ready&&(event.source!==appWindow||event.origin!==appOrigin))return;
+      if(event.data.type==='bases-registry-shell'){
+        if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}
+        shellLoaded=true;$('entry-preview').hidden=true;$('entry-card').hidden=true;
+        if(savedCatalog&&!ready)event.source.postMessage({type:'bases-registry-startup-catalog',...savedCatalog},APP_ORIGIN);
+        return;
+      }
       if(event.data.type==='bases-registry-catalog-hint'&&Number.isSafeInteger(event.data.epoch)){
         event.source.postMessage({type:'bases-registry-catalog-hint',epoch:event.data.epoch,available:!!savedCatalog},event.origin);
         return;
