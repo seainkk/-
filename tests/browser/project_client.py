@@ -161,6 +161,32 @@ def main():
             expect(cell).to_contain_text('25')
             expect(cell.locator('.pj-completion-date')).to_contain_text('01.12.2026')
 
+        # Slow entry still presents each section without exposing the previous project's data.
+        reset('analytics')
+        page.locator('#pj-segment').select_option('segment-a');idle()
+        count_before=page.evaluate("""()=>{const before=backend.calls.length;
+          RegistryProject.show('infrastructure',{ready:false,preview:true,epoch:2});return before;}""")
+        for view in ['infrastructure','analytics']:
+            page.evaluate("view=>RegistryProject.show(view,{ready:false,preview:true,epoch:2})",view)
+            section=page.locator('#pj-'+view+'-view')
+            expect(section).to_be_visible()
+            assert section.evaluate('el=>el.inert')
+            assert 'Подключите' not in section.inner_text()
+            assert 'Existing campaign' not in section.inner_text()
+        assert page.evaluate('backend.calls.length')==count_before
+        expect(page.locator('#pj-segment option')).to_have_count(1)
+        page.evaluate("""backend.holdMethods=['getProjectAnalytics'];
+RegistryProject.configure({transport,peekSegments:()=>({state:'ready',preview:true,expiresAt:Date.now()+1600,segments:[{id:'segment-a',name:'Known segment'}]})});
+RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refresh({opening:true})""")
+        page.wait_for_function("backend.pending.some(x=>x.name==='getProjectAnalytics')")
+        expect(page.locator('#pj-segment')).to_be_enabled()
+        expect(page.locator('#pj-segment')).to_contain_text('Known segment')
+        assert not page.evaluate("n=>backend.calls.slice(n).some(call=>call.name==='getProjectForecastPreview')",count_before)
+        expect(page.locator('#pj-segment')).not_to_contain_text('Known segment')
+        page.evaluate("backend.holdMethods=[];release('getProjectAnalytics')");idle()
+        expect(page.locator('#pj-segment')).to_contain_text('Segment A')
+        page.evaluate("RegistryProject.lock()");expect(section).to_be_hidden()
+
         # A fresh preview avoids a second RPC until its TTL expires. Manual refresh updates it on demand.
         reset(setup='backend.completionTtl=700;')
         page.locator('#pj-segment').select_option('segment-a')
@@ -296,6 +322,8 @@ void RegistryProject.refresh({opening:true})""")
             page.evaluate('([view,method])=>{backend.holdMethods=[method];start(view);}',[view,method])
             page.wait_for_function('backend.active>0')
             section=page.locator('#pj-'+view+'-view')
+            if view=='analytics':
+                assert count('getProjectForecastPreview')==1
             expect(section.locator('#pj-'+view+'-connect')).to_have_text('Настройки Coldy')
             expect(section.locator('#pj-'+view+'-connection')).to_be_hidden()
             assert 'Подключите' not in section.inner_text()

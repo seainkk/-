@@ -52,18 +52,20 @@
     s.data=saved.page;s.revision=s.data.revision;s.updated=saved.at;
     s.pages.set(pageKey(s),s.data);
     paintSummary(s);paintRows(s);
+    if(alive(s))window.dispatchEvent(new Event('segment-card-update'));
   }
   function select(id,name,project,firstRead){
     if(current?.id===id)return;
     resetView();current={id,name,project,...initialFilters,firstRead,previous:[],seq:0,originSeq:0,coldSeq:0,
       panel:null,data:null,pages:new Map(),catalog:null,comparisons:new Map(),loading:false,exporting:false,updated:0};
     el('title').textContent=name;el('project').textContent=project;el('owner').value='all';el('query').value='';el('secondary').open=false;
-    el('table-wrap').hidden=true;el('pages').hidden=true;el('export').disabled=true;
+    el('table-wrap').hidden=false;el('pages').hidden=true;el('export').disabled=true;
     for(const id of ['warnings','export-status','legacy-note'])el(id).hidden=true;
     paintPanels(current);paintFilters(current);restoreFirst(current);
+    if(!current.data)paintSummary(current);
   }
   function show(visible){
-    const hidden=!visible||!current;
+    const hidden=!visible||!current,opening=!hidden&&el('view').hidden;
     if(hidden&&!el('view').hidden&&current){
       current.seq++;current.originSeq++;current.coldSeq++;current.loading=false;current.exporting=false;current.scanning=false;
       if(current.panel==='coldy'||current.panel==='origins')current.panel=null;
@@ -72,10 +74,11 @@
     if(!hidden&&el('view').hidden&&current.data&&current.updated+pageLifetime<=Date.now()){
       current.data=null;current.pages.clear();current.offset=0;current.previous=[];
       for(const id of ['rows','summary','warnings','queues','validation','status','legacy-note'])el(id).replaceChildren();
-      el('table-wrap').hidden=true;el('pages').hidden=true;el('export').disabled=true;
+      el('table-wrap').hidden=false;el('pages').hidden=true;el('export').disabled=true;paintSummary(current);
     }
     el('view').hidden=hidden;
     if(!hidden)paintPanels(current);
+    if(opening)window.dispatchEvent(new Event('segment-card-update'));
   }
   function paintFilters(s){
     for(const item of el('view').querySelectorAll('[data-sc-channel]'))item.setAttribute('aria-pressed',String(item.dataset.scChannel===s.channel));
@@ -89,7 +92,7 @@
     }
   }
   function paintSummary(s){
-    const summary=s.data.summary;
+    const summary=s.data?.summary||{email:{},telegram:{}};
     el('summary').replaceChildren();
     for(const [key,label] of Object.entries(channels)){
       const stats=summary[key],box=node('div','');
@@ -98,7 +101,7 @@
     }
     const shared=summary.sharedEmail;
     if(shared>0)el('summary').firstElementChild.append(node('small','Общие для компаний и ЛПР · '+count(shared)));
-    message('warnings',(s.data.warnings||[]).join(' '));el('queues').replaceChildren();el('validation').replaceChildren();
+    message('warnings',(s.data?.warnings||[]).join(' '));el('queues').replaceChildren();el('validation').replaceChildren();
     const queues=[['all','Все контакты',null],['email','Проверить новые email',summary.email.toCheck]];
     if(summary.email.toReview)queues.push(['emailReview','Разобрать проверенные email',summary.email.toReview]);
     queues.push(['telegram','Проверить Telegram по мобильным',summary.telegram.toCheck]);
@@ -109,7 +112,7 @@
       const item=action(label+(amount===null?'':' · '+count(amount)),()=>changeFilters({queue,channel:'all'}));
       item.dataset.scQueue=queue;item.setAttribute('aria-pressed',String(s.queue===queue));el('queues').append(item);
     }
-    for(const [kind,file] of Object.entries(s.data.files||{}))if(file?.id&&kinds[kind]){
+    for(const [kind,file] of Object.entries(s.data?.files||{}))if(file?.id&&kinds[kind]){
       el('validation').append(action('Предпросмотр проверки · '+kinds[kind],()=>config.validate(file.id)));
     }
   }
@@ -130,7 +133,10 @@
       else{events.textContent=row.coldyStatuses.join(' · ')||'Нет данных о событиях';if(row.campaigns.length)events.append(node('small',row.campaigns.join(' · ')));}
       tr.append(addr,owner,manual,readiness,events);fragment.append(tr);
     }
-    body.replaceChildren(fragment);const {rows,total,offset,nextOffset}=s.data;
+    body.replaceChildren(fragment);paintPageInfo(s);
+  }
+  function paintPageInfo(s){
+    const {rows,total,offset,nextOffset}=s.data;
     el('table-wrap').hidden=!rows.length;el('pages').hidden=!s.previous.length&&nextOffset==null;
     el('prev').disabled=!s.previous.length;el('next').disabled=nextOffset==null;
     const asOf=s.data.preparedAt||s.data.checkedAt;
@@ -208,8 +214,20 @@
         s.pages.clear();s.catalog=null;s.comparisons.clear();s.originSeq++;s.scanning=false;s.originFailed=false;s.previewId=null;
         message('legacy-note','');el('preview').replaceChildren();
       }
-      s.data=response;s.revision=response.revision;s.updated=Date.now();s.pages.set(pageKey(s),response);if(s.pages.size>12)s.pages.delete(s.pages.keys().next().value);paintSummary(s);paintRows(s);
-      if(!s.offset&&s.channel==='all'&&s.owner==='all'&&s.queue==='all'&&!s.query)keepFirst(response);
+      const key=pageKey(s),previous=s.data;
+      const unchanged=previous&&s.pages.get(key)===previous&&previous.revision===response.revision&&
+        !!previous.preview===!!response.preview&&!!previous.prepared===!!response.prepared&&
+        previous.total===response.total&&previous.rows.length===response.rows.length&&previous.nextOffset===response.nextOffset;
+      if(unchanged){
+        // Keep expanded sources and focused actions, including a source request in flight.
+        previous.checkedAt=response.checkedAt;previous.preparedAt=response.preparedAt;
+        paintPageInfo(s);
+      }else{
+        s.data=response;paintSummary(s);paintRows(s);
+      }
+      s.revision=response.revision;s.updated=Date.now();s.pages.set(key,s.data);
+      if(s.pages.size>12)s.pages.delete(s.pages.keys().next().value);
+      if(!s.offset&&s.channel==='all'&&s.owner==='all'&&s.queue==='all'&&!s.query)keepFirst(s.data);
       window.dispatchEvent(new Event('segment-card-update'));
       if(s.panel==='origins'){if(s.catalog)paintCatalog(s);else void discover(s);}
       else if(!response.summary.email.total&&!s.catalog&&!s.scanning&&!s.originFailed)void discover(s,true);
@@ -226,7 +244,7 @@
     Object.assign(s,changes);firstPage(s);s.exporting=false;message('export-status','');
     s.data=s.pages.get(pageKey(s))||null;
     if(s.data){paintSummary(s);paintRows(s);}
-    else{el('rows').replaceChildren();el('table-wrap').hidden=true;el('pages').hidden=true;}
+    else{el('rows').replaceChildren();el('table-wrap').hidden=false;el('pages').hidden=true;}
     paintFilters(s);
     void refresh();
   }

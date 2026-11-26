@@ -3,11 +3,16 @@ var GRID_EDITOR_LIMITS = Object.freeze({ readCells: 5000, writeCells: 5000, inpu
 
 function getGridWorkbook_(request) {
   return api_(function () {
-    var input = gridRequest_(request, ['id', 'includeInitialRange']);
+    var input = gridRequest_(request, ['id', 'includeInitialRange', 'initialRows', 'initialColumns', 'includeUsage']);
     if (input.includeInitialRange !== undefined && typeof input.includeInitialRange !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный запрос начального диапазона.');
-    var scope = gridFile_(input.id, false), book = SpreadsheetApp.openById(scope.file.getId()), sheets = book.getSheets(), metadata = sheets.map(gridSheetMetadata_), initial = null;
+    if (input.includeUsage !== undefined && typeof input.includeUsage !== 'boolean') fail_('INVALID_REQUEST', 'Некорректный запрос размеров листов.');
+    if (!input.includeInitialRange && (input.initialRows !== undefined || input.initialColumns !== undefined)) fail_('INVALID_REQUEST', 'Размер указан без запроса начального диапазона.');
+    var rows = input.initialRows === undefined ? 80 : gridInteger_(input.initialRows, 1, 80);
+    var columns = input.initialColumns === undefined ? 50 : gridInteger_(input.initialColumns, 1, 50);
+    var scope = gridFile_(input.id, false), book = SpreadsheetApp.openById(scope.file.getId()), sheets = book.getSheets();
+    var metadata = sheets.map(function (sheet) { return gridSheetMetadata_(sheet, input.includeUsage !== false); }), initial = null;
     if (input.includeInitialRange && sheets.length) {
-      var area = gridArea_({ row: 1, column: 1, rowCount: Math.min(80, metadata[0].rowCount), columnCount: Math.min(50, metadata[0].columnCount) }, GRID_EDITOR_LIMITS.readCells);
+      var area = gridArea_({ row: 1, column: 1, rowCount: Math.min(rows, metadata[0].rowCount), columnCount: Math.min(columns, metadata[0].columnCount) }, GRID_EDITOR_LIMITS.readCells);
       gridCheckArea_(sheets[0], area);
       initial = gridRead_(scope.file.getId(), sheets[0], area);
     }
@@ -182,7 +187,14 @@ function gridInsideSegment_(file, outreachId, context) {
   return false;
 }
 
-function gridSheetMetadata_(sheet) { return { id: sheet.getSheetId(), name: sheet.getName(), rowCount: sheet.getMaxRows(), columnCount: sheet.getMaxColumns(), usedRows: sheet.getLastRow(), usedColumns: sheet.getLastColumn() }; }
+function gridSheetMetadata_(sheet, includeUsage) {
+  var item = {id:sheet.getSheetId(), name:sheet.getName(), rowCount:sheet.getMaxRows(), columnCount:sheet.getMaxColumns()};
+  if (includeUsage) {
+    item.usedRows = sheet.getLastRow();
+    item.usedColumns = sheet.getLastColumn();
+  }
+  return item;
+}
 function gridSheetId_(value) { if (!Number.isSafeInteger(value) || value < 0) fail_('INVALID_REQUEST', 'Некорректный идентификатор листа.'); return value; }
 function gridSheet_(book, id) { gridSheetId_(id); var sheet = book.getSheets().filter(function (candidate) { return candidate.getSheetId() === id; })[0]; if (!sheet) fail_('GRID_SHEET_MISSING', 'Лист больше не существует. Перечитайте таблицу.'); return sheet; }
 function gridInteger_(value, minimum, maximum) { if (!Number.isSafeInteger(value) || value < minimum || value > maximum) fail_('GRID_LIMIT', 'Размер диапазона или количество строк некорректно.'); return value; }

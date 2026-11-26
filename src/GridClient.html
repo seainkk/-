@@ -80,20 +80,47 @@
     $('rg-grid-viewport').setAttribute('aria-rowcount',String(meta?.rowCount||0));$('rg-grid-viewport').setAttribute('aria-colcount',String(meta?.columnCount||0));
     $('rg-grid-viewport').setAttribute('aria-activedescendant','rg-cell-'+current.active.row+'-'+current.active.column);
   }
-  function renderTabs(){const current=session,list=$('rg-grid-tabs');list.replaceChildren();if(!current?.book)return;for(const item of current.book.sheets){const button=document.createElement('button');button.type='button';button.className='rg-grid-tab';button.dataset.sheetId=String(item.id);button.textContent=gridText(item.name);button.setAttribute('role','tab');button.setAttribute('aria-selected',String(String(item.id)===String(current.sheetId)));button.addEventListener('click',()=>switchSheet(item.id));list.append(button);}}
+  function renderTabs(){
+    const current=session,list=$('rg-grid-tabs'),sheets=current?.book?.sheets||[];
+    if(list.children.length!==sheets.length||sheets.some((item,i)=>list.children[i].dataset.sheetId!==String(item.id))){
+      const fragment=document.createDocumentFragment();
+      for(const item of sheets){
+        const button=document.createElement('button');button.type='button';button.className='rg-grid-tab';
+        button.dataset.sheetId=String(item.id);button.setAttribute('role','tab');
+        button.addEventListener('click',()=>switchSheet(item.id));fragment.append(button);
+      }
+      list.replaceChildren(fragment);
+    }
+    sheets.forEach((item,i)=>{
+      const button=list.children[i],name=gridText(item.name);
+      if(button.textContent!==name)button.textContent=name;
+      button.setAttribute('aria-selected',String(String(item.id)===String(current.sheetId)));
+    });
+  }
+  function visibleGridSize(){
+    const view=$('rg-grid-viewport');
+    return {rows:Math.max(1,Math.min(WINDOW_ROWS,Math.ceil(view.clientHeight/ROW_HEIGHT)+1)),
+      columns:Math.max(1,Math.min(WINDOW_COLUMNS,Math.ceil(view.clientWidth/COLUMN_WIDTH)+1))};
+  }
+  function gridWindowSize(){
+    const visible=visibleGridSize();
+    return {rows:Math.min(WINDOW_ROWS,visible.rows+8),columns:Math.min(WINDOW_COLUMNS,visible.columns+3)};
+  }
   function paintSelection(){const current=session;if(!current)return;const area=rect(current);for(const td of $('rg-grid-body').querySelectorAll('td[data-row][data-column]')){const r=Number(td.dataset.row),c=Number(td.dataset.column),selected=r>=area.row&&r<area.row+area.rows&&c>=area.column&&c<area.column+area.columns;td.classList.toggle('rg-grid-selected',selected);td.classList.toggle('rg-grid-active',r===current.active.row&&c===current.active.column);td.setAttribute('aria-selected',String(selected));}for(const th of $('rg-grid-head').querySelectorAll('th[data-column]'))th.classList.toggle('rg-grid-axis-active',Number(th.dataset.column)===current.active.column);for(const th of $('rg-grid-body').querySelectorAll('th[data-row-number]'))th.classList.toggle('rg-grid-axis-active',Number(th.dataset.rowNumber)===current.active.row);update();}
   function draw(){
     const current=session,meta=sheet(current);if(!current||!meta)return;
-    const top=current.window.row,left=current.window.column,rows=Math.min(WINDOW_ROWS,meta.rowCount-top+1),columns=Math.min(WINDOW_COLUMNS,meta.columnCount-left+1),right=Math.max(0,meta.columnCount-left-columns+1),before=Math.max(0,left-1);
-    const colgroup=$('rg-grid-colgroup');colgroup.replaceChildren();const addCol=width=>{const col=document.createElement('col');col.style.width=width+'px';colgroup.append(col);};addCol(ROW_GUTTER);if(before)addCol(before*COLUMN_WIDTH);for(let i=0;i<columns;i++)addCol(COLUMN_WIDTH);if(right)addCol(right*COLUMN_WIDTH);
-    const head=$('rg-grid-head'),body=$('rg-grid-body'),header=document.createElement('tr'),corner=document.createElement('th');head.replaceChildren();body.replaceChildren();corner.className='rg-grid-corner';corner.scope='col';corner.setAttribute('aria-label','Выделить лист');corner.dataset.corner='true';header.append(corner);
+    const top=current.window.row,left=current.window.column,rows=Math.min(current.window.rows,meta.rowCount-top+1),columns=Math.min(current.window.columns,meta.columnCount-left+1),right=Math.max(0,meta.columnCount-left-columns+1),before=Math.max(0,left-1);
+    const colgroup=document.createDocumentFragment();const addCol=width=>{const col=document.createElement('col');col.style.width=width+'px';colgroup.append(col);};addCol(ROW_GUTTER);if(before)addCol(before*COLUMN_WIDTH);for(let i=0;i<columns;i++)addCol(COLUMN_WIDTH);if(right)addCol(right*COLUMN_WIDTH);
+    const body=document.createDocumentFragment(),header=document.createElement('tr'),corner=document.createElement('th');corner.className='rg-grid-corner';corner.scope='col';corner.setAttribute('aria-label','Выделить лист');corner.dataset.corner='true';header.append(corner);
     const spacerCell=(tag,width)=>{const item=document.createElement(tag);item.className='rg-grid-spacer';item.style.width=width+'px';item.setAttribute('aria-hidden','true');return item;};if(before)header.append(spacerCell('th',before*COLUMN_WIDTH));
-    for(let c=left;c<left+columns;c++){const th=document.createElement('th');th.scope='col';th.textContent=gridColumnName(c);th.dataset.column=String(c);if(c===current.active.column)th.className='rg-grid-axis-active';header.append(th);}if(right)header.append(spacerCell('th',right*COLUMN_WIDTH));head.append(header);
+    for(let c=left;c<left+columns;c++){const th=document.createElement('th');th.scope='col';th.textContent=gridColumnName(c);th.dataset.column=String(c);if(c===current.active.column)th.className='rg-grid-axis-active';header.append(th);}if(right)header.append(spacerCell('th',right*COLUMN_WIDTH));
     const span=1+columns+(before?1:0)+(right?1:0),vertical=height=>{if(!height)return;const tr=document.createElement('tr'),td=document.createElement('td');td.className='rg-grid-spacer';td.colSpan=span;td.style.height=height+'px';td.setAttribute('aria-hidden','true');tr.append(td);body.append(tr);};vertical((top-1)*ROW_HEIGHT);
     const selection=rect(current);
     for(let r=top;r<top+rows;r++){const tr=document.createElement('tr'),th=document.createElement('th');tr.dataset.row=String(r);th.scope='row';th.className='rg-grid-row-number'+(r===current.active.row?' rg-grid-axis-active':'');th.textContent=String(r);th.dataset.rowNumber=String(r);tr.append(th);if(before)tr.append(spacerCell('td',before*COLUMN_WIDTH));
       for(let c=left;c<left+columns;c++){const td=document.createElement('td'),value=document.createElement('div'),id=key(r,c);td.id='rg-cell-'+r+'-'+c;td.className='rg-grid-cell';td.dataset.row=String(r);td.dataset.column=String(c);td.setAttribute('role','gridcell');td.setAttribute('aria-rowindex',String(r));td.setAttribute('aria-colindex',String(c));const selected=r>=selection.row&&r<selection.row+selection.rows&&c>=selection.column&&c<selection.column+selection.columns;td.setAttribute('aria-selected',String(selected));if(selected)td.classList.add('rg-grid-selected');if(r===current.active.row&&c===current.active.column)td.classList.add('rg-grid-active');if(current.dirty.has(id))td.classList.add('rg-grid-dirty');value.className='rg-grid-cell-content';value.textContent=cellDisplay(r,c,current);td.append(value);tr.append(td);}if(right)tr.append(spacerCell('td',right*COLUMN_WIDTH));body.append(tr);}
-    vertical(Math.max(0,meta.rowCount-top-rows+1)*ROW_HEIGHT);$('rg-grid-table').style.width=(ROW_GUTTER+meta.columnCount*COLUMN_WIDTH)+'px';update();
+    vertical(Math.max(0,meta.rowCount-top-rows+1)*ROW_HEIGHT);
+    $('rg-grid-colgroup').replaceChildren(colgroup);$('rg-grid-head').replaceChildren(header);$('rg-grid-body').replaceChildren(body);
+    $('rg-grid-table').style.width=(ROW_GUTTER+meta.columnCount*COLUMN_WIDTH)+'px';update();
   }
   function mergeRange(current,data){
     if(!alive(current)||String(data.sheetId??current.sheetId)!==String(current.sheetId))return;
@@ -103,8 +130,8 @@
     const meta=sheet(current);if(Number.isSafeInteger(data.totalRows)&&data.totalRows>0)meta.rowCount=data.totalRows;if(Number.isSafeInteger(data.totalColumns)&&data.totalColumns>0)meta.columnCount=data.totalColumns;
     if(data.row<=WINDOW_ROWS&&data.column<=WINDOW_COLUMNS){
       current.sheetPreviews.delete(current.sheetId);
-      if(data.row===1&&data.column===1&&values.length===Math.min(WINDOW_ROWS,meta.rowCount)&&
-          values.every(line=>line.length===Math.min(WINDOW_COLUMNS,meta.columnCount))&&
+      if(data.row===1&&data.column===1&&values.length>=Math.min(current.window.rows,meta.rowCount)&&
+          values.every(line=>line.length>=Math.min(current.window.columns,meta.columnCount))&&
           values.reduce((n,line)=>n+line.reduce((sum,value)=>sum+gridText(value).length,0),0)<=PREVIEW_CHARS){
         // Only display values are reused. Write versions and formulas always come from a new read.
         current.sheetPreviews.set(current.sheetId,{checkedAt:Date.now(),values});
@@ -121,7 +148,7 @@
   async function loadWindow(row,column,options={}){
     const current=session,meta=sheet(current);if(!current||!meta)return;
     row=Math.max(1,Math.min(row,meta.rowCount));column=Math.max(1,Math.min(column,meta.columnCount));
-    current.window={row,column};const request=++current.loadSequence,sheetId=current.sheetId,height=Math.min(WINDOW_ROWS,meta.rowCount-row+1),width=Math.min(WINDOW_COLUMNS,meta.columnCount-column+1);let cached=true;for(let r=0;r<height&&cached;r++)for(let c=0;c<width;c++)if(!current.cache.has(key(row+r,column+c))){cached=false;break;}if(cached){current.loading=false;draw();if(options.focus)$('rg-grid-viewport').focus({preventScroll:true});return;}current.loading=true;draw();
+    current.window={row,column,...gridWindowSize()};const request=++current.loadSequence,sheetId=current.sheetId,height=Math.min(current.window.rows,meta.rowCount-row+1),width=Math.min(current.window.columns,meta.columnCount-column+1);let cached=true;for(let r=0;r<height&&cached;r++)for(let c=0;c<width;c++)if(!current.cache.has(key(row+r,column+c))){cached=false;break;}if(cached){current.loading=false;draw();if(options.focus)$('rg-grid-viewport').focus({preventScroll:true});return;}current.loading=true;draw();
     try{const data=await rpc(current,'getGridRange',{id:current.id,sheetId,row,column,rowCount:height,columnCount:width},()=>alive(current)&&request===current.loadSequence&&String(current.sheetId)===String(sheetId));if(!data||!alive(current)||request!==current.loadSequence||String(current.sheetId)!==String(sheetId))return;current.preview=null;mergeRange(current,data);current.loading=false;draw();if(options.focus)$('rg-grid-viewport').focus({preventScroll:true});}
     catch(error){if(closeOnScopeFailure(current,error))return;if(alive(current)&&request===current.loadSequence){current.loading=false;current.preview=null;current.sheetPreviews.delete(sheetId);draw();setError(error,current);}}
   }
@@ -451,7 +478,7 @@
   }
   function selectedCell(){return document.getElementById('rg-cell-'+session?.active.row+'-'+session?.active.column);}
   function revealActive(){const cell=selectedCell(),view=$('rg-grid-viewport');if(!cell)return;const a=cell.getBoundingClientRect(),b=view.getBoundingClientRect();if(a.top<b.top+ROW_HEIGHT)view.scrollTop-=b.top+ROW_HEIGHT-a.top;else if(a.bottom>b.bottom)view.scrollTop+=a.bottom-b.bottom;if(a.left<b.left+ROW_GUTTER)view.scrollLeft-=b.left+ROW_GUTTER-a.left;else if(a.right>b.right)view.scrollLeft+=a.right-b.right;}
-  function select(row,column,extend=false){const current=session,meta=sheet(current);if(!meta)return;row=Math.max(1,Math.min(row,meta.rowCount));column=Math.max(1,Math.min(column,meta.columnCount));if(extend){current.selection.r2=row;current.selection.c2=column;}else{current.active={row,column};current.selection={r1:row,c1:column,r2:row,c2:column};}if(row<current.window.row||row>=current.window.row+WINDOW_ROWS||column<current.window.column||column>=current.window.column+WINDOW_COLUMNS){const view=$('rg-grid-viewport');view.scrollTop=(row-1)*ROW_HEIGHT;view.scrollLeft=(column-1)*COLUMN_WIDTH;loadWindow(Math.max(1,row-2),Math.max(1,column-1));}else{paintSelection();revealActive();}}
+  function select(row,column,extend=false){const current=session,meta=sheet(current);if(!meta)return;row=Math.max(1,Math.min(row,meta.rowCount));column=Math.max(1,Math.min(column,meta.columnCount));if(extend){current.selection.r2=row;current.selection.c2=column;}else{current.active={row,column};current.selection={r1:row,c1:column,r2:row,c2:column};}if(row<current.window.row||row>=current.window.row+current.window.rows||column<current.window.column||column>=current.window.column+current.window.columns){const view=$('rg-grid-viewport');view.scrollTop=(row-1)*ROW_HEIGHT;view.scrollLeft=(column-1)*COLUMN_WIDTH;loadWindow(Math.max(1,row-2),Math.max(1,column-1));}else{paintSelection();revealActive();}}
   function beginEdit(replace=false,initial=''){
     const current=session;if(!editAllowed())return;const cell=selectedCell();if(!cell)return;
     if(!replace&&!$('rg-grid-workflow-label').hidden){$('rg-grid-workflow-status').focus();return;}
@@ -491,7 +518,21 @@
   }
   function flush(current=session){if(!alive(current))return Promise.resolve();commitEditor();if(current.formulaDirty)commitFormula();clearTimeout(current.saveTimer);if(current.error)return Promise.reject(current.error);if(!current.queue.length&&!current.inFlight&&!current.failed)return Promise.resolve();const done=new Promise((resolve,reject)=>current.waiters.push({resolve,reject}));drain(current);return done;}
   function retry(){const current=session;if(!current?.failed||current.inFlight||current.error?.code==='GRID_CONFLICT')return;const op=current.failed;current.failed=null;current.error=null;if(op.kind==='append'){runAppend(op.axis,op);return;}current.queue.unshift(op);drain(current);}
-  async function refreshBook(current,selected=current.sheetId,includeInitialRange=false){const data=await rpc(current,'getGridWorkbook',{id:current.id,...(includeInitialRange?{includeInitialRange:true}:{})});if(!alive(current))return;current.book=data;if(!Array.isArray(data.sheets)||!data.sheets.length)throw new Error('В таблице нет доступных листов.');current.sheetId=data.sheets.some(item=>String(item.id)===String(selected))?selected:data.sheets[0].id;$('rg-grid-title').textContent=gridText(data.name||'Таблица');$('rg-grid-native').href='https://docs.google.com/spreadsheets/d/'+encodeURIComponent(current.id)+'/edit#gid='+encodeURIComponent(current.sheetId);renderTabs();return data;}
+  async function refreshBook(current,selected=current.sheetId,includeInitialRange=false){
+    const request={id:current.id,includeUsage:false};
+    if(includeInitialRange){
+      Object.assign(current.window,gridWindowSize());
+      Object.assign(request,{includeInitialRange:true,initialRows:current.window.rows,initialColumns:current.window.columns});
+    }
+    let data;
+    try{data=await rpc(current,'getGridWorkbook',request);}
+    catch(error){
+      if(!alive(current)||gridFailure(error).code!=='INVALID_REQUEST')throw error;
+      // Pages and Apps Script may briefly serve different releases.
+      data=await rpc(current,'getGridWorkbook',{id:current.id,...(includeInitialRange?{includeInitialRange:true}:{})});
+    }
+    if(!alive(current))return;current.book=data;if(!Array.isArray(data.sheets)||!data.sheets.length)throw new Error('В таблице нет доступных листов.');current.sheetId=data.sheets.some(item=>String(item.id)===String(selected))?selected:data.sheets[0].id;$('rg-grid-title').textContent=gridText(data.name||'Таблица');$('rg-grid-native').href='https://docs.google.com/spreadsheets/d/'+encodeURIComponent(current.id)+'/edit#gid='+encodeURIComponent(current.sheetId);renderTabs();return data;
+  }
   async function prepareGridMailingStatus(current){
     current.transition=true;
     notify(current);
@@ -687,7 +728,23 @@
   $('rg-grid-editor').addEventListener('input',()=>{const editor=$('rg-grid-editor');editor.style.height=Math.min(140,Math.max(30,editor.scrollHeight+4))+'px';notify();});$('rg-grid-editor').addEventListener('blur',()=>commitEditor());$('rg-grid-editor').addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();commitEditor(true);$('rg-grid-viewport').focus();}else if(event.key==='Tab'){event.preventDefault();commitEditor();move(0,event.shiftKey?-1:1);$('rg-grid-viewport').focus();}else if(event.key==='Enter'&&!event.altKey){event.preventDefault();commitEditor();if(!event.ctrlKey&&!event.metaKey)move(event.shiftKey?-1:1,0);$('rg-grid-viewport').focus();}});
   $('rg-grid-table').addEventListener('mousedown',event=>{const current=session;if(!current||event.button!==0||current.transition)return;const cell=event.target.closest('td[data-row][data-column]'),column=event.target.closest('th[data-column]'),row=event.target.closest('th[data-row-number]');if(!cell&&!column&&!row&&!event.target.closest('[data-corner]'))return;commitEditor();if(current.formulaDirty)commitFormula();event.preventDefault();if(cell){select(Number(cell.dataset.row),Number(cell.dataset.column),event.shiftKey);dragging=true;}else if(column){const c=Number(column.dataset.column);current.active={row:current.window.row,column:c};current.selection={r1:1,c1:c,r2:sheet(current).rowCount,c2:c};draw();}else if(row){const r=Number(row.dataset.rowNumber);current.active={row:r,column:current.window.column};current.selection={r1:r,c1:1,r2:r,c2:sheet(current).columnCount};draw();}else{current.selection={r1:1,c1:1,r2:sheet(current).rowCount,c2:sheet(current).columnCount};draw();}$('rg-grid-viewport').focus({preventScroll:true});});
   $('rg-grid-table').addEventListener('mousemove',event=>{if(!dragging||!session)return;const cell=event.target.closest('td[data-row][data-column]');if(cell){session.selection.r2=Number(cell.dataset.row);session.selection.c2=Number(cell.dataset.column);paintSelection();}});window.addEventListener('mouseup',()=>dragging=false);$('rg-grid-table').addEventListener('dblclick',event=>{if(event.target.closest('td[data-row][data-column]'))beginEdit();});
-  $('rg-grid-viewport').addEventListener('scroll',()=>{const current=session;if(!current||!current.book)return;commitEditor();clearTimeout(current.scrollTimer);current.scrollTimer=setTimeout(()=>{if(!alive(current))return;const view=$('rg-grid-viewport'),meta=sheet(current),row=Math.max(1,Math.min(Math.floor(view.scrollTop/ROW_HEIGHT)+1,meta.rowCount)),column=Math.max(1,Math.min(Math.floor(view.scrollLeft/COLUMN_WIDTH)+1,meta.columnCount));if(row!==current.window.row||column!==current.window.column)loadWindow(row,column);},70);});
+  function queueVisibleWindow(){
+    const current=session;
+    if(!sheet(current))return;
+    clearTimeout(current.scrollTimer);
+    current.scrollTimer=setTimeout(()=>{
+      if(!alive(current))return;
+      const view=$('rg-grid-viewport'),meta=sheet(current),visible=visibleGridSize(),area=current.window;
+      const row=Math.max(1,Math.min(Math.floor(view.scrollTop/ROW_HEIGHT)+1,meta.rowCount));
+      const column=Math.max(1,Math.min(Math.floor(view.scrollLeft/COLUMN_WIDTH)+1,meta.columnCount));
+      if(row>=area.row&&column>=area.column&&Math.min(meta.rowCount+1,row+visible.rows)<=area.row+area.rows&&
+          Math.min(meta.columnCount+1,column+visible.columns)<=area.column+area.columns)return;
+      loadWindow(Math.max(1,row-3),Math.max(1,column-1));
+    },70);
+  }
+  $('rg-grid-viewport').addEventListener('scroll',()=>{if(sheet(session)){commitEditor();queueVisibleWindow();}});
+  if(window.ResizeObserver)new ResizeObserver(queueVisibleWindow).observe($('rg-grid-viewport'));
+  else window.addEventListener('resize',queueVisibleWindow);
   $('rg-grid-viewport').addEventListener('paste',event=>{if(!session)return;event.preventDefault();paste(event.clipboardData?.getData('text/plain')||'');});
   $('rg-grid-viewport').addEventListener('keydown',event=>{const current=session;if(!current||current.transition)return;const ctrl=event.ctrlKey||event.metaKey,k=event.key.toLowerCase();if(ctrl&&k==='c'){event.preventDefault();copySelection();return;}if(ctrl&&k==='z'){event.preventDefault();undo(event.shiftKey);return;}if(ctrl&&k==='y'){event.preventDefault();undo(true);return;}if(ctrl&&k==='a'){event.preventDefault();current.selection={r1:1,c1:1,r2:sheet(current).rowCount,c2:sheet(current).columnCount};draw();return;}if(event.key==='ArrowDown'||event.key==='ArrowUp'||event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();move(event.key==='ArrowDown'?1:event.key==='ArrowUp'?-1:0,event.key==='ArrowRight'?1:event.key==='ArrowLeft'?-1:0,event.shiftKey);return;}if(event.key==='Tab'||event.key==='Enter'){event.preventDefault();move(event.key==='Enter'?(event.shiftKey?-1:1):0,event.key==='Tab'?(event.shiftKey?-1:1):0);return;}if(event.key==='F2'){event.preventDefault();beginEdit();return;}if(event.key==='Delete'||event.key==='Backspace'){event.preventDefault();const area=rect(current);if(area.rows*area.columns>MAX_WRITE){hint('Для очистки выделите до '+MAX_WRITE+' ячеек.');return;}queueRange(area.row,area.column,Array.from({length:area.rows},()=>Array(area.columns).fill('')));return;}if(!ctrl&&!event.altKey&&event.key.length===1){event.preventDefault();beginEdit(true,event.key);}});
   panel.addEventListener('keydown',event=>{if(event.key!=='Tab'||event.defaultPrevented)return;const nodes=Array.from(panel.querySelectorAll('button,a[href],input,textarea,[tabindex="0"]')).filter(node=>!node.disabled&&node.getClientRects().length),first=nodes[0],last=nodes[nodes.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}});

@@ -56,7 +56,9 @@ def main():
         # Returning to a visited sheet immediately shows its display values, then verifies access
         # and replaces them with current cells before it enables editing. Slow reads allow navigation.
         reset()
+        page.evaluate("window.originalTab=document.querySelector('[data-sheet-id=\"0\"]')")
         page.locator('[data-sheet-id="1"]').click()
+        assert page.evaluate("originalTab===document.querySelector('[data-sheet-id=\"0\"]')")
         page.wait_for_function("document.getElementById('rg-grid-status').dataset.state==='saved'")
         page.evaluate("gridServerEdit(0,2,1,'Актуальная версия');gridBackend.holdMethods=['getGridRange']")
         page.locator('[data-sheet-id="0"]').click()
@@ -114,6 +116,12 @@ def main():
         initial = page.evaluate('gridBackend.calls')
         assert [call['method'] for call in initial] == ['getGridWorkbook']
         assert initial[0]['payload']['includeInitialRange'] is True
+        cells = page.locator('#rg-grid-body [role=gridcell]').count()
+        assert cells == initial[0]['payload']['initialRows'] * initial[0]['payload']['initialColumns'] < 900
+        print(f'1440x1000 viewport requested and rendered {cells} cells in the opening RPC', flush=True)
+        page.locator('#rg-grid-viewport').evaluate("el=>{el.scrollTop=28;}")
+        page.wait_for_timeout(140)
+        assert not page.evaluate("gridBackend.calls.some(call=>call.method==='getGridRange')")
         edit(2, 1, 'Сохранить без ожидания контактов')
         page.wait_for_function("gridBackend.sheets[0].cells.get('2:1').input==='Сохранить без ожидания контактов'")
         assert page.evaluate("gridBackend.sheets[0].cells.get('2:1').input") == 'Сохранить без ожидания контактов'
@@ -249,7 +257,11 @@ def main():
         assert page.locator('#rg-grid-title').inner_text() == 'Кухни — рабочая база'
         assert page.locator('#rg-grid-native').get_attribute('href') == 'https://docs.google.com/spreadsheets/d/grid_file_1234567890/edit#gid=0'
         assert page.locator('#rg-grid-head th[data-column="1"]').inner_text() == 'A'
+        page.locator('#rg-grid-address').fill('AA1')
+        page.locator('#rg-grid-address').press('Enter')
         assert page.locator('#rg-grid-head th[data-column="27"]').inner_text() == 'AA'
+        page.locator('#rg-grid-address').fill('A1')
+        page.locator('#rg-grid-address').press('Enter')
         assert page.locator('#rg-cell-3-1').inner_text() == '<img src=x onerror=alert(1)>'
         assert page.locator('#rg-grid-body img').count() == 0
         assert page.locator('#rg-cell-3-4').inner_text() == '2'

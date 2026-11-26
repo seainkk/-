@@ -5,8 +5,11 @@ from project_client import integrated_html
 
 
 def check_rows(rows):
-    boxes = [row.bounding_box() for row in rows.all()]
+    expect(rows.first).to_be_visible()
+    expect(rows.last).to_be_visible()
+    boxes = rows.evaluate_all('items=>items.map(item=>item.getBoundingClientRect().toJSON())')
     assert len(boxes) >= 2
+    assert all(box['width']>0 and box['height']>0 for box in boxes)
     for previous, current in zip(boxes, boxes[1:]):
         assert abs(current['x'] - previous['x']) < 2
         assert current['y'] >= previous['y'] + previous['height'] - 1

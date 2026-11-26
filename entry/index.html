@@ -45,6 +45,17 @@
     body[data-directory-open=true] .entry-bar{display:flex}
     body[data-directory-open=true] #entry-frame-host{position:fixed;inset:0;visibility:hidden;pointer-events:none}
     #entry-directory-nav{display:flex;gap:4px;width:fit-content;max-width:calc(100% - 48px);margin:18px max(24px,calc((100% - 1152px)/2));padding:5px;border-radius:100px;background:var(--soft)}
+    #entry-directory-nav{flex-wrap:wrap;border-radius:20px}
+    #entry-source-fields,#entry-segment-fields{display:flex;flex-wrap:wrap;align-items:end;gap:12px;margin:14px 0}
+    #entry-source-fields label{display:grid;gap:4px;font-size:13px;font-weight:600}
+    #entry-source-fields input:not([type=checkbox]),#entry-source-fields select{font:inherit;min-height:40px;padding:7px 12px;border:1px solid var(--line);border-radius:10px}
+    #entry-source-fields label:last-of-type{display:flex;align-items:center;min-height:40px}
+    #entry-segment-fields button[aria-pressed=false]{color:var(--ink);background:var(--soft)}
+    .entry-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:15px 0}
+    .entry-actions button{padding:9px 15px;font-size:13px}
+    .entry-field{border:1px solid var(--line);border-radius:16px;margin:12px 0;padding:14px 18px}
+    .entry-field h2{font-size:17px;margin:0}
+    #entry-section-note{color:var(--muted)}
     #entry-directory-nav button{min-height:37px;padding:9px 14px;background:transparent;color:var(--ink);font-size:12px}
     #entry-directory-nav [aria-pressed=true]{background:var(--blue);color:#fff}
     #entry-preview-list button{border:0;background:transparent;padding:2px 0;text-align:left;color:var(--ink);font-weight:600}
@@ -58,6 +69,10 @@
   <nav id="entry-directory-nav" aria-label="Разделы сервиса" hidden>
     <button id="entry-view-sources" type="button" aria-pressed="true">Общий каталог</button>
     <button id="entry-view-segments" type="button" aria-pressed="false">Сегменты</button>
+    <button id="entry-view-analytics" type="button" aria-pressed="false">Аналитика</button>
+    <button id="entry-view-infrastructure" type="button" aria-pressed="false">Инфраструктура</button>
+    <button id="entry-view-retarget" type="button" aria-pressed="false">Ретаргетинг</button>
+    <button id="entry-view-settings" type="button" aria-pressed="false">Настройки</button>
   </nav>
   <main id="entry-card" class="entry-card" aria-labelledby="entry-title">
     <span id="entry-spinner" class="entry-spinner" aria-hidden="true" hidden></span>
@@ -73,6 +88,31 @@
   </main>
   <section id="entry-preview" aria-labelledby="entry-preview-title" hidden>
     <h1 id="entry-preview-title">Общий каталог</h1>
+    <div id="entry-source-fields" hidden>
+      <button id="entry-import-source" type="button">＋ Загрузить базу</button>
+      <label>Поиск по названию<input id="entry-search" type="search" placeholder="Название базы" autocomplete="off"></label>
+      <label>Проект базы<select id="entry-project"><option value="">Все проекты</option><option value="numshield">Намшилд</option><option value="neosender">Нео Сендер</option><option value="none">Без отметки проекта</option></select></label>
+      <label>Тип базы<select id="entry-contents"><option value="">Все типы</option><option value="companies">Компании</option><option value="lpr">ЛПР</option></select></label>
+      <label><input id="entry-unassigned" type="checkbox">Без сегмента в этом проекте</label>
+    </div>
+    <div id="entry-segment-fields" hidden>
+      <button id="entry-category-partners" type="button" aria-pressed="false">Партнерка</button>
+      <button id="entry-category-clients" type="button" aria-pressed="true">Клиенты</button>
+      <button id="entry-import-segment" type="button">Добавить контакты</button>
+      <button type="button" disabled>Добавить сегмент</button>
+    </div>
+    <div id="entry-analytics-fields" hidden>
+      <div class="entry-actions"><button type="button" disabled>Настройки Coldy</button><button type="button" disabled>↻ Обновить данные</button></div>
+      <div class="entry-field"><h2>Прогноз отправок</h2></div>
+    </div>
+    <div id="entry-infrastructure-fields" hidden>
+      <div class="entry-actions"><button type="button" disabled>Обновить из Coldy</button><button type="button" disabled>Выбрать почты</button><button type="button" disabled>Настройки Coldy</button></div>
+    </div>
+    <div id="entry-settings-fields" hidden>
+      <button id="entry-settings-close" type="button">Закрыть</button>
+      <div class="entry-field"><h2>Coldy</h2></div><div class="entry-field"><h2>Promouser</h2></div><div class="entry-field"><h2>Доступ к сервису</h2></div>
+    </div>
+    <p id="entry-section-note" hidden></p>
     <p id="entry-preview-time"></p>
     <ul id="entry-preview-list"></ul>
   </section>
@@ -94,6 +134,15 @@
     const catalogSlot='outreach.catalog.v1',catalogLifetime=86400000;
     let savedCatalog=null,deviceKey=null,catalogWrite=0,catalogReceived=false;
     let directory=null,shown=null;
+    const sectionNames={sources:'Общий каталог',segments:'Сегменты',analytics:'Аналитика',infrastructure:'Инфраструктура',retarget:'Ретаргетинг',settings:'Настройки'};
+    const normalize=value=>(value||'').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/ё/g,'е').trim();
+    function filters(){
+      return {query:$('entry-search').value||'',project:$('entry-project').value||'',contents:$('entry-contents').value||'',onlyUnassigned:$('entry-unassigned').checked===true};
+    }
+    function clearFields(){
+      for(const id of ['entry-search','entry-project','entry-contents'])$(id).value='';
+      $('entry-unassigned').checked=false;
+    }
 
     function handoff(){
       if(directory)directory.front=false;
@@ -112,10 +161,17 @@
     }
     function forward(s){
       if(directory!==s||s.epoch===null)return;
-      if(s.explicit&&s.sentView!==s.viewSerial){s.sentView=s.viewSerial;sendFast(s,'view',{kind:s.kind,serial:s.viewSerial});}
+      if(s.explicit&&s.sentView!==s.viewSerial){
+        s.sentView=s.viewSerial;const fields={kind:s.kind,serial:s.viewSerial};
+        if(s.kind==='sources'){fields.filters=filters();if(document.activeElement===$('entry-search'))fields.focus='search';}
+        if(s.kind==='segments')fields.category=s.category;
+        if(s.kind==='settings'&&s.settingsReturn)fields.returnView=s.settingsReturn;
+        if(s.action)fields.action=s.action;
+        sendFast(s,'view',fields);
+      }
       for(const doc of Object.values(s.docs)){
         if(doc.expiresAt<=Date.now()||s.sent[doc.kind]===doc.checkedAt)continue;
-        sendFast(s,'directory',{kind:doc.kind,items:doc.items,checkedAt:doc.checkedAt,complete:doc.complete});s.sent[doc.kind]=doc.checkedAt;
+        sendFast(s,'directory',{kind:doc.kind,items:doc.items,checkedAt:doc.checkedAt,expiresAt:doc.expiresAt,complete:doc.complete});s.sent[doc.kind]=doc.checkedAt;
       }
       if(s.choice&&s.sent[s.kind]&&s.choice.serial!==s.sentChoice){
         sendFast(s,'open',s.choice);s.sentChoice=s.choice.serial;
@@ -125,13 +181,19 @@
     function renderDirectory(s){
       if(!s.front||directory!==s)return;
       document.body.dataset.directoryOpen='true';$('entry-directory-nav').hidden=false;
-      for(const kind of ['sources','segments'])$('entry-view-'+kind).setAttribute('aria-pressed',String(s.kind===kind));
+      for(const kind of Object.keys(sectionNames))$('entry-view-'+kind).setAttribute('aria-pressed',String(s.kind===kind));
       const doc=s.docs[s.kind];
-      $('entry-preview-title').textContent=s.kind==='sources'?'Общий каталог':'Сегменты';
+      $('entry-preview-title').textContent=s.kind==='infrastructure'?'Почты для рассылок':sectionNames[s.kind];
+      for(const kind of ['analytics','infrastructure','settings'])$('entry-'+kind+'-fields').hidden=s.kind!==kind;
+      $('entry-source-fields').hidden=s.kind!=='sources';$('entry-segment-fields').hidden=s.kind!=='segments';
+      for(const category of ['partners','clients'])$('entry-category-'+category).setAttribute('aria-pressed',String(s.category===category));
+      const f=filters(),notes={retarget:'Структура ещё обсуждается.',sources:f.project||f.contents||f.onlyUnassigned?'Уточняем результат по выбранным фильтрам.':''};
+      $('entry-section-note').textContent=notes[s.kind]||'';$('entry-section-note').hidden=!notes[s.kind];
       if(!doc&&s.kind==='sources'&&savedCatalog){renderPreview(savedCatalog);return;}
       shown=doc?{kind:doc.kind,at:doc.checkedAt}:null;
       const rows=[];
       for(const item of doc?.items||[]){
+        if(s.kind==='sources'&&!normalize(item.name).includes(normalize(f.query))||s.kind==='segments'&&item.category!==s.category)continue;
         const row=document.createElement('li'),button=document.createElement('button');
         button.type='button';button.textContent=item.name;button.dataset.directoryKind=s.kind;button.dataset.directoryId=item.id;
         button.addEventListener('click',()=>{
@@ -144,12 +206,14 @@
       }
       $('entry-preview-list').replaceChildren(...rows);
       const stamp=doc?new Date(doc.checkedAt).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})+' МСК':'';
-      $('entry-preview-time').textContent=doc?(rows.length?'Список на ':'Пустой список на ')+stamp:'';
+      $('entry-preview-time').textContent=doc?(doc.items.length?'Список на ':'Пустой список на ')+stamp:'';
       $('entry-card').hidden=true;$('entry-preview').hidden=false;
     }
-    function changeDirectory(kind){
-      const s=directory;if(!s?.front||s.kind===kind)return;
-      s.kind=kind;s.explicit=true;s.viewAck=false;s.choice=null;s.viewSerial=++s.serial;renderDirectory(s);forward(s);
+    function changeDirectory(kind,options={}){
+      const s=directory;if(!s?.front||s.kind===kind&&!options.changed)return;
+      if(options.category)s.category=options.category;
+      if(kind==='settings'&&s.kind!=='settings')s.settingsReturn=s.kind;
+      s.action=options.action;s.kind=kind;s.explicit=true;s.viewAck=false;s.choice=null;s.viewSerial=++s.serial;renderDirectory(s);forward(s);
     }
     function expireDirectory(s,doc){
       if(directory!==s||s.docs[doc.kind]!==doc)return;
@@ -208,8 +272,8 @@
       if(!directoryProject||!window.RegistryDirectoryReader||validationFile)return;
       let projectId='numshield';
       try{if(window.localStorage.getItem('registry.activeProject')==='neosender')projectId='neosender';}catch{}
-      const s=directory={frame,project:projectId,epoch:null,front:true,kind:'sources',docs:{},accepted:{},sent:{},timers:[],generation:0,serial:0};
-      renderDirectory(s);void loadDirectory(s,true);
+      const s=directory={frame,project:projectId,epoch:null,front:true,kind:'sources',category:'clients',docs:{},accepted:{},sent:{},timers:[],generation:0,serial:0};
+      clearFields();renderDirectory(s);void loadDirectory(s,true);
     }
     function directoryMessage(msg){
       const s=directory;if(!s)return;
@@ -226,7 +290,7 @@
         }
         forward(s);return;
       }
-      if(msg.epoch!==s.epoch||msg.projectId!==s.project||!['sources','segments'].includes(msg.kind))return;
+      if(msg.epoch!==s.epoch||msg.projectId!==s.project||!(msg.type==='bases-registry-fast-viewed'?Object.hasOwn(sectionNames,msg.kind):['sources','segments'].includes(msg.kind)))return;
       if(msg.type==='bases-registry-fast-viewed'&&msg.serial===s.sentView&&msg.kind===s.kind){
         s.viewAck=true;if(msg.visible===false){handoff();return;}
       }else if(msg.type==='bases-registry-fast-presented'&&msg.checkedAt===s.sent[msg.kind]){
@@ -262,7 +326,8 @@
     function renderPreview(data){
       shown={kind:'device',at:data.checkedAt};
       $('entry-preview-title').textContent='Общий каталог';
-      const rows=data.items.map(item=>{const row=document.createElement('li');row.textContent=item.name;return row;});
+      const query=directory?.front?normalize(filters().query):'';
+      const rows=data.items.filter(item=>normalize(item.name).includes(query)).map(item=>{const row=document.createElement('li');row.textContent=item.name;return row;});
       $('entry-preview-list').replaceChildren(...rows);
       const date=new Date(data.checkedAt).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'});
       $('entry-preview-time').textContent=(rows.length?'Список':'Пустой список')+' на '+date+' МСК. Проверяем доступ и обновляем базы.';
@@ -304,7 +369,7 @@
     function isBackEntry(){return window.history.state?.basesRegistryBack===true;}
     function syncBackEntry(){
       if(!window.history||releasingBack)return;
-      if(canBack&&ready){
+      if(canBack&&(ready||shellLoaded)){
         if(isBackEntry()){backArmed=true;return;}
         if(navigator.userActivation?.hasBeenActive===false)return;
         try{
@@ -321,8 +386,8 @@
       const wasArmed=backArmed;backArmed=false;
       if(accessKey!==keyFromHash(window.location.hash)){releasingBack=false;return;}
       if(releasingBack){releasingBack=false;syncBackEntry();return;}
-      if(isBackEntry()){backArmed=ready&&canBack;return;} // Forward to a previous same-page entry.
-      if(!wasArmed||!ready||!canBack||!frameSource(appWindow))return;
+      if(isBackEntry()){backArmed=(ready||shellLoaded)&&canBack;return;} // Forward to a previous same-page entry.
+      if(!wasArmed||!ready&&!shellLoaded||!canBack||!frameSource(appWindow))return;
       // The child reports its new state even if a dirty form kept the same view.
       canBack=false;
       try{appWindow.postMessage({type:'bases-registry-back'},appOrigin);}catch(error){/* A detached frame cannot accept a back action. */}
@@ -380,7 +445,7 @@
       }
       if(event.data.type==='bases-registry-shell'){
         if(loadingTimer!==null){clearTimeout(loadingTimer);loadingTimer=null;}
-        shellLoaded=true;$('entry-card').hidden=true;
+        shellLoaded=true;appWindow=event.source;appOrigin=event.origin;$('entry-card').hidden=true;
         if(savedCatalog&&!ready&&!directory?.docs.sources)event.source.postMessage({type:'bases-registry-startup-catalog',...savedCatalog},APP_ORIGIN);
         return;
       }
@@ -402,7 +467,7 @@
         }
       }else if(ready&&event.data.type==='bases-registry-catalog'){
         if(!directory)void rememberCatalog(event.data);
-      }else if(ready&&event.data.type==='bases-registry-navigation'&&typeof event.data.canBack==='boolean'){
+      }else if((ready||shellLoaded)&&event.data.type==='bases-registry-navigation'&&typeof event.data.canBack==='boolean'){
         canBack=event.data.canBack;syncBackEntry();
       }else if(event.data.type==='bases-registry-unavailable'){
         clearFrame(true);showState('error','Не удалось подключить сервис','Проверьте соединение и повторите попытку.',true);
@@ -422,8 +487,13 @@
       if(!validationFile||!key){$('entry-message').textContent='Вставьте полную закрытую ссылку на этот сервис.';return;}
       window.location.hash='access_key='+key;
     });
-    $('entry-view-sources').addEventListener('click',()=>changeDirectory('sources'));
-    $('entry-view-segments').addEventListener('click',()=>changeDirectory('segments'));
+    for(const kind of Object.keys(sectionNames))$('entry-view-'+kind).addEventListener('click',()=>changeDirectory(kind));
+    $('entry-settings-close').addEventListener('click',()=>changeDirectory(directory?.settingsReturn||'sources'));
+    for(const id of ['entry-project','entry-contents','entry-unassigned'])$(id).addEventListener('change',()=>changeDirectory('sources',{changed:true}));
+    $('entry-search').addEventListener('input',()=>changeDirectory('sources',{changed:true}));
+    for(const category of ['partners','clients'])$('entry-category-'+category).addEventListener('click',()=>changeDirectory('segments',{changed:true,category}));
+    for(const [id,kind] of [['entry-import-source','sources'],['entry-import-segment','segments']])
+      $(id).addEventListener('click',()=>changeDirectory(kind,{changed:true,action:'import'}));
     window.addEventListener('storage',event=>{
       const s=directory;
       if(!s||event.newValue!==null||event.key!==null&&event.key!==s.device?.slot)return;

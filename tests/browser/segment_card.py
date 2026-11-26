@@ -73,6 +73,11 @@ def main():
         expect(rows.first.locator('td').nth(4)).to_contain_text('Отправлено писем: 2')
         rows.first.locator('summary').click()
         expect(rows.first.locator('a')).to_have_attribute('href','https://docs.google.com/spreadsheets/d/synthetic/edit#gid=2&range=A3')
+        rows.first.locator('summary').focus()
+        page.evaluate('window.sourceAction=document.activeElement')
+        page.evaluate('RegistrySegmentCard.refresh({automatic:true})')
+        assert page.evaluate('sourceAction===document.activeElement && sourceAction.closest("details").open')
+        expect(rows.first.locator('a')).to_be_visible()
         assert page.evaluate("backend.calls.some(c=>c.name==='getSegmentContactCard'&&c.p.limit===1&&c.p.revision==='v1'&&!c.p.prepared)")
         page.locator('[data-sc-state="inCampaign"]').click()
         expect(rows).to_have_count(1)
@@ -138,6 +143,10 @@ def main():
         segment.locator('.br-segment-row-name').click()
         page.wait_for_function("backend.pending.some(r=>r.method==='getSegmentContactCard')")
         expect(rows).to_have_count(0)
+        expect(page.locator('#sc-table-wrap thead')).to_be_visible()
+        expect(page.locator('#sc-summary')).to_contain_text('Email · —')
+        expect(page.locator('#sc-saved-actions summary')).to_be_visible()
+        assert page.locator('#sc-saved-actions details').evaluate('node=>node.inert')
         page.evaluate("""() => {
           backend.omitPreviews=false;
           const response=api.getSegmentsDashboard({includeAnalysis:false,includeCardPreview:true});
@@ -146,6 +155,7 @@ def main():
         expect(rows).to_have_count(1)
         expect(rows.first).to_contain_text('both@example.test')
         expect(page.locator('#sc-status')).to_contain_text('Карточка собрана')
+        assert not page.locator('#sc-saved-actions details').evaluate('node=>node.inert')
         page.evaluate("backend.holdMethods=[];releaseRpc('getSegmentContactCard')")
         expect(rows).to_have_count(5)
         assert not errors,errors
