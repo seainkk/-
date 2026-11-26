@@ -3,7 +3,7 @@
  * No spreadsheet values, worksheet names or inferred outreach rules are read.
  * SEGMENTS_FOLDER_ID can override the source using an ID in this registry only.
  */
-function buildSegments_(context, registry, folders, files, includePendingImports) {
+function buildSegments_(context, registry, folders, files, includePendingImports, includeCardParents) {
   var result = {
     state: 'source_missing',
     source: null,
@@ -73,7 +73,9 @@ function buildSegments_(context, registry, folders, files, includePendingImports
       found[file.id] = true;
       return true;
     }).map(function (file) {
-      return { id: file.id, name: file.name, url: spreadsheetUrl_(file.id) };
+      var item = { id: file.id, name: file.name, url: spreadsheetUrl_(file.id) };
+      if (includeCardParents) item.parentId = file.parentId;
+      return item;
     }).sort(byName_);
     var item = {
       id: segment.id,
@@ -207,7 +209,7 @@ function getSegmentNames_(context, folderRefs) {
 }
 
 /** Metadata for the Outreach subtree only; a large source catalog is unrelated. */
-function getSegmentsMetadata_(context, includePendingImports) {
+function getSegmentsMetadata_(context, includePendingImports, includeCardParents) {
   context = context || authorize_();
   var binding = segmentMetadataBinding_(context);
   if (binding.state !== 'ready') return binding;
@@ -237,5 +239,5 @@ function getSegmentsMetadata_(context, includePendingImports) {
     }
   }
   visit(source, 0);
-  return buildSegments_(context, registry, folders, files, includePendingImports);
+  return buildSegments_(context, registry, folders, files, includePendingImports, includeCardParents);
 }

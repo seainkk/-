@@ -245,7 +245,10 @@ function coldyIncomingStep_(context,job,guard,deadline,writeCheckpoint){
       if(batch.length){
         var before=scan.position===0?0:scan.matched;
         var receipt=coldyRecipientSheetWrite_(context,binding,kind,target,batch,guard,null,{existingOnly:true});
-        if(!receipt.unchangedVersion)scan.wroteChanges=true;
+        if(!receipt.unchangedVersion){
+          scan.wroteChanges=true;
+          if(typeof segmentCardMaintenanceRequest_==='function') segmentCardMaintenanceRequest_(context,b.segmentId);
+        }
         // A partial checkpoint created before matched counts existed can only report how many were checked.
         scan.matched=Number.isSafeInteger(before)&&Number.isSafeInteger(receipt.existing)?before+receipt.existing:null;
       }
@@ -353,7 +356,7 @@ function coldyRecipientTick_(event){
   var props=PropertiesService.getScriptProperties(), timer=coldyIncomingTimer_(props);
   if(!timer||!timer.uid||!event||event.triggerUid!==timer.uid||timer.verifier!==sharedConfiguredHash_(props)||
     timer.rootId!==(props.getProperty('ROOT_FOLDER_ID')||REGISTRY_CONFIG.defaultRootFolderId)) return;
-  var previous=SHARED_REQUEST_SCOPE_, claim=Utilities.getUuid(), started=Date.now(), acquired=false,leaseUntil=0;
+  var previous=SHARED_REQUEST_SCOPE_, claim=Utilities.getUuid(), started=Date.now(), acquired=false,admitted=false,leaseUntil=0;
   var heartbeatKey=coldyIncomingHeartbeatKey_(timer), at=new Date(started).toISOString();
   function heartbeat(issue,retryAt){props.setProperty(heartbeatKey,JSON.stringify({at:at,issue:issue||null,retryAt:retryAt||0}));}
   SHARED_REQUEST_SCOPE_={keyHash:timer.verifier,automation:true};
@@ -371,7 +374,7 @@ function coldyRecipientTick_(event){
   try {
     heartbeat();
     acquired=coldyIncomingLeaseLock_(function(){
-      authorizedTimer();
+      authorizedTimer();admitted=true;
       var now=Date.now(),old=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
       if(old && old.until>now) return false;
       leaseUntil=now+COLDY_INCOMING.leaseMillis;
@@ -456,9 +459,19 @@ function coldyRecipientTick_(event){
   } catch(error) {
     heartbeat(coldyIncomingIssue_(error));throw error;
   } finally {
-    try {if(acquired) coldyIncomingLeaseLock_(function(){
-      var current=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
-      if(current&&current.id===claim) props.deleteProperty(COLDY_INCOMING.lease);
-    });} finally {SHARED_REQUEST_SCOPE_=previous;}
+    try {
+      if(acquired) {
+        coldyIncomingLeaseLock_(function(){
+          var current=JSON.parse(props.getProperty(COLDY_INCOMING.lease)||'null');
+          if(current&&current.id===claim) props.deleteProperty(COLDY_INCOMING.lease);
+        });
+      }
+      // A subsequent tick can build a card while the previous Coldy poll finishes.
+      // Direct sheet edits remain eligible when the provider is unavailable.
+      if(admitted && typeof segmentCardMaintenanceTick_==='function' && Date.now()-started<150000) {
+        try { segmentCardMaintenanceTick_(authorizedTimer); }
+        catch(ignored){ /* The card scheduler records its own failure and retry. */ }
+      }
+    } finally {SHARED_REQUEST_SCOPE_=previous;}
   }
 }

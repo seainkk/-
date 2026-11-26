@@ -158,6 +158,25 @@ function headers(fileId, sheetId, hasHeader, extra = {}) {
   return { available: true, tables: [], loads: [{ targetFileId: fileId, targetSheetId: sheetId, hasHeader, stage: 'complete', ...extra }] };
 }
 
+test('only an opted-in light project dashboard attaches verified card previews and hides internal parent evidence', () => {
+  const file = sourceFile(), f = fixture({files:[file]});
+  let requests = 0;
+  f.context.segmentCardDashboardPreviews_ = (context, projection, tracking) => {
+    requests++;
+    assert.equal(context.rootId, ROOT);
+    assert.equal(projection.items[0].files[0].parentId, SEGMENT);
+    assert.equal(tracking.available, true);
+    return {[SEGMENT]: {segmentId:SEGMENT, preview:true, rows:[]}};
+  };
+  assert.equal(f.dashboard({includeAnalysis:false}).cardPreviews, undefined);
+  assert.equal(f.dashboard({includeAnalysis:true,includeCardPreview:true}).cardPreviews, undefined);
+  const light = f.dashboard({includeAnalysis:false,includeCardPreview:true});
+  assert.equal(light.cardPreviews[SEGMENT].preview, true);
+  assert.equal(light.items[0].files[0].parentId, undefined);
+  assert.equal(requests, 1);
+  assert.throws(()=>f.dashboard({includeAnalysis:false,includeCardPreview:'true'}), /INVALID_REQUEST/);
+});
+
 test('dashboard and mailings authorize before Drive or spreadsheet reads', () => {
   for (const options of [{ accessKey: null }, { accessKey: 'wrong' }, { accessKey: 'a'.repeat(43) }]) {
     const f = fixture(options);

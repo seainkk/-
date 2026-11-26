@@ -19,73 +19,58 @@ function source(name) {
   assert.fail('Complete function: ' + name);
 }
 
-test('contact preview permits native source reads independently of collection status', () => {
-  const can = vm.runInNewContext(source('canPreviewContacts') + ';canPreviewContacts;');
-  assert.equal(can({ mimeType: 'application/vnd.google-apps.spreadsheet', status: 'collection' }), true);
-  assert.equal(can({ mimeType: 'application/vnd.google-apps.spreadsheet', present: false }), false);
-  for (const value of [null, {}, { mimeType: 'text/csv' }]) assert.equal(can(value), false);
+test('working tables can be opened by name independently of the base collection status', () => {
+  const can = vm.runInNewContext(source('canOpenSourceWorkbook') + ';canOpenSourceWorkbook;');
+  for (const status of ['collection','rework','ready']) assert.equal(can({mimeType:'application/vnd.google-apps.spreadsheet',status}),true);
+  assert.equal(can({mimeType:'application/vnd.google-apps.spreadsheet',present:false}),false);
+  for (const item of [null, {}, {mimeType:'text/csv'}]) assert.equal(can(item),false);
 });
 
-test('manual-review links use canonical source file, sheet and positive row only', () => {
-  const url = vm.runInNewContext(source('nativeUrl') + '\n' + source('contactPreviewSourceUrl') + ';contactPreviewSourceUrl;');
-  const base = 'https://docs.google.com/spreadsheets/d/source_123456/edit';
-  assert.equal(url('source_123456', { sheetId: 0, row: 2 }), base + '#gid=0&range=A2');
-  assert.equal(url('source_123456', { sheetId: 10, row: -1 }), base + '#gid=10');
-  assert.equal(url('source_123456', { sheetId: 'javascript:alert(1)', row: 1, url: 'https://evil.invalid' }), base);
-  assert.equal(url('source_123456', { sheetId: 0, row: '1&other=2' }), base + '#gid=0');
-  assert.equal(url('source_123456', { fileId: 'center_123456', sheetId: 20, row: 9 }), 'https://docs.google.com/spreadsheets/d/center_123456/edit#gid=20&range=A9');
-  assert.equal(url('source_123456', { fileId: 'https://evil.invalid', sheetId: 0, row: 2 }), base + '#gid=0&range=A2');
+test('the catalog and the upload result no longer request a contact-analysis report', () => {
+  const html=readFileSync(new URL('../src/Index.html',import.meta.url),'utf8');
+  assert.doesNotMatch(html,/id="br-contact-preview(?:-|")/);
+  assert.doesNotMatch(client,/\bpreviewSourceBaseContacts\b/);
+  assert.match(html,/id="br-prepared-preview"/);
+  assert.match(html,/id="br-segment-normalized-preview"/);
 });
 
-test('combined counters take precedence including zero, unavailable combined counters preserve source counts', () => {
-  const count = vm.runInNewContext(source('contactPreviewCount') + ';contactPreviewCount;');
-  assert.equal(count({ multiCompany: 1, multiCompanyCombined: 3 }, 'multiCompanyCombined', 'multiCompany'), 3);
-  assert.equal(count({ multiCompany: 1, multiCompanyCombined: 0 }, 'multiCompanyCombined', 'multiCompany'), 0);
-  assert.equal(count({ multiCompany: 1, multiCompanyCombined: null }, 'multiCompanyCombined', 'multiCompany'), 1);
-  assert.equal(count({ total: 2 }, 'totalCombined', 'total'), 2);
-  assert.equal(count({ total: 739, totalCombined: null }, 'totalCombined', 'total'), 739);
-  for (const value of [-1, 1.5, Infinity, '3']) assert.equal(count({ total: 2, totalCombined: value }, 'totalCombined', 'total'), 2);
-});
-
-function analysisFixture() {
-  let resolve, reject;
-  const calls = [];
-  const first = { source: { id: 'first-source' }, queued: true, loading: false, epoch: 1 };
-  const context = vm.createContext({
-    contactPreview: first, contactPreviewEpoch: 1, accessReady: true,
-    requesting: () => false, renderContactPreview() {}, updateControls() {}, flushPendingView() {},
-    failure: error => ({ message: error.message }),
-    rpc(name, payload) { calls.push({ name, payload }); return new Promise((yes, no) => { resolve = yes; reject = no; }); },
+function completedImport() {
+  const actions=[], opened=[], calls=[], sync=new Set();
+  const context=vm.createContext({
+    sourceData:{items:[]}, importOpen:true, preparedJobs:[{draftId:'draft'},{draftId:'another'}],
+    preparedEpoch:0, preparedImport:{draftId:'draft'}, importRequests:new Map(), activeView:'sources',
+    registrySection:'companies', segmentImportDestination:null, segmentReturnPending:null, lastSourceLoaded:1,
+    pendingSyncViews:sync, nativeUrl:id=>'https://docs.google.com/spreadsheets/d/'+id+'/edit',
+    $:()=>({reset(){},append(...nodes){actions.push(...nodes);}}), scheduleViewSync:()=>calls.push('sync'),
+    clearPreparedPoll(){}, setImportContents(){}, showImportMessage(){}, updateImportView(){},
+    renderSources:()=>calls.push('render'), notice:()=>calls.push('notice'), openGridWorkbook:(...args)=>opened.push(args),
+    button:(kind,label)=>({label,dataset:{},addEventListener(event,handler){assert.equal(event,'click');this.click=handler;}})
   });
-  vm.runInContext(source('runContactPreview'), context);
-  return { context, first, calls, resolve: value => resolve(value), reject: error => reject(error) };
+  vm.runInContext(source('finishPreparedBase'),context);
+  const file={id:'prepared_sheet_id',name:'Пример'}, current={draftId:'draft',section:'lpr',status:'collection'};
+  return {context,actions,opened,calls,sync,file,current,finish:result=>context.finishPreparedBase(result,current)};
 }
 
-test('a queued contact analysis dispatches once and cannot replace a newer preview', async () => {
-  const f = analysisFixture(), pending = f.context.runContactPreview();
-  await f.context.runContactPreview();
-  assert.equal(f.calls.length, 1);
-  assert.equal(f.calls[0].name, 'previewSourceBaseContacts');
-  assert.equal(f.calls[0].payload.id, 'first-source');
-  const next = { source: { id: 'next-source' }, queued: true, loading: false, epoch: 2, data: null };
-  f.context.contactPreview = next; f.context.contactPreviewEpoch = 2;
-  f.resolve({ state: 'ready', companies: { unique: 9 } }); await pending;
-  assert.equal(f.context.contactPreview, next);
-  assert.equal(next.data, null);
+test('an acknowledged upload offers the working table and validation directly, and refreshing keeps a single base', () => {
+  const f=completedImport();
+  f.finish({file:f.file});
+  assert.equal(f.context.sourceData.items[0].id,f.file.id);
+  assert.deepEqual(Array.from(f.context.sourceData.items[0].contents),['lpr']);
+  assert.deepEqual(Array.from(f.context.preparedJobs,job=>job.draftId),['another']);
+  assert.equal(f.context.importOpen,false);assert.equal(f.context.preparedImport,null);
+  assert.deepEqual(f.actions.map(action=>action.label),['Работать с таблицей','Проверить новые контакты']);
+  assert.deepEqual(f.opened,[]);for(const action of f.actions)action.click();
+  assert.deepEqual(f.opened,[[f.file.id],[f.file.id,true]]);
+  assert.deepEqual([...f.sync],['sources']);assert.ok(f.calls.includes('render'));
+  f.finish({file:f.file});assert.equal(f.context.sourceData.items.length,1);
 });
 
-test('closing or revoking access during analysis discards its late private result', async () => {
-  const f = analysisFixture(), pending = f.context.runContactPreview();
-  f.context.accessReady = false; f.context.contactPreview = null; f.context.contactPreviewEpoch++;
-  f.resolve({ state: 'ready', conflicts: { items: [{ value: 'private@example.test' }] } }); await pending;
-  assert.equal(f.context.contactPreview, null);
-  assert.equal(f.first.data, undefined);
-});
-
-test('a preview failure stays local to analysis after an acknowledged import', async () => {
-  const f = analysisFixture(), pending = f.context.runContactPreview();
-  f.reject(new Error('Temporary read error')); await pending;
-  assert.equal(f.first.error, 'Temporary read error');
-  assert.equal(f.first.loading, false);
-  assert.equal(f.first.data, undefined);
+test('a confirmed upload with a segment destination retains the handoff to the import preview', () => {
+  const f=completedImport(), destination={segmentId:'kitchens',name:'Кухни',category:'clients'};
+  f.context.segmentImportDestination={returnPoint:{view:'segmentCard'}};
+  f.finish({file:f.file,destination});
+  assert.equal(f.context.segmentReturnPending.sourceId,f.file.id);
+  assert.equal(f.context.segmentReturnPending.segmentId,destination.segmentId);
+  assert.equal(f.context.segmentReturnPending.returnPoint.view,'segmentCard');
+  assert.equal(f.context.segmentImportDestination,null);
 });

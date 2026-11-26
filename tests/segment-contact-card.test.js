@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
+import {gzipSync, gunzipSync} from 'node:zlib';
 import vm from 'node:vm';
 
 const root = 'registry_root_12345', segment = 'segment_kitchens_12345', service = 'source_registry_12345';
@@ -76,6 +77,98 @@ function fixture() {
   state.shared[c.pvKey_('telegram','+79992224455')] = {result:{status:'Telegram: активен',eligible:true,idTg:'123'}};
   return {c,state,meta,privateData,run:(options={})=>plain(c.getSegmentContactCard_({segmentId:segment,...options}))};
 }
+
+function preparedFixture() {
+  const f = fixture(), {c,state,meta} = f;
+  vm.runInContext(readFileSync(new URL('../src/SegmentCardSnapshots.gs', import.meta.url), 'utf8'), c);
+  const values = {COLDY_API_KEY:'mock', SOURCE_BASES_STORAGE_ID:service}, cache = new Map(), disk = new Map();
+  const properties = {getProperties:()=>({...values}), getProperty:k=>values[k] ?? null, setProperty:(k,v)=>{values[k]=v;}};
+  const context = {rootId:root, properties}, binding = c.coldyCampaignRegistry_().bindings[0];
+  const blob = data=>({getBytes:()=>Buffer.from(data), getDataAsString:()=>Buffer.from(data).toString('utf8')});
+  state.diskReads=0; state.diskWrites=0; state.metadataLists=0; state.hints=0; state.bound=true; state.ownedBy='numshield';
+  Object.assign(c,{
+    authorize_:()=>context, registryProjectScoped_:()=>true, registrySegmentProject_:()=>state.ownedBy,
+    COLDY:{keyProperty:'COLDY_API_KEY'}, coldySettings_:()=>({key:values.COLDY_API_KEY,credentialHash:digest(values.COLDY_API_KEY)}),
+    coldyCampaignRegistry_:()=>({credentialHash:digest(values.COLDY_API_KEY),bindings:state.bound?[binding]:[]}),
+    segmentCardMaintenanceRequest_:()=>{state.hints++;},
+    CacheService:{getScriptCache:()=>({get:k=>cache.get(k),getAll:ks=>Object.fromEntries(ks.map(k=>[k,cache.get(k)])),
+      put:(k,v)=>cache.set(k,v),putAll:data=>Object.entries(data).forEach(([k,v])=>cache.set(k,v))})},
+    Utilities:{newBlob:blob,gzip:b=>blob(gzipSync(b.getBytes())),ungzip:b=>blob(gunzipSync(b.getBytes())),
+      base64Encode:bytes=>Buffer.from(bytes).toString('base64'),base64Decode:text=>Buffer.from(text,'base64')},
+    Drive:{Files:{list:({q})=>{assert.ok(q.includes("'"+segment+"' in parents")); state.metadataLists++;
+      return {files:[{id:segment,mimeType:'application/vnd.google-apps.folder',parents:[state.folderParent || root]},meta[companies],meta[lpr]]};}}},
+    coldySave_:(ctx,kind,owner,body)=>{assert.equal(ctx,context);assert.equal(kind,'segmentcard');state.diskWrites++;disk.set(owner,plain(body));},
+    coldyLoad_:(ctx,kind,owner)=>{assert.equal(ctx,context);assert.equal(kind,'segmentcard');state.diskReads++;return disk.get(owner);}
+  });
+  const dashboard=()=>plain(c.segmentCardDashboardPreviews_(context,
+    {state:'ready',source:{id:root},items:[{id:segment,name:'Кухни',files:state.sources.map(id=>({id,parentId:segment}))}]},
+    {available:true,tables:c.segmentTrackingStorage_(context,null,false).tables}, c.coldyCampaignRegistry_()));
+  return {...f,values,cache,disk,context,dashboard,rebuild:(guard=()=>context)=>plain(c.segmentCardRefreshSnapshot_(context,segment,guard))};
+}
+
+test('prepared card survives cache eviction and serves the same filtered pages without reading contact sheets or campaign recipients',()=>{
+  const f=preparedFixture(), baseline=f.run(), result=f.rebuild();
+  const reads=f.state.reads, recipients=f.state.privateReads;
+  assert.equal(result.rebuilt,true);assert.equal(result.revision,baseline.revision);
+  assert.equal(f.state.diskWrites,1);assert.equal(f.rebuild().rebuilt,false);assert.equal(f.state.diskWrites,1);
+  const preview=f.dashboard()[segment];
+  assert.equal(preview.preview,true);assert.equal(preview.prepared,true);assert.deepEqual(preview.summary,baseline.summary);
+  assert.equal(preview.rows.length,baseline.rows.length);assert.equal(f.state.metadataLists,1);
+  assert.equal(f.state.diskReads,0);assert.equal(f.state.reads,reads);
+  f.cache.clear();
+  assert.deepEqual(f.dashboard(),{});assert.equal(f.state.diskReads,0);
+  const page=f.run({prepared:true,channel:'email',offset:2,limit:1,revision:result.revision});
+  assert.equal(page.prepared,true);assert.ok(Date.parse(page.checkedAt));assert.deepEqual(page.summary,baseline.summary);
+  assert.equal(page.rows[0].value,baseline.rows[2].value);assert.ok(page.rows[0].sources.every(s=>s.sourceType==='working'));
+  assert.equal(f.state.diskReads,1);assert.equal(f.state.reads,reads);assert.equal(f.state.privateReads,recipients);
+  assert.equal(f.rebuild().rebuilt,false);assert.equal(f.state.diskWrites,1);assert.equal(f.dashboard()[segment].revision,result.revision);
+  assert.doesNotMatch(JSON.stringify(f.values),/@example/);
+});
+
+test('prepared browsing enforces current ownership, master tags, provider assignment and scope when cache is warm',()=>{
+  const f=preparedFixture(), revision=f.rebuild().revision;
+  f.state.folderParent='outside';assert.deepEqual(f.dashboard(),{});f.state.folderParent=root;
+  f.meta[companies].parents=[root];assert.deepEqual(f.dashboard(),{});
+  assert.throws(()=>f.run({prepared:true}),{registryCode:'OUTSIDE_SEGMENTS'});f.meta[companies].parents=[segment];
+  f.meta[lpr].appProperties.registryPrivateRole='private';assert.deepEqual(f.dashboard(),{});
+  delete f.meta[lpr].appProperties.registryPrivateRole;
+  f.meta[lpr].appProperties.registryContactEmailSheetId='33';assert.deepEqual(f.dashboard(),{});
+  f.meta[lpr].appProperties.registryContactEmailSheetId='1';
+  f.state.bound=false;assert.deepEqual(f.dashboard(),{});
+  assert.throws(()=>f.run({prepared:true,revision}),{registryCode:'SEGMENT_CARD_CHANGED'});f.state.bound=true;
+  f.values.COLDY_API_KEY='another';assert.deepEqual(f.dashboard(),{});f.values.COLDY_API_KEY='mock';
+  f.state.project='neosender';assert.deepEqual(f.dashboard(),{});assert.throws(()=>f.rebuild(),{registryCode:'OUTSIDE_PROJECT'});
+  f.state.project='numshield';f.state.permitted=false;
+  assert.throws(()=>f.run({prepared:true}),{registryCode:'OUTSIDE_PROJECT'});
+});
+
+test('stale snapshots are excluded, strict reads see edits immediately, and a lost lease leaves the receipt unpublished',()=>{
+  const f=preparedFixture(), first=f.rebuild(), slot=f.c.segmentCardSnapshotSlot_(f.context,segment), originally=f.values[slot.key];
+  f.meta[lpr].version='9';
+  assert.equal(f.run({prepared:true}).revision,first.revision);
+  assert.throws(()=>f.run({revision:first.revision}),{registryCode:'SEGMENT_CARD_CHANGED'});
+  let n=0;
+  assert.throws(()=>f.rebuild(()=>{if(++n===2) throw new Error('lease');return f.context;}),/lease/);
+  assert.equal(f.state.diskWrites,1);assert.equal(f.values[slot.key],originally);
+  const expired=JSON.parse(originally);expired.checkedAt=new Date(Date.now()-86460000).toISOString();
+  f.values[slot.key]=JSON.stringify(expired);assert.deepEqual(f.dashboard(),{});
+  const current=f.run({prepared:true});assert.notEqual(current.prepared,true);assert.notEqual(current.revision,first.revision);assert.equal(f.state.hints,1);
+});
+
+test('a corrupted or superseded artifact never supplies contacts to the prepared route',()=>{
+  const f=preparedFixture();f.rebuild();f.cache.clear();
+  const [artifact]=f.disk.values();artifact.body='invalid';
+  assert.notEqual(f.run({prepared:true}).prepared,true);assert.equal(f.state.hints,1);
+  f.cache.clear();assert.equal(f.rebuild().rebuilt,true);assert.equal(f.state.diskWrites,2);
+});
+
+test('a successful poll with unchanged recipients keeps the prepared content version',()=>{
+  const f=preparedFixture(), version=f.rebuild().revision;
+  f.c.coldyIncomingMark_=()=>({state:'synced',lastSyncedAt:'2026-11-27T00:00:00Z'});
+  assert.equal(f.rebuild().rebuilt,false);assert.equal(f.state.diskWrites,1);
+  f.c.coldyStoreFile_=()=>({id:'private_poll',version:'2'});
+  assert.notEqual(f.rebuild().revision,version);assert.equal(f.state.diskWrites,2);
+});
 
 test('working card keeps manual marks, sheet evidence, ownership and Coldy facts separate across both lists', () => {
   const f=fixture(), result=f.run(), shared=result.rows.find(row=>row.value==='shared@example.org');

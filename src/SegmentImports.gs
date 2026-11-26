@@ -845,6 +845,7 @@ function segmentRecordsAdvance_(context, targets, plan, job) {
       });
     });
     segmentRecordsEnroll_(targets, plan.targetKind); job.state = 'complete'; job.phase = 'complete'; job.completedAt = new Date().toISOString(); segmentRecordsSaveJob_(context, job);
+    if (typeof segmentCardMaintenanceRequest_ === 'function') segmentCardMaintenanceRequest_(context, plan.segmentId);
     if (context.properties.getProperty('SEGMENT_RECORD_ACTIVE_' + job.segmentId) === job.id) context.properties.deleteProperty('SEGMENT_RECORD_ACTIVE_' + job.segmentId);
     return;
   }

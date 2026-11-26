@@ -20,6 +20,12 @@ def expand_segment_actions(row):
         details.locator('summary').click()
 
 
+def expand_source_details(row):
+    details = row.locator('details.br-source-settings')
+    if not details.evaluate('(node) => node.open'):
+        details.locator('summary').click()
+
+
 def main():
     with sync_playwright() as p:
         launch = {'channel':'chrome'} if sys.platform == 'win32' else {'executable_path':'/usr/bin/chromium'}
@@ -125,7 +131,9 @@ def main():
         # then selects the requested ready source for automatic normalization.
         reset()
         page.evaluate("backend.holdMethods=['getSegmentsDashboard']")
-        page.locator('[data-source-id="source-companies"] [data-add-source]').click()
+        source = page.locator('[data-source-id="source-companies"]')
+        expand_source_details(source)
+        source.locator('[data-add-source]').click()
         held('getSegmentsDashboard')
         page.locator('#br-segment-name').fill('Из реестра')
         assert page.locator('#br-segment-name').is_enabled()

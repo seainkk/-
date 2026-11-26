@@ -9,12 +9,13 @@ function getSegmentsDashboard_(request) {
   return api_(function () {
     var context = authorize_();
     var input = request === undefined ? {} : object_(request);
-    if (Object.keys(input).some(function (key) { return key !== 'includeAnalysis'; }) ||
-        (input.includeAnalysis !== undefined && typeof input.includeAnalysis !== 'boolean')) fail_('INVALID_REQUEST', 'Некорректный режим загрузки сегментов.');
-    var projection = getSegmentsMetadata_(context, true);
+    if (Object.keys(input).some(function (key) { return ['includeAnalysis', 'includeCardPreview'].indexOf(key) < 0 || typeof input[key] !== 'boolean'; })) fail_('INVALID_REQUEST', 'Некорректный режим загрузки сегментов.');
+    var previews = input.includeAnalysis === false && input.includeCardPreview === true;
+    var projection = getSegmentsMetadata_(context, true, previews);
     if (projection.state !== 'ready') return projection;
-    segmentDashboardMailings_(context, projection.items);
-    if (input.includeAnalysis === false) return segmentDashboardOverview_(context, projection);
+    if (projection.items.length && typeof segmentCardMaintenanceTimer_ === 'function') segmentCardMaintenanceTimer_(context);
+    var campaigns = segmentDashboardMailings_(context, projection.items);
+    if (input.includeAnalysis === false) return segmentDashboardOverview_(context, projection, previews, campaigns);
     var budget = segmentAnalysisBudget_(), trackingRequest = { loaded: false, snapshot: null };
     projection.items = projection.items.map(function (item) {
       return segmentAnalyzeItem_(context, projection.source, item, budget, trackingRequest);
@@ -52,10 +53,11 @@ function segmentDashboardMailings_(context, items) {
   items.forEach(function (item) {
     if (!scoped || registrySegmentProject_(context, item.id, properties) === registryProjectId_()) item.coldyMailings = counts.get(item.id);
   });
+  return registry;
 }
 
 /** Render the usable catalog before reading contact-presence data from books. */
-function segmentDashboardOverview_(context, projection) {
+function segmentDashboardOverview_(context, projection, previews, campaigns) {
   var tracking;
   try { tracking = segmentReadTrackingSnapshot_(context); }
   catch (error) { tracking = { available: false, tables: [], loads: [] }; }
@@ -72,8 +74,15 @@ function segmentDashboardOverview_(context, projection) {
     item.contactPresence = 'unknown';
     item.analysis = { state: 'pending', hasContacts: null, warnings: [] };
   });
-  // No business-sheet contents or versions are cached. Reject a revoked key,
-  // changed registry or moved source before any catalog metadata escapes.
+  if (previews) {
+    if (tracking.available && typeof segmentCardDashboardPreviews_ === 'function') {
+      projection.cardPreviews = segmentCardDashboardPreviews_(context, projection, tracking, campaigns);
+    }
+    projection.items.forEach(function (item) {
+      (item.files || []).forEach(function (file) { delete file.parentId; });
+    });
+  }
+  // The optional prepared pages share the final key and root checks.
   var fresh = authorize_();
   if (fresh.rootId !== context.rootId) fail_('SOURCE_CHANGED', 'Привязка реестра изменилась. Обновите страницу.');
   registryFolder_(fresh, projection.source.id);

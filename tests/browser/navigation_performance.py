@@ -2,7 +2,7 @@
 import sys
 sys.dont_write_bytecode = True
 
-from performance_client import expand_segment_actions
+from performance_client import expand_segment_actions, expand_source_details
 from playwright.sync_api import expect, sync_playwright
 from performance_client import FIXTURE, HTML, ROOT
 
@@ -87,11 +87,14 @@ def main():
         reset()
         add = page.locator('[data-add-source="source-companies"]')
         back = page.locator('#br-action-back')
+        expect(back).to_be_hidden()
+        expect(add).to_be_hidden()
+        expand_source_details(page.locator('[data-source-id="source-companies"]'))
         panel = page.locator('#br-segment-panel')
         selected = page.locator('[data-choose-source="source-companies"]')
         expect(add).to_be_visible()
         idle()
-        expect(back).to_be_hidden()
+        expect(back).to_be_enabled()
         page.evaluate("backend.holdMethods=['getSegmentsDashboard']")
         add.click()
         held('getSegmentsDashboard')
@@ -103,7 +106,7 @@ def main():
         release('getSegmentsDashboard')
         idle()
         expect(panel).to_be_hidden()
-        expect(back).to_be_hidden()
+        expect(back).to_be_enabled()
 
         # Back returns to the previous step with the same chosen source and target.
         add.click()
@@ -127,7 +130,7 @@ def main():
         back.click()
         expect(panel).to_be_hidden()
         expect(add).to_be_focused()
-        expect(back).to_be_hidden()
+        expect(back).to_be_enabled()
         assert not calls('createSegment') and not calls('updateSegment') and not calls('importSegmentRecords')
 
         add.click()

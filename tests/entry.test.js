@@ -24,15 +24,16 @@ test('Pages deploy retries consume the completed build artifact without uploadin
   assert.doesNotMatch(build, /pages: write|id-token: write|github-pages\s*\n\s*url:/);
 });
 
-test('the public entry and Apps Script shell identify the service and retain the base registry section', () => {
+test('the public entry and Apps Script shell identify the service and open one shared catalog', () => {
   const app = readFileSync(new URL('../src/Index.html', import.meta.url), 'utf8');
   for (const page of [html, app]) {
     assert.match(page, /<title>Центр мультиканального аутрича<\/title>/);
     assert.match(page, /Центр <(?:b|span)>мультиканального аутрича</);
   }
-  assert.match(app, /id="br-view-sources"[^>]*>Входящие базы<\/button>/);
-  assert.match(app, /id="br-sources-title">Входящие базы<\/h1>/);
-  assert.match(app, /id="br-source-catalog-toggle"[^>]*>Общий каталог<\/button>/);
+  assert.match(app, /id="br-view-sources"[^>]*>Общий каталог<\/button>/);
+  assert.match(app, /id="br-sources-title">Общий каталог<\/h1>/);
+  assert.match(html, /id="entry-preview-title">Общий каталог<\/h1>/);
+  assert.doesNotMatch(app, /id="br-source-catalog-toggle"/);
 });
 
 function fixture({ hash = '#access_key=' + KEY, supported = true, path = '/-/', active = true, storage = new Map() } = {}) {
@@ -152,7 +153,7 @@ test('repeat entry decrypts only dated names for this link before Google respond
   const repeat=fixture({storage}),wrong=fixture({storage,hash:'#access_key='+'Z'.repeat(43)});
   await until(()=>!repeat.ids['entry-preview'].hidden);
   assert.equal(repeat.body.dataset.state,'loading');
-  assert.deepEqual(repeat.ids['entry-preview-list'].children.map(row=>row.textContent),['Справочник']);
+  assert.deepEqual(repeat.ids['entry-preview-list'].children.map(row=>row.textContent),message.items.map(item=>item.name));
   assert.equal(wrong.ids['entry-preview'].hidden,true);
   for(const [page,available] of [[repeat,true],[wrong,false]]){
     let hint;
