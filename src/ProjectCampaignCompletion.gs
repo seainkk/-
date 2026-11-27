@@ -1,6 +1,6 @@
 /** Count email steps, not recipients. Keep only aggregates in the private scan checkpoint. */
 function projectCampaignProgressCounts_() {
-  return {validContacts:0, sent:0, remaining:0, issue:null};
+  return {validContacts:0, sent:0, remaining:0, issue:null, datesKnown:true, lastSend:0};
 }
 
 function projectCampaignCountLead_(counts, lead, sequence) {
@@ -25,6 +25,12 @@ function projectCampaignCountLead_(counts, lead, sequence) {
     counts.issue = counts.issue || 'sequence'; return;
   }
   counts.sent += sent;
+  if (sent>0) {
+    var raw=lead.date_last_sequence_send;
+    var at=typeof raw==='string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw) ? Date.parse(raw) : NaN;
+    if(Number.isFinite(at) && at>0)counts.lastSend=Math.max(counts.lastSend,at);
+    else counts.datesKnown=false;
+  }
   if (sent === steps.length || lead.stop_sending === true || lead.status === 'Bounce') return;
   var replied = lead.status === 'Replied' || typeof lead.reply_text === 'string' && !!lead.reply_text.trim();
   if (replied && (sequence.stopOnReply === true || sequence.stopOnCompanyReply === true)) return;
@@ -40,7 +46,8 @@ function projectCampaignMergeCounts_(work, page) {
   // A page collected before completion tracking was enabled cannot establish an all-recipient denominator.
   var before = work.completion || {validContacts:0, sent:0, remaining:0, issue:'incomplete'};
   return {validContacts:before.validContacts + page.validContacts, sent:before.sent + page.sent,
-    remaining:before.remaining + page.remaining, issue:before.issue || page.issue};
+    remaining:before.remaining + page.remaining, issue:before.issue || page.issue,
+    datesKnown:(before.sent===0 || before.datesKnown===true) && page.datesKnown===true,lastSend:Math.max(before.lastSend || 0,page.lastSend || 0)};
 }
 
 /** Public percentages use only proven valid leads. Other sendable leads still compete for mailbox slots. */
@@ -58,7 +65,11 @@ function projectCampaignCompletions_(infrastructure, demands, nowMs) {
     if (!total) { item.state = 'empty'; item.reason = counts.validContacts ? 'no_sends' : 'no_contacts'; return; }
     // Keep 100% exclusively for a finished plan, including campaigns with a single outstanding email.
     item.percent = counts.remaining ? Math.min(99, Math.round(100 * counts.sent / total)) : 100;
-    if (!counts.remaining) { item.state = 'completed'; item.reason = null; return; }
+    if (!counts.remaining) {
+      item.state = 'completed'; item.reason = null;
+      if(counts.datesKnown && counts.lastSend>0 && counts.lastSend<=nowMs)item.lastSentAt=new Date(counts.lastSend).toISOString();
+      return;
+    }
     var status = String(demand.campaignStatus || '').toLowerCase();
     if (status === 'paused') { item.state = 'paused'; item.reason = 'paused'; return; }
     if (status !== 'active') { item.reason = 'not_active'; return; }

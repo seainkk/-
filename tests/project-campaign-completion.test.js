@@ -81,6 +81,19 @@ test('zero eligible messages have no percentage and an outstanding send can neve
   const done=calculate({[a]:recipients(a,[sentOne],[0])})[a];
   assert.equal(done.percent,100);
   assert.equal(done.remaining,0);
+  assert.equal(done.lastSentAt,'2026-11-20T10:00:00.000Z');
+});
+
+test('only complete last-send evidence for valid contacts establishes the final sending date',()=>{
+  const last={...sentOne,date_last_sequence_send:'2026-11-21T23:59:41+03:00'};
+  const invalid={...last,verification_status:'invalid',date_last_sequence_send:'2026-11-22T08:00:00Z'};
+  const finished=calculate({[a]:recipients(a,[...Array(200).fill(sentOne),last,invalid],[0],'Completed')})[a];
+  assert.equal(finished.lastSentAt,'2026-11-21T20:59:41.000Z');
+  for(const date_last_sequence_send of [null,'invalid','2026-12-02T10:00:00Z']){
+    const missing=calculate({[a]:recipients(a,[sentOne,{...sentOne,date_last_sequence_send}],[0])})[a];
+    assert.equal(missing.percent,100);assert.equal(missing.lastSentAt,undefined);
+  }
+  assert.equal(calculate({[a]:recipients(a,[sentOne,{}],[0])})[a].lastSentAt,undefined);
 });
 
 test('two recent observed working days estimate a finish without a quota and keep actual limits and pauses authoritative',()=>{

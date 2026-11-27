@@ -8,6 +8,7 @@ function projectCompletionBindings_(context, observation) {
   if (registry.credentialHash !== coldyCredentialHash_(context)) fail_('COLDY_CREDENTIAL_CHANGED','Подключение Coldy изменилось.');
   var ids = registry.bindings.map(function (b) { return coldyCampaignId_(b.campaignId); });
   var owners = projectCapacityOwners_(context,ids,observation);
+  observation.owners=owners;
   return registry.bindings.filter(function (b) {
     var owner = owners[b.campaignId];
     return owner && owner.bindingState === 'linked' && owner.segmentId === b.segmentId;
@@ -57,7 +58,7 @@ function projectCompletionPrevious_(item,work) {
   return result;
 }
 
-function projectCompletionPublic_(saved,preview,ids) {
+function projectCompletionPublic_(saved,preview,ids,owners,key) {
   var campaignCompletions = {};
   var age = saved && Date.now() - Date.parse(saved.generatedAt);
   var refreshing = saved && (!!saved.work || age >= COLDY.cacheMillis);
@@ -71,9 +72,20 @@ function projectCompletionPublic_(saved,preview,ids) {
       estimatedDate:!refreshing && /^\d{4}-\d{2}-\d{2}$/.test(item.estimatedDate) ? item.estimatedDate : null,
       previousEstimate:refreshing || item.state==='unknown' ? projectCompletionPrevious_(item,saved.work && saved.work[id]) : null,
       reason:stale?'incomplete':typeof item.reason === 'string' && /^[a-z_]{1,45}$/.test(item.reason) ? item.reason : null,
+      lastSentAt:!refreshing && item.state==='completed' && typeof item.lastSentAt==='string' &&
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(item.lastSentAt) ? item.lastSentAt : null,
       generatedAt:item.generatedAt || null};
   });
-  return {campaignCompletions:campaignCompletions,generatedAt:saved && saved.generatedAt || null,
+  var campaigns=(ids || []).map(function(id){
+    var binding=owners[id], work=saved && saved.work && saved.work[id], item=saved && saved.report && saved.report[id];
+    var known=['Active','Draft','Paused','Completed'];
+    var observed=work && known.includes(work.campaignStatus) ? work.campaignStatus :
+      item && known.includes(item.campaignStatus) ? item.campaignStatus : null;
+    return {id:id,name:projectInfraText_(binding.campaignName,key,500) || id,segmentId:binding.segmentId,
+      segmentName:projectInfraText_(binding.segmentName,key,500) || binding.segmentId,
+      status:observed || (known.includes(binding.campaignStatus)?binding.campaignStatus:'Unknown'),observed:!!observed};
+  });
+  return {campaigns:campaigns,campaignCompletions:campaignCompletions,generatedAt:saved && saved.generatedAt || null,
     freshForMs:saved && !saved.work && Number.isFinite(age) && age >= 0 ? Math.max(0,COLDY.cacheMillis-age) : 0,
     pending:!preview && !!(saved && saved.work),retryAfterMs:saved ? Math.max(0,(saved.retryAt || 0)-Date.now()) : 0,
     message:saved && saved.message || ''};
@@ -85,10 +97,9 @@ function getProjectCampaignCompletions_(request) {
     var input = projectAnalyticsInput_(request,['preview']);
     if (input.preview !== undefined && typeof input.preview !== 'boolean') fail_('INVALID_REQUEST','Проверьте режим чтения прогресса.');
     var context = authorize_(), settings = coldySettings_(context);
-    if (!settings.configured) return projectCompletionPublic_(null,true);
+    if (!settings.configured) return Object.assign(projectCompletionPublic_(null,true),{message:'Подключите Coldy в настройках.'});
     var owner = projectMonitoringOwner_(settings.credentialHash), monitoringRead = {}, bindingsRead = {};
     var saved = coldyLoad_(context,'campaignprogress',owner), receipt = saved && saved.revision;
-    if (input.preview && !saved) return projectCompletionPublic_(null,true);
     var monitoring = projectMonitoringRead_(context,settings,monitoringRead);
     var signature = projectMonitoringSignature_(context,monitoring);
     var checkSelection = projectInfraMonitoringGuard_(context,settings.credentialHash,signature,monitoringRead);
@@ -102,13 +113,14 @@ function getProjectCampaignCompletions_(request) {
       return fresh;
     }
     if (!ids.length) return projectCompletionPublic_(null,true);
-    if (typeof coldyIncomingEnsure_ === 'function') coldyIncomingEnsure_(context,false);
+    function result(state,preview){return projectCompletionPublic_(state,preview,ids,bindingsRead.owners,settings.key);}
+    if ((!input.preview || saved) && typeof coldyIncomingEnsure_ === 'function') coldyIncomingEnsure_(context,false);
     var matching = saved && saved.scope === scope ? saved : null, now = Date.now();
     if (input.preview || matching && (matching.retryAt > now ||
         !matching.work && now - Date.parse(matching.generatedAt) < COLDY.cacheMillis)) {
       // All current campaign folders were verified after loading this read-only snapshot.
       checkSelection();
-      return projectCompletionPublic_(matching,input.preview,ids);
+      return result(matching,input.preview);
     }
     var state = matching && matching.work && now - matching.touchedAt < 1800000 ? matching :
       {scope:scope,work:{},progress:{campaignsDone:0,campaignsTotal:ids.length,contactsRead:0},
@@ -191,7 +203,7 @@ function getProjectCampaignCompletions_(request) {
       ids.forEach(function (id) {
         if (state.work[id] && (state.work[id].complete || state.work[id].unavailable) && report[id]) {
           if (state.work[id].unavailable) report[id].reason = state.work[id].reason || 'unavailable';
-          var row=Object.assign({},report[id],{generatedAt:generated}), work=state.work[id];
+          var work=state.work[id],row=Object.assign({},report[id],{generatedAt:generated,campaignStatus:work.campaignStatus || null});
           if ((!scanned || waiting) && row.state==='estimated') {
             row.state='unknown';row.reason='capacity';row.estimatedDate=null;
           }
@@ -219,10 +231,10 @@ function getProjectCampaignCompletions_(request) {
       var fresh = checkScope(), latest = coldyLoad_(fresh,'campaignprogress',owner);
       if ((latest && latest.revision) !== receipt) {
         if (!latest || latest.scope !== scope) fail_('COLDY_MONITORING_CHANGED','Состав проекта изменился. Обновите прогресс.');
-        return projectCompletionPublic_(latest,false,ids);
+        return result(latest,false);
       }
       state.revision = Utilities.getUuid(); state.touchedAt = Date.now();
-      return projectCompletionPublic_(coldySave_(fresh,'campaignprogress',owner,state),false,ids);
+      return result(coldySave_(fresh,'campaignprogress',owner,state),false);
     });
   });
 }

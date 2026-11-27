@@ -96,10 +96,15 @@ test('campaign totals come from actual allocations on shared senders and keep un
   const demands={k:demand([lead(25)]),l:demand([lead(25)])};
   const r=calc([account(1,['k','l'],{dailyLimit:6})],campaigns,demands);
   assert.deepEqual(r.campaigns.map(c=>[c.name,c.segmentName,c.expectedByDay[1]]),[['Кухни','Компании',3],['ЛПР','Кухни',3]]);
-  [r.today,...r.days].forEach((row,i)=>assert.equal(r.campaigns.reduce((sum,c)=>sum+c.expectedByDay[i],0),row.expected));
+  [r.today,...r.days].forEach((row,i)=>{
+    assert.equal(r.campaigns.reduce((sum,c)=>sum+c.expectedByDay[i],0),row.expected);
+    assert.equal(r.campaigns.reduce((sum,c)=>sum+c.initialByDay[i],0),row.initial);
+    assert.equal(r.senders.flatMap(a=>a.campaigns).reduce((sum,c)=>sum+c.initialByDay[i],0),row.initial);
+  });
   const partial=calc([account(1,['k']),account(2,['l'])],campaigns,{k:demands.k});
   assert.deepEqual(partial.campaigns.map(c=>c.expectedByDay[1]),[25,null]);
   assert.equal(partial.campaigns[1].expectedByDay[0],0,'before the next sending window');
+  assert.equal(partial.senders[1].campaigns[0].initialByDay[1],null);
 });
 
 test('open Sunday consumes only the remainder of the current quota; calendar rolls over at Moscow midnight',()=>{

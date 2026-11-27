@@ -127,6 +127,13 @@ api.configureColdy=p=>({configured:true,connected:true,emailValidationProvider:p
 })();
 """
 
+def select_binding_segment(page, segment):
+    settings = page.locator('#pj-binding-settings')
+    if not settings.evaluate('el => el.open'):
+        settings.locator(':scope > summary').click()
+    page.locator('#pj-segment').select_option(segment)
+
+
 def integrated_html():
     import re
     fixture = (ROOT/'tests/browser/performance-fixture.js').read_text(encoding='utf-8')
@@ -169,7 +176,7 @@ def main():
 
         # Slow entry still presents each section without exposing the previous project's data.
         reset('analytics')
-        page.locator('#pj-segment').select_option('segment-a');idle()
+        select_binding_segment(page, 'segment-a');idle()
         count_before=page.evaluate("""()=>{const before=backend.calls.length;
           RegistryProject.show('infrastructure',{ready:false,preview:true,epoch:2});return before;}""")
         for view in ['infrastructure','analytics']:
@@ -187,7 +194,6 @@ RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refr
         page.wait_for_function("backend.pending.some(x=>x.name==='getProjectAnalytics')")
         expect(page.locator('#pj-segment')).to_be_enabled()
         expect(page.locator('#pj-segment')).to_contain_text('Known segment')
-        assert not page.evaluate("n=>backend.calls.slice(n).some(call=>call.name==='getProjectForecastPreview')",count_before)
         expect(page.locator('#pj-segment')).not_to_contain_text('Known segment')
         page.evaluate("backend.holdMethods=[];release('getProjectAnalytics')");idle()
         expect(page.locator('#pj-segment')).to_contain_text('Segment A')
@@ -200,20 +206,19 @@ RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refr
           RegistryProject.configure({transport,peekSegments:()=>directory});
           RegistryProject.show('analytics',{ready:false,preview:true,epoch:3})""")
         before=page.evaluate('backend.calls.length')
-        page.locator('#pj-segment').select_option('segment-a')
-        forecast=page.locator('#pj-forecast')
-        forecast.locator(':scope > summary').click()
-        forecast.get_by_role('button',name='3 дня').click()
-        expect(forecast.locator('[data-forecast-days="3"]')).to_have_attribute('aria-pressed','true')
-        expect(forecast.locator('#pj-forecast-refresh')).to_be_disabled()
+        select_binding_segment(page, 'segment-a')
+        report=page.locator('#pj-sending')
+        report.locator('#pj-plan-period').select_option('3')
+        expect(report.locator('#pj-plan-period')).to_have_value('3')
+        expect(report.locator('#pj-plan-refresh')).to_be_disabled()
         expect(page.locator('#pj-analytics-content')).to_be_hidden()
         assert page.evaluate('backend.calls.length')==before
         page.evaluate("""RegistryProject.show('analytics',{ready:true,epoch:3});void RegistryProject.refresh({opening:true})""")
         idle()
         expect(page.locator('#pj-segment')).to_have_value('segment-a')
-        expect(forecast.locator('[data-forecast-days="3"]')).to_have_attribute('aria-pressed','true')
-        assert forecast.evaluate('el=>el.open')
-        assert page.evaluate("n=>backend.calls.slice(n).some(c=>c.name==='getProjectSendingForecast')",before)
+        expect(report.locator('#pj-plan-period')).to_have_value('3')
+        expect(report).to_be_visible()
+        assert page.evaluate("n=>backend.calls.slice(n).some(c=>c.name==='getProjectInfrastructure')",before)
         page.evaluate("RegistryProject.show('infrastructure',{ready:false,preview:true,epoch:4})")
         before=page.evaluate('backend.calls.length')
         page.locator('#pj-infrastructure-select').click()
@@ -237,7 +242,7 @@ RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refr
 
         # A fresh preview avoids a second RPC until its TTL expires. Manual refresh updates it on demand.
         reset(setup='backend.completionTtl=700;')
-        page.locator('#pj-segment').select_option('segment-a')
+        select_binding_segment(page, 'segment-a')
         check_completion('#pj-campaign-rows')
         assert count('getProjectCampaignCompletions')==1
         completion=page.locator('#pj-campaign-rows [data-completion-campaign="11111111-1111-4111-8111-111111111111"]')
@@ -275,9 +280,9 @@ generatedAt:'2026-11-23T08:05:00Z',previousEstimate:null}""")
         page.wait_for_function("backend.pending.some(x=>x.name==='getProjectCampaignCompletions')")
         page.evaluate("backend.holdMethods=[];backend.completionPercent=10;RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refresh({opening:true})")
         expect(gauge).to_have_count(0)
-        page.locator('#pj-segment').select_option('segment-a')
+        select_binding_segment(page, 'segment-a')
         expect(gauge).to_have_attribute('value','10')
-        page.evaluate("release('getProjectCampaignCompletions')");idle()
+        page.evaluate("while(backend.pending.some(job=>job.name==='getProjectCampaignCompletions'))release('getProjectCampaignCompletions')");idle()
         expect(gauge).to_have_attribute('value','10')
         # Once the association is removed, a pending update cannot resurrect its progress.
         page.evaluate("backend.holdMethods=['getProjectCampaignCompletions'];void RegistryProject.refresh({manual:true})")
@@ -285,26 +290,27 @@ generatedAt:'2026-11-23T08:05:00Z',previousEstimate:null}""")
         page.locator('[data-project-campaign="11111111-1111-4111-8111-111111111111"]').uncheck()
         page.locator('#pj-selection-save').click()
         expect(gauge).to_have_count(0)
-        page.evaluate("backend.holdMethods=[];release('getProjectCampaignCompletions')");idle()
+        page.evaluate("backend.holdMethods=[];while(backend.pending.some(job=>job.name==='getProjectCampaignCompletions'))release('getProjectCampaignCompletions')");idle()
         expect(gauge).to_have_count(0)
 
         reset(setup="""backend.bindings[0].recipientSync={enabled:false,needsOwnerSetup:true,state:'off',
 lastSyncedAt:null,nextRetryAt:null}""")
-        page.locator('#pj-segment').select_option('segment-a')
+        select_binding_segment(page, 'segment-a')
         setup_box=page.locator('#pj-recipient-sync-setup')
         expect(setup_box).to_contain_text('authorizeGoogleAccess')
         setup_box.get_by_role('button').click()
         expect(setup_box).to_be_hidden()
-        expect(page.locator('#pj-campaign-rows .pj-recipient-sync').first).to_contain_text('первый подтверждённый запуск таймера')
+        expect(page.locator('#pj-campaign-rows .pj-recipient-sync')).to_have_count(0)
         assert count('enableColdyRecipientSync')==1
 
         reset(setup="""backend.bindings[0].recipientSync={enabled:true,state:'error',issue:'rate_limit',
 progress:{phase:'read',read:400,total:1267}}""")
-        page.locator('#pj-segment').select_option('segment-a')
-        read_progress=page.locator('#pj-campaign-rows .pj-recipient-sync').first
-        expect(read_progress).to_contain_text('Сверка с листом Email отложена')
-        expect(read_progress).to_contain_text('Coldy временно ограничил запросы')
-        expect(read_progress).to_contain_text('прочитано адресатов Coldy 400 из 1 267')
+        select_binding_segment(page, 'segment-a')
+        row=page.locator('#pj-campaign-rows tr').filter(has=page.locator('[data-recipient-binding]')).first
+        expect(row.get_by_role('button',name='Перенести адресатов в Email')).to_be_visible()
+        expect(row.locator('summary').filter(has_text='Почты рассылки')).to_be_visible()
+        expect(row).not_to_contain_text('прочитано адресатов Coldy')
+        expect(row.locator('.pj-recipient-sync')).to_have_count(0)
         for issue in ('connection','storage','sheet_schema','google_access','google_setup','unknown'):
             message=page.evaluate("issue=>RegistryProject.recipientSyncText({enabled:true,state:'error',issue})",issue)
             assert 'Ошибка сверки с листом Email' in message
@@ -330,7 +336,7 @@ backend.senderAssignments={
  'account-1':{state:'busy',campaignIds:[A,B],inactiveCampaignIds:[]},
  'account-2':{state:'busy',campaignIds:[A],inactiveCampaignIds:[],outsideActive:true},
  'account-3':{state:'free',campaignIds:[],inactiveCampaignIds:[C]}}""")
-        page.locator('#pj-segment').select_option('segment-a');idle()
+        select_binding_segment(page, 'segment-a');idle()
         active_senders=page.locator('#pj-campaign-rows details[data-campaign="11111111-1111-4111-8111-111111111111"]')
         paused_senders=page.locator('#pj-campaign-rows details[data-campaign="33333333-3333-4333-8333-333333333333"]')
         active_senders.get_by_text('Почты рассылки').click()
@@ -351,7 +357,8 @@ backend.senderAssignments={
         page.evaluate("""backend.accountMarker='new-scope';backend.uncertainCapacity=true;
 backend.holdMethods=['getProjectInfrastructure'];RegistryProject.show('analytics',{ready:true,epoch:2});
 void RegistryProject.refresh({opening:true})""")
-        page.locator('#pj-segment').select_option('segment-a');idle()
+        select_binding_segment(page, 'segment-a')
+        expect(active_senders.locator('summary')).to_be_visible()
         assert not active_senders.evaluate('el=>el.open')
         active_senders.get_by_text('Почты рассылки').click()
         page.wait_for_function("backend.pending.some(x=>x.name==='getProjectInfrastructure')")
@@ -370,8 +377,8 @@ void RegistryProject.refresh({opening:true})""")
             page.evaluate('([view,method])=>{backend.holdMethods=[method];start(view);}',[view,method])
             page.wait_for_function('backend.active>0')
             section=page.locator('#pj-'+view+'-view')
-            if view=='analytics':
-                assert count('getProjectForecastPreview')==1
+            if view=='infrastructure':
+                assert count('getProjectSendingForecast')==count('getProjectSendingHistory')==0
             expect(section.locator('#pj-'+view+'-connect')).to_have_text('Настройки Coldy')
             expect(section.locator('#pj-'+view+'-connection')).to_be_hidden()
             assert 'Подключите' not in section.inner_text()
@@ -398,7 +405,7 @@ void RegistryProject.refresh({opening:true})""")
 
         reset()
         expect(page.locator('#pj-segment')).to_be_enabled()
-        page.locator('#pj-segment').select_option('segment-a');idle()
+        select_binding_segment(page, 'segment-a');idle()
         expect(page.locator('[data-project-campaign="'+ '11111111-1111-4111-8111-111111111111' +'"]')).to_be_checked()
         expect(page.locator('[data-project-campaign="33333333-3333-4333-8333-333333333333"]')).to_have_count(0)
         expect(page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]')).to_have_count(0)
@@ -429,7 +436,7 @@ void RegistryProject.refresh({opening:true})""")
         assert not any(x['name'].startswith(('start','previewColdyUpload','testColdy')) for x in page.evaluate('backend.calls'))
         assert page.locator('#pj-selection-save').is_disabled()
 
-        reset();page.locator('#pj-segment').select_option('segment-a');idle();find_campaign('New campaign')
+        reset();select_binding_segment(page, 'segment-a');idle();find_campaign('New campaign')
         page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]').check()
         teammate=page.evaluate("(()=>{const binding={id:'teammate-binding-0000001',segmentId:'segment-a',campaignId:B,campaignName:'New campaign',includeCompanies:false,includeLpr:true,autoUpload:true,allowActive:true,revision:7};backend.bindings.push(binding);return JSON.parse(JSON.stringify(binding));})()")
         page.locator('#pj-selection-save').click();idle()
@@ -440,7 +447,7 @@ void RegistryProject.refresh({opening:true})""")
         reset(setup="""backend.extraCampaigns=Array.from({length:1200},(_,i)=>({id:'bulk-'+i,name:'Архив '+i,status:'Draft'}));
 backend.extraCampaigns.push({id:'kitchen',name:'Намшилд / Кухни ЛПР',status:'Active'},{id:'pinned',name:'Привязана в конце',status:'Active'});
 backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pinned',campaignName:'Привязана в конце',revision:1});""")
-        page.locator('#pj-segment').select_option('segment-a');idle()
+        select_binding_segment(page, 'segment-a');idle()
         campaign_rows=page.locator('#pj-campaign-rows tr')
         search=page.locator('#pj-campaign-search')
         expect(campaign_rows).to_have_count(3)
@@ -463,12 +470,12 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         assert {x['campaignId'] for x in page.evaluate("backend.bindings.filter(b=>b.segmentId==='segment-a')")}=={
             '11111111-1111-4111-8111-111111111111','44444444-4444-4444-8444-444444444444','kitchen','bulk-1199','pinned'}
         assert count('removeColdyBinding')==0
-        page.locator('#pj-segment').select_option('segment-b');idle();expect(search).to_have_value('')
+        select_binding_segment(page, 'segment-b');idle();expect(search).to_have_value('')
         page.locator('#pj-selection-open').click();search.fill('чужой поиск');page.evaluate('RegistryProject.lock()');expect(search).to_have_value('')
 
         # Refresh rebases explicit user changes instead of deleting a teammate's binding.
         for clean in [False,True]:
-            reset();page.locator('#pj-segment').select_option('segment-a');idle();find_campaign('New')
+            reset();select_binding_segment(page, 'segment-a');idle();find_campaign('New')
             chosen=page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]')
             chosen.check()
             if clean:chosen.uncheck()
@@ -487,10 +494,10 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
 
         # Late segment A response cannot replace segment B's chooser or summaries.
         reset(setup="backend.holdMethods=['getProjectAnalyticsCampaigns']")
-        page.locator('#pj-segment').select_option('segment-a')
+        select_binding_segment(page, 'segment-a')
         page.wait_for_function("backend.pending.some(x=>x.name==='getProjectAnalyticsCampaigns')")
         page.evaluate('backend.holdMethods=[]')
-        page.locator('#pj-segment').select_option('segment-b');page.wait_for_function('backend.active===1')
+        select_binding_segment(page, 'segment-b')
         expect(page.locator('[data-project-campaign="33333333-3333-4333-8333-333333333333"]')).to_be_checked()
         page.evaluate("release('getProjectAnalyticsCampaigns')");idle()
         assert page.locator('#pj-segment').input_value()=='segment-b'
@@ -502,7 +509,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         assert page.evaluate('backend.connectionOpens')==1
         assert page.locator('#pj-infrastructure-totals dd').all_text_contents() == ['—','—','—','—']
 
-        reset_monitored()
+        reset_monitored(setup="backend.detailIds=['account-0','account-1']")
         assert count('refreshProjectInfrastructure')==2,'Finite pagination completes both batches'
         expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
         assert page.locator('#pj-account-rows tr').count()==6
@@ -514,45 +521,30 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         expect(sender).to_contain_text('Поставленная на паузу кампания')
         expect(sender).to_contain_text('На паузе')
         expect(sender.locator('[data-label="Дневной лимит"]')).to_have_text('40')
-        expect(sender.locator('[data-label="Отправлено сегодня"]')).to_have_text('15')
-        expect(sender.locator('[data-label="Остаток лимита"]')).to_have_text('25')
-        expect(page.locator('#pj-account-rows [data-account="account-2"] [data-label="Остаток лимита"]')).to_have_text('—')
-        expect(page.locator('#pj-schedule-rows')).not_to_contain_text('Поставленная на паузу кампания')
-        expect(sender).to_contain_text('23.11.2026')
-        expect(sender).to_contain_text('Дата неизвестна')
-        expect(page.locator('#pj-schedule-rows tr')).to_have_count(2)
-        check_completion('#pj-schedule-rows')
-        expect(page.locator('#pj-schedule-rows')).not_to_contain_text('Только в другом пуле')
-        expect(page.locator('#pj-schedule-rows')).to_contain_text('Пн–Пт · 09:00–18:30')
-        expect(page.locator('#pj-schedule-rows')).to_contain_text('Ожидает расписания')
-        expect(page.locator('#pj-schedule-rows')).to_contain_text('Пн–Пт · 10:00–18:30')
-        expect(page.locator('#pj-schedule-rows')).to_contain_text('Сохранённый график')
-        expect(page.locator('#pj-schedule-rows')).to_contain_text('Запрашиваем график…')
-        sender.get_by_role('button',name='Показать расписание · Намшилд / Кухни').click()
-        assert page.evaluate("document.activeElement.id.startsWith('pj-schedule-')")
+        expect(sender.locator('td')).to_have_count(4)
+        expect(sender).to_contain_text('Намшилд / Кухни')
+        expect(sender).to_contain_text('Веб-студии')
+        expect(page.locator('#pj-account-rows')).not_to_contain_text('Только в другом пуле')
+        expect(page.locator('#pj-infrastructure-view')).not_to_contain_text('Расписание рассылок')
+        expect(page.locator('#pj-infrastructure-view')).not_to_contain_text('Ход и завершение')
+        expect(page.locator('#pj-infrastructure-view')).not_to_contain_text('Отправлено сегодня')
         page.locator('#pj-capacity-filter').select_option('free')
         expect(page.locator('#pj-account-rows tr')).to_have_count(4)
-        expect(page.locator('#pj-account-rows [data-account="account-1"]')).to_contain_text('Проверьте подключение')
+        problem=page.locator('#pj-account-rows [data-account="account-1"] details')
+        problem.locator('summary').click()
+        expect(problem).to_contain_text('SMTP')
+        expect(problem).to_contain_text('<img')
+        assert problem.locator('img').count()==0
         page.locator('#pj-capacity-filter').select_option('unknown')
         expect(page.locator('#pj-account-rows tr')).to_have_count(1)
         expect(page.locator('#pj-account-rows')).to_contain_text('Нет подтверждённых данных')
         page.locator('#pj-capacity-filter').select_option('')
-        assert not page.locator('#pj-infrastructure-diagnostics').evaluate('el=>el.open')
-        page.locator('#pj-infrastructure-diagnostics summary').click()
-        assert page.evaluate('backend.detailIds')==[]
-        expect(page.locator('#pj-diagnostics-health')).to_contain_text('ещё не загружена')
-        expect(page.locator('#pj-diagnostic-rows')).not_to_contain_text('<img')
-        page.locator('#pj-diagnostics-refresh').click();idle()
-        expect(page.locator('#pj-diagnostic-rows')).to_contain_text('<img')
-        expect(page.locator('#pj-diagnostic-rows')).to_contain_text('Проверено')
-        assert page.evaluate('backend.detailIds.length')==6
-        assert page.locator('#pj-diagnostic-rows img').count()==0
-        assert page.locator('#pj-diagnostic-rows tr').first.locator('td').nth(3).inner_text()=='—'
+        expect(page.locator('#pj-infrastructure-diagnostics')).to_have_count(0)
         page.wait_for_timeout(350)
-        assert count('refreshProjectInfrastructure')==4,'Two schedule and two explicit diagnostics batches'
+        assert count('refreshProjectInfrastructure')==2
         calls=page.evaluate("backend.calls.filter(x=>x.name==='refreshProjectInfrastructure')")
         assert calls[0]['payload']=={'includeCapacity':True,'live':True}
-        assert [call['payload'] for call in calls[1:]]==[{'cursor':'pool-schedule-cursor'},{},{'cursor':'details-5'}]
+        assert [call['payload'] for call in calls[1:]]==[{'cursor':'pool-schedule-cursor'}]
         assert page.locator('#pj-account-rows tr').count()==6
         expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
         page.evaluate("backend.senderName='Обновлённое имя '")
@@ -562,7 +554,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         page.evaluate('backend.uncertainCapacity=true')
         page.locator('#pj-infrastructure-refresh').click();idle()
         expect(page.locator('#pj-infrastructure-totals dd')).to_have_text(['6','0','0','6'])
-        expect(page.locator('#pj-infrastructure-note')).to_contain_text('последние сохранённые')
+        expect(page.locator('#pj-infrastructure-updated')).to_contain_text('Последние сохранённые назначения')
         page.evaluate('backend.failInfra=true')
         page.locator('#pj-infrastructure-refresh').click();idle()
         assert page.locator('#pj-account-rows tr').count()==6,'Old safe values survive refresh failure'
@@ -768,22 +760,6 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
             assert count('refreshProjectInfrastructure')==expected_calls,'Pause/cursor failure cannot spin'
             expect(page.locator('#pj-infrastructure-continue')).to_be_visible()
 
-        # Only the diagnostic control resumes a paused detail run; reopening cannot start pool work over it.
-        reset_monitored()
-        page.evaluate('backend.pauseFirst=true')
-        page.locator('#pj-infrastructure-diagnostics summary').click()
-        page.locator('#pj-diagnostics-refresh').click();idle()
-        expect(page.locator('#pj-diagnostics-refresh')).to_have_text('Продолжить диагностику')
-        expect(page.locator('#pj-infrastructure-continue')).to_be_hidden()
-        writes=count('refreshProjectInfrastructure')
-        page.evaluate("RegistryProject.show('analytics',{ready:true,epoch:1});RegistryProject.show('infrastructure',{ready:true,epoch:1});void RegistryProject.refresh({opening:true})")
-        idle()
-        assert count('refreshProjectInfrastructure')==writes
-        page.evaluate('backend.pauseFirst=false')
-        page.locator('#pj-diagnostics-refresh').click();idle()
-        assert page.evaluate("backend.calls.filter(x=>x.name==='refreshProjectInfrastructure').at(-1).payload")=={'cursor':'details-5'}
-        expect(page.locator('#pj-diagnostics-refresh')).to_have_text('Обновить диагностику')
-
         # Leaving the view pauses the finite run; Continue resumes its exact cursor.
         page.goto('about:blank');page.set_content(HTML)
         page.evaluate(monitored_setup+"backend.holdMethods=['refreshProjectInfrastructure'];start('infrastructure')")
@@ -819,7 +795,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         assert 'private-old' not in page.locator('#pj-account-rows').inner_text()
 
         reset()
-        page.locator('#pj-segment').select_option('segment-a');idle()
+        select_binding_segment(page, 'segment-a');idle()
         find_campaign('New')
         page.locator('[data-project-campaign="22222222-2222-4222-8222-222222222222"]').check()
         page.locator('[data-remove-project-campaign="44444444-4444-4444-8444-444444444444"]').click()
@@ -857,7 +833,7 @@ nextRetryAt:'2026-11-23T09:15:00Z',suppressionPending:true,lastSuppressionAt:'20
         page.locator('#br-view-analytics').click()
         expect(page.locator('#pj-analytics-view')).to_be_visible()
         expect(page.locator('#br-view-analytics')).to_have_attribute('aria-pressed','true')
-        page.locator('#pj-segment').select_option('segment-a')
+        select_binding_segment(page, 'segment-a')
         expect(page.locator('#pj-campaign-rows')).to_contain_text('Название из обзора сегментов')
         expect(page.locator('#pj-campaign-rows input, #pj-campaign-rows button')).to_have_count(0)
         page.wait_for_function("backend.pending.some(x=>x.method==='getProjectAnalyticsCampaigns')")

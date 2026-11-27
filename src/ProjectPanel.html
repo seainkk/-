@@ -2,48 +2,32 @@
   <div class="pj-heading"><div><p class="pj-eyebrow">Проект · Coldy</p><h1 id="pj-analytics-title">Аналитика</h1></div><div class="pj-toolbar"><button id="pj-analytics-connect" class="br-button" type="button" aria-haspopup="dialog">Настройки Coldy</button><button id="pj-analytics-refresh" class="br-button" type="button">↻ Обновить данные</button></div></div>
   <p id="pj-analytics-health" class="pj-health" role="status" aria-live="polite"></p>
   <div id="pj-analytics-connection" class="pj-connection" hidden></div>
-  <details id="pj-history" class="pj-card pj-forecast">
-    <summary>Отправлено за прошлую неделю</summary>
-    <div class="pj-forecast-body">
-      <div class="pj-toolbar"><span id="pj-history-period"></span><button id="pj-history-refresh" type="button" class="br-button">Обновить отчёт</button></div>
-      <p id="pj-history-health" class="pj-health" role="status"></p>
-      <div id="pj-history-result" class="pj-table-wrap" hidden>
-        <table class="pj-table pj-sending-table"><caption class="pj-sr-only">Фактические отправки по выбранным почтам и рассылкам проекта</caption><thead></thead><tbody></tbody></table>
-      </div>
+  <section id="pj-sending" class="pj-card" aria-labelledby="pj-plan-title">
+    <div class="pj-card-heading"><h2 id="pj-plan-title">План и факт отправок</h2><button id="pj-plan-refresh" type="button" class="br-button">Обновить отчёт</button></div>
+    <div class="pj-toolbar">
+      <label>Период <select id="pj-plan-period"><option value="today">Сегодня</option><option value="tomorrow">Завтра</option><option value="3">Следующие 3 дня</option><option value="7">Неделя вперёд</option><option value="history">История отправок</option></select></label>
+      <label>Группировка <select id="pj-plan-group"><option value="day">По дням</option><option value="week">По неделям</option></select></label>
+      <label id="pj-history-date-field" hidden>Дата внутри недели <input type="date" id="pj-history-date"></label>
+      <label>Сегмент <select id="pj-plan-segment"><option value="">Все сегменты</option></select></label>
+      <label>Рассылка <select id="pj-plan-campaign"><option value="">Все рассылки</option></select></label>
+      <details id="pj-plan-pool"><summary>Почты · все</summary><fieldset><legend>Почты проекта</legend><label><input id="pj-plan-all" type="checkbox" checked> Все почты</label><div id="pj-plan-senders"></div></fieldset></details>
     </div>
-  </details>
-  <details id="pj-forecast" class="pj-card pj-forecast">
-    <summary>Прогноз отправок</summary>
-    <div class="pj-forecast-body">
-      <div class="pj-toolbar">
-        <div class="pj-forecast-periods" role="group" aria-label="Период прогноза">
-          <button type="button" data-forecast-days="0" aria-pressed="false">Сегодня</button>
-          <button type="button" data-forecast-days="1" aria-pressed="true">Завтра</button>
-          <button type="button" data-forecast-days="3" aria-pressed="false">3 дня</button>
-          <button type="button" data-forecast-days="7" aria-pressed="false">Неделя</button>
-        </div>
-        <button id="pj-forecast-refresh" class="br-button" type="button">Пересчитать</button>
-      </div>
-      <p id="pj-forecast-health" class="pj-health" role="status" aria-live="polite"></p>
-      <div id="pj-forecast-report" hidden>
-        <p id="pj-forecast-context" class="br-muted"></p>
-        <dl id="pj-forecast-totals" class="pj-metrics" aria-label="Прогноз за период"></dl>
-        <details id="pj-forecast-senders">
-          <summary>Прогноз по почтам и рассылкам</summary>
-          <p id="pj-forecast-sender-note" class="br-muted"></p>
-          <div class="pj-table-wrap"><table id="pj-forecast-sender-table" class="pj-table pj-sending-table"><caption class="pj-sr-only">План отправок по дням и свободный остаток лимита каждого ящика</caption><thead></thead><tbody></tbody></table></div>
-        </details>
-        <div class="pj-table-wrap" id="pj-forecast-campaign-table">
-          <table class="pj-table"><caption>Рассылки в расчёте</caption><thead><tr><th scope="col">Рассылка</th><th scope="col">Сегмент</th><th scope="col">Ожидается писем за период</th></tr></thead><tbody id="pj-forecast-campaigns"></tbody></table>
-        </div>
-        <p id="pj-forecast-queue" class="br-muted" hidden></p>
-        <div id="pj-forecast-daily" class="pj-table-wrap" hidden>
-          <table class="pj-table"><caption class="pj-sr-only">Прогноз по дням, московское время</caption><thead><tr><th scope="col">Дата</th><th scope="col">Первые письма</th><th scope="col">Повторные</th><th scope="col">Ожидается всего</th><th scope="col">Предел по графику</th><th scope="col" id="pj-forecast-limit-col" hidden>Лимит почт</th><th scope="col" id="pj-forecast-unused-col" hidden>Свободно по прогнозу</th><th id="pj-forecast-scenario-column" scope="col" hidden>По разобранной части (сценарий)</th></tr></thead><tbody id="pj-forecast-rows"></tbody></table>
-        </div>
-        <ul id="pj-forecast-reasons" class="pj-forecast-reasons" hidden></ul>
-      </div>
-    </div>
-  </details>
+    <p id="pj-plan-health" class="pj-health" role="status"></p><p id="pj-plan-asof" class="br-muted"></p>
+    <div class="pj-table-wrap"><table class="pj-table"><caption class="pj-sr-only">Расчёт за выбранный период</caption>
+      <thead><tr><th scope="col">Период</th><th scope="col">Лимит почт</th><th scope="col">Факт</th><th scope="col">План первых</th><th scope="col">План повторных</th><th scope="col" data-sending-remaining>Ещё ожидается</th><th scope="col" data-sending-total>Прогноз всего</th><th scope="col">Свободно по плану</th></tr></thead><tbody id="pj-plan-days"></tbody></table></div>
+    <details id="pj-plan-detail"><summary>По почтам и рассылкам</summary>
+      <label>Период в таблице <select id="pj-plan-day"></select></label>
+      <div class="pj-table-wrap"><table class="pj-table"><thead><tr><th scope="col">Почта</th><th scope="col">Рассылка</th><th scope="col">Факт</th><th scope="col" data-sending-remaining>Ещё ожидается</th><th scope="col" data-sending-total>Прогноз всего</th></tr></thead><tbody id="pj-plan-accounts"></tbody></table></div>
+    </details>
+  </section>
+  <section id="pj-project-completions" class="pj-card" aria-labelledby="pj-project-completions-title">
+    <div class="pj-card-heading"><h2 id="pj-project-completions-title">Завершение рассылок</h2>
+      <p id="pj-project-completions-last" hidden></p></div>
+    <p id="pj-project-completions-health" class="pj-health" role="status"></p>
+    <div class="pj-table-wrap"><table class="pj-table"><thead><tr><th scope="col">Рассылка</th><th scope="col">Сегмент</th><th scope="col">Статус Coldy</th><th scope="col">Ход и завершение</th></tr></thead>
+      <tbody id="pj-project-completions-rows"></tbody></table></div>
+  </section>
+  <details id="pj-binding-settings" class="pj-card"><summary>Настроить привязки рассылок</summary>
   <div class="pj-filter"><label for="pj-segment">Сегмент</label><select id="pj-segment"><option value="">Выберите сегмент</option></select><span id="pj-analytics-updated" class="br-muted"></span></div>
   <div id="pj-analytics-empty" class="pj-empty" hidden></div>
   <div id="pj-analytics-content" hidden>
@@ -59,6 +43,7 @@
       <p id="pj-analytics-note" class="pj-footnote br-muted">Выбор связывает существующие рассылки с аналитикой сегмента. Снятие выбора удаляет связь и её автозагрузку контактов. Отправка писем настраивается в Coldy.</p>
     </div>
   </div>
+  </details>
 </section>
 <section id="pj-infrastructure-view" class="pj-view" hidden aria-labelledby="pj-infrastructure-title">
   <div class="pj-heading"><h1 id="pj-infrastructure-title">Почты для рассылок</h1><div class="pj-toolbar"><button id="pj-infrastructure-refresh" class="br-button br-primary" type="button">Обновить из Coldy</button><button id="pj-infrastructure-select" class="br-button" type="button" aria-haspopup="dialog">Выбрать почты</button><button id="pj-infrastructure-connect" class="br-button" type="button" aria-haspopup="dialog">Настройки Coldy</button></div></div>
@@ -68,30 +53,12 @@
   <dl id="pj-infrastructure-totals" class="pj-metrics" aria-label="Занятость выбранных почт"></dl>
   <div id="pj-infrastructure-empty" class="pj-empty" hidden></div>
   <div id="pj-infrastructure-content" hidden>
-    <section class="pj-card" aria-labelledby="pj-plan-title">
-      <div class="pj-card-heading"><h2 id="pj-plan-title">План и факт отправок</h2><span id="pj-plan-asof" class="br-muted"></span></div>
-      <p id="pj-plan-health" class="pj-health" role="status"></p>
-      <p class="br-muted">Факт учитывает письма выбранных почт в рассылках проекта. Прогноз за сегодня складывается из подтверждённых отправок и писем, которые ещё успеют уйти до конца дня.</p>
-      <div class="pj-table-wrap"><table class="pj-table"><thead><tr><th>День</th><th>Лимит почт</th><th>Факт по проекту</th><th>Ожидается первых</th><th>Ожидается повторных</th><th>Прогноз за день</th><th>Свободный лимит</th></tr></thead><tbody id="pj-plan-days"></tbody></table></div>
-      <details id="pj-plan-detail"><summary>По почтам и рассылкам</summary>
-        <label for="pj-plan-day">День</label> <select id="pj-plan-day"></select>
-        <div class="pj-table-wrap"><table class="pj-table"><thead><tr><th>Почта</th><th>Рассылка</th><th>Факт</th><th>Ещё ожидается</th><th>Прогноз за день</th></tr></thead><tbody id="pj-plan-accounts"></tbody></table></div>
-      </details>
-    </section>
     <section class="pj-card" aria-labelledby="pj-pool-title">
       <div class="pj-card-heading"><h2 id="pj-pool-title">Пул почт</h2><div class="pj-toolbar"><label for="pj-capacity-filter">Занятость</label><select id="pj-capacity-filter"><option value="">Все почты</option><option value="free">Свободные</option><option value="busy">Занятые</option><option value="unknown">Уточняется</option></select></div></div>
-      <div class="pj-table-wrap"><table class="pj-table pj-pool-table"><thead><tr><th scope="col">Отправитель</th><th scope="col">Занятость</th><th scope="col">Рассылки и сегменты</th><th scope="col">Дневной лимит</th><th scope="col">Отправлено сегодня</th><th scope="col">Остаток лимита</th><th scope="col">Окно без отправок</th><th scope="col">Свободна для новой рассылки</th></tr></thead><tbody id="pj-account-rows"></tbody></table></div>
+      <div class="pj-table-wrap"><table class="pj-table pj-pool-table"><thead><tr><th scope="col">Отправитель</th><th scope="col">Занятость</th><th scope="col">Рассылки и сегменты</th><th scope="col">Дневной лимит</th></tr></thead><tbody id="pj-account-rows"></tbody></table></div>
+      <p id="pj-infrastructure-updated" class="pj-footnote br-muted"></p>
       <p id="pj-capacity-empty" class="pj-footnote br-muted" hidden></p>
     </section>
-    <section class="pj-card" aria-labelledby="pj-schedule-title">
-      <div class="pj-card-heading"><h2 id="pj-schedule-title">Расписание рассылок</h2><span id="pj-infrastructure-updated" class="br-muted"></span></div>
-      <div class="pj-table-wrap"><table class="pj-table pj-schedule-table"><thead><tr><th scope="col">Рассылка и сегмент</th><th scope="col">Статус Coldy</th><th scope="col">График отправок</th><th scope="col">Ход и завершение</th></tr></thead><tbody id="pj-schedule-rows"></tbody></table></div>
-      <p id="pj-infrastructure-note" class="pj-footnote br-muted" hidden></p>
-    </section>
-    <details id="pj-infrastructure-diagnostics" class="pj-card pj-diagnostics"><summary>Состояние ящиков и счётчики Coldy</summary>
-      <div class="pj-card-heading"><button id="pj-diagnostics-refresh" class="br-button" type="button">Обновить диагностику</button><span id="pj-diagnostics-health" class="br-muted" role="status"></span></div>
-      <div class="pj-table-wrap"><table class="pj-table pj-infrastructure-table"><thead><tr><th scope="col">Почта</th><th scope="col">Подключение</th><th scope="col">Отправлено</th><th scope="col">За сегодня</th><th scope="col">Лимит в день</th><th scope="col">Ошибки</th></tr></thead><tbody id="pj-diagnostic-rows"></tbody></table></div>
-    </details>
   </div>
 </section>
 <dialog id="pj-recipient-dialog" class="pj-mailbox-dialog" aria-labelledby="pj-recipient-title">

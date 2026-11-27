@@ -9,7 +9,7 @@ const second = '00000000-0000-0000-0000-000000000002';
 const foreign = '00000000-0000-0000-0000-000000000003';
 const plain = value => JSON.parse(JSON.stringify(value));
 const read = name => readFileSync(new URL('../src/'+name,import.meta.url),'utf8');
-const sources = ['Coldy.gs','ColdyCampaigns.gs','ProjectInfrastructure.gs','ProjectAnalytics.gs','ProjectSendingHistory.gs'].map(read);
+const sources = ['Coldy.gs','ColdyCampaigns.gs','ProjectInfrastructure.gs','ProjectAnalytics.gs','ProjectPlanArchive.gs','ProjectSendingHistory.gs'].map(read);
 const hash = input => createHash('sha256').update(input).digest('base64url');
 
 function fixture() {
@@ -53,6 +53,87 @@ test('a completed Moscow Monday–Sunday is selected across a year and the Monda
   assert.deepEqual(plain(c.projectHistoryWeek_(Date.parse('2027-01-03T21:00:00Z'))),[
     '2026-12-28','2026-12-29','2026-12-30','2026-12-31','2027-01-01','2027-01-02','2027-01-03'
   ]);
+});
+
+test('a confirmed pre-day plan is immutable within its issue day, replaced before the target, and scoped on every history read',()=>{
+  const f=fixture(), c=f.c, dayMs=86400000;
+  const context={rootId:f.root,properties:{getProperties:()=>({})}}, settings=c.coldySettings_();
+  c.registrySegmentProject_=(_ctx,id)=>id==='k'?f.project:'another';
+  c.projectCapacityOwners_=(_ctx,ids)=>Object.fromEntries(ids.map(id=>[id,{segmentId:'k',segmentProjectId:f.project,bindingState:'linked'}]));
+  function issue(day,expected,partial=false) {
+    f.weekNow=Date.parse(day+'T12:30:00+03:00');
+    const dates=Array.from({length:8},(_,i)=>new Date(Date.parse(day)+i*dayMs).toISOString().slice(0,10));
+    const quantities=dates.map((_,i)=>i===2&&partial?null:i<3?expected:0);
+    const days=dates.map((date,i)=>({date,expected:quantities[i],initial:quantities[i],followups:0,mailboxLimit:120,unused:120-quantities[i]}));
+    const generatedAt=new Date(f.weekNow).toISOString();
+    const forecast={today:days[0],days:days.slice(1),campaigns:[{id:first,segmentId:'k',expectedByDay:quantities,initialByDay:quantities}],
+      senders:['1','2'].map((id,j)=>({id,email:'must-not-be-stored@example.test',dailyLimit:60,
+        days:dates.map((date,i)=>({date,expected:j?0:quantities[i],unused:j?60:60-quantities[i]})),
+        campaigns:j?[]:[{id:first,expectedByDay:quantities,initialByDay:quantities}]}))};
+    const state={day,generatedAt,forecast,selection:c.projectMonitoringSignature_(context,{accountIds:f.selected}),demandScope:'test'};
+    c.projectPlanCapture_(context,settings,state,f.latest,{},f.selected);
+    f.latest=state;
+  }
+  issue('2026-11-19',3,true);
+  const writes=f.writes;assert.equal(writes,2);
+  issue('2026-11-19',11,true);
+  assert.equal(f.writes,writes,'same-day refresh cannot reset a prior baseline');
+  issue('2026-11-20',7);
+  assert.equal(f.paths.length,0,'archiving needs no provider requests');
+  assert.doesNotMatch(JSON.stringify([...f.saved.values()]),/@|private-api-key|Foreign campaign/);
+  f.weekNow=Date.parse('2026-11-27T10:15:00Z');
+  const week={weekOf:'2026-11-20'}, history=f.run(week);
+  assert.deepEqual(history.plans.map(d=>d.date),['2026-11-20','2026-11-21','2026-11-22']);
+  const [closed,updated]=history.plans;
+  assert.equal(closed.expected,3,'the issue day cannot revise its own total');
+  assert.equal(updated.expected,7);
+  assert.equal(updated.generatedAt,'2026-11-20T09:30:00.000Z');
+  assert.deepEqual(updated.campaigns,[{id:first,name:'Active campaign',segmentId:'k',segmentName:'Кухни',expected:7,initial:7}]);
+  assert.deepEqual(updated.senders[0],{id:'1',dailyLimit:60,expected:7,unused:53,campaigns:[{id:first,expected:7,initial:7}]});
+  assert.equal(updated.senders[1].expected,0);
+  const next=f.run({weekOf:'2026-11-24'});
+  assert.equal(next.plans.find(d=>d.date==='2026-11-23').expected,0,'confirmed zero survives');
+  assert.deepEqual(f.run({weekOf:'2026-10-15'}).plans,[],'no invented historical plans');
+  assert.deepEqual(f.run({...week,refresh:true}).plans,history.plans);
+  f.selected=['2'];assert.deepEqual(f.run(week).plans,[]);f.selected=['1','2'];
+  f.proofSlot='rotated';assert.deepEqual(f.run(week).plans,[]);f.proofSlot='configured';
+  f.project='other';assert.deepEqual(f.run(week).plans,[]);f.project='numshield';
+  const before=c.coldyCampaignRegistry_;
+  c.coldyCampaignRegistry_=()=>({...before(),bindings:before().bindings.map(b=>({...b,id:'replacement'}))});
+  assert.deepEqual(f.run(week).plans,[],'a replacement binding cannot inherit the old plan');
+  c.coldyCampaignRegistry_=before;
+  const bucket=[...f.saved.values()].find(value=>value.week==='2026-11-16');
+  bucket.days['2026-11-20'].senders[0][0]='foreign-sender';
+  bucket.days['2026-11-21'].totals[0]={email:'private@example.test'};
+  assert.deepEqual(f.run(week).plans.map(d=>d.date),['2026-11-22'],'a malformed day cannot expose identities or fabricated totals');
+});
+
+test('a calendar week includes only closed dates, even when Monday is the sole closed day',()=>{
+  const f=fixture();
+  f.weekNow=Date.parse('2026-11-24T08:00:00Z');
+  const selected={weekOf:'2026-11-23'};
+  assert.deepEqual(plain(f.c.projectHistoryDates_('previous_week',f.weekNow,'2026-11-06')),[
+    '2026-11-02','2026-11-03','2026-11-04','2026-11-05','2026-11-06','2026-11-07','2026-11-08']);
+  for (const weekOf of ['2026-11-24','2026-02-30','2026-5-1','later',null,{}])
+    assert.throws(()=>f.run({weekOf}),e=>e.registryCode==='INVALID_REQUEST');
+  assert.throws(()=>f.run({period:'today',...selected}),e=>e.registryCode==='INVALID_REQUEST');
+  f.days=['2026-11-23'];
+  f.fetch=url=>{
+    assert.ok(url.pathname.endsWith('/events'),'a closed zero day does not need live sender reconciliation');
+    return f.events([0]);
+  };
+  let report;
+  for(let i=0;i<4;i++){report=f.run(selected);if(report.complete)break;}
+  assert.equal(report.period,'week');
+  assert.equal(report.complete,true);
+  assert.deepEqual(report.days,f.days);
+  const calls=f.paths.length;
+  f.run(selected);
+  assert.equal(f.paths.length,calls);
+  f.weekNow+=86400000;f.days.push('2026-11-24');
+  f.fetch=()=>f.events([0,0]);
+  assert.deepEqual(f.run(selected).days,f.days);
+  assert.ok(f.paths.length>calls,'a new closed date invalidates the shorter checkpoint');
 });
 
 test('seven daily event totals, selected sender IDs and all bound campaigns including completed campaigns',()=>{

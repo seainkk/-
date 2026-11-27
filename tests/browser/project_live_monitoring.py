@@ -1,7 +1,7 @@
 """Visible project polling, transport scope and selection guards with synthetic data."""
 import sys
 from playwright.sync_api import expect, sync_playwright
-from project_client import integrated_html
+from project_client import select_binding_segment, integrated_html
 
 
 def main():
@@ -29,7 +29,7 @@ def main():
         idle()
         tick()
         assert count('refreshColdyMailings') == 0
-        page.locator('#pj-segment').select_option('segment-a')
+        select_binding_segment(page, 'segment-a')
         idle()
         assert count('refreshColdyMailings') == 1
         expect(page.locator('#pj-analytics-updated')).to_contain_text('раз в минуту')
@@ -57,6 +57,10 @@ def main():
 
         page.locator('#br-view-infrastructure').click()
         idle()
+        report_methods=('getProjectSendingForecast','getProjectSendingHistory','getProjectCampaignCompletions')
+        report_reads={method:count(method) for method in report_methods}
+        expect(page.locator('#pj-infrastructure-view')).not_to_contain_text('План и факт отправок')
+        expect(page.locator('#pj-infrastructure-view')).not_to_contain_text('Расписание рассылок')
         tick()
         assert count('refreshProjectInfrastructure') == 0
         assert count('refreshColdyMailings') == 3
@@ -70,6 +74,7 @@ def main():
         assert initial > 0
         tick(120000)
         assert count('refreshProjectInfrastructure') > initial
+        assert report_reads == {method:count(method) for method in report_methods}
         assert not any(call.get('p',{}).get('inventoryOnly') for call in page.evaluate(
             "backend.calls.filter(call=>call.name==='refreshProjectInfrastructure')"))
         assert not page.evaluate("backend.calls.some(call=>call.name==='getProjectInfrastructureSelection')")
@@ -77,7 +82,7 @@ def main():
         # A binding removed while metrics are being read must clear the displayed totals until a fresh read.
         page.locator('#br-view-analytics').click()
         idle()
-        page.locator('#pj-segment').select_option('segment-a')
+        select_binding_segment(page, 'segment-a')
         idle()
         totals = page.locator('#pj-analytics-totals')
         expect(totals).to_contain_text('100')
