@@ -60,7 +60,7 @@
     #entry-directory-nav [aria-pressed=true]{background:var(--blue);color:#fff}
     #entry-preview-list button{border:0;background:transparent;padding:2px 0;text-align:left;color:var(--ink);font-weight:600}
     #entry-preview-list [data-directory-kind=segments]{font-size:18px;line-height:1.25;letter-spacing:-.3px}
-    #entry-preview-list small{color:var(--muted)}
+    #entry-preview-list a{margin-inline-start:16px;color:var(--blue);font-size:14px;white-space:nowrap}
     #entry-preview-list button:hover{text-decoration:underline;color:var(--blue)}
   </style>
 </head>
@@ -201,7 +201,11 @@
           s.choice={kind:s.kind,id:item.id,serial:++s.serial};forward(s);
         });
         row.append(button);
-        if(item.category){const detail=document.createElement('small');detail.textContent=item.category==='partners'?' · Партнерка':' · Клиенты';row.append(detail);}
+        if(s.kind==='sources'){
+          const link=document.createElement('a');
+          link.href='https://drive.google.com/open?id='+encodeURIComponent(item.id);
+          link.target='_blank';link.rel='noopener noreferrer';link.textContent='Открыть на Диске';row.append(link);
+        }
         rows.push(row);
       }
       $('entry-preview-list').replaceChildren(...rows);

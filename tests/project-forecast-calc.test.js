@@ -126,6 +126,20 @@ test('per-campaign overall and first/followup limits and fixed sender do not dup
   assert.equal(r.reasons.length,0);
 });
 
+test('verified current quota controls forecast capacity even when raw counters or their generic updatedAt disagree',()=>{
+  const now='2026-11-22T20:59:00.000Z', today='2026-11-22';
+  const a=account(1,['k'],{dailyLimit:1000,sentToday:0,updatedAt:now,
+    todayQuota:{date:today,limit:10,sent:7,limitAt:now,sentAt:now}});
+  const k=campaign('k',{schedule:{days:['sunday',...weekdays],from:'00:00',to:'24:00'}});
+  const calculate=(when=now)=>calc([a],[k],{k:demand([lead(100)])},when);
+  assert.equal(calculate().today.capacity,3);
+  a.todayQuota.sent=null;assert.equal(calculate().today.capacity,null);
+  assert.equal(calculate().days[0].mailboxLimit,10);
+  a.todayQuota.sent=7;assert.equal(calculate('2026-11-22T21:00:00.000Z').today.capacity,null);
+  a.todayQuota.limit=null;assert.equal(calculate().days[0].mailboxLimit,null);
+  delete a.todayQuota;assert.equal(calculate().today.capacity,1000);
+});
+
 test('overnight New York window converts into Moscow Tuesday; model shares the clock, while the limit allows independent campaign timers',()=>{
   const ny={days:['monday'],from:'23:30',to:'00:30',timezone:'America/New_York',gapStartSeconds:1800,gapEndSeconds:1800};
   const ru={days:['tuesday'],from:'07:30',to:'08:30',timezone:'Europe/Moscow',gapStartSeconds:1800,gapEndSeconds:1800};

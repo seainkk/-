@@ -286,7 +286,7 @@ function projectInfraInventory_(response, key, identityOnly) {
   if (!response || !Array.isArray(response.items) || response.items.length > PROJECT_INFRASTRUCTURE.maxAccounts ||
       response.next_cursor || response.nextPageToken || response.has_more === true ||
       Number.isSafeInteger(response.total) && response.total > response.items.length) fail_('COLDY_INFRA_INCOMPLETE', 'Coldy вернул неполный или слишком большой список ящиков. Сохранённый список не заменён.');
-  var seen = Object.create(null);
+  var seen = Object.create(null), observedAt=new Date().toISOString();
   return response.items.map(function (item) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) fail_('COLDY_RESPONSE', 'Coldy не подтвердил сведения о ящиках.');
     var id = projectInfraId_(item.id), email = projectInfraEmail_(item.email);
@@ -298,6 +298,7 @@ function projectInfraInventory_(response, key, identityOnly) {
     return { id: id, email: email, listedName: item.first_name !== undefined || item.last_name !== undefined, name:name,
       provider:provider, status: null, sentTotal: projectInfraCount_(item.total_sent),
       sentToday: projectInfraCount_(item.sent_today), dailyLimit: projectInfraCount_(item.limit), errorCount: null,
+      sentTodayAt:observedAt, dailyLimitAt:observedAt,
       errors: projectInfraProviderErrors_(item.error_text, key), tags: projectInfraTags_(item.tags, key),
       warmup: projectInfraWarmup_(item, false, key), updatedAt: null, stale: true, syncError: null };
   });
@@ -306,6 +307,7 @@ function projectInfraInventory_(response, key, identityOnly) {
 function projectInfraDetail_(listed, response, key, selectedOnly) {
   if (!response || typeof response !== 'object' || Array.isArray(response) || projectInfraId_(response.id) !== listed.id ||
       listed.email && projectInfraEmail_(response.email) !== listed.email) fail_('COLDY_INFRA_ACCOUNT_CHANGED', 'Сведения о ящике изменились во время синхронизации.');
+  var observedAt=new Date().toISOString();
   return { id: listed.id, email: projectInfraEmail_(response.email),
     name: selectedOnly && (response.first_name !== undefined || response.last_name !== undefined) ? [projectInfraText_(response.first_name,key,200),projectInfraText_(response.last_name,key,200)].filter(Boolean).join(' ') :
       listed.listedName ? listed.name : [projectInfraText_(response.first_name, key, 200), projectInfraText_(response.last_name, key, 200)].filter(Boolean).join(' ') || listed.name,
@@ -314,10 +316,27 @@ function projectInfraDetail_(listed, response, key, selectedOnly) {
     sentTotal: response.total_sent === undefined ? listed.sentTotal : projectInfraCount_(response.total_sent),
     sentToday: response.sent_today === undefined ? listed.sentToday : projectInfraCount_(response.sent_today),
     dailyLimit: response.daily_limit === undefined ? listed.dailyLimit : projectInfraCount_(response.daily_limit),
+    sentTodayAt: response.sent_today === undefined ? listed.sentTodayAt || null : observedAt,
+    dailyLimitAt: response.daily_limit === undefined ? listed.dailyLimitAt || null : observedAt,
     errorCount: null, errors: response.error_text === undefined ? listed.errors : projectInfraProviderErrors_(response.error_text, key),
     tags: response.tags === undefined ? listed.tags : projectInfraTags_(response.tags, key),
     warmup: response.warmup === undefined ? listed.warmup : projectInfraWarmup_(response.warmup, true, key),
-    updatedAt: new Date().toISOString(), stale: false, syncError: null };
+    updatedAt: observedAt, stale: false, syncError: null };
+}
+
+// Either field may be absent from a partial detail response. Its age is independent of the latest account check.
+function projectInfraTodayQuota_(item,now) {
+  var date = new Date(now+10800000).toISOString().slice(0,10);
+  function fresh(value,at,sameDay) {
+    if (item.syncError || typeof at!=='string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(at)) return null;
+    var time=Date.parse(at), age=now-time;
+    if (!Number.isFinite(time) || age<0 || age>=PROJECT_INFRASTRUCTURE.cacheMillis ||
+        sameDay && new Date(time+10800000).toISOString().slice(0,10)!==date) return null;
+    return projectInfraCount_(value);
+  }
+  var limit=fresh(item.dailyLimit,item.dailyLimitAt,false), sent=fresh(item.sentToday,item.sentTodayAt,true);
+  return {date:date,limit:limit,sent:sent,remaining:limit!==null && sent!==null ? Math.max(0,limit-sent) : null,
+    limitAt:limit===null ? null : item.dailyLimitAt,sentAt:sent===null ? null : item.sentTodayAt};
 }
 
 function projectInfraPublic_(context, saved, expectedSignature, read) {
@@ -337,6 +356,7 @@ function projectInfraPublic_(context, saved, expectedSignature, read) {
   var accounts = selectedAccounts.map(function (item) {
     return { id: item.id, email: item.email, name: projectInfraText_(item.name, settings.key, 500), provider: projectInfraNullableText_(item.provider, settings.key, 200),
       status: projectInfraNullableText_(item.status, settings.key, 200), sentTotal: projectInfraCount_(item.sentTotal), sentToday: projectInfraCount_(item.sentToday), dailyLimit: projectInfraCount_(item.dailyLimit),
+      todayQuota:projectInfraTodayQuota_(item,Date.now()),
       errorCount: null, errors: projectInfraErrorsPublic_(item.errors, settings.key), tags: projectInfraTags_(item.tags, settings.key),
       warmup: projectInfraWarmupPublic_(item.warmup, settings.key), updatedAt: item.updatedAt || null, stale: inventoryStale || item.stale === true ||
         poolOnly && (!item.updatedAt || Date.parse(item.updatedAt) < Date.now() - PROJECT_INFRASTRUCTURE.cacheMillis),

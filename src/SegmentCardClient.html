@@ -17,10 +17,14 @@
   function message(id,text){el(id).textContent=text||'';el(id).hidden=!text;}
   function alive(state){return state&&state===current&&!state.previewOnly&&!el('view').hidden&&config.active();}
   function run(state,method,params,guard){return config.rpc(method,{segmentId:state.id,...params},()=>alive(state)&&(!guard||guard()));}
+  function clearWorkStatus(){
+    const host=el('work-status');delete host.dataset.pendingFor;host.replaceChildren();
+  }
   function resetView(){
     current=null;el('view').hidden=true;
+    clearWorkStatus();
     window.dispatchEvent(new Event('segment-card-clear'));
-    for(const id of ['project','title','summary','warnings','queues','validation','coldy-status','campaigns','rows','status','files','sources','history','preview','origin-status','legacy-note','export-status'])el(id).replaceChildren();
+    for(const id of ['project','title','warnings','queues','validation','coldy-status','campaigns','rows','status','files','sources','history','preview','origin-status','legacy-note','export-status'])el(id).replaceChildren();
   }
   function clear(){firstPages.clear();resetView();}
   function keepFirst(page){
@@ -80,22 +84,30 @@
     const s=current;s.previewOnly=false;s.name=name;s.project=project;s.firstRead=firstRead;
     el('title').textContent=name;el('project').textContent=project;
     privateActions(false);message('status','Читаем контакты сегмента…');restoreFirst(s);
+    if(!el('view').hidden)window.RegistrySegmentWorkStatus?.mount(el('work-status'),id);
   }
+  el('secondary').addEventListener('toggle',()=>{
+    if(el('secondary').open&&current&&!current.previewOnly)window.RegistrySegmentWorkStatus?.mount(el('work-status'),current.id);
+  });
   function show(visible){
     const hidden=!visible||!current,opening=!hidden&&el('view').hidden;
     if(hidden&&!el('view').hidden&&current){
       current.seq++;current.originSeq++;current.coldSeq++;current.loading=false;current.exporting=false;current.scanning=false;
       if(current.panel==='coldy'||current.panel==='origins')current.panel=null;
+      el('secondary').open=false;clearWorkStatus();
       window.dispatchEvent(new Event('segment-card-clear'));
     }
     if(!hidden&&el('view').hidden&&current.data&&current.updated+pageLifetime<=Date.now()){
       current.data=null;current.pages.clear();current.offset=0;current.previous=[];
-      for(const id of ['rows','summary','warnings','queues','validation','status','legacy-note'])el(id).replaceChildren();
+      for(const id of ['rows','warnings','queues','validation','status','legacy-note'])el(id).replaceChildren();
       el('table-wrap').hidden=false;el('pages').hidden=true;el('export').disabled=true;paintSummary(current);
     }
     el('view').hidden=hidden;
     if(!hidden)paintPanels(current);
-    if(opening)window.dispatchEvent(new Event('segment-card-update'));
+    if(opening){
+      if(!current.previewOnly)window.RegistrySegmentWorkStatus?.mount(el('work-status'),current.id);
+      window.dispatchEvent(new Event('segment-card-update'));
+    }
   }
   function paintFilters(s){
     for(const item of el('view').querySelectorAll('[data-sc-channel]'))item.setAttribute('aria-pressed',String(item.dataset.scChannel===s.channel));
@@ -110,23 +122,15 @@
   }
   function paintSummary(s){
     const summary=s.data?.summary||{email:{},telegram:{}};
-    el('summary').replaceChildren();
-    for(const [key,label] of Object.entries(channels)){
-      const stats=summary[key],box=node('div','');
-      box.append(node('strong',label+' · '+count(stats.total)),node('span','Готовы '+count(stats.ready)+' · ждут проверки '+count(stats.toCheck)));
-      el('summary').append(box);
-    }
-    const shared=summary.sharedEmail;
-    if(shared>0)el('summary').firstElementChild.append(node('small','Общие для компаний и ЛПР · '+count(shared)));
     message('warnings',(s.data?.warnings||[]).join(' '));el('queues').replaceChildren();el('validation').replaceChildren();
-    const queues=[['all','Все контакты',null],['email','Проверить новые email',summary.email.toCheck]];
-    if(summary.email.toReview)queues.push(['emailReview','Разобрать проверенные email',summary.email.toReview]);
-    queues.push(['telegram','Проверить Telegram по мобильным',summary.telegram.toCheck]);
-    if(summary.telegram.toReview)queues.push(['telegramReview','Ручная проверка Telegram',summary.telegram.toReview]);
-    if(summary.telegram.addressBook)queues.push(['telegramBook','Записная книжка',summary.telegram.addressBook]);
-    queues.push(['ownership','Разобрать принадлежность',summary.ownership]);
-    for(const [queue,label,amount] of queues){
-      const item=action(label+(amount===null?'':' · '+count(amount)),()=>changeFilters({queue,channel:'all'}));
+    const queues=[['all','Все контакты'],['email','Проверить новые email']];
+    if(summary.email.toReview)queues.push(['emailReview','Разобрать проверенные email']);
+    queues.push(['telegram','Проверить Telegram по мобильным']);
+    if(summary.telegram.toReview)queues.push(['telegramReview','Ручная проверка Telegram']);
+    if(summary.telegram.addressBook)queues.push(['telegramBook','Записная книжка']);
+    queues.push(['ownership','Разобрать принадлежность']);
+    for(const [queue,label] of queues){
+      const item=action(label,()=>changeFilters({queue,channel:'all'}));
       item.dataset.scQueue=queue;item.setAttribute('aria-pressed',String(s.queue===queue));el('queues').append(item);
     }
     for(const [kind,file] of Object.entries(s.data?.files||{}))if(file?.id&&kinds[kind]){
@@ -153,11 +157,11 @@
     body.replaceChildren(fragment);paintPageInfo(s);
   }
   function paintPageInfo(s){
-    const {rows,total,offset,nextOffset}=s.data;
+    const {rows,nextOffset}=s.data;
     el('table-wrap').hidden=!rows.length;el('pages').hidden=!s.previous.length&&nextOffset==null;
     el('prev').disabled=!s.previous.length;el('next').disabled=nextOffset==null;
     const asOf=s.data.preparedAt||s.data.checkedAt;
-    message('status',(rows.length?'Показаны '+count(offset+1)+'–'+count(offset+rows.length)+' из '+count(total):'Контакты по этому отбору отсутствуют.')+(asOf?' · '+(s.data.prepared?'Карточка собрана ':'Проверено ')+when(asOf):''));
+    message('status',[rows.length?'':'Контакты по этому отбору отсутствуют.',asOf?(s.data.prepared?'Карточка собрана ':'Проверено ')+when(asOf):''].filter(Boolean).join(' '));
   }
   function sourceDetails(s,row,offset){
     const details=document.createElement('details'),summary=node('summary','Источники'),list=document.createElement('div');
@@ -202,7 +206,8 @@
   function discardRevoked(s,code){
     if(!['OUTSIDE_PROJECT','OUTSIDE_SEGMENTS','OUTSIDE_REGISTRY','ACCESS_DENIED','NOT_FOUND','SEGMENT_NOT_FOUND','GRID_PROTECTED','SEGMENT_TARGET_CHANGED','SOURCE_CHANGED','COLDY_BINDING_CHANGED','COLDY_SCOPE_CHANGED','COLDY_CREDENTIAL_CHANGED'].includes(code))return false;
     firstPages.delete(s.id);s.pages.clear();s.data=null;s.catalog=null;s.comparisons.clear();s.originSeq++;s.coldSeq++;s.scanning=false;
-    for(const id of ['rows','summary','warnings','queues','validation','sources','history','files','campaigns','coldy-status','preview','legacy-note'])el(id).replaceChildren();
+    clearWorkStatus();
+    for(const id of ['rows','warnings','queues','validation','sources','history','files','campaigns','coldy-status','preview','legacy-note'])el(id).replaceChildren();
     el('table-wrap').hidden=true;el('pages').hidden=true;el('export').disabled=true;
     window.dispatchEvent(new Event('segment-card-clear'));
     return true;
@@ -281,6 +286,7 @@
     if(s.panel===panel){dismiss();return;}
     if(['email','telegram','ownership'].includes(s.queue))changeFilters({queue:'all'});
     s.panel=panel;el('secondary').open=false;paintPanels(s);
+    const title=el(panel+'-title');title.tabIndex=-1;title.focus({preventScroll:true});
     if(panel==='coldy'){el('coldy-title').scrollIntoView({block:'nearest'});void checkColdy(s);}
     if(panel==='origins'){if(s.catalog)paintCatalog(s);else void discover(s);}
   }

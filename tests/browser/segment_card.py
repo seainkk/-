@@ -45,7 +45,11 @@ def check_directory_preview(browser):
     page.evaluate("""()=>{window.backend={};window.api={getSegmentsDashboard:()=>({state:'ready',
       items:[{id:'existing-segment',files:[{id:'existing-segment-companies'}]}]})};"""+DATA+"}")
     page.evaluate("""()=>{
-      window.authorized=false;window.reads=[];
+      window.authorized=false;window.reads=[];window.statusIds=[];
+      window.RegistrySegmentWorkStatus={mount:(container,id)=>{
+        if(!authorized)throw Error('status before authorization');
+        statusIds.push(id);container.textContent='В работе';
+      }};
       RegistrySegmentCard.configure({active:()=>authorized,error:e=>e,rpc:(method,p,valid)=>{
         reads.push(p);
         if(!authorized||!valid())throw Error('premature read');
@@ -56,7 +60,9 @@ def check_directory_preview(browser):
       RegistrySegmentCard.show(true);
     }""")
     expect(page.locator('#sc-title')).to_have_text('Кухни')
-    expect(page.locator('#sc-summary')).to_contain_text('Email · —')
+    expect(page.locator('#sc-summary')).to_have_count(0)
+    expect(page.locator('#sc-secondary > summary')).to_have_accessible_name('Действия сегмента')
+    expect(page.locator('#sc-work-status')).to_be_empty()
     expect(page.locator('#sc-table-wrap thead')).to_be_visible()
     expect(page.locator('#sc-add')).to_be_disabled()
     expect(page.locator('#sc-coldy')).to_be_disabled()
@@ -78,6 +84,7 @@ def check_directory_preview(browser):
     expect(query).to_have_value('79990')
     expect(query).to_be_focused()
     expect(page.locator('#sc-add')).to_be_enabled()
+    assert page.evaluate('statusIds')==['existing-segment']
     expect(page.locator('#sc-rows tr')).to_have_count(1)
     expect(page.locator('#sc-rows tr')).to_contain_text('+79990000001')
     assert page.evaluate("reads.length===1&&reads[0].query==='79990'&&reads[0].channel==='telegram'&&reads[0].owner==='companies'")
@@ -134,6 +141,12 @@ def main():
         expect(rows).to_have_count(1)
         expect(rows.first).to_contain_text('both@example.test')
         page.locator('[data-sc-state="ready"]').click()
+        menu=page.locator('#sc-secondary > summary')
+        expect(page.locator('#sc-export')).to_be_hidden()
+        menu.click()
+        page.keyboard.press('Escape')
+        expect(page.locator('#sc-export')).to_be_hidden()
+        menu.press('Enter')
         expect(rows.first).to_contain_text('+79990000001')
         with TemporaryDirectory() as temp:
             with page.expect_download() as download:
@@ -166,18 +179,19 @@ def main():
         page.locator('[data-sc-queue="telegramBook"]').click()
         expect(rows.first).to_contain_text('+79990000002')
         page.locator('#sc-prep-panel [data-sc-dismiss]').click()
-        page.locator('#sc-secondary summary').click()
+        menu.click()
         page.locator('#sc-origins').click()
         expect(page.locator('#sc-history')).to_contain_text('Завершён')
         page.locator('#sc-sources button').click()
         expect(page.locator('#sc-preview')).to_contain_text('новых 12')
         expect(page.locator('#sc-legacy-note')).to_contain_text('не перенесены')
         page.locator('#sc-origins-panel [data-sc-dismiss]').click()
-        page.locator('#sc-secondary summary').click()
+        menu.click()
         page.locator('#sc-coldy').click()
         expect(page.locator('#sc-campaigns')).to_contain_text('Тестовая кампания')
         assert page.evaluate("backend.calls.filter(c=>/^(start|upload|enable|sync)/.test(c.name)).length")==0
         page.locator('#sc-coldy-panel [data-sc-dismiss]').click()
+        menu.click()
         page.locator('#sc-add').click()
         expect(page.locator('#br-import-destination')).to_have_value('existing-segment')
         page.locator('#br-import-cancel').click()
@@ -195,7 +209,8 @@ def main():
         page.wait_for_function("backend.pending.some(r=>r.method==='getSegmentContactCard')")
         expect(rows).to_have_count(0)
         expect(page.locator('#sc-table-wrap thead')).to_be_visible()
-        expect(page.locator('#sc-summary')).to_contain_text('Email · —')
+        expect(page.locator('#sc-summary')).to_have_count(0)
+        menu.click()
         expect(page.locator('#sc-saved-actions summary')).to_be_visible()
         assert page.locator('#sc-saved-actions details').evaluate('node=>node.inert')
         page.evaluate("""() => {

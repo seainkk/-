@@ -247,18 +247,18 @@ def main():
         assert len([call for call in calls('getSourceBases') if call['projectId']=='neosender'])==1
         idle()
 
-        # The lightweight segment projection provides real destinations and
-        # workbook links before any business-sheet analytics have completed.
-        reset("backend.holdAfterMethods=['getSegmentsDashboard:full'];")
+        # The segment directory provides destinations without reading working spreadsheets.
+        reset()
         page.wait_for_selector('[data-source-id="source-companies"]')
         idle()
         page.locator('#br-view-segments').click()
         row = page.locator('[data-segment="existing-segment"]')
         expect(row).to_be_visible()
-        held('getSegmentsDashboard:full')
+        page.wait_for_function('backend.dashboardLightGets>0&&backend.active===0')
         light_calls = [call for call in calls('getSegmentsDashboard') if call['p'] and call['p'].get('includeAnalysis') is False]
         assert len(light_calls) == 1
-        expect(row.locator('.br-segment-status')).to_have_attribute('data-status', 'unknown')
+        expect(row.locator('.br-segment-status')).to_have_attribute('data-status', 'working')
+        expect(row.locator('.br-segment-row-metrics')).to_have_count(0)
         expect(row.locator('[data-grid-source="existing-segment-companies"]')).to_be_enabled()
         expect(row.locator('[data-grid-source="existing-segment-lpr"]')).to_be_enabled()
         expect(row.locator('[data-edit-segment]').first).to_be_enabled()
@@ -272,9 +272,11 @@ def main():
         expect(page.locator('#br-retarget-view')).to_be_visible()
         page.locator('#br-view-segments').click()
         expect(row).to_be_visible()
-        assert page.evaluate('backend.pending.some(item=>item.tag==="getSegmentsDashboard:full")')
+        assert not page.evaluate('backend.dashboardFullGets')
+        page.evaluate("backend.holdAfterMethods=['getSegmentsDashboard:light'];tick(61000)")
+        held('getSegmentsDashboard:light')
 
-        # An already running analytics read cannot block the next explicit
+        # An already running directory refresh cannot block the next explicit
         # mutation. Duplicate submits remain one exact operation.
         page.locator('#br-add-segment').click()
         page.locator('#br-segment-name').fill('Новый сегмент после снимка')
@@ -289,10 +291,10 @@ def main():
         expect(page.locator('#br-segment-panel')).to_be_hidden()
         expect(page.locator('[data-segment="created-segment-1"]')).to_be_visible()
 
-        # The held analytics response was captured before creation. It must not
+        # The held directory response was captured before creation. It must not
         # replace the newer local acknowledgement or refreshed metadata.
         page.evaluate('backend.holdAfterMethods=[]')
-        release('getSegmentsDashboard:full')
+        release('getSegmentsDashboard:light')
         idle()
         expect(page.locator('[data-segment="created-segment-1"]')).to_be_visible()
         expect(page.locator('#br-notice')).to_contain_text('Сегмент создан')
@@ -301,21 +303,22 @@ def main():
             'startColdyValidation', 'startPhoneValidation', 'startPromouserValidation',
             'payValidationOrder', 'startColdyUpload']]
 
-        # Failed optional analysis leaves the light catalog usable and does not
-        # create a 250ms retry loop. Explicit refresh is the recovery action.
-        reset("backend.failFullDashboardAlways=true;backend.fullSegments=clone(backend.segments);backend.fullSegments[0].companiesInWork=12;")
+        # A failed lightweight refresh leaves the last confirmed list available.
+        reset()
         page.wait_for_selector('[data-source-id="source-companies"]')
         idle()
         page.locator('#br-view-segments').click()
         expect(page.locator('[data-segment="existing-segment"]')).to_be_visible()
-        page.wait_for_function('(backend.dashboardFullGets||0)===1 && backend.active===0')
+        page.wait_for_function('backend.dashboardLightGets>0&&backend.active===0')
+        page.evaluate("backend.failDashboard=true;tick(61000)")
         expect(page.locator('#br-segments-health')).to_contain_text('Аналитика временно недоступна')
         page.wait_for_timeout(800)
-        assert page.evaluate('backend.dashboardFullGets') == 1
+        assert page.evaluate('backend.dashboardLightGets') == 2
+        assert not page.evaluate('backend.dashboardFullGets')
         expect(page.locator('#br-add-segment')).to_be_enabled()
-        page.evaluate('backend.failFullDashboardAlways=false')
+        page.evaluate("backend.segments[0].workStatus='paused';backend.segments[0].workStatusRevision=1")
         page.locator('#br-refresh').click()
-        expect(page.locator('[data-segment="existing-segment"] .br-segment-row-metrics dd').nth(3)).to_have_text('12')
+        expect(page.locator('[data-segment="existing-segment"] .br-segment-status')).to_have_text('Пауза')
         idle()
         concurrency()
 

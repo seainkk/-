@@ -17,34 +17,31 @@ test('segment metrics distinguish unknown values from confirmed zero', () => {
   assert.equal(metric(12), '12');
 });
 
-test('only approved actual channel states receive channel labels and indicators', () => {
-  const status = actualHelper('channelStatus');
-  assert.equal(status('active').id, 'active');
-  assert.equal(status('active').label, 'В работе');
-  assert.equal(status('inactive').id, 'inactive');
-  assert.equal(status('inactive').label, 'Не запущен');
-  for (const value of [null, undefined, 'unknown', 'unexpected', '__proto__']) {
-    assert.equal(status(value).id, 'unknown');
-    assert.equal(status(value).mark, '—');
+test('only a confirmed manual status is visible, and the newest revision of this segment wins', () => {
+  const start=client.indexOf('const workStatusLabels='),end=client.indexOf('function mountWorkStatus(',start);
+  assert.ok(start>=0&&end>start);
+  const dashboard={items:[{id:'segment',workStatus:'working',workStatusRevision:0}]};
+  const segmentDirectory={items:[{id:'other',workStatus:'stopped',workStatusRevision:9}]};
+  const read=vm.runInNewContext(client.slice(start,end)+';segmentStatusItem',{dashboard,segmentDirectory});
+  assert.equal(read('segment').workStatus,'working');
+  const newer={id:'segment',workStatus:'paused',workStatusRevision:1};
+  segmentDirectory.items.push(newer);
+  assert.equal(read('segment'),newer);
+  dashboard.items[0]={id:'segment',workStatus:'stopped',workStatusRevision:2};
+  assert.equal(read('segment'),dashboard.items[0]);
+  segmentDirectory.items=[];
+  for(const item of [{id:'segment',overallStatus:'in_work'},{id:'segment',workStatus:'paused'},
+      {id:'segment',workStatus:'__proto__',workStatusRevision:1}]) {
+    dashboard.items=[item];
+    assert.equal(read('segment'),undefined);
   }
-});
-
-test('unknown overall status never becomes a business status', () => {
-  const status = actualHelper('segmentStatus');
-  for (const value of [null, undefined, 0, '', 'unexpected', '__proto__']) {
-    assert.equal(status(value).id, 'unknown');
-    assert.equal(status(value).label, 'Статус ещё не определён');
-  }
-  assert.equal(status('in_work').label, 'В работе');
-  assert.equal(status('preparation').label, 'Подготовка');
-  assert.equal(status('no_contacts').label, 'Нет контактов');
 });
 
 test('timestamp-only refresh keeps the same segment content identity', () => {
   const key = actualHelper('segmentContentKey');
   const first = { state: 'ready', source: { id: 'source', name: 'Source' }, rulesConfigured: false,
-    generatedAt: '2026-11-15T10:00:00Z', items: [{ id: 'segment', companiesInWork: null }] };
+    generatedAt: '2026-11-15T10:00:00Z', items: [{ id: 'segment', workStatus:'working', workStatusRevision:0 }] };
   assert.equal(key(first), key({ ...first, generatedAt: '2026-11-15T10:01:00Z' }));
-  assert.notEqual(key(first), key({ ...first, items: [{ id: 'segment', companiesInWork: 0 }] }));
+  assert.notEqual(key(first), key({ ...first, items: [{ id: 'segment', workStatus:'paused', workStatusRevision:1 }] }));
   assert.notEqual(key(first), key({ ...first, state: 'source_missing' }));
 });

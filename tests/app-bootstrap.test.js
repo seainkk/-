@@ -73,10 +73,14 @@ test('startup and standalone segment directory return only current project folde
   const f=directorySetup(), start=f.call('getAppBootstrap',{includeSegmentDirectory:true}).segmentDirectory;
   assert.equal(f.lists(),1);assert.equal(start.state,'ready');assert.equal(start.projectId,'numshield');assert.equal(start.sourceId,f.source);
   assert.equal(start.complete,true);assert.equal(typeof start.checkedAt,'number');assert.match(start.revision,/^[\w-]{43}$/);
-  assert.deepEqual(start.items,[{id:f.ids[1],name:'Веб-студии',category:'partners'},{id:f.ids[0],name:'Кухни',category:'partners'}]);
+  const initial={workStatus:'working',workStatusRevision:0};
+  assert.deepEqual(start.items,[{id:f.ids[1],name:'Веб-студии',category:'partners',...initial},{id:f.ids[0],name:'Кухни',category:'partners',...initial}]);
   assert.equal(f.call().revision,start.revision);assert.equal(f.lists(),2);
   const other=f.call('getSegmentDirectory',{},'neosender');
-  assert.deepEqual(other.items,[{id:f.ids[2],name:'Сегмент другого проекта',category:'clients'}]);assert.notEqual(other.revision,start.revision);
+  assert.deepEqual(other.items,[{id:f.ids[2],name:'Сегмент другого проекта',category:'clients',...initial}]);assert.notEqual(other.revision,start.revision);
+  const key=f.context.segmentWorkStatusKey_({rootId:ROOT},f.ids[0]);
+  f.props[key]=JSON.stringify({scope:key,status:'paused',revision:1,receipts:[['a'.repeat(43),'paused']]});
+  assert.equal(f.call().items.find(i=>i.id===f.ids[0]).workStatus,'paused');assert.notEqual(f.call().revision,start.revision);
   f.page.files.find(file=>file?.id===f.ids[0]).name='Новое имя';
   assert.notEqual(f.call().revision,start.revision);
   delete f.props['REGISTRY_SEGMENT_PROJECT_'+f.ids[1]];

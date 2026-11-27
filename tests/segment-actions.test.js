@@ -184,6 +184,60 @@ function fixture(options = {}) {
 const loads = (sourceId = MIXED) => [{ sourceId, expectedRevision: 1, sheets: sourceId === MIXED ? [{ sheetId: 11, target: 'companies', hasHeader: true }, { sheetId: 12, target: 'lpr', hasHeader: false }] : [{ sheetId: 21, target: 'companies', hasHeader: true }] }];
 const request = (overrides = {}) => ({ id: SEGMENT, requestId: 'segment_request_12345678', loads: loads(), ...overrides });
 
+function statusFixture(options) {
+  const f=fixture(options);
+  vm.runInContext(readFileSync(new URL('../src/RegistryProjects.gs',import.meta.url),'utf8'),f.context);
+  f.properties.set('REGISTRY_SEGMENT_PROJECT_'+SEGMENT,JSON.stringify({rootId:ROOT,projectId:'numshield'}));
+  f.change=(status,expectedRevision,requestId='request_for_status',projectId='numshield',accessKey=TEST_ACCESS_KEY)=>
+    plain(f.context.callApp({method:'setSegmentWorkStatus',projectId,accessKey,payload:{segmentId:SEGMENT,status,expectedRevision,requestId}}));
+  f.read=()=>plain(f.context.segmentWorkStatusFields_({rootId:ROOT},SEGMENT,Object.fromEntries(f.properties)));
+  return f;
+}
+
+test('manual work status defaults on older segments, persists across renames and retries without rolling back later edits',()=>{
+  const f=statusFixture();
+  assert.deepEqual(f.read(),{workStatus:'working',workStatusRevision:0});
+  assert.deepEqual(f.change('paused',0),{segmentId:SEGMENT,workStatus:'paused',workStatusRevision:1});
+  f.folders.get(SEGMENT).name='Новое имя';
+  assert.equal(f.change('paused',0).workStatusRevision,1);
+  assert.equal(f.change('stopped',1,'another_status_change').workStatus,'stopped');
+  assert.deepEqual(f.change('paused',0),{segmentId:SEGMENT,workStatus:'stopped',workStatusRevision:2});
+  assert.throws(()=>f.change('working',0,'stale_status_change'),/SEGMENT_STATUS_CONFLICT/);
+  assert.throws(()=>f.change('working',0),/REQUEST_REUSED/);
+  assert.throws(()=>f.change('paused',2),/REQUEST_REUSED/);
+  assert.deepEqual(f.read(),{workStatus:'stopped',workStatusRevision:2});
+  assert.equal(f.calls.writes.length,0);assert.equal(f.calls.creates.length,0);
+});
+
+test('setSegmentWorkStatus requires current access, an owned live direct folder, write capability and valid inputs',()=>{
+  const bad=statusFixture({storageCanEdit:false});
+  assert.throws(()=>bad.change('working',0),/STORAGE_WRITE_REQUIRED/);
+  const f=statusFixture();
+  assert.throws(()=>f.change('paused',0,'valid_request','neosender'),/OUTSIDE_PROJECT/);
+  assert.throws(()=>f.change('paused',0,'valid_request','numshield','invalid-key'),/LINK_ACCESS_REQUIRED/);
+  for(const [status,revision,req] of [['other',0,'valid_request'],['paused',-1,'valid_request'],['stopped','0','valid_request'],['working',0,'x']])
+    assert.throws(()=>f.change(status,revision,req),/INVALID_REQUEST/);
+  f.folders.get(SEGMENT).parent=ROOT;
+  assert.throws(()=>f.change('paused',0),/OUTSIDE_SEGMENTS/);assert.equal(f.read().workStatusRevision,0);
+});
+
+test('lost status acknowledgments, expired receipts and damaged status storage fail safely',()=>{
+  const f=statusFixture(), original=f.context.PropertiesService.getScriptProperties;
+  let attempt='before';
+  f.context.PropertiesService.getScriptProperties=()=>{const p=original();return {...p,setProperty:(k,v)=>{
+    if(attempt==='before')throw new Error('offline');
+    p.setProperty(k,v);if(attempt==='after')throw new Error('lost reply');
+  }};};
+  assert.throws(()=>f.change('paused',0),/SEGMENT_STATUS_UNCERTAIN/);
+  attempt='after';assert.equal(f.change('paused',0).workStatusRevision,1);
+  attempt='ok';for(let i=1;i<34;i++)f.change(i%2?'working':'paused',i,'test_status_receipt_'+i);
+  assert.throws(()=>f.change('paused',0),/SEGMENT_STATUS_CONFLICT/);
+  const key=f.context.segmentWorkStatusKey_({rootId:ROOT},SEGMENT);
+  f.properties.set(key,'broken');assert.throws(()=>f.change('working',34),/SEGMENT_STATUS_STORAGE/);
+  assert.deepEqual(f.read(),{workStatus:null,workStatusRevision:null});
+  assert.equal(f.properties.get(key),'broken');
+});
+
 test('preview uses actual ready source worksheets and never reads their cells', () => {
   const f = fixture();
   const result = plain(f.context.getSourceSheets({ sourceId: MIXED, expectedRevision: 1 }));

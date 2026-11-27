@@ -805,27 +805,58 @@ test('shared senders stay busy without disclosing foreign or unselected campaign
 test('monitored mailboxes expose only bound inactive campaign IDs without making them busy', () => {
   const draft='ffffffff-ffff-4fff-8fff-ffffffffffff';
   const f=capacityFixture(({response})=>response({items:[
-    {account_id:1,campaigns:[{id:FINISHED,status:'Completed'},{id:PAUSED,status:'Paused'},
+    {account_id:1,campaigns:[{id:FINISHED,status:'Completed',name:'Завершённая кампания'},{id:PAUSED,status:'Paused'},
       {id:draft,status:'Draft'},{id:UNSELECTED,name:'Private external campaign',status:'Draft'}]},
     {account_id:2,campaigns:[{id:ACTIVE_ONE,name:'Bound active',status:'Active'},{id:PAUSED,status:'Paused'}]},
     {account_id:4,campaigns:[{id:FINISHED,status:'Completed'}]}
   ]}));
   const linked=new Set([ACTIVE_ONE,FINISHED,PAUSED,draft]);
   f.c.projectCapacityOwners_=(context,ids)=>Object.fromEntries(ids.filter(id=>linked.has(id))
-    .map(id=>[id,{bindingState:'linked',segmentId:'segment_kitchens',segmentProjectId:'numshield'}]));
+    .map(id=>[id,{bindingState:'linked',segmentId:'segment_kitchens',segmentName:'Кухни',segmentProjectId:'numshield',
+      campaignName:id===PAUSED?'Сохранённое название':'Старое название',campaignStatus:'Paused'}]));
   const report=readCapacity(f), [free,busy,unused]=report.accounts;
   assert.deepEqual(free.capacity.inactiveCampaignIds,[FINISHED,PAUSED,draft]);assert.equal(free.capacity.state,'free');
   assert.deepEqual(busy.capacity.inactiveCampaignIds,[PAUSED]);assert.deepEqual(busy.capacity.campaignIds,[ACTIVE_ONE]);
   assert.equal(busy.capacity.state,'busy');assert.deepEqual(unused.capacity.inactiveCampaignIds,[]);
   assert.deepEqual(report.capacity.campaigns.map(c=>c.id),[ACTIVE_ONE]);
+  assert.deepEqual(report.capacity.inactiveCampaigns.map(c=>[c.id,c.name,c.status,c.segmentName]),[
+    [FINISHED,'Завершённая кампания','Completed','Кухни'],[PAUSED,'Сохранённое название','Paused','Кухни'],[draft,'Старое название','Draft','Кухни']]);
+  assert.ok(free.capacity.outsideInactive);assert.equal(busy.capacity.outsideInactive,false);
   assert.deepEqual(f.calls.http.filter(path=>path.startsWith('/campaigns/')),['/campaigns/'+ACTIVE_ONE]);
   assert.doesNotMatch(JSON.stringify([report,f.calls.saves]),new RegExp(UNSELECTED+'|Private external campaign'));
   linked.delete(PAUSED);
   assert.ok(f.get().accounts.every(row=>!row.capacity.inactiveCampaignIds.includes(PAUSED)));
+  assert.doesNotMatch(JSON.stringify(f.get()),new RegExp(PAUSED+'|Сохранённое название'));
   delete f.state().capacity.inactiveAssignments;
   assert.ok(f.get().accounts.every(row=>row.capacity.inactiveCampaignIds===null),'Legacy maps have no inactive evidence');
   f.state().capacity.inactiveAssignments={'1':[ACTIVE_ONE]};
   assert.throws(()=>f.get(),/COLDY_STORAGE/,'The same campaign cannot have both statuses in a snapshot');
+});
+
+test('mailbox daily quota distinguishes zero, stale or missing fields and Moscow midnight when a partial detail is received',()=>{
+  const f=fixture();f.configure();const at=Date.parse('2026-11-26T20:59:00Z'),stamp=new Date(at).toISOString();
+  const quota=(record,t)=>plain(f.c.projectInfraTodayQuota_(record,t));
+  const record={id:'1',email:'test@example.test',dailyLimit:20,sentToday:0,dailyLimitAt:stamp,sentTodayAt:stamp};
+  assert.deepEqual(quota(record,at),{date:'2026-11-26',limit:20,sent:0,remaining:20,limitAt:stamp,sentAt:stamp});
+  assert.deepEqual(quota({...record,sentToday:22},at).remaining,0);
+  assert.deepEqual(quota(record,at+61000),{date:'2026-11-27',limit:20,sent:null,remaining:null,limitAt:stamp,sentAt:null});
+  assert.equal(quota(record,at+300000).limit,null);
+  const detail=f.c.projectInfraDetail_(record,{id:1,email:record.email,status:'Connected'},KEY,true);
+  assert.equal(detail.sentTodayAt,stamp);assert.equal(detail.dailyLimitAt,stamp);
+  assert.equal(quota({...record,sentTodayAt:null},at).sent,null);
+  assert.equal(quota({...record,dailyLimit:null},at).remaining,null);
+});
+
+test('forecast cache keys use verified mailbox counts and expire an input when only its evidence goes stale',()=>{
+  const f=forecastFixture(), now=f.c.Date.now(), at=new Date(now).toISOString();
+  const a={id:'1',status:'Connected',updatedAt:at,dailyLimit:999,sentToday:0,capacity:{campaignIds:[]},
+    todayQuota:{date:new Date(now+10800000).toISOString().slice(0,10),limit:25,sent:12,limitAt:at,sentAt:at}};
+  const infra={capacity:{state:'ready',campaigns:[]},accounts:[a]};
+  const scope=()=>f.c.projectForecastScope_('selection',infra), stamp=()=>f.c.projectForecastInputStamp_(infra);
+  const initial=scope(), known=stamp();
+  a.sentToday=12;a.dailyLimit=438;assert.equal(scope(),initial);assert.equal(stamp(),known);
+  a.todayQuota.sent=null;assert.equal(scope(),initial);assert.notEqual(stamp(),known);
+  a.todayQuota.sent=12;f.tick(300001);assert.notEqual(scope(),initial);assert.notEqual(stamp(),known);
 });
 
 test('switching project while reading sender assignments or cached inventory denies a mixed snapshot', () => {

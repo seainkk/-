@@ -180,3 +180,63 @@ test('history batching only accepts canonical event and same-day account GETs fo
     [(base+query).replace('end_date='+d,'end_date='+f.days[1])],['/accounts/42'],[base+'summary?period=all&type=event']])
     assert.throws(()=>run(paths),e=>e.registryCode==='INVALID_REQUEST');
 });
+
+test('today uses only the selected project and senders, has its own dated cache, and refreshes after a minute',()=>{
+  const f=fixture(),week=f.finish(),date='2026-11-27',empty={labels:[date],series:[{name:'sent',data:[0]}]};
+  const query={period:'today'};let rawTotal=7;
+  f.paths.length=0;
+  f.fetch=url=>{
+    assert.equal(url.searchParams.get('start_date'),date);assert.equal(url.searchParams.get('end_date'),date);
+    assert.ok(!url.pathname.includes(foreign));
+    if(url.pathname.endsWith('events'))return url.pathname.includes(first)?{labels:[date],series:[{name:'sent',data:[rawTotal]}]}:empty;
+    return url.pathname.includes(first)?f.page(0,2,[[1,rawTotal-2],[888,2]]):f.page(0,0,[]);
+  };
+  assert.equal(f.run(query).pending,true);
+  const today=f.run(query);assert.equal(today.complete,true);assert.equal(today.period,'today');
+  assert.deepEqual([today.from,today.to,today.days],[date,date,[date]]);
+  assert.deepEqual(today.rows,[{date,accountId:'1',campaignId:first,sent:5}]);assert.equal(today.checkedCells.length,2);
+  assert.equal(f.paths.length,4);assert.deepEqual(f.run(),week);
+  rawTotal=11;f.weekNow+=59999;assert.deepEqual(f.run(query),today);
+  f.weekNow++;assert.equal(f.run(query).rows[0].sent,9);assert.equal(f.run(query).complete,true);
+  assert.equal(f.paths.length,8);assert.deepEqual(f.run(),week);assert.equal(f.saved.size,2);
+  assert.throws(()=>f.run({period:'custom'}),e=>e.registryCode==='INVALID_REQUEST');
+});
+
+test('today retries a moving zero total and sender pages in seconds, observing the documented provider cooldown',()=>{
+  const f=fixture(),date='2026-11-27';let reference=0;
+  f.fetch=url=>{
+    const campaign=url.pathname.includes(first);
+    if(url.pathname.endsWith('events'))return {labels:[date],series:[{name:'sent',data:[campaign?reference:0]}]};
+    return campaign?f.page(0,1,[[2,1]]):f.page(0,0,[]);
+  };
+  const query={period:'today'};let r=f.run(query);
+  assert.equal(r.checkedCells.length,0);assert.equal(r.pending,true);r=f.run(query);
+  assert.equal(r.checkedCells.length,1);assert.equal(r.retryAfterMs,15000);assert.deepEqual(r.rows,[]);
+  reference=1;f.weekNow+=14999;f.run(query);assert.equal(f.paths.length,4);
+  f.weekNow++;r=f.run(query);assert.equal(r.complete,true);assert.equal(r.rows[0].sent,1);
+  assert.equal(r.rows[0].accountId,'2');
+  f.fetch=()=>{throw Object.assign(new Error('rate'),{registryCode:'COLDY_RATE_LIMIT',retryAfterMs:180000});};
+  assert.equal(f.run({...query,refresh:true}).retryAfterMs,180000);
+});
+
+test('today drops an in-flight read at Moscow midnight and never reuses the previous day',()=>{
+  const f=fixture(),query={period:'today'};
+  f.weekNow=Date.parse('2026-11-27T20:59:50Z');
+  const timeline=url=>({labels:[url.searchParams.get('start_date')],series:[{name:'sent',data:[0]}]});
+  f.fetch=url=>{f.weekNow=Date.parse('2026-11-27T21:00:00Z');return url.pathname.endsWith('events')?timeline(url):f.page(0,0,[]);};
+  assert.throws(()=>f.run(query),e=>e.registryCode==='COLDY_MONITORING_CHANGED');
+  assert.equal(f.writes,0);f.run(query);assert.equal(f.run(query).from,'2026-11-28');
+  f.weekNow+=86400000;f.fetch=url=>url.pathname.endsWith('events')?timeline(url):f.page(0,0,[]);
+  const newDay=f.run(query);assert.equal(newDay.from,'2026-11-29');assert.equal(newDay.pending,true);
+});
+
+test('today keeps refreshing confirmed campaigns while another campaign is unavailable',()=>{
+  const f=fixture(),date='2026-11-27';let total=2;
+  f.fetch=url=>{
+    if(url.pathname.includes(second))throw Object.assign(new Error('no access'),{registryCode:'COLDY_FORBIDDEN'});
+    return url.pathname.endsWith('events')?{labels:[date],series:[{name:'sent',data:[total]}]}:f.page(0,1,[[1,total]]);
+  };
+  const q={period:'today'};f.run(q);const partial=f.run(q);
+  assert.equal(partial.retryAfterMs,60000);assert.equal(partial.rows[0].sent,2);assert.equal(partial.checkedCells.length,1);
+  total=4;f.weekNow+=60000;assert.equal(f.run(q).rows[0].sent,4);
+});

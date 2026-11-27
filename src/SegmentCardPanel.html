@@ -1,19 +1,20 @@
 <section id="sc-view" aria-labelledby="sc-title" hidden>
-  <div class="br-list-heading">
+  <div class="sc-heading">
     <div><p id="sc-project" class="br-muted"></p><h1 id="sc-title" tabindex="-1"></h1></div>
-    <div class="sc-actions">
-      <button id="sc-add" type="button" class="br-button br-primary">Добавить контакты</button>
-      <button id="sc-prepare" type="button" class="br-button" aria-expanded="false" aria-controls="sc-prep-panel">Что подготовить</button>
-    </div>
+    <details id="sc-secondary">
+      <summary class="br-button" aria-label="Действия сегмента" title="Действия сегмента">⋯</summary>
+      <div id="sc-work-status"></div>
+      <div class="sc-actions">
+        <button id="sc-add" type="button" class="br-button br-primary">Добавить контакты</button>
+        <button id="sc-prepare" type="button" class="br-button" aria-expanded="false" aria-controls="sc-prep-panel">Что подготовить</button>
+        <button id="sc-coldy" type="button" class="br-button" aria-expanded="false" aria-controls="sc-coldy-panel">Сверить с Coldy</button>
+        <button id="sc-origins" type="button" class="br-button" aria-expanded="false" aria-controls="sc-origins-panel">Исходники и история импортов</button>
+        <button id="sc-settings" type="button" class="br-button">Настройки сегмента</button>
+      </div>
+      <div id="sc-saved-actions" class="sc-actions"></div>
+      <div class="sc-actions"><button type="button" id="sc-export" class="br-button" disabled>Скачать CSV по фильтру</button><small id="sc-export-hint" class="br-muted">Чтобы выгрузить контакты для запуска, выберите «Готово к запуску».</small></div>
+    </details>
   </div>
-  <details id="sc-secondary"><summary>Другие действия</summary>
-    <div class="sc-actions sc-secondary">
-    <button id="sc-coldy" type="button" class="br-button" aria-expanded="false" aria-controls="sc-coldy-panel">Сверить с Coldy</button>
-    <button id="sc-origins" type="button" class="br-button" aria-expanded="false" aria-controls="sc-origins-panel">Исходники и история импортов</button>
-    <button id="sc-settings" type="button" class="br-button">Настройки сегмента</button>
-  </div>
-  </details>
-  <div id="sc-summary" aria-label="Готовность по каналам"></div>
   <p id="sc-warnings" class="br-segment-warning" hidden></p>
   <section id="sc-prep-panel" class="sc-panel" aria-labelledby="sc-prep-title" hidden>
     <div class="sc-bar"><h2 id="sc-prep-title">Что подготовить</h2><button type="button" class="br-button" data-sc-dismiss>Закрыть</button></div>
@@ -53,8 +54,6 @@
       <button class="br-button" type="submit">Найти</button>
     </form>
   </div>
-  <div id="sc-saved-actions" class="sc-actions"></div>
-  <div class="sc-actions"><button type="button" id="sc-export" class="br-button" disabled>Скачать CSV по фильтру</button><small id="sc-export-hint" class="br-muted">Чтобы выгрузить контакты для запуска, выберите «Готово к запуску».</small></div>
   <p id="sc-export-status" class="br-muted" role="status" hidden></p>
   <p id="sc-status" class="br-muted" role="status"></p>
   <div id="sc-table-wrap" class="sc-table-wrap" hidden>

@@ -93,6 +93,7 @@ function buildSegments_(context, registry, folders, files, includePendingImports
       overallStatus: null,
       companiesInWork: null
     };
+    Object.assign(item, segmentWorkStatusFields_(context,segment.id,categoryProperties));
     if (includePendingImports) {
       var pending = segmentDashboardPendingImport_(context, segment.id, categoryProperties);
       if (pending) item.pendingImport = pending;
@@ -139,9 +140,50 @@ function segmentCategory_(raw, name) {
   return segmentStoredCategory_(raw) || segmentDefaultCategory_(name);
 }
 
+function segmentWorkStatusKey_(context,segmentId) {
+  var project = typeof registryProjectId_ === 'function' ? registryProjectId_() : 'numshield';
+  return 'SEGMENT_WORK_STATUS_' + context.rootId + ':' + project + ':' + segmentId;
+}
+
+function segmentWorkStatusValid_(status) {
+  return ['working','paused','stopped'].indexOf(status) >= 0;
+}
+
+// A single property commits the version, manual status and recent request receipts atomically.
+function segmentWorkStatusRecord_(context,segmentId,properties) {
+  var key = segmentWorkStatusKey_(context,segmentId);
+  var raw = properties ? properties[key] : context.properties.getProperty(key);
+  if (raw == null) return {scope:key,status:'working',revision:0,receipts:[]};
+  var state;
+  try { state = JSON.parse(raw); } catch (ignored) {}
+  var seen = new Set();
+  if (!state || state.scope !== key || !segmentWorkStatusValid_(state.status) ||
+      !Number.isSafeInteger(state.revision) || state.revision < 1 ||
+      !Array.isArray(state.receipts) || state.receipts.length !== Math.min(state.revision,32) ||
+      state.receipts.some(function (receipt) {
+        if (!Array.isArray(receipt) || receipt.length !== 2 || typeof receipt[0] !== 'string' ||
+            !/^[A-Za-z0-9_-]{43}$/.test(receipt[0]) || seen.has(receipt[0]) || !segmentWorkStatusValid_(receipt[1])) return true;
+        seen.add(receipt[0]); return false;
+      }) || state.status !== state.receipts[state.receipts.length-1][1]) {
+    fail_('SEGMENT_STATUS_STORAGE','Не удалось прочитать сохранённый статус сегмента.');
+  }
+  return state;
+}
+
+function segmentWorkStatusFields_(context,segmentId,properties) {
+  try {
+    var state = segmentWorkStatusRecord_(context,segmentId,properties);
+    return {workStatus:state.status,workStatusRevision:state.revision};
+  } catch (error) {
+    if (error.registryCode !== 'SEGMENT_STATUS_STORAGE') throw error;
+    return {workStatus:null,workStatusRevision:null};
+  }
+}
+
 function segmentFolderResult_(context, folder) {
   var id = folder.getId(), name = folder.getName();
-  return { id: id, name: name, url: segmentFolderUrl_(id), category: segmentCategory_(context.properties.getProperty(segmentCategoryKey_(id)), name) };
+  return Object.assign({ id:id,name:name,url:segmentFolderUrl_(id),category:segmentCategory_(context.properties.getProperty(segmentCategoryKey_(id)),name) },
+    segmentWorkStatusFields_(context,id));
 }
 
 function segmentFolderUrl_(folderId) {
@@ -208,7 +250,8 @@ function segmentDirectory_(context, root) {
     if (!child(f,sourceId) || f.id === sourceId || f.id === context.rootId || seen.has(f.id)) return;
     seen.add(f.id);
     if (registrySegmentProject_(fresh,f.id,props) !== project) return;
-    items.push({id:f.id,name:f.name,category:segmentCategory_(props[segmentCategoryKey_(f.id)],f.name)});
+    items.push(Object.assign({id:f.id,name:f.name,category:segmentCategory_(props[segmentCategoryKey_(f.id)],f.name)},
+      segmentWorkStatusFields_(fresh,f.id,props)));
   });
   items.sort(function (a,b) { return byName_(a,b) || a.id.localeCompare(b.id); });
   result.complete = !page.nextPageToken && items.length <= limit;

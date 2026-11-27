@@ -8,6 +8,7 @@
   let activeProjectId='numshield';
   try{if(window.localStorage.getItem(projectPreference)==='neosender')activeProjectId='neosender';}catch(ignored){}
   const projectDrafts=new Map(),claimRequests=new Map();
+  const segmentStatusWrites=new Map();
   let bootstrap=null,activeView='sources',busy=false,networkPending=0,readPending=0,mutationGeneration=0,pendingView=null,formMode=null;
   let sourceData=null,sourceTimer=null,lastSourceAttempt=0,lastSourceLoaded=0,sourceLoading=false,sourceSaving=null,sourceRefreshError=null,renderedSourceKey=null;
   let sourceProbeAt=0,sourceCheckedAt=0,sourceProbe=null;
@@ -24,7 +25,7 @@
   let suspendedSegment=null;
   let providerSession=null,coldySession=null,coldyMailings=null;
   let settingsSession=null,settingsTimer=null;
-  let dashboard=null,dashboardLoading=false,dashboardAnalysisLoading=false,dashboardAnalysisTimer=null,dashboardRequest=0,dashboardError=null,lastDashboardAttempt=0,lastDashboardLoaded=0,renderedDashboardKey=null;
+  let dashboard=null,dashboardLoading=false,dashboardRequest=0,dashboardError=null,lastDashboardAttempt=0,lastDashboardLoaded=0,renderedDashboardKey=null;
   let segmentDirectory=null,directoryRequest=null,bootstrapIncludesDirectory=null;
   let sourceDirectory=null,sourceDirectoryRequest=null,fastDirectories={},pendingDirectoryOpen=null,lastDirectorySerial=0,lastDirectoryView=0;
   let mailings=null,mailingsLoading=false,mailingsError=null,mailingSegmentId=null,lastMailingsAttempt=0,lastMailingsLoaded=0;
@@ -182,10 +183,6 @@
   }
   function viewMutationBlocked(){return busy||!!sourceSaving||importing||segmentSaving||segmentPreviewLoading;}
   function workspaceMutationBlocked(){return viewMutationBlocked()||sourceLoading||networkPending-readPending>0||networkPending>=2;}
-  function scheduleSegmentAnalysis(){
-    if(dashboardAnalysisTimer!==null||dashboardError)return;const epoch=accessEpoch;
-    dashboardAnalysisTimer=setTimeout(()=>{dashboardAnalysisTimer=null;if(accessReady&&epoch===accessEpoch&&activeView==='segments'&&!document.hidden&&dashboard?.analysisPending===true&&!dashboardError&&!formIsOpen()&&!viewMutationBlocked())refreshSegments({background:true,fullAnalysis:true});},250);
-  }
   function rpc(name,payload){
     if(!accessKey)return Promise.reject(new Error('Для входа нужна полная закрытая ссылка.'));
     const rpcEpoch=typeof accessEpoch==='number'?accessEpoch:0,rpcKey=accessKey;if(typeof mutationGeneration==='number'&&typeof isReadRpc==='function'&&!isReadRpc(name,payload))mutationGeneration++;networkPending++;
@@ -236,12 +233,12 @@
     window.RegistrySegmentCard?.clear();if(activeView==='segmentCard')activeView='segments';
     catalogPreview=null;acceptSavedCatalog=false;
     sourceProbeAt=0;sourceCheckedAt=0;sourceProbe=null;
-    projectDrafts.clear();claimRequests.clear();mailingSegmentId=null;sourceSaving=null;segmentSaving=false;segmentEditorEpoch++;
+    projectDrafts.clear();claimRequests.clear();segmentStatusWrites.clear();mailingSegmentId=null;sourceSaving=null;segmentSaving=false;segmentEditorEpoch++;
     $('br-coldy-binding-form').reset();$('br-coldy-upload-preview').hidden=true;$('br-segment-normalized-preview').hidden=true;
     for(const id of ['br-coldy-campaign','br-coldy-bindings-list','br-coldy-bindings-message','br-coldy-upload-counts','br-coldy-upload-sample','br-coldy-upload-warnings','br-coldy-upload-message','br-mailings-health','br-segment-preview-counts','br-segment-preview-tables','br-segment-preview-review','br-segment-error'])$(id).replaceChildren();
     $('br-coldy-upload-title').textContent='Загрузка в рассылку';$('br-mailings-title').textContent='Рассылки';
     $('br-unassigned').hidden=true;$('br-unassigned-rows').replaceChildren();$('br-upload-project').value='';
-    accessEpoch++;dashboardRequest++;if(dashboardAnalysisTimer!==null){clearTimeout(dashboardAnalysisTimer);dashboardAnalysisTimer=null;}dashboardAnalysisLoading=false;dashboardLoading=false;mailingsLoading=false;sourceLoading=false;accessReady=false;accessKey='';window.RegistryProject?.lock?.();closeProviderSettings();closeColdySettings();coldyMailings=null;preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
+    accessEpoch++;dashboardRequest++;dashboardLoading=false;mailingsLoading=false;sourceLoading=false;accessReady=false;accessKey='';window.RegistryProject?.lock?.();closeProviderSettings();closeColdySettings();coldyMailings=null;preparedEpoch++;preparedImport=null;preparedJobs=[];preparedJobsLoaded=false;preparedJobsQueued=false;preparedJobsLoading=false;renderPreparedJobs();clearPreparedPoll();window.RegistryGrid?.lock?.();workspaceRpcQueue=Promise.resolve();
     viewTrail.length=0;pendingImportExit=null;suspendedSegment=null;uploadSegmentOptions=null;uploadEntryView='sources';$('br-import-destination').replaceChildren();$('br-import-segment-name').value='';recoveringOrigins=false;$('br-origin-recovery-status').textContent='';closeSourceOrigin();$('br-origin-recovery').hidden=true;
     segmentImportDestination=null;segmentReturnPending=null;
     pendingSyncViews.clear();if(syncTimer!==null){clearTimeout(syncTimer);syncTimer=null;}lastSourceLoaded=0;lastDashboardLoaded=0;lastMailingsLoaded=0;lastSourceAttempt=0;lastDashboardAttempt=0;lastMailingsAttempt=0;
@@ -653,7 +650,72 @@
   function button(className,text){const node=document.createElement('button');node.type='button';node.className='br-button '+className;if(text)node.textContent=text;return node;}
   function metricNumber(value){return Number.isSafeInteger(value)&&value>=0?value.toLocaleString('ru-RU'):'—';}
   function channelStatus(value){const states={active:{id:'active',label:'В работе',mark:'✓'},inactive:{id:'inactive',label:'Не запущен',mark:'−'}};return Object.prototype.hasOwnProperty.call(states,value)?states[value]:{id:'unknown',label:'Статус не определён',mark:'—'};}
-  function segmentStatus(value){const labels={in_work:'В работе',preparation:'Подготовка',no_contacts:'Нет контактов'};return Object.prototype.hasOwnProperty.call(labels,value)?{id:value,label:labels[value]}:{id:'unknown',label:'Статус ещё не определён'};}
+  const workStatusLabels={working:'В работе',paused:'Пауза',stopped:'Остановлен'};
+  function segmentStatusItem(id){
+    return [dashboard,segmentDirectory].map(data=>data?.items?.find(item=>item.id===id))
+      .filter(item=>item&&Object.hasOwn(workStatusLabels,item.workStatus)&&Number.isSafeInteger(item.workStatusRevision))
+      .sort((a,b)=>b.workStatusRevision-a.workStatusRevision)[0];
+  }
+  function mountWorkStatus(container,id){
+    container.replaceChildren();
+    if(!accessReady||!id)return;
+    const item=segmentStatusItem(id);
+    if(!item){
+      if(container.id==='sc-work-status'&&container.closest('details')?.open&&container.dataset.pendingFor!==id){
+        container.dataset.pendingFor=id;
+        container.textContent='Получаем статус сегмента…';
+        const epoch=accessEpoch;
+        void fetchSegmentDirectory().finally(()=>{
+          if(accessEpoch!==epoch||container.dataset.pendingFor!==id)return;
+          if(segmentStatusItem(id))mountWorkStatus(container,id);
+          else{delete container.dataset.pendingFor;container.textContent='Не удалось получить статус сегмента.';}
+        });
+      }
+      return;
+    }
+    container.dataset.pendingFor=id;
+    const label=document.createElement('label'),select=document.createElement('select');
+    label.className='br-work-status-field';label.append('Статус сегмента',select);
+    for(const [value,title] of Object.entries(workStatusLabels))select.add(new Option(title,value));
+    select.value=item.workStatus;select.dataset.segmentFocus=id+'/status';select.disabled=segmentSaving;
+    select.addEventListener('change',()=>saveWorkStatus(id,select.value,container));
+    container.append(label);
+  }
+  window.RegistrySegmentWorkStatus={mount:mountWorkStatus};
+  async function saveWorkStatus(id,status,container){
+    const item=segmentStatusItem(id);
+    if(!accessReady||segmentSaving||!item||!Object.hasOwn(workStatusLabels,status))return;
+    const epoch=accessEpoch,project=activeProjectId;
+    const valid=()=>accessReady&&epoch===accessEpoch&&project===activeProjectId;
+    const old=segmentStatusWrites.get(id);
+    const op=old?.status===status&&old.expectedRevision===item.workStatusRevision?old:
+      {segmentId:id,status,expectedRevision:item.workStatusRevision,requestId:requestId()};
+    segmentStatusWrites.set(id,op);segmentSaving=true;updateControls();container.querySelector('select').disabled=true;
+    try{
+      const result=await rpc('setSegmentWorkStatus',op);
+      if(!valid())return;
+      if(result?.segmentId!==id||!Object.hasOwn(workStatusLabels,result.workStatus)||!Number.isSafeInteger(result.workStatusRevision))
+        throw new Error('Не удалось подтвердить сохранение статуса.');
+      for(const data of [dashboard,segmentDirectory]){
+        const row=data?.items?.find(s=>s.id===id);
+        if(row&&!(row.workStatusRevision>result.workStatusRevision))Object.assign(row,{workStatus:result.workStatus,workStatusRevision:result.workStatusRevision});
+      }
+      segmentStatusWrites.delete(id);notice('Статус сегмента сохранён.');
+    }catch(error){
+      if(!valid())return;
+      const problem=failure(error);notice(problem.message,'error');
+      if(problem.code==='SEGMENT_STATUS_CONFLICT'){
+        segmentStatusWrites.delete(id);
+        await fetchSegmentDirectory();
+      }
+    }finally{
+      if(valid()){
+        segmentSaving=false;renderedDashboardKey=null;renderSegments();updateControls();
+        if(container.isConnected)mountWorkStatus(container,id);
+        flushPendingView();
+      }
+    }
+  }
   function segmentContentKey(data){return JSON.stringify({state:data?.state||'unavailable',source:data?.source||null,items:data?.items||[],unassigned:data?.unassigned||[]});}
   function segmentCategory(item){return item?.category==='partners'?'partners':'clients';}
   function normalizeContents(value){return Array.isArray(value)?['companies','lpr'].filter((kind)=>value.includes(kind)):[];}
@@ -747,22 +809,37 @@
     link.addEventListener('click',()=>openRelatedSource(item.id,link));
     return link;
   }
-  function renderSourceRelations(row,meta,item,catalog,children){
-    const origin=item.origin,role=document.createElement('span');
-    role.className='br-source-role';
-    role.textContent=origin?'Выборка':children.length?'Исходная база':item.originAvailable===false?'Происхождение недоступно':'Источник не указан';
-    meta.prepend(role);
-    if(!origin&&!children.length)return;
-    const relations=document.createElement('div');relations.className='br-source-relations';
-    if(origin){
-      const parent=document.createElement('p');parent.append('Источник: ');
-      if(catalog.has(origin.id))parent.append(relatedSourceButton(item,catalog.get(origin.id)));
-      else if(origin.url&&importLinkId(origin.url)===origin.id){
-        const link=document.createElement('a');link.href=nativeUrl(origin.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent=origin.name;parent.append(link);
-      }else parent.append(origin.name);
-      relations.append(parent);
-      if(origin.criteria){const criteria=document.createElement('p');criteria.textContent='Критерии: '+origin.criteria;relations.append(criteria);}
+  function catalogLink(url,label){
+    const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener noreferrer';link.textContent=label;
+    return link;
+  }
+  function renderCatalogHead(row,item,fileUrl,openWorkbook,original){
+    const head=document.createElement('div'),heading=document.createElement('h2');
+    head.className='br-source-head';head.append(heading);row.append(head);
+    if(!fileUrl){heading.textContent=item.name;return;}
+    const name=openWorkbook?button('br-catalog-name',item.name):catalogLink(fileUrl,item.name);
+    name.className='br-catalog-name';name.dataset.sourceFocus=item.id+(openWorkbook?'/grid':'/name');
+    if(openWorkbook){
+      name.title='Работать с таблицей';name.addEventListener('click',openWorkbook);
+      if(item.mimeType){name.dataset.gridSource=item.id;name.disabled=editingBlocked()||importOpen||!!segmentEditor;}
     }
+    heading.append(name);
+    const link=catalogLink(fileUrl,'Открыть на Диске');link.className='br-source-file';link.dataset.sourceFocus=item.id+'/file';
+    link.setAttribute('aria-label','Открыть на Диске: '+item.name);
+    if(item.mimeType)link.title=sourceFormatLabel(item);
+    head.append(link);
+    if(!item.origin)return;
+    const origin=item.origin,parent=document.createElement('span');parent.className='br-source-origin';parent.append('Исходная база: ');
+    const parentUrl=original?sourceFileUrl(original):origin.url&&importLinkId(origin.url)===origin.id?nativeUrl(origin.id):null;
+    if(parentUrl){const parentLink=catalogLink(parentUrl,original?.name||origin.name);parentLink.dataset.sourceFocus=item.id+'/parent';parent.append(parentLink);}
+    else parent.append(origin.name);
+    head.append(parent);
+  }
+  function renderSourceRelations(row,item,original,children){
+    if(!original&&!item.origin?.criteria&&!children.length)return;
+    const relations=document.createElement('div');relations.className='br-source-relations';
+    if(original){const parent=document.createElement('p');parent.append('В каталоге: ',relatedSourceButton(item,original));relations.append(parent);}
+    if(item.origin?.criteria){const criteria=document.createElement('p');criteria.textContent='Критерии: '+item.origin.criteria;relations.append(criteria);}
     if(children.length){
       const selections=document.createElement('p');selections.append('Выборки ('+children.length+'): ');
       children.forEach((child,index)=>{if(index)selections.append(' · ');selections.append(relatedSourceButton(item,child));});
@@ -849,24 +926,16 @@
     const openIds=new Set(Array.from(target.querySelectorAll('.br-source-settings[open]'),details=>details.parentElement.dataset.sourceId));
     const focus=document.activeElement?.dataset.sourceFocus;
     for(const item of matches){
-      const row=document.createElement('article'),title=document.createElement('h2'),kind=document.createElement('span');
-      row.className='br-source-item';title.textContent=item.name;kind.className='br-muted';
+      const row=document.createElement('article');row.className='br-source-item';
+      const fileUrl=item.id?'https://drive.google.com/open?id='+encodeURIComponent(item.id):null;
+      renderCatalogHead(row,item,fileUrl,item.workbook===false?null:()=>chooseDirectoryItem('sources',item.id));
       if(item.id){
         row.dataset.sourceId=item.id;
-        if(item.workbook===false){
-          const file=document.createElement('a');file.className='br-catalog-name';file.textContent=item.name;file.href='https://drive.google.com/open?id='+encodeURIComponent(item.id);file.target='_blank';file.rel='noopener noreferrer';title.replaceChildren(file);
-        }else{
-          const work=button('br-catalog-name',item.name);work.dataset.sourceFocus=item.id+'/grid';work.title='Работать с таблицей';work.addEventListener('click',()=>chooseDirectoryItem('sources',item.id));title.replaceChildren(work);
-        }
-      }
-      kind.textContent=item.contents?.length?contentsLabel(item.contents):'';
-      row.append(title,kind);
-      if(item.id){
         const details=document.createElement('details'),summary=document.createElement('summary');
         details.className='br-source-settings';details.open=openIds.has(item.id);
         summary.dataset.sourceFocus=item.id+'/settings';summary.textContent='Сведения';
-        const link=document.createElement('a');link.href='https://drive.google.com/open?id='+encodeURIComponent(item.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent='Открыть на Google Диске';
-        details.append(summary,link);row.append(details);
+        const loading=document.createElement('p');loading.className='br-muted';loading.textContent='Загружаем сведения о базе…';
+        details.append(summary,loading);row.append(details);
       }
       rows.append(row);
     }
@@ -918,7 +987,7 @@
     const allItems=(data?.items||[]).filter(item=>item.present!==false);
     $('br-origin-recovery').hidden=!data?.canEdit||!allItems.length;
     // Related files may be outside the current search results.
-    const relatedItems=allItems.map(item=>[item.id,item.name,item.origin?.id]);
+    const relatedItems=allItems.map(item=>[item.id,item.name,item.mimeType,item.url,item.origin?.id]);
     const key=JSON.stringify({state:data?.state,source:data?.source,storage:data?.storage,canEdit:data?.canEdit,associationsAvailable:data?.associationsAvailable,filters:sourceFilters,registrySection,items,relatedItems,projects:Array.from(projectDrafts),drafts:Array.from(sourceDrafts),messages:Array.from(sourceMessages),saving:sourceSaving,initial:!data?(sourceLoading?'loading':sourceRefreshError?'error':'empty'):''});if(key===renderedSourceKey)return;renderedSourceKey=key;
     const catalog=new Map(),selectionsByOrigin=new Map();
     for(const item of allItems){
@@ -941,33 +1010,14 @@
     $('br-sources-empty-title').textContent=emptyText[0];$('br-sources-empty-description').textContent=emptyText[1];
     for(const item of items){
       const row=document.createElement('article');row.className='br-source-item';row.dataset.sourceId=item.id;row.tabIndex=-1;row.dataset.sourceFocus=item.id+'/card';
-      const head=document.createElement('div');head.className='br-source-head';
-      const identity=document.createElement('div');identity.className='br-source-identity';
-      const heading=document.createElement('h2');heading.textContent=item.name;
-      const status=document.createElement('span');status.className='br-source-status';status.dataset.status=item.status||'';status.textContent=sourceStatusLabel(item.status);
-      identity.append(heading,status);head.append(identity);row.append(head);
+      const original=item.origin&&catalog.get(item.origin.id);
+      renderCatalogHead(row,item,sourceFileUrl(item),canOpenSourceWorkbook(item)?()=>openGridWorkbook(item.id):null,original);
       if(selection.pinnedIds.includes(item.id)&&item.present!==false){const pinned=document.createElement('p');pinned.className='br-source-filter-pinned';pinned.textContent='База показана вне фильтров, чтобы вы могли сохранить или отменить изменения.';row.append(pinned);}
-      const meta=document.createElement('div');meta.className='br-source-meta';
-      const link=document.createElement('a');link.className='br-source-file';link.href=sourceFileUrl(item);link.target='_blank';link.rel='noopener noreferrer';
-      const format=sourceFormatLabel(item);
-      link.textContent=item.fileName&&item.fileName!==item.name?item.fileName+' · '+format:format;
-      link.setAttribute('aria-label','Открыть файл: '+(item.fileName||item.name)+' · '+format);link.dataset.sourceFocus=item.id+'/file';
-      const type=document.createElement('span');type.textContent=contentsLabel(item.contents);
-      meta.append(link,type);
-      if(item.projectIds?.length){const projects=document.createElement('span');projects.textContent=item.projectIds.map(id=>projectNames[id]).filter(Boolean).join(' · ');meta.append(projects);}
-      identity.append(meta);
-
-      if(canOpenSourceWorkbook(item)){
-        const work=button('br-catalog-name',item.name);work.title='Работать с таблицей';work.dataset.gridSource=item.id;work.dataset.sourceFocus=item.id+'/grid';work.disabled=editingBlocked()||importOpen||!!segmentEditor;work.addEventListener('click',()=>openGridWorkbook(item.id));
-        heading.replaceChildren(work);
-      }else{
-        const file=link.cloneNode(false);file.className='br-catalog-name';file.dataset.sourceFocus=item.id+'/name';file.textContent=item.name;heading.replaceChildren(file);
-      }
       const draft=sourceDrafts.get(item.id),editable=sourceCanEdit(data,item);
       const settings=document.createElement('details');settings.className='br-source-settings';settings.open=openSettings.get(item.id)??!!draft;
       const summary=document.createElement('summary');summary.textContent=draft?'Сведения · Есть изменения':'Сведения';summary.dataset.sourceFocus=item.id+'/settings';settings.append(summary);
-      renderSourceRelations(settings,meta,item,catalog,selectionsByOrigin.get(item.id)||[]);
-      if(!editable){const reason=document.createElement('p');reason.className='br-source-reason';reason.textContent=item.present===false?'Файл больше недоступен в исходной папке. Изменения не отправлены.':data.state==='storage_unavailable'?'Изменение отметок недоступно без общего хранилища.':'Изменение отметок сейчас недоступно.';row.append(reason);}
+      renderSourceRelations(settings,item,original,selectionsByOrigin.get(item.id)||[]);
+      if(!editable){const reason=document.createElement('p');reason.className='br-source-reason';reason.textContent=item.present===false?'Файл больше недоступен в исходной папке. Изменения не отправлены.':data.state==='storage_unavailable'?'Изменение отметок недоступно без общего хранилища.':'Изменение отметок сейчас недоступно.';settings.append(reason);}
       const message=sourceMessages.get(item.id);if(message){const text=document.createElement('p');text.className='br-source-message'+(message.error?' br-error':'');text.setAttribute(message.error?'role':'aria-live',message.error?'alert':'polite');text.textContent=message.text;row.append(text);}
       if(settings.open)renderSourceFields(settings,item,data,draft,editable);
       else settings.addEventListener('toggle',function mount(){
@@ -1110,11 +1160,12 @@
     // A navigation click can arrive after the bootstrap was dispatched. Both
     // calls authorize independently; rendering waits for this session's access.
     const reading=accessReady?readRpc('getSegmentDirectory',{},valid):rpc('getSegmentDirectory',{});
-    directoryRequest=reading.then(result=>{if(valid())useSegmentDirectory(result);},error=>{if(valid())handleDirectoryError('segments',error);});
-    return directoryRequest;
+    const pending=reading.then(result=>{if(valid())useSegmentDirectory(result);},error=>{if(valid())handleDirectoryError('segments',error);});
+    directoryRequest=pending;
+    return pending.finally(()=>{if(directoryRequest===pending)directoryRequest=null;});
   }
   function segmentById(id){return (dashboard||segmentDirectory)?.items?.find(item=>item.id===id);}
-  function renderSegmentsHealth(){const node=$('br-segments-health');node.classList.toggle('br-error',!!dashboardError);node.textContent=dashboardError?'Не удалось обновить сегменты. '+dashboardError:(segmentDirectory||fastDirectories.segments)?.state==='ready'&&!dashboard||dashboard?.analysisPending===true?'Сведения о контактах обновляются в фоне.':dashboardLoading&&!dashboard?'Получаем список сегментов…':formIsOpen()?'Автообновление приостановлено на время редактирования.':'Данные обновляются каждую минуту, пока раздел открыт.'+(lastDashboardLoaded?' Проверено в '+new Date(lastDashboardLoaded).toLocaleTimeString('ru-RU')+'.':'');}
+  function renderSegmentsHealth(){const node=$('br-segments-health');node.classList.toggle('br-error',!!dashboardError);node.textContent=dashboardError?'Не удалось обновить сегменты. '+dashboardError:(segmentDirectory||fastDirectories.segments)?.state==='ready'&&!dashboard?'Обновляем сведения о сегментах.':dashboardLoading&&!dashboard?'Получаем список сегментов…':formIsOpen()?'Автообновление приостановлено на время редактирования.':'Данные обновляются каждую минуту, пока раздел открыт.'+(lastDashboardLoaded?' Проверено в '+new Date(lastDashboardLoaded).toLocaleTimeString('ru-RU')+'.':'');}
   function renderUnassignedSegments(items){
     const list=$('br-unassigned-rows');list.replaceChildren();$('br-unassigned').hidden=!items?.length;
     for(const item of items||[]){
@@ -1160,38 +1211,33 @@
         resume.addEventListener('click',()=>resumeDashboardImport(item));actions.append(resume);
       }else actions.append(upload,replenish);
       actions.append(edit,campaigns);
-      const more=document.createElement('details'),summary=document.createElement('summary');more.className='br-segment-secondary';more.open=openActions.has(item.id);summary.dataset.segmentFocus=item.id+'/actions';summary.textContent='Действия с сегментом';more.append(summary,actions);row.append(head);
+      const more=document.createElement('details'),summary=document.createElement('summary');
+      more.className='br-segment-secondary';more.open=openActions.has(item.id);
+      summary.dataset.segmentFocus=item.id+'/actions';summary.textContent='⋯';
+      summary.setAttribute('aria-label','Настройки сегмента «'+item.name+'»');summary.title='Настройки сегмента';
+      const menu=document.createElement('div');menu.className='br-segment-menu';
+      const field=document.createElement('div');mountWorkStatus(field,item.id);menu.append(field,actions);
+      more.append(summary,menu);row.append(head);
       more.addEventListener('click',event=>{if(event.target.closest('button,a'))more.open=false;});
+      more.addEventListener('toggle',()=>{if(more.open&&target.contains(more))for(const other of target.querySelectorAll('.br-segment-secondary[open]'))if(other!==more)other.open=false;});
+      const status=document.createElement('span'),known=accessReady&&segmentStatusItem(item.id);
+      status.className='br-segment-status';status.hidden=!known;
+      if(known){status.dataset.status=known.workStatus;status.textContent=workStatusLabels[known.workStatus];}
+      row.append(status);
       if(compact){row.append(more);target.append(row);continue;}
-      const inline=document.createElement('div');inline.className='br-segment-inline';const pills=document.createElement('div');pills.className='br-channel-pills';
-      for(const [channel,label] of [['email','Email'],['telegram','Telegram'],['retargeting','Ретаргетинг']]){
-        const value=item.channels?.[channel],info=channelStatus(channel==='email'&&value?.configured===false?'unknown':value?.state);
-        const pill=document.createElement('span');pill.className='br-channel-pill';pill.dataset.channel=channel;
-        const mailings=channel==='email'&&item.coldyMailings;
-        if(mailings&&Number.isSafeInteger(mailings.linked)){
-          let text='Email · рассылок Coldy '+mailings.linked;
-          if(mailings.linked)text+=Number.isSafeInteger(mailings.activeAtBinding)?' · активных при привязке '+mailings.activeAtBinding:' · статус при привязке неизвестен';
-          pill.dataset.state='unknown';pill.textContent=text;pill.title='Подробные показатели и обновление доступны в разделе «Рассылки».';
-        }else{
-          pill.dataset.state=info.id;pill.textContent=label+' '+info.mark;pill.setAttribute('aria-label',label+': '+info.label);pill.title=info.label;
-        }
-        pills.append(pill);
-      }
-      inline.append(pills);
-      const metrics=document.createElement('dl');metrics.className='br-segment-row-metrics';for(const entry of [['Email',item.channels?.email?.inWork],['Telegram',item.channels?.telegram?.inWork],['Ретаргетинг',item.channels?.retargeting?.inWork],['Компании ≥1 канал',item.companiesInWork]]){const group=document.createElement('div');const label=document.createElement('dt');label.textContent=entry[0];const value=document.createElement('dd');value.textContent=metricNumber(entry[1]);group.append(label,value);metrics.append(group);}inline.append(metrics);const info=segmentStatus(item.overallStatus),status=document.createElement('span');status.className='br-segment-status';status.dataset.status=info.id;status.textContent=info.label;inline.append(status);row.append(inline);
-      const links=document.createElement('div');links.className='br-segment-sheet-links';for(const file of item.files||[]){const link=document.createElement('a');link.href=nativeUrl(file.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent=file.kind==='companies'?'Компании':file.kind==='lpr'?'ЛПР':file.name;link.title=file.name;links.append(link);if(['companies','lpr'].includes(file.kind)){const work=button('','Работать: '+(file.kind==='companies'?'компании':'ЛПР'));work.dataset.gridSource=file.id;work.addEventListener('click',()=>openGridWorkbook(file.id));links.append(work);}}more.append(links);row.append(more);
-      if(item.analysis?.warnings?.length){const warning=document.createElement('p');warning.className='br-segment-warning';warning.textContent=item.analysis.warnings.join(' ');row.append(warning);}target.append(row);
+      const links=document.createElement('div');links.className='br-segment-sheet-links';for(const file of item.files||[]){const link=document.createElement('a');link.href=nativeUrl(file.id);link.target='_blank';link.rel='noopener noreferrer';link.textContent=file.kind==='companies'?'Компании':file.kind==='lpr'?'ЛПР':file.name;link.title=file.name;links.append(link);if(['companies','lpr'].includes(file.kind)){const work=button('','Работать: '+(file.kind==='companies'?'компании':'ЛПР'));work.dataset.gridSource=file.id;work.addEventListener('click',()=>openGridWorkbook(file.id));links.append(work);}}menu.append(links);row.append(more);
+      target.append(row);
     }
     if(focusKey)Array.from(target.querySelectorAll('[data-segment-focus]')).find((node)=>node.dataset.segmentFocus===focusKey)?.focus({preventScroll:true});if(window.scrollY!==oldY)window.scrollTo(0,oldY);
   }
   async function refreshSegments(options={}){
-    if(!accessReady||viewMutationBlocked()||dashboardLoading||dashboardAnalysisLoading)return;if(options.automatic&&(activeView!=='segments'||document.hidden||formIsOpen()||Date.now()-lastDashboardAttempt<60000))return;
-    const epoch=accessEpoch,request=++dashboardRequest,mutation=mutationGeneration,light=!dashboard&&!options.manual&&!options.sync&&!options.fullAnalysis;
+    if(!accessReady||viewMutationBlocked()||dashboardLoading)return;if(options.automatic&&(activeView!=='segments'||document.hidden||formIsOpen()||Date.now()-lastDashboardAttempt<60000))return;
+    const epoch=accessEpoch,request=++dashboardRequest,mutation=mutationGeneration;
     const current=()=>accessReady&&epoch===accessEpoch&&request===dashboardRequest&&
       (!(options.background||options.automatic)||activeView==='segments'&&!document.hidden&&!formIsOpen()&&!viewMutationBlocked());
-    if(options.background)dashboardAnalysisLoading=true;else dashboardLoading=true;lastDashboardAttempt=Date.now();updateControls();renderSegmentsHealth();
+    dashboardLoading=true;lastDashboardAttempt=Date.now();updateControls();renderSegmentsHealth();
     try{
-      const result=await readRpc('getSegmentsDashboard',light?{includeAnalysis:false,...(window.RegistrySegmentCard?{includeCardPreview:true}:{})}:{},current);
+      const result=await readRpc('getSegmentsDashboard',{includeAnalysis:false,...(window.RegistrySegmentCard?{includeCardPreview:true}:{})},current);
       if(!result||!current()||mutation!==mutationGeneration)return;
       window.RegistrySegmentCard?.acceptDashboard?.(result);
       delete result.cardPreviews;
@@ -1206,7 +1252,7 @@
       const parsed=failure(error);dashboardError=parsed.message;
       if(['ACCESS_DENIED','OUTSIDE_REGISTRY','SOURCE_CHANGED','NOT_FOUND','AUTH_REQUIRED'].includes(parsed.code)){segmentDirectory=null;directoryRequest=null;delete fastDirectories.segments;dashboard=null;}
     }}
-    finally{if(epoch!==accessEpoch||request!==dashboardRequest)return;dashboardLoading=false;dashboardAnalysisLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();if(dashboard?.analysisPending===true&&activeView==='segments'&&!formIsOpen())scheduleSegmentAnalysis();}
+    finally{if(epoch!==accessEpoch||request!==dashboardRequest)return;dashboardLoading=false;if(segmentEditor)renderSegmentSources();updateControls();if(activeView==='segments')renderSegments();renderSegmentsHealth();flushPendingView();}
   }
   function openSegmentContactCard(id,firstRead,fromPreview=false){
     const item=segmentById(id)||(!dashboard&&!segmentDirectory&&fastDirectories.segments?.items.find(item=>item.id===id));if(!accessReady||!item||!window.RegistrySegmentCard)return;
@@ -1731,7 +1777,7 @@
   }
   function updateControls(){
     $('br-origin-recover').disabled=!sourceData?.canEdit||recoveringOrigins||requesting()||!accessReady;
-    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&(dashboardLoading||dashboardAnalysisLoading)||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady&&!previewShell();$('br-settings-open').disabled=!accessReady&&!previewShell()||gridIsOpen()||!!window.RegistryProject?.hasPending?.();$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=(!accessReady&&(!globalThis.RegistryPagesTransport||!!accessMessage))||gridIsOpen();renderPreparedJobs();
+    const waiting=requesting()||!accessReady,editing=editingBlocked();$('br-refresh').disabled=waiting||gridIsOpen()||activeView==='segments'&&dashboardLoading||activeView==='mailings'&&mailingsLoading;if(['analytics','infrastructure'].includes(activeView)&&window.RegistryProject?.isLoading?.())$('br-refresh').disabled=true;$('br-refresh').hidden=activeView==='retarget'||!accessReady&&!previewShell();$('br-settings-open').disabled=!accessReady&&!previewShell()||gridIsOpen()||!!window.RegistryProject?.hasPending?.();$('br-share-copy').disabled=!accessReady;$('br-provider-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!coldySession;$('br-coldy-open').disabled=!accessReady||gridIsOpen()&&!settingsSession?.gridReturn||!!providerSession||!!window.RegistryProject?.hasPending?.();for(const view of ['sources','segments','analytics','infrastructure','retarget'])$('br-view-'+view).disabled=(!accessReady&&(!globalThis.RegistryPagesTransport||!!accessMessage))||gridIsOpen();renderPreparedJobs();
     // Repeated state updates in another section must not walk hidden catalog cards.
     if(activeView==='sources'){
       const editors=$('br-sources-items').querySelectorAll('.br-source-fields');
@@ -1817,7 +1863,7 @@
     if(preparedImport?.continueQueued){advancePreparedBase(true);return;}
     if(preparedImport?.previewQueued&&importOpen&&activeView==='sources'){runPreparedPreview();return;}
     if(segmentEditor){renderSegmentSources();updateControls();if(segmentEditor.readingLists)return;if(segmentEditor.loadingLists){loadSegmentEditorLists();return;}if(segmentEditor.pendingSourceId){const id=segmentEditor.pendingSourceId;segmentEditor.pendingSourceId=null;chooseSegmentSource(id,true);return;}}
-    updateControls();if(activeView==='segments'&&dashboard?.analysisPending===true&&!dashboardAnalysisLoading&&!dashboardLoading&&!formIsOpen())scheduleSegmentAnalysis();if(pendingView){const view=pendingView;pendingView=null;if(view===activeView){refreshActiveView({opening:true,preserveNotice:true});return;}}
+    updateControls();if(pendingView){const view=pendingView;pendingView=null;if(view===activeView){refreshActiveView({opening:true,preserveNotice:true});return;}}
     if(activeView==='sources'&&preparedJobsQueued&&!preparedJobsLoaded&&!preparedJobsLoading&&(sourceData||lastSourceAttempt)&&!formIsOpen()&&!sourceFocused()){runPreparedJobList();return;}
     if(syncTimer===null&&pendingSyncViews.has(activeView)&&!formIsOpen()&&!sourceFocused())refreshActiveView({sync:true,preserveNotice:true});
   }
@@ -1848,7 +1894,7 @@
     if(pendingDirectoryOpen&&view!==pendingDirectoryOpen.kind)cancelDirectoryOpen();
     if(view==='segments'&&!options.fromFastEntry&&!fastDirectories.segments&&!accessReady&&busy&&accessKey&&bootstrapIncludesDirectory===false&&globalThis.RegistryPagesTransport)void fetchSegmentDirectory();
     if(view!==activeView&&!options.back)rememberView({view:activeView,scroll:window.scrollY,mailingSegmentId,cardId:window.RegistrySegmentCard?.id()});
-    activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});if(view==='segments'&&dashboard?.analysisPending===true&&!formIsOpen())scheduleSegmentAnalysis();if(view==='sources'&&preparedJobsQueued)flushPendingView();
+    activeView=view;render();armViewTimer();if(!options.cached)refreshActiveView({opening:true});if(view==='sources'&&preparedJobsQueued)flushPendingView();
   }
   function previousView(){
     const previous=viewTrail.pop();if(!previous)return false;
@@ -1911,7 +1957,15 @@
   window.addEventListener('registry-grid-state',()=>syncBack());
   root.addEventListener('toggle',()=>syncBack(),true);
   root.addEventListener('close',()=>syncBack(),true);
+  document.addEventListener('click',event=>{
+    const open=root.querySelector('.br-segment-secondary[open]');
+    if(open&&!open.contains(event.target))open.open=false;
+  });
   document.addEventListener('keydown',event=>{
+    const menu=event.target.closest?.('.br-segment-secondary[open]');
+    if(event.key==='Escape'&&menu&&!event.defaultPrevented){
+      event.preventDefault();menu.open=false;menu.querySelector('summary').focus();return;
+    }
     if(event.key!=='Escape'||event.defaultPrevented||event.isComposing||root.querySelector('dialog[open]')||!canGoBack())return;
     event.preventDefault();goBack();syncBack();
   });

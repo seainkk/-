@@ -5,11 +5,12 @@ import sys
 from performance_client import expand_segment_actions
 from playwright.sync_api import expect, sync_playwright
 from project_client import integrated_html
+from segment_card import DATA as CARD_DATA
 
 
 def main():
     grid = Path(__file__).with_name('grid-fixture.js').read_text(encoding='utf-8')
-    fixture = grid + """
+    fixture = grid + CARD_DATA + """
 const fullCatalog=api.getSourceBases;
 const bootstrapCatalog=api.getAppBootstrap;
 api.getAppBootstrap=payload=>({...bootstrapCatalog(),catalogPreview:payload?.includeSourcePreview?{
@@ -98,11 +99,52 @@ for(const method of ['getGridWorkbook','getGridRange','saveGridRange','getContac
         segment=page.locator('[data-segment="existing-segment"]')
         expect(segment).to_be_visible()
         expect(bases).to_have_attribute('aria-pressed','false')
-        page.wait_for_function('backend.dashboardFullGets>0&&backend.active===0')
+        page.wait_for_function('backend.dashboardLightGets>0&&backend.active===0')
         assert calls('getSourceBases')==5
         page.evaluate("backend.segments[0].name='Сегмент после изменения'")
         tick(61000)
         expect(segment.locator('.br-segment-row-name')).to_have_text('Сегмент после изменения')
+        status=segment.locator('.br-segment-status')
+        menu=segment.locator('.br-segment-secondary > summary')
+        expect(menu).to_have_accessible_name('Настройки сегмента «Сегмент после изменения»')
+        expect(status).to_have_text('В работе')
+        expect(segment.get_by_role('combobox')).not_to_be_visible()
+        menu.focus();menu.press('Enter')
+        field=segment.get_by_role('combobox',name='Статус сегмента')
+        page.evaluate('backend.loseWorkStatusReply=true')
+        field.select_option('paused')
+        expect(page.locator('#br-notice')).to_contain_text('Ответ потерян')
+        expect(field).to_have_value('working')
+        field.select_option('paused')
+        expect(status).to_have_text('Пауза')
+        writes=page.evaluate("backend.calls.filter(c=>c.name==='setSegmentWorkStatus').map(c=>c.p)")
+        assert len(writes)==2 and writes[0]==writes[1]
+        assert writes[0]['segmentId']=='existing-segment' and writes[0]['expectedRevision']==0 and writes[0]['requestId']
+        expand_segment_actions(segment)
+        field.focus()
+        page.keyboard.press('Escape')
+        expect(field).not_to_be_visible()
+        expect(menu).to_be_focused()
+        page.locator('#br-refresh').click()
+        page.wait_for_function('backend.active===0')
+        expect(status).to_have_text('Пауза')
+        segment.locator('.br-segment-row-name').click()
+        card=page.locator('#sc-view')
+        card.locator('#sc-secondary > summary').click()
+        editor=card.get_by_role('combobox',name='Статус сегмента')
+        expect(editor).to_have_value('paused')
+        # A colleague saves a newer revision while this editor is open.
+        page.evaluate("Object.assign(backend.segments[0],{workStatus:'stopped',workStatusRevision:2})")
+        editor.select_option('working')
+        expect(page.locator('#br-notice')).to_contain_text('Статус уже изменён')
+        expect(editor).to_have_value('stopped')
+        editor.select_option('working')
+        expect(page.locator('#br-notice')).to_contain_text('Статус сегмента сохранён')
+        page.wait_for_function("backend.segments[0].workStatusRevision===3&&backend.active===0")
+        page.keyboard.press('Escape')
+        page.locator('#br-action-back').click()
+        expect(status).to_have_text('В работе')
+        assert page.evaluate("backend.calls.filter(c=>c.name==='getSegmentsDashboard').every(c=>c.p?.includeAnalysis===false)")
         before=calls('getSegmentsDashboard')
         page.evaluate("testClock.hidden=true;document.dispatchEvent(new Event('visibilitychange'));tick(121000)")
         assert calls('getSegmentsDashboard')==before
