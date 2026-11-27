@@ -12,13 +12,13 @@
   let senderTimer=null,senderAttempt=0,senderView=null;
   let recipientImport=null;
   let syncSetupBusy=false,syncSetupMessage='';
-  let forecastData=null,forecastError='',forecastDays=1,forecastBusy=false,forecastSequence=0;
+  let forecastData=null,forecastError='',forecastBusy=false,forecastSequence=0;
   let forecastTimer=null,forecastCheckedAt=0,forecastRetryAt=0;
   let forecastArchive=null,forecastPreviewAttempt=0,forecastPreviewVersion=0;
-  let historyReport=null,historySequence=0,historyTimer=null,historyBusy=false,historyRetryAt=0,historyChecked=0;
-  let senderTableReport=null,senderTablePeriod=null;
+  let historyReport=null,historyError='',historySequence=0,historyTimer=null,historyBusy=false,historyRetryAt=0,historyChecked=0;
   let todayFacts=null,todayBusy=false,todayEpoch=0,todayChecked=0,todayRetry=0,todayTimer=null,todayError='';
   let completionData=null,completionMessage='',completionNext=0,completionTimer=null,completionVersion=0,completionBusy=false;
+  let completionTableKey=null;
   const recipientRequests=new Map();
   const campaignPageSize=40;
   const liveInterval=60000;
@@ -39,9 +39,10 @@
   function mutation(details){
     if(details?.kind==='binding'||details?.kind==='monitoring'){
       resetTodayFacts();
-      clearHistory(false);
+      clearHistory();
       if(details.kind==='binding'){infrastructure=null;infraLoadedAt=0;}
-      senderAttempt=0;resetForecast(false);resetCompletions();paintOpenSenders();queueSenderUpdate(true);
+      senderAttempt=0;resetForecast();resetCompletions();paintOpenSenders();queueSenderUpdate(true);
+      if(view==='analytics')queueMicrotask(()=>loadSendingPeriod());
     }
     try{config?.onMutation?.(details);}catch(ignored){}
   }
@@ -90,7 +91,7 @@
   }
   function clear(){
     resetTodayFacts();
-    clearHistory(true);
+    clearHistory();resetSendingFilters();
     clearTimeout(catalogExpiryTimer);catalogExpiryTimer=null;
     expandedSenders.clear();clearTimeout(senderTimer);senderTimer=null;senderAttempt=0;senderView=null;
     resetForecast();
@@ -108,8 +109,8 @@
     if(options.credentialsChanged){clear();}
     else{
       resetTodayFacts();
-      clearHistory(false);
-      resetForecast(false);
+      clearHistory();
+      resetForecast();
       resetCompletions();
       catalogLoadedAt=0;catalogSequence++;catalogLoading=false;catalogError='';
       for(const context of contexts.values()){context.loadedAt=0;if(context.data){delete context.data.configured;delete context.data.connected;}context.sequence++;context.loading=false;context.metricsLoading=false;context.searching=false;}
@@ -125,14 +126,12 @@
     if(scopeChanged)accessEpoch=options.epoch;
     ready=options.ready===true;preview=!ready&&options.preview===true;
     view=(ready||preview)&&views.has(next)?next:null;
-    if(view!=='infrastructure'){clearTimeout(todayTimer);todayTimer=null;}
-    if(view!=='analytics'&&$('pj-history')?.open){$('pj-history').open=false;pauseHistory();}
-    if(view==='analytics'&&ready&&!wasReady&&$('pj-history')?.open)void readHistory();
+    if(previous==='analytics'&&view!==previous)stopSendingTimers();
     const directoryApplied=updateCatalogHint();
-    if(view!=='analytics'&&$('pj-forecast')?.open){$('pj-forecast').open=false;pauseForecast();}
     if(view!=='infrastructure'&&mailboxPicker?.open)closeMailboxPicker();
     if((view!=='analytics'||!ready)&&recipientImport?.open)closeRecipientImport();
     if(directoryApplied||scopeChanged||view!==previous||wasReady!==ready||wasPreview!==preview)render();
+    if(ready&&view==='analytics'&&(previous!==view||!wasReady))queueMicrotask(()=>loadSendingPeriod());
     if(ready&&!wasReady&&wasPreview&&!scopeChanged){
       if(view==='infrastructure'&&mailboxPicker?.open)void loadMailboxSelection();
       if(view==='analytics'&&segmentId&&catalog?.segments.some(item=>item.id===segmentId))void loadSegment(segmentId);
@@ -142,7 +141,7 @@
       // The host toggles the segment mailing view immediately after this callback.
       if(ready)queueMicrotask(()=>queueSenderUpdate(true));
     }
-    if(ready&&(next==='mailings'||view!==previous&&completionCells().length))queueCompletions();
+    if(ready&&(next==='mailings'||view==='analytics'||view!==previous&&completionCells().length))queueCompletions();
   }
   function updateCatalogHint(){
     if(view!=='analytics'||catalogError||catalog&&catalogExpiryTimer===null)return false;
@@ -231,30 +230,52 @@
   }
   function pollVisible(){return ready&&!document.hidden&&!isEditing()&&!hasPending()&&config?.canPoll?.()!==false;}
   function recentPoll(at){const age=Date.now()-at;return at>0&&age>=0&&age<liveInterval;}
-  function infrastructurePlanVisible(){return view==='infrastructure'&&infrastructure?.monitoring?.accountIds?.length>0&&pollVisible();}
-  function forecastVisible(){return infrastructurePlanVisible()||view==='analytics'&&$('pj-forecast')?.open&&pollVisible();}
+  function reportVisible(){return view==='analytics'&&pollVisible();}
+  function forecastVisible(){return reportVisible()&&$('pj-plan-period').value!=='history';}
+  function todayVisible(){return forecastVisible()&&$('pj-plan-period').value==='today';}
+  function historyVisible(){return reportVisible()&&$('pj-plan-period').value==='history';}
+  function stopSendingTimers(){
+    clearTimeout(todayTimer);todayTimer=null;
+    clearTimeout(forecastTimer);forecastTimer=null;
+    pauseHistory();
+  }
+  function loadSendingPeriod(manual=false){
+    if(!reportVisible())return;
+    if(historyVisible()){
+      if(historyRetryAt>Date.now()){
+        if(historyTimer===null)scheduleHistory(historyRetryAt-Date.now());
+      }else if(manual||historyTimer===null)void readHistory(manual);
+    }else{
+      void readForecast(manual||!!forecastData?.pending&&forecastTimer===null);
+      if(todayVisible()){
+        if(todayRetry>Date.now()){
+          if(todayTimer===null)scheduleTodayFacts(todayRetry-Date.now());
+        }else if(manual||todayTimer===null)void readTodayFacts(manual);
+      }
+      void preloadForecast();
+    }
+    if(!infraLoadedAt||!recentPoll(infraLoadedAt))void loadInfrastructure();
+  }
   function pauseForecast(){
     if(forecastTimer!==null)clearTimeout(forecastTimer);
     forecastTimer=null;forecastBusy=false;forecastSequence++;
   }
-  function resetForecast(close=true){
+  function resetForecast(){
     pauseForecast();forecastData=null;forecastError='';forecastCheckedAt=0;forecastRetryAt=0;
     forecastArchive=null;forecastPreviewAttempt=0;forecastPreviewVersion++;
-    if(close){forecastDays=1;if($('pj-forecast'))$('pj-forecast').open=false;if($('pj-forecast-senders'))$('pj-forecast-senders').open=false;}
-    renderForecast();
   }
   function currentForecastDay(){return new Date(Date.now()+10800000).toISOString().slice(0,10);}
   async function preloadForecast(){
-    if(view!=='analytics'||!ready||document.hidden||forecastArchive?.day===currentForecastDay()||recentPoll(forecastPreviewAttempt))return;
+    if(!forecastVisible()||forecastArchive?.day===currentForecastDay()||recentPoll(forecastPreviewAttempt))return;
     const mark=token(),version=forecastPreviewVersion;
-    const valid=()=>alive(mark)&&version===forecastPreviewVersion&&view==='analytics'&&!document.hidden;
+    const valid=()=>alive(mark)&&version===forecastPreviewVersion&&forecastVisible();
     forecastPreviewAttempt=Date.now();
     try{
       const data=await invoke('getProjectForecastPreview',{},mark,valid);
       if(valid()&&data?.forecast&&data.generatedAt&&data.day===currentForecastDay()&&
         (!forecastData||forecastData.previewScope===data.previewScope)&&
         !(Date.parse(forecastArchive?.generatedAt)>=Date.parse(data.generatedAt))){
-        forecastArchive=data;renderForecast();
+        forecastArchive=data;renderSendingReport();
       }
     }catch(ignored){/* The live calculation reports any error when the forecast is opened. */}
   }
@@ -275,7 +296,7 @@
     const mark=token(),sequence=++forecastSequence,previous=forecastData;
     const valid=()=>alive(mark)&&sequence===forecastSequence&&forecastVisible();
     if(forecastTimer!==null){clearTimeout(forecastTimer);forecastTimer=null;}
-    forecastBusy=true;forecastError='';forecastCheckedAt=Date.now();renderForecast();
+    forecastBusy=true;forecastError='';forecastCheckedAt=Date.now();renderSendingReport();
     try{
       const data=await invoke('getProjectSendingForecast',{},mark,valid);
       if(!data||!valid())return;
@@ -294,7 +315,7 @@
         forecastData=null;forecastArchive=null;forecastPreviewVersion++;
       }
       forecastError=problem.message;
-    }finally{if(alive(mark)&&sequence===forecastSequence){forecastBusy=false;renderForecast();}}
+    }finally{if(alive(mark)&&sequence===forecastSequence){forecastBusy=false;if(!valid())forecastCheckedAt=0;if(view==='analytics')renderSendingReport();}}
   }
   const forecastReasons={
     previous_horizon:'Последний день нового периода выходит за даты прежнего расчёта. Он появится после обновления.',
@@ -345,12 +366,16 @@
     const notice=completionMessage||completionData?.message;
     let description;
     if(record?.state==='completed')description='Все письма отправлены';
+    else if(block.dataset.providerStatus==='Completed')description='Рассылка завершена в Coldy';
     else if(date!=='—')description='Ориентировочно '+date;
     else if(previousDate!=='—')description='Предыдущая оценка '+previousDate;
     else if(record)description=completionReasons[record.reason]||'Пока нет оценки даты завершения.';
     else description=notice||(completionData&&!completionData.pending?'Для этой рассылки пока нет расчёта.':'Рассчитываем завершение…');
     block.append(node(hasDate||record?.state==='completed'?'strong':'span','pj-completion-date',description));
     const note=value=>block.append(node('small','pj-completion-count',value));
+    if(record?.state==='completed'&&record.lastSentAt)note('Последнее письмо по валидным контактам: '+timestamp(record.lastSentAt)+' МСК');
+    else if(record?.state==='completed')note('Для части отправок нет подтверждённого времени последнего письма.');
+    else if(block.dataset.providerStatus==='Completed')note('Coldy не передал дату завершения.');
     if(previousDate!=='—'&&previousAt)note('Рассчитано '+previousAt+' МСК');
     if(hasDate&&(date!=='—'?record.reason:previous.reason)==='observed_pace')note('По фактическому темпу отправок этой рассылки.');
     if(date!=='—'&&record.reason==='from_tomorrow')note('Расчёт с завтрашнего дня, остаток отправок на сегодня неизвестен.');
@@ -370,11 +395,57 @@
   function completionCells(){
     return Array.from(document.querySelectorAll('.pj-completion[data-completion-campaign]')).filter(block=>!block.closest('[hidden]'));
   }
+  function projectCompletionVisible(){return view==='analytics'&&!!$('pj-project-completions-rows');}
+  function renderProjectCompletionTable(){
+    const body=$('pj-project-completions-rows');if(!body)return;
+    const summary=$('pj-project-completions-last');
+    if(!ready||view!=='analytics'){completionTableKey=null;body.replaceChildren();summary.hidden=true;summary.textContent='';health('pj-project-completions-health','');return;}
+    const campaigns=completionData?.campaigns,filters=sendingFilters;
+    const senders=filters.accounts,assigned=new Set();
+    if(senders){
+      for(const a of infrastructure?.accounts||[])if(senders.has(String(a.id))){
+        for(const id of [...(a.capacity?.campaignIds||[]),...(a.capacity?.inactiveCampaignIds||[])])assigned.add(String(id));
+      }
+      const day=currentForecastDay(),evidence=sendingEvidence(day,sendingDates(day));
+      for(const a of evidence.plan?.senders||[])if(senders.has(String(a.id))){
+        for(const c of a.campaigns||[])assigned.add(String(c.id));
+      }
+      for(const row of evidence.facts?.rows||[]){
+        if(row.sent>0&&senders.has(String(row.accountId)))assigned.add(String(row.campaignId));
+      }
+    }
+    const visible=(campaigns||[]).filter(c=>(!filters.segment||filters.segment===c.segmentId)&&(!filters.campaign||filters.campaign===c.id)&&(!senders||assigned.has(c.id)));
+    let latest='';
+    const dated=visible.every(c=>{
+      const record=completionData.campaignCompletions?.[c.id];
+      if(!c.observed||!['Active','Completed'].includes(c.status))return false;
+      if(record?.state==='completed')return true;
+      if(c.status!=='Active'||record?.state!=='estimated'||forecastDate(record.estimatedDate)==='—')return false;
+      if(record.estimatedDate>latest)latest=record.estimatedDate;
+      return true;
+    });
+    summary.hidden=!latest||!dated||!!completionData?.pending||!!completionMessage;
+    summary.textContent=summary.hidden?'':'Последняя отправка по прогнозу — '+forecastDate(latest);
+    health('pj-project-completions-health',completionMessage||(!campaigns?'Получаем список рассылок проекта…':
+      !campaigns.length?completionData.message||'В проекте нет связанных рассылок.':!visible.length?'Для выбранных фильтров пока нет подтверждённых рассылок.':''),!!completionMessage);
+    const key=JSON.stringify(visible);if(key===completionTableKey)return;completionTableKey=key;
+    const rows=document.createDocumentFragment();
+    for(const c of [...visible].sort((a,b)=>a.name.localeCompare(b.name,'ru'))){
+      const row=node('tr'),status=node('td'),finish=node('td'),block=node('div','pj-completion');
+      row.dataset.projectCompletion=c.id;
+      status.append(badge(c.status==='Unknown'?'Уточняется':c.status));
+      if(!c.observed&&c.status!=='Unknown')status.append(node('small','pj-cell-note','Сохранённый статус'));
+      block.dataset.completionCampaign=c.id;block.dataset.providerStatus=c.status;paintCompletion(block);finish.append(block);
+      row.append(node('th','',c.name),node('td','',c.segmentName),status,finish);rows.append(row);
+    }
+    body.replaceChildren(rows);
+  }
   function resetCompletions(){
     if(completionTimer!==null)clearTimeout(completionTimer);
     completionTimer=null;completionVersion++;completionData=null;completionNext=0;completionBusy=false;completionMessage='';
+    renderProjectCompletionTable();
     const blocks=document.querySelectorAll('.pj-completion[data-completion-campaign]');
-    blocks.forEach(paintCompletion);if(blocks.length)queueCompletions();
+    blocks.forEach(paintCompletion);if(blocks.length||projectCompletionVisible())queueCompletions();
   }
   function queueCompletions(){
     if(!ready||document.hidden||completionTimer!==null||completionBusy)return;
@@ -383,15 +454,19 @@
     completionTimer=setTimeout(()=>{completionTimer=null;void readCompletions();},Math.max(yieldToSelection?120:0,completionNext-Date.now()));
   }
   function refreshVisibleCompletions(){
-    if(!completionCells().length||completionBusy||completionData?.retryAfterMs>0&&completionNext>Date.now())return;
+    if(!projectCompletionVisible()&&!completionCells().length||completionBusy||completionData?.retryAfterMs>0&&completionNext>Date.now())return;
     if(completionTimer!==null)clearTimeout(completionTimer);
     completionTimer=null;completionNext=0;queueCompletions();
   }
   async function readCompletions(){
-    if(!ready||document.hidden||completionBusy||!completionCells().length)return;
+    const visible=()=>projectCompletionVisible()||completionCells().length>0;
+    if(!ready||document.hidden||completionBusy||!visible())return;
     const mark=token(),version=completionVersion;
-    const valid=()=>alive(mark)&&version===completionVersion&&!document.hidden&&completionCells().length>0;
-    const paint=()=>{completionCells().forEach(paintCompletion);paintOpenSenders();};
+    const valid=()=>alive(mark)&&version===completionVersion&&!document.hidden&&visible();
+    const paint=()=>{
+      if(projectCompletionVisible())renderSendingReport();
+      completionCells().forEach(paintCompletion);paintOpenSenders();
+    };
     completionBusy=true;
     try{
       if(!completionData){
@@ -399,6 +474,7 @@
         if(!valid())return;
         if(preview){
           completionData=preview;paint();
+          if(Array.isArray(preview.campaigns)&&!preview.campaigns.length){completionNext=Date.now()+300000;return;}
           const wait=Math.max(Number(preview.freshForMs)||0,Number(preview.retryAfterMs)||0);
           if(wait>0){completionNext=Date.now()+wait;return;}
         }
@@ -583,219 +659,327 @@
       }
     }
   }
-  function sendingHead(table,dates){
-    const row=node('tr');
-    for(const label of ['Почта','Рассылка',...dates.map(day=>forecastDate(day).slice(0,5)),'Всего']){
-      const th=node('th','',label);th.scope='col';row.append(th);
-    }
-    table.tHead.replaceChildren(row);
+  const sendingFilters={segment:'',campaign:'',accounts:null,period:'today',group:'day'};
+  const sendingOptions={campaigns:new Map(),segments:new Map()};
+  let lastSendingRender=null;
+  function resetSendingFilters(){
+    lastSendingRender=null;
+    Object.assign(sendingFilters,{segment:'',campaign:'',accounts:null,period:'today',group:'day'});
+    for(const map of Object.values(sendingOptions))map.clear();
+    if(!$('pj-plan-period'))return;
+    $('pj-plan-period').value='today';$('pj-plan-group').value='day';$('pj-history-date').value='';
+    $('pj-history-date-field').hidden=true;
+    $('pj-plan-pool').open=false;$('pj-plan-detail').open=false;
+    for(const id of ['pj-plan-days','pj-plan-day','pj-plan-accounts','pj-plan-senders','pj-plan-asof','pj-plan-health'])$(id).replaceChildren();
+    for(const id of ['pj-plan-segment','pj-plan-campaign'])$(id).options.length=1;
+    $('pj-plan-all').checked=true;$('pj-plan-all').indeterminate=false;
+    $('pj-plan-pool').querySelector('summary').textContent='Почты · все';
   }
-  function sendingRow(body,account,campaign,values,group=false,notes=[]){
-    const row=node('tr',group?'pj-mail-group':'');
-    const label=node('th','',account);label.scope='row';row.append(label,node('td','',campaign));
-    values.forEach((value,i)=>{
-      const cell=node('td','pj-number',value);
-      if(notes[i])cell.append(node('small','',notes[i]));
-      row.append(cell);
-    });
-    body.append(row);
+  const knownCount=n=>Number.isSafeInteger(n)&&n>=0;
+  function sendingQuota(q,today){
+    const age=Date.now()-Date.parse(q?.limitAt);
+    return q?.date===today&&age>=0&&age<300000&&knownCount(q.limit)?q.limit:null;
   }
-  function mailLabel(account){return account.email||account.name||String(account.id);}
-  function renderSendingHistory(data){
-    const wrap=$('pj-history-result'),table=wrap.querySelector('table');
-    const dates=data?.days||[],accounts=data?.accounts||[],campaigns=data?.campaigns||[];
-    wrap.hidden=!dates.length||!accounts.length||!campaigns.length;
-    table.tBodies[0].replaceChildren();table.tHead.replaceChildren();
-    if(wrap.hidden)return;
-    sendingHead(table,dates);
-    const fragment=document.createDocumentFragment(), indexes=new Map(dates.map((d,i)=>[d,i]));
-    const counts=new Map(),coverage=new Map(),dayChecks=dates.map(()=>0);
-    for(const item of data.checkedCells||[]){
-      const id=String(item.campaignId),i=indexes.get(item.date);
-      if(i===undefined)continue;
-      if(!coverage.has(id))coverage.set(id,new Set());
-      if(!coverage.get(id).has(i)){coverage.get(id).add(i);dayChecks[i]++;}
+  function addCounts(values){return values.every(knownCount)?values.reduce((a,b)=>a+b,0):null;}
+  function dateOffset(date,days){return new Date(Date.parse(date+'T00:00:00Z')+days*86400000).toISOString().slice(0,10);}
+  function weekStart(date){return dateOffset(date,-((new Date(date+'T00:00:00Z').getUTCDay()+6)%7));}
+  function sendingDates(today){
+    const period=sendingFilters.period;
+    if(period==='history'){
+      const anchor=$('pj-history-date').value,start=anchor?weekStart(anchor):dateOffset(weekStart(today),-7);
+      return Array.from({length:7},(_,i)=>dateOffset(start,i)).filter(d=>d<today);
     }
-    for(const fact of data.rows||[]){
-      const i=indexes.get(fact.date);
-      if(i===undefined||!Number.isSafeInteger(fact.sent)||fact.sent<0)continue;
-      const a=String(fact.accountId),c=String(fact.campaignId);
-      if(!counts.has(a))counts.set(a,new Map());
-      const map=counts.get(a);
-      if(!map.has(c))map.set(c,dates.map(()=>0));
-      map.get(c)[i]+=fact.sent;
+    const count=period==='3'?3:period==='7'?7:1;
+    return Array.from({length:count},(_,i)=>dateOffset(today,i+(period==='today'?0:1)));
+  }
+  function periodGroups(dates){
+    const groups=new Map();
+    for(const d of dates){
+      const id=sendingFilters.group==='week'?weekStart(d):d;
+      if(!groups.has(id))groups.set(id,[]);
+      groups.get(id).push(d);
     }
-    const allDays=dayChecks.map(n=>data.complete===true||n===campaigns.length);
-    function display(values,known){
-      const format=(n,ok)=>ok?number(n):n>0?'от '+number(n):'—';
-      return [...values.map((n,i)=>format(n,known[i])),format(values.reduce((a,b)=>a+b,0),known.every(Boolean))];
+    return groups;
+  }
+  function sendingSelect(id,entries,selected){
+    const control=$(id),all=control.options[0].textContent;
+    if(selected&&!entries.has(selected))entries.set(selected,sendingOptions[id==='pj-plan-campaign'?'campaigns':'segments'].get(selected)||'Выбранное значение');
+    const items=[['',all],...Array.from(entries).sort((a,b)=>a[1].localeCompare(b[1],'ru'))];
+    if(items.length!==control.options.length||items.some(([v,t],i)=>control.options[i].value!==v||control.options[i].text!==t))
+      control.replaceChildren(...items.map(([v,t])=>new Option(t,v)));
+    control.value=selected;
+  }
+  function sendingSenderPicker(accounts){
+    const ids=Array.from(accounts.keys()),selected=sendingFilters.accounts,all=$('pj-plan-all'),list=$('pj-plan-senders');
+    const count=selected===null?ids.length:ids.filter(id=>selected.has(id)).length;
+    all.checked=selected===null;all.indeterminate=selected!==null&&count>0;
+    $('pj-plan-pool').querySelector('summary').textContent=selected===null?'Почты · все':'Почты · выбрано '+count;
+    const old=new Map(Array.from(list.querySelectorAll('input'),b=>[b.value,b]));
+    for(const [id,label] of accounts){
+      let input=old.get(id);
+      if(!input){
+        const wrapper=node('label','');input=document.createElement('input');
+        input.type='checkbox';input.value=id;wrapper.append(input,document.createTextNode(' '+label));list.append(wrapper);
+      }else if(input.nextSibling.textContent!==' '+label)input.nextSibling.textContent=' '+label;
+      input.checked=selected===null||selected.has(id);old.delete(id);
     }
-    const total=dates.map(()=>0),campaignNames=new Map(campaigns.map(c=>[String(c.id),c.name||String(c.id)]));
-    for(const account of accounts){
-      const days=dates.map(()=>0),entries=counts.get(String(account.id));
-      for(const [id,values] of entries||[]){
-        if(campaignNames.has(id))values.forEach((v,i)=>{days[i]+=v;total[i]+=v;});
-      }
-      sendingRow(fragment,mailLabel(account),'Все рассылки',display(days,allDays),true);
-      for(const [id,name] of campaignNames){
-        const values=entries?.get(id)||dates.map(()=>0);
-        sendingRow(fragment,'',name,display(values,dates.map((_,i)=>data.complete===true||coverage.get(id)?.has(i))));
-      }
+    for(const stale of old.values())stale.parentElement.remove();
+  }
+  function sendingEvidence(today,dates){
+    const history=sendingFilters.period==='history',raw=history?historyReport:todayFacts;
+    const facts=raw&&(history?dates.length&&raw.from===dates[0]:raw.from===today)?raw:null;
+    const live=forecastData?.day===today?forecastData:null,archive=forecastArchive?.day===today?forecastArchive:null;
+    const archived=archive?.forecast,calendarCovered=sendingFilters.period!=='today'||archived?.today?.date===today;
+    const needsSenders=sendingFilters.period==='today'||sendingFilters.accounts!==null||$('pj-plan-detail').open;
+    const useArchive=archive&&!live?.generatedAt&&(!live?.forecast||calendarCovered&&(!needsSenders||Array.isArray(archived?.senders)||!live.forecast.senders));
+    const snapshot=history?null:useArchive?archive:live;
+    const directory=infrastructure?.monitoring?.accountIds;
+    const accountSource=Array.isArray(directory)?directory:facts?.accounts?.map(a=>a.id)||snapshot?.forecast?.senders?.map(a=>a.id);
+    const pool=Array.isArray(accountSource)?new Set(accountSource.map(String)):null;
+    const matches=list=>pool&&Array.isArray(list)&&list.length===pool.size&&new Set(list.map(a=>String(a.id))).size===pool.size&&list.every(a=>pool.has(String(a.id)));
+    const trustedFacts=matches(facts?.accounts)?facts:null;
+    const report=snapshot?.forecast;
+    const idsProven=matches(report?.senders);
+    const bound=new Set((trustedFacts?.campaigns||[]).map(c=>String(c.id)));
+    const compatible=!trustedFacts||!Array.isArray(report?.campaigns)||report.campaigns.every(c=>bound.has(String(c.id)));
+    const unfiltered=!sendingFilters.segment&&!sendingFilters.campaign&&sendingFilters.accounts===null;
+    const trustedPlan=report&&compatible&&(idsProven||(!report.senders&&unfiltered&&sendingFilters.period!=='today'))?report:null;
+    const labels=new Map();
+    for(const a of [...(infrastructure?.accounts||[]),...(trustedPlan?.senders||[]),...(trustedFacts?.accounts||[])]){
+      const id=String(a.id);if(pool?.has(id))labels.set(id,a.email||a.name||labels.get(id)||id);
     }
-    sendingRow(table.tBodies[0],'Все почты','Все рассылки',display(total,allDays),true);
-    table.tBodies[0].append(fragment);
+    const accounts=new Map(Array.from(pool||[],id=>[id,labels.get(id)||id]));
+    const campaigns=new Map();
+    for(const c of [...(completionData?.campaigns||[]),...(infrastructure?.capacity?.campaigns||[]),...(trustedPlan?.campaigns||[]),...(trustedFacts?.campaigns||[])]){
+      const id=String(c.id),old=campaigns.get(id);
+      campaigns.set(id,{id,name:c.name||old?.name||id,segmentId:c.segmentId||old?.segmentId||'',segmentName:c.segmentName||old?.segmentName||''});
+    }
+    const segments=new Map((catalog?.segments||[]).map(s=>[String(s.id),s.name||String(s.id)]));
+    for(const c of campaigns.values())if(c.segmentId)segments.set(c.segmentId,c.segmentName||segments.get(c.segmentId)||c.segmentId);
+    return {history,accounts,campaigns,segments,facts:trustedFacts,plan:trustedPlan,generatedAt:snapshot?.generatedAt,archived:!!useArchive,idsProven};
   }
   function pauseHistory(){
     clearTimeout(historyTimer);historyTimer=null;
   }
-  function clearHistory(close){
-    pauseHistory();historySequence++;historyBusy=false;historyReport=null;historyChecked=0;historyRetryAt=0;
-    if(!$('pj-history'))return;
-    if(close)$('pj-history').open=false;
-    $('pj-history-period').textContent='';$('pj-history-refresh').disabled=!ready;
-    health('pj-history-health','');renderSendingHistory(null);
+  function clearHistory(){
+    pauseHistory();historySequence++;historyBusy=false;historyReport=null;historyError='';historyChecked=0;historyRetryAt=0;
   }
-  function historyVisible(){return ready&&view==='analytics'&&!document.hidden&&$('pj-history')?.open;}
+  function changeHistoryWeek(){
+    clearHistory();
+    renderSendingReport();
+    if(historyVisible())void readHistory();
+  }
   async function readHistory(manual=false){
     if(!historyVisible()||historyBusy||Date.now()<historyRetryAt||!manual&&!historyReport?.pending&&recentPoll(historyChecked))return;
     const mark=token(),seq=++historySequence,valid=()=>alive(mark)&&historyVisible()&&seq===historySequence;
     clearTimeout(historyTimer);historyTimer=null;historyBusy=true;
-    $('pj-history-refresh').disabled=true;
-    if(!historyReport)health('pj-history-health','Получаем отправки за прошлую неделю…');
+    historyError='';renderSendingReport();
     try{
-      const result=await invoke('getProjectSendingHistory',manual?{refresh:true}:{},mark,valid);
+      const input=manual?{refresh:true}:{},weekOf=$('pj-history-date')?.value;
+      if(weekOf)input.weekOf=weekOf;
+      const result=await invoke('getProjectSendingHistory',input,mark,valid);
       if(!valid()||!result)return;
       historyReport=result;historyChecked=Date.now();historyRetryAt=historyChecked+Math.max(0,Number(result.retryAfterMs)||0);
-      $('pj-history-period').textContent=result.from&&result.to?forecastDate(result.from)+' – '+forecastDate(result.to)+' · календарные дни Coldy':'';
-      renderSendingHistory(result);
-      const stamp=timestamp(result.checkedAt);
-      health('pj-history-health',[result.message,result.complete&&stamp?'Проверено '+stamp+' МСК':'',
-        !result.complete&&result.accounts?.length&&result.campaigns?.length?'Прочерк означает, что данные ещё не подтверждены.':''].filter(Boolean).join(' '),result.state==='error');
       if(result.pending)scheduleHistory(Math.max(1500,historyRetryAt-Date.now()));
     }catch(error){
       if(!valid())return;
       const problem=failure(error);
       if(historyReport&&['COLDY_NETWORK','COLDY_RATE_LIMIT','COLDY_UNAVAILABLE'].includes(problem.code)){
-        health('pj-history-health','Показаны ранее полученные данные. '+problem.message,true);
+        historyError='Показаны ранее полученные данные. '+problem.message;
       }else{
-        clearHistory(false);health('pj-history-health',problem.message,true);
+        historyReport=null;historyError=problem.message;
       }
-    }finally{if(seq===historySequence){historyBusy=false;$('pj-history-refresh').disabled=Date.now()<historyRetryAt;}}
+    }finally{if(seq===historySequence){historyBusy=false;if(view==='analytics')renderSendingReport();}}
   }
   function scheduleHistory(delay){
     clearTimeout(historyTimer);historyTimer=setTimeout(()=>{historyTimer=null;void readHistory();},delay);
   }
-  function renderSenderForecast(report,period,dates){
-    const details=$('pj-forecast-senders'),table=$('pj-forecast-sender-table');
-    if(!details)return;
-    if(!period||!details.open){
-      senderTableReport=null;senderTablePeriod=null;table.tBodies[0].replaceChildren();table.tHead.replaceChildren();return;
+  function sendingModel(e,dates){
+    const {plan,facts,campaigns}=e,today=currentForecastDay(),sf=sendingFilters,scoped=!!(sf.segment||sf.campaign);
+    const accounts=[...e.accounts.keys()].filter(id=>sf.accounts===null||sf.accounts.has(id));
+    const permitted=id=>{
+      const c=campaigns.get(String(id));return (!sf.campaign||sf.campaign===String(id))&&(!sf.segment||c?.segmentId===sf.segment);
+    };
+    const factCampaigns=(facts?.campaigns||[]).map(c=>String(c.id)).filter(permitted);
+    const factScope=new Set(factCampaigns);
+    const quotas=new Map((infrastructure?.accounts||[]).map(a=>[String(a.id),a.todayQuota]));
+    const coverage=new Map(),counts=new Map(),seen=new Map(),plansByDate=new Map();
+    function indexPlan(report) {
+      const byAccount=new Map((report.senders||[]).map(a=>[String(a.id),a]));
+      const links=new Map(Array.from(byAccount,([id,a])=>[id,new Map((a.campaigns||[]).map(c=>[String(c.id),c]))]));
+      const byCampaign=new Map((report.campaigns||[]).map(c=>[String(c.id),c]));
+      return {byAccount,links,byCampaign,included:[...byCampaign.keys()].filter(permitted)};
     }
-    if(senderTableReport===report&&senderTablePeriod===forecastDays)return;
-    senderTableReport=report;senderTablePeriod=forecastDays;
-    sendingHead(table,dates);
-    const out=document.createDocumentFragment(),campaignNames=new Map((report.campaigns||[]).map(c=>[String(c.id),c.name||String(c.id)]));
-    const start=forecastDays===0?0:1;
-    const senders=report.senders;
-    $('pj-forecast-sender-note').textContent=Array.isArray(senders)?senders.length?
-      'Для каждой почты указаны ожидаемые письма и свободный остаток лимита. Распределение по ящикам расчётное. Прочерк означает, что данных недостаточно.':'В расчёте нет почт проекта.':
-      'Разбивка по почтам появится при получении полного расчёта.';
-    function withTotal(values){
-      const total=values.length&&values.every(Number.isSafeInteger)?values.reduce((sum,v)=>sum+v,0):null;
-      return [...values,total].map(number);
+    if(plan){
+      const indexed=indexPlan(plan);
+      for(const row of [plan.today,...(plan.days||[])])if(row)plansByDate.set(row.date,{row,...indexed});
     }
-    for(const sender of senders||[]){
-      const days=new Map((sender.days||[]).map(d=>[d.date,d]));
-      const cells=dates.map(d=>days.get(d));
-      const free=withTotal(cells.map(d=>d?.unused)),capacity=withTotal(cells.map(d=>d?.remainingLimit));
-      const notes=free.map((value,i)=>'Доступно '+capacity[i]+' · свободно '+value);
-      sendingRow(out,mailLabel(sender),'Все рассылки',withTotal(cells.map(d=>d?.expected)),true,notes);
-      for(const campaign of sender.campaigns||[]){
-        sendingRow(out,'',campaignNames.get(String(campaign.id))||String(campaign.id),withTotal(dates.map((_,i)=>campaign.expectedByDay?.[start+i])));
+    if(e.history)for(const archived of facts?.plans||[]){
+      if(!dates.includes(archived.date)||!(Date.parse(archived.generatedAt)<Date.parse(archived.date+'T00:00:00+03:00'))||
+        !Array.isArray(archived.senders)||!Array.isArray(archived.campaigns))continue;
+      const indexed=indexPlan(archived);
+      if(indexed.byAccount.size!==e.accounts.size||[...e.accounts.keys()].some(id=>!indexed.byAccount.has(id)))continue;
+      if([...indexed.byCampaign.keys()].some(id=>!facts.campaigns.some(c=>String(c.id)===id)))continue;
+      plansByDate.set(archived.date,{row:archived,...indexed,archived:true});
+    }
+    for(const cell of facts?.checkedCells||[]){
+      if(!coverage.has(cell.date))coverage.set(cell.date,new Map());
+      coverage.get(cell.date).set(String(cell.campaignId),Date.parse(cell.checkedAt||facts.checkedAt));
+    }
+    for(const f of facts?.rows||[]){
+      const id=String(f.accountId),c=String(f.campaignId);
+      if(!knownCount(f.sent)||!coverage.get(f.date)?.has(c)||!e.accounts.has(id))continue;
+      if(!factScope.has(c))continue;
+      if(!counts.has(f.date))counts.set(f.date,new Map());
+      const accountsOnDay=counts.get(f.date);
+      if(!accountsOnDay.has(id))accountsOnDay.set(id,new Map());
+      accountsOnDay.get(id).set(c,f.sent);
+      if(!seen.has(id))seen.set(id,new Set());seen.get(id).add(c);
+    }
+    const allKnown=!plan?.reasons?.some(r=>r==='stale_membership'||r==='missing_accounts');
+    const stamp=Date.parse(e.generatedAt);
+    function at(date,accountIds,campaignId,pool){
+      const i=Math.round((Date.parse(date)-Date.parse(today))/86400000),p=plansByDate.get(date),r=p?.row,now=date===today,past=i<0;
+      const checked=coverage.get(date),fc=campaignId?factCampaigns.filter(id=>id===campaignId):factCampaigns;
+      const selectedCampaign=campaignId||scoped;
+      const segmentOnly=!!sf.segment&&!sf.campaign&&!campaignId;
+      const missingFactOwner=segmentOnly&&facts?.campaigns?.some(c=>!campaigns.get(String(c.id))?.segmentId);
+      const missingPlanOwner=segmentOnly&&p&&[...p.byCampaign.keys()].some(id=>!campaigns.get(id)?.segmentId);
+      const target=campaignId||sf.campaign;
+      const confirmedScope=facts?.state==='no_campaigns'||((facts?.state==='ready'||facts?.state==='partial')&&facts.campaigns?.length>0);
+      const emptyScopeKnown=confirmedScope&&!missingFactOwner&&(!target||fc.includes(target))&&!(sf.segment&&!e.segments.has(sf.segment));
+      const factComplete=(now||past)&&emptyScopeKnown&&fc.every(c=>checked?.has(c));
+      let fact=0;
+      if(now||past)for(const a of accountIds){
+        const amounts=counts.get(date)?.get(a);if(!amounts)continue;
+        if(campaignId)fact+=amounts.get(campaignId)||0;
+        else for(const sent of amounts.values())fact+=sent;
+      }
+      const comparable=now&&e.idsProven&&factComplete&&Number.isFinite(stamp)&&
+        fc.every(c=>Math.abs(checked.get(c)-stamp)<=300000);
+      let expected=null,initial=null,free=null,limit=null;
+      if(r){
+        const detailsKnown=p.archived||e.idsProven;
+        const senderDay=id=>p.archived?p.byAccount.get(id):p.byAccount.get(id)?.days?.[i];
+        const quantity=(obj,key)=>p.archived?obj?.[key==='initialByDay'?'initial':'expected']:obj?.[key]?.[i];
+        const entire=pool&&sf.accounts===null&&!selectedCampaign;
+        if(entire){expected=r.expected;initial=r.initial;}
+        else if(detailsKnown&&!missingPlanOwner){
+          const pc=campaignId?[campaignId]:p.included;
+          if(!selectedCampaign)expected=addCounts(accountIds.map(a=>senderDay(a)?.expected));
+          const filteredAmounts=key=>addCounts(accountIds.map(a=>addCounts(pc.map(c=>{
+            const link=p.links.get(a)?.get(c);
+            return link?quantity(link,key):(p.archived?knownCount(senderDay(a)?.expected):allKnown)?0:null;
+          }))));
+          if(selectedCampaign)expected=filteredAmounts('expectedByDay');
+          initial=filteredAmounts('initialByDay');
+        }else if(pool&&sf.accounts===null&&scoped&&p.byCampaign.size&&!missingPlanOwner){
+          expected=addCounts(p.included.map(c=>quantity(p.byCampaign.get(c),'expectedByDay')));
+          initial=addCounts(p.included.map(c=>quantity(p.byCampaign.get(c),'initialByDay')));
+        }
+        if(pool&&sf.accounts===null){limit=r.mailboxLimit;free=r.unused;}
+        else if(detailsKnown){
+          if(p.archived||i!==7||!plan?.reasons?.includes('previous_horizon'))limit=addCounts(accountIds.map(id=>p.byAccount.get(id)?.dailyLimit));
+          free=addCounts(accountIds.map(id=>senderDay(id)?.unused));
+        }
+      }
+      if(now&&limit==null&&e.accounts.size)limit=addCounts(accountIds.map(a=>sendingQuota(quotas.get(a),today)));
+      if(now&&r&&knownCount(expected)&&factComplete&&!comparable&&fc.length>0)asynchronous=true;
+      return {fact,factComplete,limit,initial,followups:knownCount(expected)&&knownCount(initial)?expected-initial:null,expected,free,
+        projection:now?(comparable&&knownCount(expected)?fact+expected:null):expected};
+    }
+    let asynchronous=false;
+    function group(ds,ids=accounts,c=null,pool=true){
+      const items=ds.map(d=>at(d,ids,c,pool));
+      const result=Object.fromEntries(['limit','initial','followups','expected','free','projection'].map(k=>[k,addCounts(items.map(row=>row[k]))]));
+      const fact=items.reduce((sum,r)=>sum+r.fact,0);
+      result.fact=items.every(r=>r.factComplete)?number(fact):fact?'от '+number(fact):'—';
+      return result;
+    }
+    function details(id,days){
+      const ids=new Set(seen.get(id)||[]);
+      for(const d of days)for(const c of plansByDate.get(d)?.links.get(id)?.keys()||[])ids.add(c);
+      return [...ids].filter(permitted)
+        .sort((a,b)=>(campaigns.get(a)?.name||a).localeCompare(campaigns.get(b)?.name||b,'ru'));
+    }
+    return {accounts,group,details,archiveCount:plansByDate.size,asyncCounts:()=>asynchronous};
+  }
+  function renderSendingReport(){
+    if(!$('pj-sending')||view!=='analytics')return;
+    const today=currentForecastDay(),dates=sendingDates(today),sf=sendingFilters,history=sf.period==='history';
+    // Keep the potentially large sender breakdown intact across unrelated background repaints.
+    const signature=[ready,today,sf.period,sf.group,sf.segment,sf.campaign,sf.accounts,$('pj-history-date').value,$('pj-plan-detail').open,
+      $('pj-plan-day').value,catalog?.segments,infrastructure?.accounts,infrastructure?.capacity,infrastructure?.monitoring,completionData,
+      forecastData,forecastArchive,forecastBusy,forecastError,todayFacts,todayBusy,todayError,historyReport,historyBusy,historyError,Date.now()<historyRetryAt,
+      sf.period==='today'&&(infrastructure?.accounts||[]).filter(a=>sendingQuota(a.todayQuota,today)!==null).length];
+    if(lastSendingRender?.every((v,i)=>v===signature[i])){renderProjectCompletionTable();return;}
+    lastSendingRender=signature;
+    $('pj-history-date-field').hidden=!history;$('pj-history-date').max=dateOffset(today,-1);
+    for(const th of $('pj-sending').querySelectorAll('[data-sending-remaining]'))th.hidden=history;
+    for(const th of $('pj-sending').querySelectorAll('[data-sending-total]'))th.textContent=history?'План всего':'Прогноз всего';
+    const e=sendingEvidence(today,dates);
+    const campOptions=new Map([...e.campaigns.values()].filter(c=>!sf.segment||c.segmentId===sf.segment).map(c=>[c.id,c.name]));
+    for(const [id,n] of e.segments)sendingOptions.segments.set(id,n);
+    for(const [id,n] of campOptions)sendingOptions.campaigns.set(id,n);
+    sendingSelect('pj-plan-segment',new Map(e.segments),sf.segment);sendingSelect('pj-plan-campaign',campOptions,sf.campaign);
+    sendingSenderPicker(e.accounts);
+    const model=sendingModel(e,dates),groups=periodGroups(dates),output=document.createDocumentFragment();
+    const label=ds=>ds.length===1?((ds[0]===today?'Сегодня · ':ds[0]===dateOffset(today,1)?'Завтра · ':'')+forecastDate(ds[0])):
+      forecastDate(ds[0])+' – '+forecastDate(ds.at(-1));
+    for(const ds of groups.values()){
+      const m=model.group(ds),row=node('tr'),title=node('th','',label(ds));title.scope='row';row.append(title);
+      const values=[number(m.limit),m.fact,number(m.initial),number(m.followups)];
+      if(!history)values.push(number(m.expected));values.push(number(m.projection),number(m.free));
+      for(const value of values)row.append(node('td','pj-number',value));
+      output.append(row);
+    }
+    $('pj-plan-days').replaceChildren(output);
+    const range=$('pj-plan-day'),keys=[...groups.keys()],old=range.value;
+    if(keys.length!==range.options.length||keys.some((k,i)=>range.options[i].value!==k||range.options[i].text!==label(groups.get(k)))){
+      range.replaceChildren(...keys.map(k=>new Option(label(groups.get(k)),k)));if(groups.has(old))range.value=old;
+    }
+    const detail=document.createDocumentFragment();
+    if($('pj-plan-detail').open&&groups.has(range.value)){
+      const ds=groups.get(range.value);
+      function line(name,campaign,m,bold){
+        const row=node('tr',bold?'pj-mail-group':''),title=node('th','',name);title.scope='row';
+        row.append(title,node('td','',campaign),node('td','pj-number',m.fact));
+        if(!history)row.append(node('td','pj-number',number(m.expected)));
+        row.append(node('td','pj-number',number(m.projection)));detail.append(row);
+      }
+      for(const c of e.campaigns.values()){
+        if(sf.segment&&c.segmentId!==sf.segment||sf.campaign&&c.id!==sf.campaign)continue;
+        line('Выбранные почты',c.name,model.group(ds,model.accounts,c.id,false),true);
+      }
+      for(const id of model.accounts){
+        line(e.accounts.get(id),'Итого',model.group(ds,[id],null,false),true);
+        for(const c of model.details(id,ds))line('',e.campaigns.get(c)?.name||c,model.group(ds,[id],c,false),false);
       }
     }
-    table.tBodies[0].replaceChildren(out);
-  }
-  function renderForecast(){
-    if(view==='infrastructure')renderInfrastructurePlan();
-    if(!$('pj-forecast'))return;
-    const today=currentForecastDay(),response=forecastData?.day&&forecastData.day!==today?null:forecastData;
-    const archive=forecastArchive?.day===today?forecastArchive:null;
-    const restOfDay=forecastDays===0;
-    function selectedPeriod(report){
-      return restOfDay?(report?.today?.date===today?{...report.today,from:today,to:today}:null):report?.periods?.find(item=>item.days===forecastDays);
+    $('pj-plan-accounts').replaceChildren(detail);
+    const notices=new Set();
+    if(!ready)notices.add('Проверяем доступ к аналитике.');
+    else if(history){
+      if(historyError||e.facts?.message)notices.add(historyError||e.facts.message);
+      else if(!e.facts)notices.add('Получаем историю отправок.');
+      if(e.facts&&model.archiveCount<dates.length)notices.add(model.archiveCount?'Для части дат нет сохранённого плана. В этих ячейках стоит прочерк.':'За выбранный период пока нет сохранённых планов.');
+      if(model.archiveCount)notices.add('План и лимит сохранены до начала соответствующего дня по Москве. Факт указан за календарные дни Coldy.');
+    }else{
+      if(forecastError||forecastData?.message)notices.add(forecastError||forecastData.message);
+      if(!e.plan&&!forecastData?.message)notices.add('Получаем очереди и лимиты Coldy.');
+      if(e.archived)notices.add('Показан сохранённый прогноз.');
+      if(sf.period==='today'&&(todayError||e.facts?.message||!e.facts))notices.add(todayError||e.facts?.message||'Получаем факт за сегодня.');
+      if(model.asyncCounts())notices.add('Факт и очередь получены в разное время. Итог за сегодня уточняется.');
+      if(sf.campaign||sf.segment)notices.add('Лимит и свободный остаток относятся к выбранным почтам с учётом всех назначенных рассылок.');
+      for(const reason of e.plan?.reasons||[])if(forecastReasons[reason])notices.add(forecastReasons[reason]);
+      if(forecastData?.progress&&forecastData.pending)notices.add('Адресатов проверено '+number(forecastData.progress.contactsRead)+'.');
     }
-    const archivedPeriod=selectedPeriod(archive?.forecast),livePeriod=selectedPeriod(response?.forecast);
-    const fromArchive=!!archive&&!response?.generatedAt&&(!!archivedPeriod||!livePeriod);
-    const report=fromArchive?archive.forecast:response?.forecast,generatedAt=fromArchive?archive.generatedAt:response?.generatedAt;
-    const historical=fromArchive||!!generatedAt&&(response?.pending||response?.retryAfterMs>0);
-    const period=fromArchive?archivedPeriod:livePeriod;
-    const body=$('pj-forecast-report'),rows=$('pj-forecast-rows'),reasons=$('pj-forecast-reasons'),queue=$('pj-forecast-queue');
-    body.hidden=!period;rows.replaceChildren();reasons.replaceChildren();reasons.hidden=true;queue.textContent='';queue.hidden=true;
-    $('pj-forecast-refresh').disabled=!ready||forecastBusy||Date.now()<forecastRetryAt;
-    for(const button of $('pj-forecast').querySelectorAll('[data-forecast-days]'))button.setAttribute('aria-pressed',String(Number(button.dataset.forecastDays)===forecastDays));
-    const progress=response?.progress;
-    let message=!ready&&preview?'Проверяем доступ к прогнозу…':forecastError||response?.message||'';
-    if(!forecastError&&response?.retryAfterMs>0&&Date.now()<forecastRetryAt)message=message||'Coldy попросил подождать. Расчёт продолжится после паузы.';
-    if(!forecastError&&progress&&(response.pending||response.retryAfterMs>0)){
-      const counts='Рассылок обработано '+number(progress.campaignsDone)+' из '+number(progress.campaignsTotal)+', контактов проверено '+number(progress.contactsRead)+'.';
-      message=(message||'Идёт расчёт.')+' '+counts;
-    }
-    else if(!message&&(forecastBusy||response?.pending))message='Получаем данные для прогноза…';
-    else if(!message&&response)message=({no_selection:'Для расчёта выберите почты мониторинга и привяжите рассылки проекта.',not_configured:'Для расчёта подключите Coldy.',error:'Не удалось получить прогноз. Повторите расчёт.'})[response.state]||'';
-    if(historical)message=[forecastBusy||response?.pending?'Показан последний расчёт. Обновляем прогноз в фоне.':'Показан последний расчёт.',message==='Получаем данные для прогноза…'?'':message].filter(Boolean).join(' ');
-    else if(period&&forecastBusy&&!forecastError&&!response?.message)message='Обновляем прогноз в фоне.';
-    if(restOfDay&&report&&!period&&!forecastError)message='Для остатка сегодняшнего дня нужны свежие счётчики почт.'+(message?' '+message:'');
-    health('pj-forecast-health',message,!!forecastError||response?.state==='error');
-    const campaignRows=$('pj-forecast-campaigns');campaignRows.replaceChildren();
-    if(!period){$('pj-forecast-totals').replaceChildren();$('pj-forecast-context').textContent='';renderSenderForecast(null,null,[]);return;}
-    const range=period.from===period.to?forecastDate(period.from):forecastDate(period.from)+' – '+forecastDate(period.to);
-    const context=[range+' · МСК'+(restOfDay?' · до конца дня':''),'выбранных ящиков '+number(report.selectedAccounts),'активных рассылок '+number(report.activeCampaigns)];
-    if(generatedAt)context.push('расчёт на '+timestamp(generatedAt)+' МСК');
-    $('pj-forecast-context').textContent=context.join(' · ');
-    const totals=[['Ожидается писем',period.expected],['Первые письма',period.initial],['Повторные письма',period.followups],['Предел по графику',period.capacity]];
-    const limitsKnown=Object.hasOwn(period,'mailboxLimit');
-    if(limitsKnown){
-      totals.push(['Лимит выбранных почт',period.mailboxLimit]);
-      if(restOfDay)totals.push(['Остаток лимита сегодня',period.remainingLimit]);
-      totals.push(['Свободно по прогнозу',period.unused]);
-    }
-    const hasScenario=item=>item.expected===null&&Number.isFinite(item.modeled);
-    if(hasScenario(period))totals.push(['По разобранной части (сценарий)',period.modeled]);
-    metrics('pj-forecast-totals',totals);
-    for(const campaign of report.campaigns||[]){
-      const amounts=campaign.expectedByDay?.slice(restOfDay?0:1,restOfDay?1:1+forecastDays);
-      const known=amounts?.length===(restOfDay?1:forecastDays)&&amounts.every(n=>Number.isSafeInteger(n)&&n>=0);
-      const row=node('tr'),name=node('th','',campaign.name||campaign.id);name.scope='row';
-      row.append(name,node('td','',campaign.segmentName||'—'),node('td','pj-number',known?number(amounts.reduce((sum,n)=>sum+n,0)):'Уточняется'));
-      campaignRows.append(row);
-    }
-    if(!campaignRows.childElementCount){
-      const cell=campaignRows.insertRow().insertCell();cell.colSpan=3;
-      cell.textContent=Array.isArray(report.campaigns)?'У выбранных ящиков нет активных рассылок проекта.':'Разбивка по рассылкам появится при следующем расчёте.';
-    }
-    if(report.queue&&(generatedAt||response?.progress?.contactsRead>0)){
-      const q=report.queue,parts=['первого письма ждут '+number(q.pendingInitial),'повторного — '+number(q.pendingFollowups)];
-      if(q.unresolved>0)parts.push('неизвестен отправитель или следующий шаг у '+number(q.unresolved));
-      if(q.unreadCampaigns>0)parts.push('ещё не полностью прочитано рассылок '+number(q.unreadCampaigns));
-      queue.textContent=(generatedAt?'В очереди на момент расчёта ':'Среди уже прочитанных адресатов ')+parts.join(', ')+'.';queue.hidden=false;
-    }
-    $('pj-forecast-daily').hidden=forecastDays<=1;
-    const displayedDays=(report.days||[]).filter(day=>day.date>=period.from&&day.date<=period.to),dailyScenario=displayedDays.some(hasScenario);
-    renderSenderForecast(report,period,restOfDay?[period.from]:displayedDays.map(day=>day.date));
-    $('pj-forecast-limit-col').hidden=$('pj-forecast-unused-col').hidden=!limitsKnown;
-    $('pj-forecast-scenario-column').hidden=!dailyScenario;
-    if(forecastDays>1)for(const day of displayedDays){
-      const tr=node('tr'),date=node('th','',forecastDate(day.date));date.scope='row';tr.append(date);
-      for(const key of ['initial','followups','expected','capacity'])tr.append(node('td','pj-number',number(day[key])));
-      if(limitsKnown)for(const key of ['mailboxLimit','unused'])tr.append(node('td','pj-number',number(day[key])));
-      if(dailyScenario)tr.append(node('td','pj-number',hasScenario(day)?number(day.modeled):'—'));
-      rows.append(tr);
-    }
-    const notes=new Set((report.reasons||[]).filter(code=>code!=='previous_horizon'||forecastDays===7).map(code=>forecastReasons[code]||'Для части отправок не хватает подтверждённых данных.'));
-    if(hasScenario(period)||dailyScenario)notes.add('Сценарий показывает, сколько писем можно отправить по известной части очереди, если остальные получатели не займут время выбранных ящиков.');
-    if([period.initial,period.followups,period.expected,period.capacity].some(value=>value===null))notes.add('Прочерк означает, что для расчёта не хватает данных.');
-    for(const note of notes)reasons.append(node('li','',note));reasons.hidden=!notes.size;
+    if(sf.accounts!==null&&!model.accounts.length)notices.add('Выберите хотя бы одну почту.');
+    health('pj-plan-health',[...notices].join(' '));
+    $('pj-plan-asof').textContent=[e.facts?.checkedAt?'Факт на '+timestamp(e.facts.checkedAt)+' МСК':'',
+      e.plan&&e.generatedAt?'Прогноз на '+timestamp(e.generatedAt)+' МСК':''].filter(Boolean).join(' · ');
+    $('pj-plan-refresh').disabled=!ready||(history?historyBusy||Date.now()<historyRetryAt:forecastBusy||sf.period==='today'&&todayBusy);
+    renderProjectCompletionTable();
   }
   async function pollSelected(){
     if(!pollVisible()||isLoading())return;
@@ -829,31 +1013,25 @@
   async function refresh(options={}){
     if(!ready||!view)return;
     if(options.manual)refreshVisibleCompletions();
-    if(options.automatic)return Promise.all([pollProjectView(),readForecast(),readHistory(),readTodayFacts()]);
+    if(options.automatic){loadSendingPeriod();return pollProjectView();}
     if(view==='analytics'&&(recipientImport?.open||recipientImport?.running))return;
     const mark=token(),requestedView=view;
     if(view==='analytics'){
-      if(historyVisible())void readHistory(!!options.manual);
+      loadSendingPeriod(!!options.manual);
       const context=currentContext();
-      if(forecastVisible()&&!forecastData&&!forecastBusy){void preloadForecast();void readForecast();}
       if(options.opening&&catalogLoadedAt&&!catalogError&&(!segmentId||context?.data&&!context.error&&!context.metricsError)){
-        const update=pollProjectView();
-        void preloadForecast();return update;
+        return pollProjectView();
       }
       const updateCatalog=!catalog||options.manual||!catalogLoadedAt||!isEditing()&&!recentPoll(catalogLoadedAt);
       const catalogRequest=updateCatalog?loadCatalog():null;
-      // If a segment can already be selected, keep the other read slot for that click.
-      if(!segmentId&&!catalog?.segments?.length)void preloadForecast();
       if(catalogRequest)await catalogRequest;
       if(!alive(mark)||view!==requestedView)return;
       const selection=currentContext();
       let selectedRead=null;
       if(segmentId&&(options.manual||!selection?.data||selection.error||!isEditing()&&!recentPoll(selection.loadedAt)))selectedRead=loadSegment(segmentId,options);
-      void preloadForecast();
       if(selectedRead)await selectedRead;
     }else{
-      if(options.manual){void readTodayFacts(true);void readForecast(true);return syncInfrastructure();}
-      if(infrastructurePlanVisible()){void readTodayFacts();void readForecast();}
+      if(options.manual)return syncInfrastructure();
       if(options.opening&&infrastructureFresh())return;
       return loadInfrastructure();
     }
@@ -1240,6 +1418,7 @@
     select.disabled=!segments.length||!!currentContext()?.operation||!!recipientImport?.running;
   }
   function renderAnalytics(){
+    renderSendingReport();
     const context=currentContext(),configured=context?.data?.configured??catalog?.coldy?.configured,connected=context?.data?.connected??catalog?.coldy?.connected;
     renderConnection('analytics',configured,connected);
     $('pj-analytics-refresh').disabled=!ready||catalogLoading||!!context?.loading||!!context?.metricsLoading||!!context?.operation||!!recipientImport?.running;
@@ -1311,8 +1490,6 @@
       if(campaign.blockedReason)name.append(node('span','pj-cell-note',campaign.blockedReason));
       if(campaign.ownerSegmentId&&campaign.ownerSegmentId!==segmentId)name.append(node('span','pj-cell-note','Сегмент: '+text(campaign.ownerSegmentName||'Другой сегмент')));
       const binding=context.data.bindings?.find(item=>item.campaignId===campaign.id);
-      const sync=recipientSyncText(metric?.recipientSync||campaign.recipientSync||binding?.recipientSync);
-      if(campaign.selected&&sync)name.append(node('span','pj-cell-note pj-recipient-sync',sync));
       if(binding?.autoUpload)name.append(node('span','pj-cell-note','Для этой связи включена автозагрузка контактов.'));
       if(binding&&campaign.selected&&!campaign.missing){
         name.append(campaignSenderDetails(campaign,segmentId));
@@ -1340,110 +1517,29 @@
   }
   function resetTodayFacts(){
     clearTimeout(todayTimer);todayTimer=null;todayEpoch++;todayFacts=null;todayBusy=false;todayChecked=0;todayRetry=0;todayError='';
-    for(const id of ['pj-plan-days','pj-plan-accounts','pj-plan-day','pj-plan-asof','pj-plan-health'])$(id)?.replaceChildren();
-    if($('pj-plan-detail'))$('pj-plan-detail').open=false;
+  }
+  function scheduleTodayFacts(delay){
+    clearTimeout(todayTimer);
+    todayTimer=setTimeout(()=>{todayTimer=null;void readTodayFacts();},delay);
   }
   async function readTodayFacts(manual=false){
-    if(!infrastructurePlanVisible()||todayBusy)return;
+    if(!todayVisible()||todayBusy)return;
     const day=currentForecastDay();
     if(todayFacts&&todayFacts.from!==day)resetTodayFacts();
     if(Date.now()<todayRetry||!manual&&!todayFacts?.pending&&recentPoll(todayChecked))return;
-    const seq=todayEpoch,mark=token(),valid=()=>seq===todayEpoch&&alive(mark)&&view==='infrastructure'&&!document.hidden;
+    const seq=todayEpoch,mark=token(),valid=()=>seq===todayEpoch&&alive(mark)&&todayVisible();
     todayBusy=true;todayChecked=Date.now();clearTimeout(todayTimer);todayTimer=null;
     try{
       const result=await invoke('getProjectSendingHistory',manual?{period:'today',refresh:true}:{period:'today'},mark,valid);
       if(!valid()||!result||result.from!==currentForecastDay()||result.days?.length!==1)return;
       todayFacts=result;todayError='';todayRetry=Date.now()+Math.max(0,Number(result.retryAfterMs)||0);
-      if(result.pending)todayTimer=setTimeout(()=>void readTodayFacts(),Math.max(1500,todayRetry-Date.now()));
+      if(result.pending)scheduleTodayFacts(Math.max(1500,todayRetry-Date.now()));
     }catch(error){
       if(!valid())return;
       todayFacts=null;todayError=failure(error).message;
     }finally{
-      if(seq===todayEpoch){todayBusy=false;if(!valid()&&!todayFacts)todayChecked=0;if(view==='infrastructure')renderInfrastructurePlan();}
+      if(seq===todayEpoch){todayBusy=false;if(!valid()&&!todayFacts)todayChecked=0;if(view==='analytics')renderSendingReport();}
     }
-  }
-  function renderInfrastructurePlan(){
-    const selected=infrastructure?.monitoring?.accountIds||[],slots=$('pj-plan-days');
-    if(!slots)return;
-    if(!ready||view!=='infrastructure'||!selected.length){
-      slots.replaceChildren();$('pj-plan-accounts').replaceChildren();return;
-    }
-    const day=currentForecastDay(),ids=new Set(selected.map(String));
-    const inScope=list=>Array.isArray(list)&&list.length===ids.size&&list.every(a=>ids.has(String(a.id)));
-    const raw=todayFacts?.from===day?todayFacts:null;
-    const facts=inScope(raw?.accounts)?raw:null;
-    const found=forecastData?.day===day?forecastData.forecast:null;
-    const bound=new Set((facts?.campaigns||[]).map(c=>String(c.id)));
-    const matchingBindings=!facts||Array.isArray(found?.campaigns)&&found.campaigns.every(c=>bound.has(String(c.id)));
-    const plan=inScope(found?.senders)&&matchingBindings?found:null;
-    const dates=Array.from({length:8},(_,i)=>new Date(Date.parse(day+'T00:00:00Z')+i*86400000).toISOString().slice(0,10));
-    const labels=dates.map((date,i)=>(i===0?'Сегодня · ':i===1?'Завтра · ':'')+forecastDate(date).slice(0,5));
-    const completed=new Set((facts?.checkedCells||[]).filter(cell=>cell.date===day).map(cell=>String(cell.campaignId)));
-    const factsComplete=!!facts&&(facts.complete===true||facts.state==='no_campaigns');
-    const planTime=Date.parse(forecastData?.generatedAt);
-    const verifiedTimes=(facts?.checkedCells||[]).map(c=>Date.parse(c.checkedAt||facts.checkedAt));
-    const sameCampaignScope=Array.isArray(plan?.campaigns)&&plan.campaigns.every(c=>bound.has(String(c.id)));
-    const comparable=sameCampaignScope&&(facts?.state==='no_campaigns'||Number.isFinite(planTime)&&verifiedTimes.length>0&&verifiedTimes.every(t=>Math.abs(t-planTime)<=300000));
-    const byAccount=new Map(),byCampaign=new Map();let actual=0;
-    for(const row of facts?.rows||[]){
-      const id=String(row.accountId),campaign=String(row.campaignId);
-      if(!ids.has(id)||row.date!==day||!completed.has(campaign)||!Number.isSafeInteger(row.sent))continue;
-      if(!byAccount.has(id))byAccount.set(id,new Map());
-      const counts=byAccount.get(id);counts.set(campaign,(counts.get(campaign)||0)+row.sent);actual+=row.sent;
-      byCampaign.set(campaign,(byCampaign.get(campaign)||0)+row.sent);
-    }
-    function confirmed(value,known){return known?number(value):value>0?'от '+number(value):'—';}
-    function projection(fact,expected){return comparable&&Number.isSafeInteger(fact)&&Number.isSafeInteger(expected)?number(fact+expected):'—';}
-    const days=new Map([plan?.today,...(plan?.days||[])].filter(Boolean).map(d=>[d.date,d]));
-    const quotas=new Map((infrastructure.accounts||[]).map(a=>[String(a.id),a.todayQuota]));
-    const limits=Array.from(ids,id=>quotas.get(id)).map(q=>q?.date===day?q.limit:null);
-    const poolLimit=limits.every(Number.isSafeInteger)?limits.reduce((sum,n)=>sum+n,0):null;
-    const out=document.createDocumentFragment();
-    for(const [i,date] of dates.entries()){
-      const d=days.get(date),tr=node('tr');
-      tr.append(node('th','',labels[i]),node('td','',number(d?.mailboxLimit??(i===0?poolLimit:null))),node('td','',i?'—':confirmed(actual,factsComplete)),
-        node('td','',number(d?.initial)),node('td','',number(d?.followups)),
-        node('td','',i?number(d?.expected):projection(factsComplete?actual:null,d?.expected)),node('td','',number(d?.unused)));
-      out.append(tr);
-    }
-    slots.replaceChildren(out);
-    $('pj-plan-asof').textContent=[facts?.checkedAt?'Факт Coldy на '+timestamp(facts.checkedAt)+' МСК':'',
-      plan&&forecastData.generatedAt?'Прогноз на '+timestamp(forecastData.generatedAt)+' МСК':''].filter(Boolean).join(' · ');
-    health('pj-plan-health',[todayError||raw?.message||(!facts?'Получаем факт по рассылкам проекта.':''),
-      forecastError||forecastData?.message||(!plan?'Получаем очереди и лимиты Coldy.':''),
-      factsComplete&&plan&&!comparable?'Уточняем итог на сегодня: факт и очередь получены в разное время.':''].filter(Boolean).join(' '));
-    if(!$('pj-plan-detail').open){$('pj-plan-accounts').replaceChildren();return;}
-    const chooser=$('pj-plan-day');
-    if(chooser.options[0]?.value!==day)chooser.replaceChildren(...dates.map((d,i)=>new Option(labels[i],d)));
-    const index=Math.max(0,dates.indexOf(chooser.value)),isToday=index===0,date=dates[index];
-    const forecastSenders=new Map((plan?.senders||[]).map(a=>[String(a.id),a]));
-    const inventory=new Map((infrastructure.accounts||[]).map(a=>[String(a.id),a]));
-    const factSenders=new Map((facts?.accounts||[]).map(a=>[String(a.id),a]));
-    const plannedCampaigns=new Map((plan?.campaigns||[]).map(c=>[String(c.id),c]));
-    const names=new Map([...(facts?.campaigns||[]),...(infrastructure.capacity?.campaigns||[]),...(plan?.campaigns||[])].map(c=>[String(c.id),c.name||String(c.id)]));
-    const table=document.createDocumentFragment();
-    function line(name,campaign,sent,count,known,group){
-      const tr=node('tr',group?'pj-mail-group':'');
-      tr.append(node('th','',name),node('td','',campaign),node('td','',isToday?confirmed(sent,known):'—'),node('td','',number(count)),
-        node('td','',isToday?projection(known?sent:null,count):number(count)));table.append(tr);
-    }
-    const inactiveInPlan=id=>Array.isArray(plan?.campaigns)&&!!forecastData?.generatedAt&&!plannedCampaigns.has(id);
-    for(const id of new Set([...plannedCampaigns.keys(),...(isToday?byCampaign.keys():[])])){
-      const expected=plannedCampaigns.get(id)?.expectedByDay?.[index]??(inactiveInPlan(id)?0:null);
-      line('Все почты',names.get(id)||id,byCampaign.get(id)||0,expected,completed.has(id),true);
-    }
-    for(const id of ids){
-      const sender=forecastSenders.get(id),account=inventory.get(id)||factSenders.get(id);
-      const counts=byAccount.get(id)||new Map(),alloc=new Map((sender?.campaigns||[]).map(c=>[String(c.id),c]));
-      const expected=sender?.days?.find(d=>d.date===date)?.expected;
-      line(mailLabel(account||sender||{id}),'Все рассылки',Array.from(counts.values()).reduce((a,b)=>a+b,0),expected,factsComplete,true);
-      const assignments=new Set([...(account?.capacity?.campaignIds||[]).map(String),...alloc.keys(),...(isToday?counts.keys():[])]);
-      for(const c of assignments){
-        const amount=alloc.has(c)?alloc.get(c).expectedByDay?.[index]:expected===0||inactiveInPlan(c)?0:null;
-        line('',names.get(c)||c,counts.get(c)||0,amount,completed.has(c),false);
-      }
-    }
-    $('pj-plan-accounts').replaceChildren(table);
   }
   function renderInfrastructure(){
     const data=infrastructure,accounts=data?.accounts||[];
@@ -1452,33 +1548,25 @@
     $('pj-infrastructure-refresh').disabled=infraLoading||!data?.monitoring?.accountIds?.length;
     const diagnosticCursor=!!data?.nextCursor&&data.poolOnly!==true;
     $('pj-infrastructure-continue').hidden=!data?.nextCursor||diagnosticCursor;$('pj-infrastructure-continue').disabled=infraLoading;
-    $('pj-diagnostics-refresh').disabled=infraLoading||!data?.monitoring?.accountIds?.length;
-    $('pj-diagnostics-refresh').textContent=diagnosticCursor?'Продолжить диагностику':'Обновить диагностику';
     const progress=data?.syncProgress||data?.detailProgress,steps=data?.nextCursor&&progress?number(progress.completed)+' из '+number(progress.total):'';
-    const progressText=steps?(diagnosticCursor?'Диагностика ящиков':'Карта назначений и расписания')+' · '+steps:'';
+    const progressText=steps&&!diagnosticCursor?'Назначения почт · '+steps:'';
     const syncError=infraError||data?.error?.message;
-    const activity=infraSyncMode==='diagnostics'?'Получаем состояния ящиков из Coldy…':'Получаем назначения и графики отправок из Coldy…';
+    const activity='Обновляем назначения почт…';
     health('pj-infrastructure-health',syncError||(infraLoading&&!data?activity:infraNotice||progressText||(data?.warnings||[]).join(' ')),!!syncError);
-    const dated=accounts.filter(account=>account.updatedAt).length;
-    $('pj-diagnostics-health').textContent=diagnosticCursor?progressText:infraLoading&&infraSyncMode==='diagnostics'?activity:dated?'Сохранённые данные по ящикам: '+number(dated)+' из '+number(accounts.length):'Диагностика ящиков ещё не загружена.';
     const selectedCount=data?.configured&&Array.isArray(data.monitoring?.accountIds)?data.monitoring.accountIds.length:null;
-    const capacity=data?.capacity,all=[...accounts];
-    for(const id of data?.monitoring?.missingAccountIds||[])all.push({id,name:'Ящик отсутствует в Coldy',missing:true});
+    const capacity=data?.capacity,byId=new Map(accounts.map(account=>[String(account.id),account]));
+    const missing=new Set((data?.monitoring?.missingAccountIds||[]).map(String));
+    const all=(selectedCount?data.monitoring.accountIds:[]).map(id=>byId.get(String(id))||{
+      id,name:missing.has(String(id))?'Ящик отсутствует в Coldy':'Уточняем адрес ящика',showId:true});
     const busy=all.filter(item=>poolState(item)==='busy').length,free=all.filter(item=>poolState(item)==='free').length;
     metrics('pj-infrastructure-totals',[['В мониторинге',selectedCount],['Свободны',selectedCount===null?null:free],['Заняты',selectedCount===null?null:busy],['Занятость неизвестна',selectedCount===null?null:Math.max(0,selectedCount-free-busy)]]);
     const empty=$('pj-infrastructure-empty');empty.hidden=all.length>0;
     empty.textContent=syncError?'Не удалось получить список ящиков. Повторите синхронизацию.':infraLoading||data?.configured==null?'Получаем список из Coldy…':data.configured===false?'Подключите Coldy, чтобы увидеть почтовые ящики проекта.':data.state==='no_selection'||data.monitoring&&!data.monitoring.accountIds?.length?'Выберите почты для мониторинга кнопкой «Выбрать почты».':data.state==='not_synced'?'Почтовые ящики ещё не синхронизированы. Нажмите «Обновить из Coldy».':'Выбранные почты пока недоступны. Обновите список через «Выбрать почты».';
     $('pj-infrastructure-content').hidden=!all.length;
     $('pj-infrastructure-updated').textContent=selectedCount>0?
-      [capacity?.updatedAt?'Занятость на '+timestamp(capacity.updatedAt)+' МСК':'','Обновление раз в минуту, пока раздел открыт'].filter(Boolean).join(' · '):'';
+      (capacity?.updatedAt?(capacity.stale?'Последние сохранённые назначения на ':'Назначения на ')+timestamp(capacity.updatedAt)+' МСК':''):'';
     renderMailboxCapacity(all,capacity);
-    renderInfrastructurePlan();
-    if(infrastructurePlanVisible()&&(todayChecked===0||forecastCheckedAt===0)){
-      queueMicrotask(()=>{void readTodayFacts();void readForecast();});
-    }
-    if($('pj-infrastructure-diagnostics').open)renderMailboxDiagnostics(accounts);
-    else $('pj-diagnostic-rows').replaceChildren();
-    if(data?.nextCursor&&!diagnosticCursor)$('pj-infrastructure-continue').textContent='Продолжить обновление расписаний'+(steps?' · '+steps:'');
+    if(data?.nextCursor&&!diagnosticCursor)$('pj-infrastructure-continue').textContent='Продолжить обновление'+(steps?' · '+steps:'');
   }
   function poolState(account){
     const state=account.capacity?.state;
@@ -1492,51 +1580,24 @@
     return campaign.bindingState==='unlinked'?'Без сегмента':'Сегмент неизвестен';
   }
   function poolDate(value){const date=timestamp(value);return date?date+' МСК':'';}
-  function scheduleDays(days){
-    const keys=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'],labels=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
-    const chosen=new Set((Array.isArray(days)?days:[]).map(day=>text(day).toLowerCase()));
-    if(keys.every(key=>chosen.has(key)))return 'Ежедневно';
-    const parts=[];
-    for(let i=0;i<keys.length;i++){
-      if(!chosen.has(keys[i]))continue;
-      let last=i;while(last+1<keys.length&&chosen.has(keys[last+1]))last++;
-      parts.push(i===last?labels[i]:labels[i]+'–'+labels[last]);i=last;
-    }
-    return parts.join(', ');
-  }
-  function renderCampaignSchedule(campaign,cell){
-    const schedule=campaign.schedule||campaign.lastKnownSchedule,days=scheduleDays(schedule?.days);
-    const note={pending:'Запрашиваем график…',error:'Не удалось проверить график',unavailable:'Coldy не передал график',stale:'График требует обновления'}[campaign.scheduleState];
-    if(!days||!schedule?.from||!schedule.to){cell.append(node('span','pj-unavailable',note||'График неизвестен'));return;}
-    cell.append(node('span','',days+' · '+schedule.from+'–'+schedule.to));
-    cell.append(node('small','pj-cell-note',schedule.timezone==='Europe/Moscow'?'МСК':schedule.timezone||'Часовой пояс неизвестен'));
-    if(Number.isFinite(schedule.gapStartSeconds)&&Number.isFinite(schedule.gapEndSeconds)){
-      const gap=schedule.gapStartSeconds===schedule.gapEndSeconds?number(schedule.gapStartSeconds):number(schedule.gapStartSeconds)+'–'+number(schedule.gapEndSeconds);
-      cell.append(node('small','pj-cell-note','Интервал между письмами '+gap+' с'));
-    }
-    if(campaign.lastKnownSchedule)cell.append(node('small','pj-cell-note',['Сохранённый график',poolDate(campaign.scheduleUpdatedAt),note].filter(Boolean).join(' · ')));
-  }
   function renderMailboxCapacity(accounts,capacity){
-    const filter=$('pj-capacity-filter').value,now=Date.now(),day=currentForecastDay();
+    const filter=$('pj-capacity-filter').value,now=Date.now();
     const period=filter+'|'+Math.floor(now/60000);
     if(capacityRowsKey!==null&&capacitySource===infrastructure&&capacityFilter===period)return;
     capacitySource=infrastructure;capacityFilter=period;
     const key=JSON.stringify([period,capacity,accounts]);
     if(capacityRowsKey===key)return;
     capacityRowsKey=key;
-    const focused=document.activeElement,focusId=focused?.closest('#pj-schedule-rows')?focused.id:null;
-    const accountFocus=focused?.closest('#pj-account-rows [data-account]')?.dataset.account,jumpFocus=focused?.dataset.poolCampaign;
     const campaignMap=new Map((capacity?.campaigns||[]).map(campaign=>[campaign.id,campaign]));
     const inactiveMap=new Map((capacity?.inactiveCampaigns||[]).map(campaign=>[campaign.id,campaign]));
-    const visibleCampaigns=new Set(),rows=$('pj-account-rows');rows.replaceChildren();
+    const rows=$('pj-account-rows');rows.replaceChildren();
     for(const account of accounts){
       const ids=account.capacity?.campaignIds||[],state=poolState(account);
-      for(const id of ids)visibleCampaigns.add(id);
       if(filter&&state!==filter)continue;
       const row=node('tr');row.dataset.account=text(account.id);
       const identity=poolCell(row,'Отправитель');identity.append(node('span','pj-name',account.name||account.email||'Ящик без названия'));
       if(account.email&&account.email!==account.name)identity.append(node('span','pj-cell-note',account.email));
-      if(account.missing)identity.append(node('span','pj-cell-note','ID '+text(account.id)));
+      if(account.showId)identity.append(node('span','pj-cell-note','ID '+text(account.id)));
       const tag=node('span','pj-badge',state==='busy'?'Занята':state==='free'?'Свободна':'Неизвестно');
       tag.dataset.tone=state==='busy'?'busy':state==='free'?'success':'neutral';poolCell(row,'Занятость').append(tag);
       const assignments=poolCell(row,'Рассылки и сегменты');
@@ -1544,12 +1605,9 @@
       for(const id of ids){
         const campaign=campaignMap.get(id);if(!campaign)continue;
         const group=node('div','pj-assignment');
-        const jump=node('button','pj-jump',campaign.name);jump.type='button';jump.dataset.poolCampaign=id;jump.setAttribute('aria-label','Показать расписание · '+text(campaign.name));
-        jump.addEventListener('click',()=>document.getElementById('pj-schedule-'+id)?.focus());
-        group.append(jump,node('small','',' · '+segmentLabel(campaign)),badge(campaign.status));assignments.append(group);
+        group.append(node('span','',campaign.name),node('small','',' · '+segmentLabel(campaign)),badge(campaign.status));assignments.append(group);
       }
       if(account.capacity?.outsideActive)assignments.append(node('div','pj-assignment','Занята в другой рассылке'));
-      if(!assignments.childElementCount)assignments.textContent=state==='free'?'Активных рассылок нет':'Нет подтверждённых данных';
       for(const id of account.capacity?.inactiveCampaignIds||[]){
         const campaign=inactiveMap.get(id);if(!campaign)continue;
         const group=node('div','pj-assignment');
@@ -1558,61 +1616,23 @@
         assignments.append(group);
       }
       if(account.capacity?.outsideInactive)assignments.append(node('div','pj-assignment','Есть неактивное назначение вне проекта'));
-      const quota=account.todayQuota;
-      const fresh=at=>Number.isFinite(Date.parse(at))&&now>=Date.parse(at)&&now-Date.parse(at)<300000;
-      const limit=fresh(quota?.limitAt)?quota.limit:null;
-      const sent=quota?.date===day&&fresh(quota?.sentAt)?quota.sent:null;
-      const remaining=Number.isSafeInteger(limit)&&Number.isSafeInteger(sent)?Math.max(0,limit-sent):null;
+      if(!assignments.childElementCount)assignments.textContent=state==='free'?'Активных рассылок нет':'Нет подтверждённых данных';
+      const observed=Date.parse(account.todayQuota?.limitAt);
+      const limit=now>=observed&&now-observed<300000?account.todayQuota.limit:null;
       poolCell(row,'Дневной лимит',number(limit));
-      poolCell(row,'Отправлено сегодня',number(sent));
-      poolCell(row,'Остаток лимита',number(remaining));
-      const cap=account.capacity||{},from=poolDate(cap.idleFrom),until=poolDate(cap.idleUntil);
-      poolCell(row,'Окно без отправок',state==='busy'&&from&&until?from+' — '+until:state==='free'?'Нет активных рассылок':'Неизвестно');
-      const blocked=!!account.errors?.length||['failed','error','disabled','paused','disconnected'].includes(text(account.status).toLowerCase());
-      const knownConnection=!account.stale&&['connected','active','ready','enabled'].includes(text(account.status).toLowerCase());
-      const available=state==='free'?limit===0||remaining===0?'Исчерпан дневной лимит':blocked?'Проверьте подключение':!knownConnection?'Проверьте подключение':remaining===null?'Уточняется дневной лимит':'Сейчас':state==='busy'?poolDate(cap.availableAt)||'Дата неизвестна':'Неизвестно';
-      poolCell(row,'Свободна для новой рассылки',available);rows.append(row);
+      const blocked=['failed','error','disabled','paused','disconnected','blocked'].includes(text(account.status).toLowerCase());
+      const errors=[...(account.errors||[])];
+      if(account.syncError)errors.push(account.syncError);
+      if(errors.length){
+        const problem=node('details','pj-account-error'),summary=node('summary','',account.syncError?'Не удалось обновить ящик':'Проблема с подключением');
+        problem.append(summary);
+        for(const error of errors)problem.append(node('span','pj-cell-note',typeof error==='string'?error:[error.code,error.message].filter(Boolean).join(' · ')));
+        identity.append(problem);
+      }else if(blocked)identity.append(node('span','pj-cell-note','Проверьте подключение'));
+      rows.append(row);
     }
     const noMatches=$('pj-capacity-empty');noMatches.hidden=!accounts.length||!!rows.childElementCount;
     noMatches.textContent=noMatches.hidden?'':'В этой группе почт нет.';
-    const schedules=$('pj-schedule-rows');schedules.replaceChildren();
-    for(const campaign of campaignMap.values()){
-      if(!visibleCampaigns.has(campaign.id))continue;
-      const row=node('tr');row.id='pj-schedule-'+campaign.id;row.tabIndex=-1;
-      const name=poolCell(row,'Рассылка и сегмент');name.append(node('span','pj-name',campaign.name),node('span','pj-cell-note',segmentLabel(campaign)));
-      const status=poolCell(row,'Статус Coldy');status.append(badge(campaign.status));
-      if(campaign.waitSchedule===true)status.append(node('span','pj-cell-note','Ожидает расписания'));
-      renderCampaignSchedule(campaign,poolCell(row,'График отправок'));
-      const finish=poolCell(row,'Ход и завершение');
-      if(campaign.bindingState==='linked')finish.append(campaignCompletion(campaign));
-      else finish.textContent='Нет привязки к сегменту проекта.';
-      schedules.append(row);
-    }
-    if(!schedules.childElementCount){
-      const message=capacity?.state==='ready'?'У выбранных почт нет активных рассылок этого проекта.':'Состав активных рассылок пока неизвестен.';
-      const row=node('tr'),cell=poolCell(row,'',message,'pj-unavailable');cell.colSpan=4;schedules.append(row);
-    }
-    const note=$('pj-infrastructure-note');
-    note.textContent=capacity?.stale?'Показаны последние сохранённые сведения. Обновите данные из Coldy.':visibleCampaigns.size?'Окно без отправок рассчитано по графикам активных рассылок. До завершения всех назначенных рассылок ящик остаётся занятым.':'';
-    note.hidden=!note.textContent;
-    if(focusId)document.getElementById(focusId)?.focus({preventScroll:true});
-    if(accountFocus&&jumpFocus)rows.querySelector('[data-account="'+CSS.escape(accountFocus)+'"] [data-pool-campaign="'+CSS.escape(jumpFocus)+'"]')?.focus({preventScroll:true});
-  }
-  function renderMailboxDiagnostics(accounts){
-    const rows=$('pj-diagnostic-rows');rows.replaceChildren();
-    for(const account of accounts){
-      const row=node('tr');row.dataset.account=text(account.id);const identity=node('td');identity.append(node('span','pj-name',account.email||account.name||'Ящик без адреса'));
-      const detail=[account.name&&account.name!==account.email?account.name:'',account.provider||''].filter(Boolean).join(' · ');if(detail)identity.append(node('span','pj-cell-note',detail));
-      if(account.tags?.length)identity.append(node('span','pj-cell-note',account.tags.join(', ')));
-      if(account.updatedAt)identity.append(node('span','pj-cell-note',(account.stale?'Сохранено ранее · ':'Проверено · ')+poolDate(account.updatedAt)));
-      row.append(identity);const status=node('td');status.append(badge(account.status));
-      if(typeof account.warmup?.enabled==='boolean')status.append(node('span','pj-cell-note','Прогрев: '+(account.warmup.enabled?'включён':'выключен')));
-      else if(account.warmup?.status)status.append(node('span','pj-cell-note','Прогрев: '+text(account.warmup.status)));
-      if(typeof account.warmup?.sentToday==='number')status.append(node('span','pj-cell-note','Прогрев сегодня: '+number(account.warmup.sentToday)));
-      row.append(status);
-      for(const value of [account.sentTotal,account.sentToday,account.dailyLimit])row.append(node('td','',number(value)));
-      const errors=node('td');if(account.errors?.length){errors.append(node('div','pj-account-error',account.errors.map(item=>typeof item==='string'?item:[item.code,item.message].filter(Boolean).join(': ')).join('\n')));}else errors.append(node('span','br-muted',account.errorCount===0?'Нет':account.errorCount!==null&&account.errorCount!==undefined?number(account.errorCount):'—'));row.append(errors);rows.append(row);
-    }
   }
   function render(){
     if(!$('pj-analytics-view'))return;
@@ -1624,48 +1644,46 @@
   }
   function scrub(){
     if(!$('pj-analytics-view'))return;
+    $('pj-binding-settings').open=false;
     catalogOptionsKey=null;campaignRowsKey=null;capacityRowsKey=null;capacitySource=null;capacityFilter=null;
     for(const id of ['pj-recipient-sync-setup','br-recipient-sync-setup'])renderRecipientSyncSetup(id,[]);
-    for(const id of ['pj-campaign-rows','pj-account-rows','pj-diagnostic-rows','pj-schedule-rows','pj-analytics-totals','pj-infrastructure-totals'])$(id).replaceChildren();
-    $('pj-infrastructure-diagnostics').open=false;$('pj-capacity-filter').value='';$('pj-capacity-empty').textContent='';
+    for(const id of ['pj-campaign-rows','pj-account-rows','pj-analytics-totals','pj-infrastructure-totals'])$(id).replaceChildren();
+    $('pj-capacity-filter').value='';$('pj-capacity-empty').textContent='';
     resetCampaignSearch();$('pj-campaign-shown').textContent='';$('pj-campaign-more').hidden=true;
     $('pj-segment').replaceChildren(new Option('Выберите сегмент',''));
-    for(const id of ['pj-analytics-health','pj-selection-health','pj-infrastructure-health','pj-analytics-updated','pj-infrastructure-updated','pj-diagnostics-health','pj-analytics-connection','pj-infrastructure-connection','pj-selection-count','pj-analytics-note','pj-infrastructure-note'])$(id).textContent='';
+    for(const id of ['pj-analytics-health','pj-selection-health','pj-infrastructure-health','pj-analytics-updated','pj-infrastructure-updated','pj-analytics-connection','pj-infrastructure-connection','pj-selection-count','pj-analytics-note'])$(id).textContent='';
     $('pj-infrastructure-continue').hidden=true;
   }
   function hasPending(){return !!recipientImport?.running||!!mailboxPicker?.operation?.running||[...contexts.values()].some(context=>context.operation?.running);}
   function isEditing(){const context=currentContext();return view==='infrastructure'?!!mailboxPicker&&(mailboxPicker.open||!!mailboxPicker.operation):view==='analytics'&&!!context&&(context.picker||dirty(context)||!!context.operation||!!recipientImport?.open);}
   function isLoading(){return view==='analytics'?catalogLoading||!!currentContext()?.loading||!!currentContext()?.metricsLoading||hasPending():view==='infrastructure'?infraLoading||!!mailboxPicker?.pending:false;}
   if($('pj-segment')){
-    $('pj-plan-detail').addEventListener('toggle',renderInfrastructurePlan);
-    $('pj-plan-day').addEventListener('change',renderInfrastructurePlan);
-    $('pj-history').addEventListener('toggle',()=>{
-      if(!$('pj-history').open){pauseHistory();return;}
-      if(!ready){health('pj-history-health','Проверяем доступ к отчёту…');$('pj-history-refresh').disabled=true;return;}
-      if(Date.now()<historyRetryAt)scheduleHistory(historyRetryAt-Date.now());else void readHistory();
+    $('pj-plan-period').addEventListener('change',()=>{
+      sendingFilters.period=$('pj-plan-period').value;renderSendingReport();loadSendingPeriod();
     });
-    $('pj-history-refresh').addEventListener('click',()=>readHistory(true));
-    $('pj-forecast-senders').addEventListener('toggle',renderForecast);
+    $('pj-history-date').addEventListener('change',()=>{
+      if(!$('pj-history-date').validity.valid){$('pj-history-date').reportValidity();return;}
+      changeHistoryWeek();renderSendingReport();
+    });
+    $('pj-plan-group').addEventListener('change',()=>{sendingFilters.group=$('pj-plan-group').value;renderSendingReport();});
+    $('pj-plan-segment').addEventListener('change',()=>{sendingFilters.segment=$('pj-plan-segment').value;sendingFilters.campaign='';renderSendingReport();});
+    $('pj-plan-campaign').addEventListener('change',()=>{sendingFilters.campaign=$('pj-plan-campaign').value;renderSendingReport();});
+    $('pj-plan-all').addEventListener('change',()=>{
+      sendingFilters.accounts=$('pj-plan-all').checked?null:new Set();renderSendingReport();
+    });
+    $('pj-plan-senders').addEventListener('change',event=>{
+      if(!event.target.matches('input[type="checkbox"]'))return;
+      sendingFilters.accounts=new Set([...$('pj-plan-senders').querySelectorAll('input:checked')].map(b=>b.value));renderSendingReport();
+    });
+    $('pj-plan-detail').addEventListener('toggle',renderSendingReport);$('pj-plan-day').addEventListener('change',renderSendingReport);
+    $('pj-plan-refresh').addEventListener('click',()=>loadSendingPeriod(true));
     for(const button of document.querySelectorAll('[data-enable-recipient-sync]'))button.addEventListener('click',enableRecipientSync);
-    $('pj-forecast').addEventListener('toggle',()=>{
-      if($('pj-forecast').open){renderForecast();void preloadForecast();void readForecast(!forecastData||forecastData.pending);}
-      else pauseForecast();
-    });
-    $('pj-forecast-refresh').addEventListener('click',()=>readForecast(true));
-    for(const button of $('pj-forecast').querySelectorAll('[data-forecast-days]'))button.addEventListener('click',()=>{
-      forecastDays=Number(button.dataset.forecastDays);renderForecast();
-    });
     document.addEventListener('visibilitychange',()=>{
       queueSenderUpdate(!document.hidden);
-      if(document.hidden){pauseForecast();pauseHistory();clearTimeout(todayTimer);todayTimer=null;}
+      if(document.hidden){stopSendingTimers();}
       else{
-        if(historyVisible())scheduleHistory(Math.max(0,historyRetryAt-Date.now()));
-        if(infrastructurePlanVisible()){
-          clearTimeout(todayTimer);
-          todayTimer=setTimeout(()=>void readTodayFacts(),Math.max(0,todayRetry-Date.now()));
-        }
-        if(forecastVisible())void readForecast(!forecastData||forecastData.pending);
-        if(completionCells().length)queueCompletions();
+        loadSendingPeriod();
+        if(projectCompletionVisible()||completionCells().length)queueCompletions();
       }
     });
     $('pj-selection-open').addEventListener('click',()=>{const context=currentContext();if(!context?.data?.configured||context.operation)return;context.picker=true;render();notify();$('pj-campaign-search').focus();});
@@ -1683,12 +1701,7 @@
     for(const id of ['pj-analytics-connect','pj-infrastructure-connect'])$(id).addEventListener('click',()=>{if(ready)config?.openConnection?.();});
     $('pj-analytics-refresh').addEventListener('click',()=>refresh({manual:true}));
     $('pj-infrastructure-refresh').addEventListener('click',()=>refresh({manual:true}));
-    $('pj-diagnostics-refresh').addEventListener('click',()=>syncInfrastructure(!!infrastructure?.nextCursor&&infrastructure.poolOnly!==true,true));
     $('pj-capacity-filter').addEventListener('change',renderInfrastructure);
-    $('pj-infrastructure-diagnostics').addEventListener('toggle',()=>{
-      const details=$('pj-infrastructure-diagnostics');if(details.open&&ready&&view==='infrastructure')renderMailboxDiagnostics(infrastructure?.accounts||[]);
-      else $('pj-diagnostic-rows').replaceChildren();
-    });
     $('pj-infrastructure-continue').addEventListener('click',()=>syncInfrastructure(true));
     $('pj-infrastructure-select').addEventListener('click',()=>openMailboxPicker());
     $('pj-mailbox-cancel').addEventListener('click',()=>{closeMailboxPicker();render();});

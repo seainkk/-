@@ -1,7 +1,7 @@
 """Use synthetic campaigns to verify target selection, progress and recovery in Chrome."""
 import sys
 from playwright.sync_api import expect, sync_playwright
-from project_client import HTML
+from project_client import select_binding_segment, HTML
 
 
 def main():
@@ -39,7 +39,7 @@ def main():
             if hold_metrics:
                 expect(page.locator('#pj-segment')).to_be_enabled()
                 expect(page.locator('#pj-analytics-connection')).to_be_hidden()
-            page.locator('#pj-segment').select_option('segment-a')
+            select_binding_segment(page, 'segment-a')
 
         def import_calls():
             return page.evaluate("backend.calls.filter(c=>c.name==='syncColdyRecipients').map(c=>c.payload)")
@@ -56,7 +56,9 @@ def main():
         expect(action).to_be_enabled()
         assert page.locator('[data-recipient-binding]').count() == 1
         page.wait_for_function("backend.pending.some(c=>c.name==='getSegmentMailings')")
-        assert page.evaluate("backend.calls.map(c=>c.name).slice(0,3)")==['getProjectAnalytics','getProjectAnalyticsCampaigns','getSegmentMailings']
+        binding_reads = ['getProjectAnalytics','getProjectAnalyticsCampaigns','getSegmentMailings']
+        calls = page.evaluate("backend.calls.map(c=>c.name)")
+        assert [name for name in calls if name in binding_reads][:3] == binding_reads
         action.click()
         dialog = page.locator('#pj-recipient-dialog')
         target = page.locator('#pj-recipient-target')
@@ -71,14 +73,14 @@ def main():
 
         # A response for the previous segment must not replace a warm chooser or its draft.
         page.evaluate("backend.holdMethods=['getProjectAnalyticsCampaigns'];release('getProjectAnalytics')")
-        page.locator('#pj-segment').select_option('segment-b')
+        select_binding_segment(page, 'segment-b')
         expect(hints).to_have_text('Сохранённые привязки · обновляем список')
         expect(rows).to_contain_text('Other campaign')
         expect(rows).not_to_contain_text('Кухни из снимка')
         expect(rows.locator('button,input')).to_have_count(0)
         page.evaluate("backend.holdMethods=[];release('getProjectAnalyticsCampaigns')")
         expect(page.locator('[data-recipient-binding="binding-other-0000000002"]')).to_be_enabled()
-        page.locator('#pj-segment').select_option('segment-a')
+        select_binding_segment(page, 'segment-a')
         page.locator('#pj-selection-open').click()
         page.locator('#pj-campaign-search').fill('New')
         page.locator('#pj-campaign-find').click()

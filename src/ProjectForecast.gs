@@ -28,7 +28,11 @@ function projectForecastPreviewRange_(archive,day) {
   // Yesterday's plan for a whole day cannot stand in for the remaining sends today.
   var aligned = Object.assign({},report,{today:null,days:days,periods:periods,startDate:days[0].date,
     reasons:(report.reasons || []).concat('previous_horizon')});
-  function alignCampaign(c) { return Object.assign({},c,{expectedByDay:[null].concat(c.expectedByDay.slice(2),null)}); }
+  function alignCampaign(c) {
+    var copy=Object.assign({},c,{expectedByDay:[null].concat(c.expectedByDay.slice(2),null)});
+    if(Array.isArray(c.initialByDay))copy.initialByDay=[null].concat(c.initialByDay.slice(2),null);
+    return copy;
+  }
   if (Array.isArray(report.campaigns)) aligned.campaigns = report.campaigns.map(alignCampaign);
   if (Array.isArray(report.senders)) aligned.senders = report.senders.map(function (sender) {
     function unknown(date) { return {date:date,remainingLimit:null,expected:null,unused:null}; }
@@ -66,7 +70,12 @@ function projectForecastCachedArchive_(archive) {
   if (Array.isArray(f.campaigns)) {
     if (!f.campaigns.every(function (c) { return c && coldyUuid_(c.id) && typeof c.name === 'string' && typeof c.segmentName === 'string' &&
       Array.isArray(c.expectedByDay) && c.expectedByDay.length === 8 && c.expectedByDay.every(count); })) return null;
-    compact.campaigns = f.campaigns.map(function (c) {return {id:c.id,name:c.name,segmentName:c.segmentName,expectedByDay:c.expectedByDay};});
+    compact.campaigns = f.campaigns.map(function (c) {
+      var row={id:c.id,name:c.name,segmentName:c.segmentName,expectedByDay:c.expectedByDay};
+      if(typeof c.segmentId==='string' && /^[\w-]{10,200}$/.test(c.segmentId))row.segmentId=c.segmentId;
+      if(Array.isArray(c.initialByDay)&&c.initialByDay.length===8&&c.initialByDay.every(count))row.initialByDay=c.initialByDay;
+      return row;
+    });
   }
   return {day:archive.day,generatedAt:archive.generatedAt,demandScope:archive.demandScope,forecast:compact};
 }
@@ -333,6 +342,8 @@ function getProjectSendingForecast_(request) {
         }
         fail_('COLDY_MONITORING_CHANGED', 'Состав проекта изменился во время расчёта. Обновите прогноз.');
       }
+      if (!state.work && state.generatedAt) projectPlanCapture_(fresh,settings,state,latest,bindingsObservation,monitoring.accountIds);
+      else if (latest && latest.planCapture) state.planCapture=latest.planCapture;
       state.revision = Utilities.getUuid();
       state.touchedAt = Date.now();
       return coldySave_(fresh, 'sendingforecast', owner, state);

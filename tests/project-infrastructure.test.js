@@ -437,10 +437,13 @@ function forecastFixture(total = 15) {
     [ACTIVE_ONE]:{sequences:[{id:7,delay:0}],sending_priority:'sequence_emails',
       is_stop_sending_on_reply:true,is_stop_sending_on_company_reply:false}
   },{monitoringIds:['1']});
-  for (const file of ['ProjectAnalytics.gs','ProjectForecastDemand.gs','ProjectForecastCalc.gs','ProjectForecast.gs']) {
+  for (const file of ['ColdyCampaigns.gs','ProjectAnalytics.gs','ProjectForecastDemand.gs','ProjectForecastCalc.gs','ProjectPlanArchive.gs','ProjectForecast.gs']) {
     vm.runInContext(readFileSync(new URL('../src/' + file, import.meta.url),'utf8'), f.c, {filename:file});
   }
   f.c.registryProjectId_=()=>'numshield';
+  f.c.registrySegmentProject_=()=>'numshield';
+  f.c.coldyCampaignRegistry_=context=>({credentialHash:f.c.coldyCredentialHash_(context),bindings:[
+    {id:'test-binding-id',campaignId:ACTIVE_ONE,segmentId:'segment_directory_1'}]});
   f.c.coldyCampaignId_=id=>{assert.equal(id,ACTIVE_ONE);return id;};
   const api=f.c.coldyApi_; f.offsets=[];
   f.c.coldyApi_=(context,method,path)=>{
@@ -471,6 +474,10 @@ test('project forecast reads only selected cohorts, resumes without double count
   assert.deepEqual(report.forecast.periods.map(p=>p.expected),[100,200,200]);
   assert.ok(!f.calls.http.includes('/accounts') && !f.calls.http.includes('/campaigns'));
   const count=f.calls.http.length, before=f.offsets.length;
+  const archive=f.calls.saves.filter(x=>x.kind==='sendingplanweek');
+  assert.equal(archive.length,1,'a complete Sunday forecast spans one target week');
+  assert.deepEqual(Object.keys(archive[0].value.days),report.forecast.days.map(d=>d.date));
+  assert.doesNotMatch(JSON.stringify(archive),/example\.test|fixture_secret|private recipient/);
   assert.deepEqual(f.forecast(),report);
   assert.equal(f.offsets.length,before);assert.equal(f.calls.http.length,count);
   assert.doesNotMatch(JSON.stringify(report),/private recipient|sensitive@example|seenIds|cohorts/);

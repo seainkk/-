@@ -5,8 +5,17 @@ function projectHistoryWeek_(now) {
   return Array.from({length:7},function (_,i) { return new Date(monday + i * 86400000).toISOString().slice(0,10); });
 }
 
-function projectHistoryDates_(period,now) {
-  return period === 'today' ? [new Date(now + 10800000).toISOString().slice(0,10)] : projectHistoryWeek_(now);
+function projectHistoryDates_(period,now,weekOf) {
+  var today=new Date(now+10800000).toISOString().slice(0,10);
+  if(weekOf===undefined)return period==='today'?[today]:projectHistoryWeek_(now);
+  if(period==='today'||typeof weekOf!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(weekOf)||weekOf>=today)
+    fail_('INVALID_REQUEST','Выберите прошедшую дату для истории отправок.');
+  var anchor=Date.parse(weekOf+'T00:00:00Z');
+  if(!Number.isFinite(anchor)||new Date(anchor).toISOString().slice(0,10)!==weekOf)
+    fail_('INVALID_REQUEST','Дата истории не существует.');
+  var monday=anchor-((new Date(anchor).getUTCDay()+6)%7)*86400000;
+  return Array.from({length:7},function (_,i){return new Date(monday+i*86400000).toISOString().slice(0,10);})
+    .filter(function (date){return date<today;});
 }
 
 // Within one request, reuse a verified journal only while Drive still confirms its identity and version.
@@ -21,7 +30,7 @@ function projectHistoryScope_(context, settings, days, reads) {
   var project = registryProjectId_(), monitoring = projectHistoryObserved_(reads.monitoring,function (proof) {
     return projectMonitoringRead_(context,settings,proof);
   });
-  var signature = projectMonitoringSignature_(context,monitoring), accounts = [], campaigns = [];
+  var signature = projectMonitoringSignature_(context,monitoring), accounts = [], campaigns = [], planBindings=[];
   if (monitoring.accountIds.length) {
     var inventory = !monitoring.accounts && projectHistoryObserved_(reads.inventory,function (proof) {
       return projectInfraRead_(context,settings,proof);
@@ -41,12 +50,14 @@ function projectHistoryScope_(context, settings, days, reads) {
       var id = coldyCampaignId_(binding.campaignId);
       if (seen.has(id)) fail_('COLDY_STORAGE','Обнаружены повторные привязки одной рассылки.');
       seen.add(id);
+      planBindings.push([id,binding.segmentId,binding.id || '']);
       campaigns.push({id:id, name:projectInfraText_(binding.campaignName,settings.key,500) || id, segmentId:binding.segmentId,segmentName:segments.get(binding.segmentId)});
     });
     campaigns.sort(function (a,b) { return a.id.localeCompare(b.id); });
   }
-  return {project:project, accounts:accounts, campaigns:campaigns, token:digest_(JSON.stringify(
-    [context.rootId,project,settings.credentialHash,settings.proofSlot,signature,days[0],campaigns.map(function (c) { return [c.id,c.segmentId]; })]))};
+  var planScope=projectPlanScope_(context,settings,signature,planBindings);
+  return {project:project, accounts:accounts,campaigns:campaigns,planScope:planScope,
+    token:digest_(JSON.stringify([planScope,days[0],days[days.length-1]]))};
 }
 
 function projectHistoryInvalid_() { fail_('COLDY_RESPONSE','Coldy не подтвердил полный состав отправок за день.'); }
@@ -101,7 +112,7 @@ function projectHistoryCheckpoint_(saved,scope,dayCount) {
     if (!Array.isArray(e.totals) || e.totals.length !== dayCount || !e.totals.every(nonnegative)) return false;
     return Object.keys(e.cells).every(function (index) {
       var c = e.cells[index];
-      if (!/^[0-6]$/.test(index) || Number(index)>=dayCount || dayCount!==1 && !e.totals[index] || !record(c) || c.retryAt !== undefined && !nonnegative(c.retryAt)) return false;
+      if (!/^[0-6]$/.test(index) || Number(index)>=dayCount || scope.period!=='today' && !e.totals[index] || !record(c) || c.retryAt !== undefined && !nonnegative(c.retryAt)) return false;
       if (!c.counts) return !c.done && !c.offset && !!c.retryAt;
       if (!record(c.counts)) return false;
       var sum = 0, inScope = Object.keys(c.counts).every(function (a) {
@@ -128,7 +139,7 @@ function projectHistoryJobs_(scope,days,report,now) {
   function summaryTasks(path) {
     var tasks=[{index:-1,path:path+'events?type=event&start_date='+days[0]+'&end_date='+days[days.length-1]}];
     // Read both views of a changing day together to minimize drift between their timestamps.
-    if(days.length===1)tasks.push(accountTask(0,path,0));
+    if(scope.period==='today')tasks.push(accountTask(0,path,0));
     return tasks;
   }
   for (var c=0;c<scope.campaigns.length;c++) {
@@ -141,14 +152,14 @@ function projectHistoryJobs_(scope,days,report,now) {
     }
     for (var i=0;i<days.length;i++) {
       var cell = entry.cells[i] || {};
-      if (days.length!==1 && !entry.totals[i] || cell.done) continue;
+      if (scope.period!=='today' && !entry.totals[i] || cell.done) continue;
       missing = true;
       if (cell.retryAt > now) { pauseUntil=Math.min(pauseUntil,cell.retryAt); continue; }
       tasks.push(accountTask(i,path,cell.offset || 0));
       if (tasks.length === COLDY.readBatchSize) break;
     }
     if (tasks.length) return {campaign:id,tasks:tasks};
-    if(days.length===1 && entry.cells[0]?.done) {
+    if(scope.period==='today' && entry.cells[0]?.done) {
       var observed=entry.verifiedAt || 0;
       if(observed+60000>now)pauseUntil=Math.min(pauseUntil,observed+60000);
       else if(!oldest || observed<oldest.at)oldest={campaign:id,path:path,at:observed};
@@ -182,13 +193,13 @@ function projectHistoryApply_(report,job,results,scope,days,now) {
       }
       else {
         entry.cells[index]=projectHistoryPage_(result.value,cell,entry.totals[index],selected);
-        if(days.length===1 && entry.cells[index].done)entry.verifiedAt=now;
+        if(scope.period==='today' && entry.cells[index].done)entry.verifiedAt=now;
       }
       report.checkedAt = new Date(now).toISOString();
     } catch (error) {
       var code = error.registryCode;
       if (['COLDY_NETWORK','COLDY_RATE_LIMIT','COLDY_RESPONSE','COLDY_UNAVAILABLE','COLDY_NOT_FOUND','COLDY_PROVIDER','COLDY_CONFLICT','COLDY_FORBIDDEN'].indexOf(code) === -1) throw error;
-      var delay = days.length===1 && code==='COLDY_RESPONSE' ? 15000 :
+      var delay = scope.period==='today' && code==='COLDY_RESPONSE' ? 15000 :
         ['COLDY_RESPONSE','COLDY_NOT_FOUND','COLDY_PROVIDER','COLDY_FORBIDDEN'].indexOf(code) >= 0 ? 3600000 : 60000;
       var retryAt = now + Math.max(delay,error.retryAfterMs || 0);
       if (code === 'COLDY_FORBIDDEN' || code === 'COLDY_NOT_FOUND') {
@@ -217,9 +228,9 @@ function projectHistoryResult_(scope,days,report,state) {
     if (!entry || !entry.totals) return;
     days.forEach(function (date,i) {
       var cell = entry.cells[i];
-      if ((days.length===1 || entry.totals[i]) && !(cell && cell.done)) return;
+      if ((scope.period==='today' || entry.totals[i]) && !(cell && cell.done)) return;
       var verified={date:date,campaignId:campaign.id};
-      if(days.length===1 && entry.verifiedAt)verified.checkedAt=new Date(entry.verifiedAt).toISOString();
+      if(scope.period==='today' && entry.verifiedAt)verified.checkedAt=new Date(entry.verifiedAt).toISOString();
       checked.push(verified);
       Object.keys(cell && cell.counts || {}).forEach(function (id) { rows.push({date:date,accountId:id,campaignId:campaign.id,sent:cell.counts[id]}); });
     });
@@ -229,28 +240,31 @@ function projectHistoryResult_(scope,days,report,state) {
   var message = {not_configured:'Подключите Coldy в настройках.',no_accounts:'Выберите почты для мониторинга в этом проекте.',
     no_campaigns:'В сегментах проекта пока нет подключённых рассылок.'}[state] ||
     (complete ? '' : retryAfter ? 'Coldy пока не подтвердил часть данных. Полученные дни сохранены.' : 'Получаем отправки по подключённым рассылкам.');
-  return {state:state || (complete?'ready':'partial'),period:days.length===1?'today':'previous_week',from:days[0],to:days[days.length-1],days:days,dayBasis:'coldy_calendar',timeZone:null,
+  return {state:state || (complete?'ready':'partial'),period:scope.period,from:days[0],to:days[days.length-1],days:days,dayBasis:'coldy_calendar',timeZone:null,
     accounts:scope.accounts,campaigns:scope.campaigns,rows:rows,checkedCells:checked,complete:complete,
     pending:!state&&!complete,retryAfterMs:retryAfter,message:message,checkedAt:report.checkedAt || null};
 }
 
 function getProjectSendingHistory_(request) {
   return api_(function () {
-    var input=projectAnalyticsInput_(request,['refresh','period']), period=input.period===undefined?'previous_week':input.period;
+    var input=projectAnalyticsInput_(request,['refresh','period','weekOf']), period=input.period===undefined?'previous_week':input.period;
     if(period!=='previous_week' && period!=='today')fail_('INVALID_REQUEST','Неизвестный период истории отправок.');
     if (input.refresh !== undefined && typeof input.refresh !== 'boolean') fail_('INVALID_REQUEST','Некорректный запрос обновления истории.');
-    var context=authorize_(), project=registryProjectId_(), settings=coldySettings_(context), now=Date.now(), days=projectHistoryDates_(period,now);
+    var context=authorize_(), project=registryProjectId_(), settings=coldySettings_(context), now=Date.now(), days=projectHistoryDates_(period,now,input.weekOf);
     if (!registryProjectScoped_()) fail_('OUTSIDE_PROJECT','Выберите проект для просмотра истории отправок.');
     var reads={monitoring:{},inventory:{},bindings:{},checkpoint:{}};
     var scope=settings.configured ? projectHistoryScope_(context,settings,days,reads) : {accounts:[],campaigns:[]};
+    scope.period=input.weekOf===undefined?period:'week';
     var empty=!settings.configured?'not_configured':!scope.accounts.length?'no_accounts':!scope.campaigns.length?'no_campaigns':null;
     if (empty){
-      if(days[0]!==projectHistoryDates_(period,Date.now())[0])fail_('COLDY_MONITORING_CHANGED','Дата отчёта изменилась. Обновите историю.');
-      return projectHistoryResult_(scope,days,{entries:{}},empty);
+      if(days.join()!==projectHistoryDates_(period,Date.now(),input.weekOf).join())fail_('COLDY_MONITORING_CHANGED','Дата отчёта изменилась. Обновите историю.');
+      return Object.assign(projectHistoryResult_(scope,days,{entries:{}},empty),{plans:[]});
     }
     var owner=projectMonitoringOwner_(settings.credentialHash), kind=period==='today'?'sendinghistorytoday':'sendinghistory';
+    if(input.weekOf!==undefined)owner=digest_(owner+'|week|'+days[0]);
     var saved=coldyLoad_(context,kind,owner,reads.checkpoint);
     var before=saved ? saved.version : null, report=projectHistoryCheckpoint_(saved,scope,days.length);
+    var plans=period==='today'?[]:projectPlanRead_(context,settings,scope,days);
     function current() {
       var fresh=authorize_(), currentSettings=coldySettings_(fresh);
       if (fresh.rootId!==context.rootId || registryProjectId_()!==project || currentSettings.credentialHash!==settings.credentialHash)
@@ -259,9 +273,9 @@ function getProjectSendingHistory_(request) {
       return fresh;
     }
     function confirm() {
-      var fresh=current(), verified=projectHistoryScope_(fresh,settings,projectHistoryDates_(period,Date.now()),reads);
+      var fresh=current(), verified=projectHistoryScope_(fresh,settings,projectHistoryDates_(period,Date.now(),input.weekOf),reads);
       if (verified.token!==scope.token) fail_('COLDY_MONITORING_CHANGED','Период, выбор ящиков или привязки рассылок изменились. Обновите историю.');
-      scope=verified;
+      verified.period=scope.period;scope=verified;
       return fresh;
     }
     var job=projectHistoryJobs_(scope,days,report,now);
@@ -271,7 +285,7 @@ function getProjectSendingHistory_(request) {
     }
     if (!job.tasks.length || report.pauseUntil>now) {
       confirm();
-      return projectHistoryResult_(scope,days,report);
+      return Object.assign(projectHistoryResult_(scope,days,report),{plans:plans});
     }
     var results;
     try { results=coldyGetBatch_(context,job.tasks.map(function (task) { return task.path; }),current,'sending-history'); }
@@ -289,6 +303,6 @@ function getProjectSendingHistory_(request) {
       }
       report.version=Utilities.getUuid(); coldySave_(fresh,kind,owner,report); return report;
     });
-    return projectHistoryResult_(scope,days,accepted);
+    return Object.assign(projectHistoryResult_(scope,days,accepted),{plans:plans});
   });
 }

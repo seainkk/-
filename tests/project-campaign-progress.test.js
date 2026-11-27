@@ -11,7 +11,9 @@ function fixture(){
   const ctx={rootId:'root'}, settings={configured:true, credentialHash:'credential'};
   const stored=new Map(), fetched=[], states={[a]:'Paused',[b]:'Completed',[c]:'Draft'};
   const ownership={first:'numshield',second:'neosender'};
-  const bindings=[{id:'one',segmentId:'first',campaignId:a},{id:'two',segmentId:'first',campaignId:b},{id:'three',segmentId:'second',campaignId:c}];
+  const bindings=[{id:'one',segmentId:'first',campaignId:a,campaignName:'А',campaignStatus:'Draft'},
+    {id:'two',segmentId:'first',campaignId:b,campaignName:'Б',campaignStatus:'Active'},
+    {id:'three',segmentId:'second',campaignId:c,campaignName:'В',campaignStatus:'Draft'}];
   const environment={project:'numshield',revision:0,serial:0,totals:{[a]:1,[b]:1,[c]:1},afterFetch:null};
   function fail(code,message){const err=new Error(message||code);err.registryCode=code;throw err;}
   const runtime=vm.createContext({
@@ -30,7 +32,7 @@ function fixture(){
     projectCapacityOwners_:(_ctx,ids,observation)=>{
       observation.registry={credentialHash:settings.credentialHash,bindings:copy(bindings)};
       return Object.fromEntries(bindings.filter(x=>ids.includes(x.campaignId)&&ownership[x.segmentId]===environment.project)
-        .map(x=>[x.campaignId,{segmentId:x.segmentId,bindingState:'linked'}]));
+        .map(x=>[x.campaignId,{segmentId:x.segmentId,bindingState:'linked',segmentName:'Сегмент '+x.segmentId,campaignName:x.campaignName,campaignStatus:x.campaignStatus}]));
     },
     coldyLoad_:(_ctx,kind,owner)=>copy(stored.get(kind+owner)||null),
     coldySave_:(_ctx,kind,owner,v)=>{stored.set(kind+owner,copy(v));return v;},
@@ -58,12 +60,15 @@ function fixture(){
   for (const name of ['ProjectForecastDemand','ProjectForecastCalc','ProjectForecast','ProjectCampaignCompletion','ProjectCampaignProgress']){
     vm.runInContext(readFileSync(new URL('../src/'+name+'.gs',import.meta.url),'utf8'),runtime,{filename:name+'.gs'});
   }
+  runtime.projectInfraText_=s=>typeof s==='string'?s:'';
   return {runtime,states,environment,fetched,stored,ownership,bindings,get:(input={})=>copy(runtime.getProjectCampaignCompletions_(input))};
 }
 
 test('all bound campaigns get valid-email progress without a mailbox selection; warm reads and project switches respect scope',()=>{
-  const f=fixture();assert.deepEqual(f.get({preview:true}).campaignCompletions,{});assert.equal(f.fetched.length,0);
+  const f=fixture(),preview=f.get({preview:true});assert.deepEqual(preview.campaignCompletions,{});assert.equal(f.fetched.length,0);
+  assert.deepEqual(preview.campaigns.map(c=>[c.name,c.segmentName,c.status,c.observed]),[['А','Сегмент first','Draft',false],['Б','Сегмент first','Active',false]]);
   const result=f.get();
+  assert.deepEqual(result.campaigns.map(c=>[c.status,c.observed]),[['Paused',true],['Completed',true]]);
   assert.deepEqual(Object.keys(result.campaignCompletions),[a,b]);assert.equal(result.pending,false);
   assert.equal(result.campaignCompletions[a].percent,50);assert.equal(result.campaignCompletions[a].state,'paused');
   assert.equal(result.campaignCompletions[b].estimatedDate,null);assert.equal(result.campaignCompletions[b].percent,50);
@@ -71,7 +76,8 @@ test('all bound campaigns get valid-email progress without a mailbox selection; 
   const count=f.fetched.length;
   assert.equal(f.get({preview:true}).campaignCompletions[a].percent,50);assert.equal(f.get().pending,false);
   assert.equal(f.fetched.length,count);
-  f.environment.project='neosender';assert.deepEqual(f.get({preview:true}).campaignCompletions,{});
+  f.environment.project='neosender';const other=f.get({preview:true});assert.deepEqual(other.campaignCompletions,{});
+  assert.deepEqual(other.campaigns.map(x=>x.id),[c]);
   assert.deepEqual(Object.keys(f.get().campaignCompletions),[c]);
   f.ownership.second='numshield';assert.deepEqual(f.get({preview:true}).campaignCompletions,{});
   assert.ok(!JSON.stringify([...f.stored.values()]).includes('private@example.test'));

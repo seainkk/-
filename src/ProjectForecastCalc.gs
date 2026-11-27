@@ -37,7 +37,7 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
     var windows = projectForecastWindows_(schedule, today, horizon, zones);
     var slow = schedule && projectInfraCount_(schedule.gapEndSeconds), fast = schedule && projectInfraCount_(schedule.gapStartSeconds);
     var gap = fast != null && slow != null && slow >= fast ? (fast + slow) * 500 : null;
-    campaigns.set(source.id, {id:source.id, name:source.name, segmentName:source.segmentName, expectedByDay:Array(8).fill(0),
+    campaigns.set(source.id, {id:source.id, name:source.name, segmentId:source.segmentId, segmentName:source.segmentName, expectedByDay:Array(8).fill(0),initialByDay:Array(8).fill(0),
       demand:demand, sequence:demand.sequence, allSelected:demand.allSendersSelected === true || source.allSendersSelected === true,
       dailyLimit:projectInfraCount_(demand.dailyLimit), firstDailyLimit:projectInfraCount_(demand.firstDailyLimit), followupDailyLimit:projectInfraCount_(demand.followupDailyLimit),
       owners:[], senderSelection:selection, assigned:new Map(), schedule:schedule, windows:windows, minGap:fast, gap:gap, reasons:new Set(), queues:new Map(), used:[0,0]});
@@ -62,7 +62,7 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
       if (!c) { mappingUnknown = true; return; }
       if (!c.assigned.has(id)) {
         account.campaigns.push(c); c.owners.push(account); c.assigned.set(id,account);
-        if (account.allocations) account.allocations.set(key,Array(8).fill(0));
+        if (account.allocations) account.allocations.set(key,{id:key,expectedByDay:Array(8).fill(0),initialByDay:Array(8).fill(0)});
       }
     });
   });
@@ -119,7 +119,7 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
   }
   var senders = accounts.map(function (account) {
     var links = account.campaigns.map(function (campaign) {
-      return {id:campaign.id, expectedByDay:mappingUnknown || missing ? Array(8).fill(null) : account.allocations.get(campaign.id)};
+      return mappingUnknown || missing ? {id:campaign.id,expectedByDay:Array(8).fill(null),initialByDay:Array(8).fill(null)} : account.allocations.get(campaign.id);
     });
     var days = rows.map(function (row,index) {
       var remaining = index ? account.limit : projectForecastRemaining_(account.limit,account.sentToday);
@@ -141,8 +141,8 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
     row.unused = sum(poolDay,'unused');
   });
   var breakdown = Array.from(campaigns.values()).map(function (c) {
-    return {id:c.id, name:c.name || '', segmentName:c.segmentName || '',
-      expectedByDay:mappingUnknown || missing ? Array(8).fill(null) : c.expectedByDay};
+    return {id:c.id, name:c.name || '', segmentId:c.segmentId || '', segmentName:c.segmentName || '',
+      expectedByDay:mappingUnknown || missing ? Array(8).fill(null) : c.expectedByDay,initialByDay:mappingUnknown || missing ? Array(8).fill(null) : c.initialByDay};
   });
   return {timezone:zone, today:rows[0], startDate:days[0].date, selectedAccounts:selection.size, activeCampaigns:campaigns.size, campaigns:breakdown, senders:senders, days:days,queue:queue,
     periods:[1,3,7].map(function (length) {
@@ -322,9 +322,10 @@ function projectForecastPool_(pool, rows, reasons, now, today, day, budget, queu
     pool.campaigns.forEach(function (c) {
       var unknown = uncertain && open(c) && c.dailyLimit !== 0 && (c.firstDailyLimit !== 0 || c.followupDailyLimit !== 0);
       c.expectedByDay[index] = unknown ? null : c.used[0] + c.used[1];
+      c.initialByDay[index] = unknown ? null : c.used[0];
       if (unknown) c.owners.forEach(function (a) {
         if (!a.blocked && a.limit !== 0 && (index || projectForecastRemaining_(a.limit,a.sentToday) !== 0))
-          a.allocations.get(c.id)[index] = null;
+          a.allocations.get(c.id).expectedByDay[index] = a.allocations.get(c.id).initialByDay[index] = null;
       });
     });
     if (uncertain) daily.expected = daily.initial = daily.followups = null;
@@ -388,7 +389,10 @@ function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
     if (--group.count === 0) projectForecastPop_(best.heap);
     c.used[best.kind]++; a.remaining--; c.lastAllocation = budget.sends;
     a.turn = pool.nextTurn++;
-    if (a.allocations) a.allocations.get(c.id)[index]++;
+    if (a.allocations) {
+      var attribution=a.allocations.get(c.id);attribution.expectedByDay[index]++;
+      if(!best.kind)attribution.initialByDay[index]++;
+    }
     if (daily.expected !== null) { daily.expected++; if (best.kind) daily.followups++; else daily.initial++; }
     if (next < c.sequence.steps.length) {
       var due = event.time + c.sequence.steps[next].delayDays * 86400000;
