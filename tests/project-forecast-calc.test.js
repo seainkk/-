@@ -48,6 +48,48 @@ test('first emails trigger followups on their actual modeled send day plus the n
   assert.equal(r.periods[2].capacity,10);
 });
 
+test('mailbox ceilings, eligible sends and unused quota reconcile across all selected senders and campaign assignments',()=>{
+  const senders=Array.from({length:20},(_,i)=>account(i+1,['k','l'],{email:'sender'+i+'@example.test',name:'Ящик '+i}));
+  const report=calc([...senders,account('other',['k'])],[campaign('k'),campaign('l')],
+    {k:demand([lead(420)]),l:demand([lead(80)])},sunday,{monitoring:{accountIds:senders.map(a=>a.id)}});
+  const monday=report.days[0];
+  assert.deepEqual([monday.mailboxLimit,monday.remainingLimit,monday.capacity,monday.expected,monday.unused],[1000,1000,1000,500,500]);
+  assert.equal(report.senders.length,20);
+  assert.ok(report.senders.every((sender,i)=>sender.email===senders[i].email && sender.days[1].expected===25));
+  for(const [i,day] of [report.today,...report.days].entries()){
+    assert.equal(report.senders.reduce((n,a)=>n+a.days[i].expected,0),day.expected);
+    for(const a of report.senders){
+      assert.equal(a.days[i].date,day.date);
+      assert.equal(a.campaigns.reduce((n,c)=>n+c.expectedByDay[i],0),a.days[i].expected);
+      assert.equal(a.days[i].unused,a.days[i].remainingLimit-a.days[i].expected);
+    }
+    for(const c of report.campaigns)
+      assert.equal(report.senders.reduce((n,a)=>n+a.campaigns.find(ac=>ac.id===c.id).expectedByDay[i],0),c.expectedByDay[i]);
+  }
+  assert.deepEqual(report.periods.map(p=>[p.mailboxLimit,p.unused]),[[1000,500],[3000,2500],[7000,6500]]);
+});
+
+test('gross headroom includes free mailboxes, subtracts today’s usage, and preserves unknown or outside consumption',()=>{
+  const other=account(5,[],{capacity:{state:'busy',campaignIds:[],outsideActive:true}});
+  const live=account(3,['a'],{dailyLimit:50,sentToday:20});
+  const free=account(4,[],{sentToday:10}), inactive=account(2,[],{status:'Paused',dailyLimit:0,sentToday:null});
+  const camps=[campaign('a',{schedule:{days:['sunday',...weekdays]}})];
+  const facts={a:demand([lead(18,{senderId:3})])};
+  const good=calc([live,free,inactive],camps,facts);
+  assert.deepEqual([good.today.mailboxLimit,good.today.remainingLimit,good.today.expected,good.today.unused],[100,70,18,52]);
+  assert.deepEqual(good.senders.map(s=>[s.days[0].remainingLimit,s.days[0].expected,s.days[0].unused]),[[30,18,12],[40,0,40],[0,0,0]]);
+  const outside=calc([live,other],camps,facts);
+  assert.equal(outside.senders[1].days[1].expected,0);
+  assert.equal(outside.senders[1].days[1].unused,null);assert.equal(outside.days[0].unused,null);
+  const partial=calc([live,free],camps,{});
+  assert.equal(partial.today.remainingLimit,70);assert.equal(partial.today.unused,null);
+  assert.equal(partial.senders[0].campaigns[0].expectedByDay[0],null);
+  assert.equal(partial.senders[1].days[0].unused,40);
+  const missing=calc([free],[],{},sunday,{monitoring:{accountIds:['4','missing']}});
+  assert.equal(missing.today.mailboxLimit,null);assert.equal(missing.today.unused,null);
+  assert.equal(missing.senders[1].id,'missing');assert.equal(missing.senders[1].dailyLimit,null);
+});
+
 test('campaign totals come from actual allocations on shared senders and keep unknown separate from zero',()=>{
   const campaigns=[campaign('k',{name:'Кухни',segmentName:'Компании'}),campaign('l',{name:'ЛПР',segmentName:'Кухни'}),
     campaign('paused',{status:'Paused'})];

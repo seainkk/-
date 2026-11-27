@@ -39,6 +39,7 @@ function callApp(request) {
         getSourceBasesRevision: typeof getSourceBasesRevision_ === 'function' ? getSourceBasesRevision_ : null,
         claimRegistrySegment: typeof claimRegistrySegment_ === 'function' ? claimRegistrySegment_ : null,
         getProjectAnalytics: typeof getProjectAnalytics_ === 'function' ? getProjectAnalytics_ : null,
+        getProjectSendingHistory: typeof getProjectSendingHistory_ === 'function' ? getProjectSendingHistory_ : null,
         getProjectSendingForecast: typeof getProjectSendingForecast_ === 'function' ? getProjectSendingForecast_ : null,
         getProjectCampaignCompletions: typeof getProjectCampaignCompletions_ === 'function' ? getProjectCampaignCompletions_ : null,
         enableColdyRecipientSync: typeof enableColdyRecipientSync_ === 'function' ? enableColdyRecipientSync_ : null,

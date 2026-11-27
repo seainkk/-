@@ -1,7 +1,17 @@
 <section id="pj-analytics-view" class="pj-view" hidden aria-labelledby="pj-analytics-title">
-  <div class="pj-heading"><div><p class="pj-eyebrow">Проект · Coldy</p><h1 id="pj-analytics-title">Аналитика</h1><p class="br-muted">Рассылки и результаты по сегментам.</p></div><div class="pj-toolbar"><button id="pj-analytics-connect" class="br-button" type="button" aria-haspopup="dialog">Настройки Coldy</button><button id="pj-analytics-refresh" class="br-button" type="button">↻ Обновить данные</button></div></div>
+  <div class="pj-heading"><div><p class="pj-eyebrow">Проект · Coldy</p><h1 id="pj-analytics-title">Аналитика</h1></div><div class="pj-toolbar"><button id="pj-analytics-connect" class="br-button" type="button" aria-haspopup="dialog">Настройки Coldy</button><button id="pj-analytics-refresh" class="br-button" type="button">↻ Обновить данные</button></div></div>
   <p id="pj-analytics-health" class="pj-health" role="status" aria-live="polite"></p>
   <div id="pj-analytics-connection" class="pj-connection" hidden></div>
+  <details id="pj-history" class="pj-card pj-forecast">
+    <summary>Отправлено за прошлую неделю</summary>
+    <div class="pj-forecast-body">
+      <div class="pj-toolbar"><span id="pj-history-period"></span><button id="pj-history-refresh" type="button" class="br-button">Обновить отчёт</button></div>
+      <p id="pj-history-health" class="pj-health" role="status"></p>
+      <div id="pj-history-result" class="pj-table-wrap" hidden>
+        <table class="pj-table pj-sending-table"><caption class="pj-sr-only">Фактические отправки по выбранным почтам и рассылкам проекта</caption><thead></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </details>
   <details id="pj-forecast" class="pj-card pj-forecast">
     <summary>Прогноз отправок</summary>
     <div class="pj-forecast-body">
@@ -18,12 +28,17 @@
       <div id="pj-forecast-report" hidden>
         <p id="pj-forecast-context" class="br-muted"></p>
         <dl id="pj-forecast-totals" class="pj-metrics" aria-label="Прогноз за период"></dl>
+        <details id="pj-forecast-senders">
+          <summary>Прогноз по почтам и рассылкам</summary>
+          <p id="pj-forecast-sender-note" class="br-muted"></p>
+          <div class="pj-table-wrap"><table id="pj-forecast-sender-table" class="pj-table pj-sending-table"><caption class="pj-sr-only">План отправок по дням и свободный остаток лимита каждого ящика</caption><thead></thead><tbody></tbody></table></div>
+        </details>
         <div class="pj-table-wrap" id="pj-forecast-campaign-table">
           <table class="pj-table"><caption>Рассылки в расчёте</caption><thead><tr><th scope="col">Рассылка</th><th scope="col">Сегмент</th><th scope="col">Ожидается писем за период</th></tr></thead><tbody id="pj-forecast-campaigns"></tbody></table>
         </div>
         <p id="pj-forecast-queue" class="br-muted" hidden></p>
         <div id="pj-forecast-daily" class="pj-table-wrap" hidden>
-          <table class="pj-table"><caption class="pj-sr-only">Прогноз по дням, московское время</caption><thead><tr><th scope="col">Дата</th><th scope="col">Первые письма</th><th scope="col">Повторные</th><th scope="col">Ожидается всего</th><th scope="col">Предел по лимитам</th><th id="pj-forecast-scenario-column" scope="col" hidden>По разобранной части (сценарий)</th></tr></thead><tbody id="pj-forecast-rows"></tbody></table>
+          <table class="pj-table"><caption class="pj-sr-only">Прогноз по дням, московское время</caption><thead><tr><th scope="col">Дата</th><th scope="col">Первые письма</th><th scope="col">Повторные</th><th scope="col">Ожидается всего</th><th scope="col">Предел по графику</th><th scope="col" id="pj-forecast-limit-col" hidden>Лимит почт</th><th scope="col" id="pj-forecast-unused-col" hidden>Свободно по прогнозу</th><th id="pj-forecast-scenario-column" scope="col" hidden>По разобранной части (сценарий)</th></tr></thead><tbody id="pj-forecast-rows"></tbody></table>
         </div>
         <ul id="pj-forecast-reasons" class="pj-forecast-reasons" hidden></ul>
       </div>
@@ -81,10 +96,10 @@
   <div class="pj-heading"><div><h2 id="pj-mailbox-title">Выбрать почты</h2><p class="br-muted">Отметьте ящики для мониторинга в этом проекте. Выбор виден всей команде.</p></div><button id="pj-mailbox-cancel" class="br-button" type="button">Отмена</button></div>
   <p id="pj-mailbox-health" class="pj-health" role="status" aria-live="polite"></p>
   <fieldset id="pj-mailbox-fields" class="pj-mailbox-fields">
-    <label for="pj-mailbox-search">Найти почту<input id="pj-mailbox-search" type="search" placeholder="ID, название или email" autocomplete="off"></label>
-    <div class="pj-toolbar"><span id="pj-mailbox-count" class="br-muted"></span><button id="pj-mailbox-inventory" class="br-button" type="button">Найти в Coldy</button><button id="pj-mailbox-clear" class="br-button" type="button">Снять весь выбор</button></div>
+    <label for="pj-mailbox-search">Найти почту<input id="pj-mailbox-search" type="search" maxlength="254" placeholder="Часть адреса, имени или ID" autocomplete="off" aria-controls="pj-mailbox-rows"></label>
+    <div class="pj-toolbar"><span id="pj-mailbox-count" class="br-muted"></span><button id="pj-mailbox-inventory" class="br-button" type="button" hidden>Повторить поиск</button><button id="pj-mailbox-clear" class="br-button" type="button">Снять весь выбор</button></div>
     <div id="pj-mailbox-rows" class="pj-mailbox-rows"></div>
-    <p id="pj-mailbox-shown" class="br-muted"></p><button id="pj-mailbox-more" class="br-button" type="button" hidden>Показать ещё</button>
+    <p id="pj-mailbox-shown" class="br-muted" role="status"></p><button id="pj-mailbox-more" class="br-button" type="button" hidden>Показать ещё</button>
   </fieldset>
   <div class="pj-toolbar pj-mailbox-footer"><button id="pj-mailbox-save" class="br-button br-primary" type="button" disabled>Сохранить выбор</button><button id="pj-mailbox-retry" class="br-button" type="button" hidden>Продолжить тот же запрос</button><button id="pj-mailbox-reload" class="br-button" type="button" hidden>Загрузить сохранённый выбор</button></div>
   <p class="br-muted">Обновление списка получает только адреса из Coldy. Показатели синхронизируются отдельно, для выбранных почт.</p>
