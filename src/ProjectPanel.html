@@ -68,9 +68,19 @@
   <dl id="pj-infrastructure-totals" class="pj-metrics" aria-label="Занятость выбранных почт"></dl>
   <div id="pj-infrastructure-empty" class="pj-empty" hidden></div>
   <div id="pj-infrastructure-content" hidden>
+    <section class="pj-card" aria-labelledby="pj-plan-title">
+      <div class="pj-card-heading"><h2 id="pj-plan-title">План и факт отправок</h2><span id="pj-plan-asof" class="br-muted"></span></div>
+      <p id="pj-plan-health" class="pj-health" role="status"></p>
+      <p class="br-muted">Факт учитывает письма выбранных почт в рассылках проекта. Прогноз за сегодня складывается из подтверждённых отправок и писем, которые ещё успеют уйти до конца дня.</p>
+      <div class="pj-table-wrap"><table class="pj-table"><thead><tr><th>День</th><th>Лимит почт</th><th>Факт по проекту</th><th>Ожидается первых</th><th>Ожидается повторных</th><th>Прогноз за день</th><th>Свободный лимит</th></tr></thead><tbody id="pj-plan-days"></tbody></table></div>
+      <details id="pj-plan-detail"><summary>По почтам и рассылкам</summary>
+        <label for="pj-plan-day">День</label> <select id="pj-plan-day"></select>
+        <div class="pj-table-wrap"><table class="pj-table"><thead><tr><th>Почта</th><th>Рассылка</th><th>Факт</th><th>Ещё ожидается</th><th>Прогноз за день</th></tr></thead><tbody id="pj-plan-accounts"></tbody></table></div>
+      </details>
+    </section>
     <section class="pj-card" aria-labelledby="pj-pool-title">
       <div class="pj-card-heading"><h2 id="pj-pool-title">Пул почт</h2><div class="pj-toolbar"><label for="pj-capacity-filter">Занятость</label><select id="pj-capacity-filter"><option value="">Все почты</option><option value="free">Свободные</option><option value="busy">Занятые</option><option value="unknown">Уточняется</option></select></div></div>
-      <div class="pj-table-wrap"><table class="pj-table pj-pool-table"><thead><tr><th scope="col">Отправитель</th><th scope="col">Занятость</th><th scope="col">Активные рассылки и сегменты</th><th scope="col">Окно без отправок</th><th scope="col">Свободна для новой рассылки</th></tr></thead><tbody id="pj-account-rows"></tbody></table></div>
+      <div class="pj-table-wrap"><table class="pj-table pj-pool-table"><thead><tr><th scope="col">Отправитель</th><th scope="col">Занятость</th><th scope="col">Рассылки и сегменты</th><th scope="col">Дневной лимит</th><th scope="col">Отправлено сегодня</th><th scope="col">Остаток лимита</th><th scope="col">Окно без отправок</th><th scope="col">Свободна для новой рассылки</th></tr></thead><tbody id="pj-account-rows"></tbody></table></div>
       <p id="pj-capacity-empty" class="pj-footnote br-muted" hidden></p>
     </section>
     <section class="pj-card" aria-labelledby="pj-schedule-title">

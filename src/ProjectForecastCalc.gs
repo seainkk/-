@@ -1,3 +1,16 @@
+function projectForecastSenderQuota_(sender,now) {
+  var day = new Date(now+10800000).toISOString().slice(0,10);
+  if (sender.todayQuota !== undefined) {
+    var q=sender.todayQuota || {};
+    return projectInfraTodayQuota_({dailyLimit:q.limit,dailyLimitAt:q.limitAt,sentToday:q.date===day?q.sent:null,
+      sentTodayAt:q.sentAt,syncError:sender.syncError},now);
+  }
+  // Older callers supplied a single observation time for the entire mailbox.
+  var at = Date.parse(sender.updatedAt), fresh = Number.isFinite(at) && !sender.stale && !sender.syncError;
+  return {limit:fresh ? projectInfraCount_(sender.dailyLimit) : null,
+    sent:fresh && new Date(at+10800000).toISOString().slice(0,10)===day ? projectInfraCount_(sender.sentToday) : null};
+}
+
 /** Model the selected sending pool. All queues, dates and allocations are local to this calculation. */
 function projectForecastCalculate_(infrastructure, demands, nowMs, completionReports) {
   var day = 86400000, zone = 'Europe/Moscow', now = Number(nowMs), data = infrastructure || {};
@@ -36,9 +49,9 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
     var fresh = !source.stale && !source.syncError && !!source.updatedAt;
     var blocked = fresh && ((source.errors || []).length > 0 || ['failed','error','disabled','paused','disconnected','blocked'].indexOf(status) >= 0);
     var online = fresh && ['connected','active','ready','enabled','ok'].indexOf(status) >= 0;
-    var observedAt = Date.parse(source.updatedAt);
-    var account = {id:id, name:source.name || '', email:source.email || '', blocked:blocked, online:online, limit:fresh ? projectInfraCount_(source.dailyLimit) : null,
-      sentToday:fresh && Number.isFinite(observedAt) && date(observedAt) === date(now) ? projectInfraCount_(source.sentToday) : null,
+    var quota = projectForecastSenderQuota_(source,now);
+    var account = {id:id, name:source.name || '', email:source.email || '', blocked:blocked, online:online, limit:quota.limit,
+      sentToday:quota.sent,
       outside:cap.outsideActive === true, campaigns:[], nextAt:now};
     if (!completionReports) account.allocations = new Map();
     accounts.push(account);

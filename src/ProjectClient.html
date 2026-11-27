@@ -17,6 +17,7 @@
   let forecastArchive=null,forecastPreviewAttempt=0,forecastPreviewVersion=0;
   let historyReport=null,historySequence=0,historyTimer=null,historyBusy=false,historyRetryAt=0,historyChecked=0;
   let senderTableReport=null,senderTablePeriod=null;
+  let todayFacts=null,todayBusy=false,todayEpoch=0,todayChecked=0,todayRetry=0,todayTimer=null,todayError='';
   let completionData=null,completionMessage='',completionNext=0,completionTimer=null,completionVersion=0,completionBusy=false;
   const recipientRequests=new Map();
   const campaignPageSize=40;
@@ -37,6 +38,7 @@
   function notify(){try{config?.onStateChange?.();}catch(ignored){}}
   function mutation(details){
     if(details?.kind==='binding'||details?.kind==='monitoring'){
+      resetTodayFacts();
       clearHistory(false);
       if(details.kind==='binding'){infrastructure=null;infraLoadedAt=0;}
       senderAttempt=0;resetForecast(false);resetCompletions();paintOpenSenders();queueSenderUpdate(true);
@@ -87,6 +89,7 @@
     return dashboardNames?.slice(0,10)||[];
   }
   function clear(){
+    resetTodayFacts();
     clearHistory(true);
     clearTimeout(catalogExpiryTimer);catalogExpiryTimer=null;
     expandedSenders.clear();clearTimeout(senderTimer);senderTimer=null;senderAttempt=0;senderView=null;
@@ -104,6 +107,7 @@
   function invalidate(options={}){
     if(options.credentialsChanged){clear();}
     else{
+      resetTodayFacts();
       clearHistory(false);
       resetForecast(false);
       resetCompletions();
@@ -121,6 +125,7 @@
     if(scopeChanged)accessEpoch=options.epoch;
     ready=options.ready===true;preview=!ready&&options.preview===true;
     view=(ready||preview)&&views.has(next)?next:null;
+    if(view!=='infrastructure'){clearTimeout(todayTimer);todayTimer=null;}
     if(view!=='analytics'&&$('pj-history')?.open){$('pj-history').open=false;pauseHistory();}
     if(view==='analytics'&&ready&&!wasReady&&$('pj-history')?.open)void readHistory();
     const directoryApplied=updateCatalogHint();
@@ -226,7 +231,8 @@
   }
   function pollVisible(){return ready&&!document.hidden&&!isEditing()&&!hasPending()&&config?.canPoll?.()!==false;}
   function recentPoll(at){const age=Date.now()-at;return at>0&&age>=0&&age<liveInterval;}
-  function forecastVisible(){return view==='analytics'&&$('pj-forecast')?.open&&pollVisible();}
+  function infrastructurePlanVisible(){return view==='infrastructure'&&infrastructure?.monitoring?.accountIds?.length>0&&pollVisible();}
+  function forecastVisible(){return infrastructurePlanVisible()||view==='analytics'&&$('pj-forecast')?.open&&pollVisible();}
   function pauseForecast(){
     if(forecastTimer!==null)clearTimeout(forecastTimer);
     forecastTimer=null;forecastBusy=false;forecastSequence++;
@@ -711,6 +717,7 @@
     table.tBodies[0].replaceChildren(out);
   }
   function renderForecast(){
+    if(view==='infrastructure')renderInfrastructurePlan();
     if(!$('pj-forecast'))return;
     const today=currentForecastDay(),response=forecastData?.day&&forecastData.day!==today?null:forecastData;
     const archive=forecastArchive?.day===today?forecastArchive:null;
@@ -822,7 +829,7 @@
   async function refresh(options={}){
     if(!ready||!view)return;
     if(options.manual)refreshVisibleCompletions();
-    if(options.automatic)return Promise.all([pollProjectView(),readForecast(),readHistory()]);
+    if(options.automatic)return Promise.all([pollProjectView(),readForecast(),readHistory(),readTodayFacts()]);
     if(view==='analytics'&&(recipientImport?.open||recipientImport?.running))return;
     const mark=token(),requestedView=view;
     if(view==='analytics'){
@@ -845,7 +852,8 @@
       void preloadForecast();
       if(selectedRead)await selectedRead;
     }else{
-      if(options.manual)return syncInfrastructure();
+      if(options.manual){void readTodayFacts(true);void readForecast(true);return syncInfrastructure();}
+      if(infrastructurePlanVisible()){void readTodayFacts();void readForecast();}
       if(options.opening&&infrastructureFresh())return;
       return loadInfrastructure();
     }
@@ -1330,6 +1338,113 @@
       }
     }
   }
+  function resetTodayFacts(){
+    clearTimeout(todayTimer);todayTimer=null;todayEpoch++;todayFacts=null;todayBusy=false;todayChecked=0;todayRetry=0;todayError='';
+    for(const id of ['pj-plan-days','pj-plan-accounts','pj-plan-day','pj-plan-asof','pj-plan-health'])$(id)?.replaceChildren();
+    if($('pj-plan-detail'))$('pj-plan-detail').open=false;
+  }
+  async function readTodayFacts(manual=false){
+    if(!infrastructurePlanVisible()||todayBusy)return;
+    const day=currentForecastDay();
+    if(todayFacts&&todayFacts.from!==day)resetTodayFacts();
+    if(Date.now()<todayRetry||!manual&&!todayFacts?.pending&&recentPoll(todayChecked))return;
+    const seq=todayEpoch,mark=token(),valid=()=>seq===todayEpoch&&alive(mark)&&view==='infrastructure'&&!document.hidden;
+    todayBusy=true;todayChecked=Date.now();clearTimeout(todayTimer);todayTimer=null;
+    try{
+      const result=await invoke('getProjectSendingHistory',manual?{period:'today',refresh:true}:{period:'today'},mark,valid);
+      if(!valid()||!result||result.from!==currentForecastDay()||result.days?.length!==1)return;
+      todayFacts=result;todayError='';todayRetry=Date.now()+Math.max(0,Number(result.retryAfterMs)||0);
+      if(result.pending)todayTimer=setTimeout(()=>void readTodayFacts(),Math.max(1500,todayRetry-Date.now()));
+    }catch(error){
+      if(!valid())return;
+      todayFacts=null;todayError=failure(error).message;
+    }finally{
+      if(seq===todayEpoch){todayBusy=false;if(!valid()&&!todayFacts)todayChecked=0;if(view==='infrastructure')renderInfrastructurePlan();}
+    }
+  }
+  function renderInfrastructurePlan(){
+    const selected=infrastructure?.monitoring?.accountIds||[],slots=$('pj-plan-days');
+    if(!slots)return;
+    if(!ready||view!=='infrastructure'||!selected.length){
+      slots.replaceChildren();$('pj-plan-accounts').replaceChildren();return;
+    }
+    const day=currentForecastDay(),ids=new Set(selected.map(String));
+    const inScope=list=>Array.isArray(list)&&list.length===ids.size&&list.every(a=>ids.has(String(a.id)));
+    const raw=todayFacts?.from===day?todayFacts:null;
+    const facts=inScope(raw?.accounts)?raw:null;
+    const found=forecastData?.day===day?forecastData.forecast:null;
+    const bound=new Set((facts?.campaigns||[]).map(c=>String(c.id)));
+    const matchingBindings=!facts||Array.isArray(found?.campaigns)&&found.campaigns.every(c=>bound.has(String(c.id)));
+    const plan=inScope(found?.senders)&&matchingBindings?found:null;
+    const dates=Array.from({length:8},(_,i)=>new Date(Date.parse(day+'T00:00:00Z')+i*86400000).toISOString().slice(0,10));
+    const labels=dates.map((date,i)=>(i===0?'Сегодня · ':i===1?'Завтра · ':'')+forecastDate(date).slice(0,5));
+    const completed=new Set((facts?.checkedCells||[]).filter(cell=>cell.date===day).map(cell=>String(cell.campaignId)));
+    const factsComplete=!!facts&&(facts.complete===true||facts.state==='no_campaigns');
+    const planTime=Date.parse(forecastData?.generatedAt);
+    const verifiedTimes=(facts?.checkedCells||[]).map(c=>Date.parse(c.checkedAt||facts.checkedAt));
+    const sameCampaignScope=Array.isArray(plan?.campaigns)&&plan.campaigns.every(c=>bound.has(String(c.id)));
+    const comparable=sameCampaignScope&&(facts?.state==='no_campaigns'||Number.isFinite(planTime)&&verifiedTimes.length>0&&verifiedTimes.every(t=>Math.abs(t-planTime)<=300000));
+    const byAccount=new Map(),byCampaign=new Map();let actual=0;
+    for(const row of facts?.rows||[]){
+      const id=String(row.accountId),campaign=String(row.campaignId);
+      if(!ids.has(id)||row.date!==day||!completed.has(campaign)||!Number.isSafeInteger(row.sent))continue;
+      if(!byAccount.has(id))byAccount.set(id,new Map());
+      const counts=byAccount.get(id);counts.set(campaign,(counts.get(campaign)||0)+row.sent);actual+=row.sent;
+      byCampaign.set(campaign,(byCampaign.get(campaign)||0)+row.sent);
+    }
+    function confirmed(value,known){return known?number(value):value>0?'от '+number(value):'—';}
+    function projection(fact,expected){return comparable&&Number.isSafeInteger(fact)&&Number.isSafeInteger(expected)?number(fact+expected):'—';}
+    const days=new Map([plan?.today,...(plan?.days||[])].filter(Boolean).map(d=>[d.date,d]));
+    const quotas=new Map((infrastructure.accounts||[]).map(a=>[String(a.id),a.todayQuota]));
+    const limits=Array.from(ids,id=>quotas.get(id)).map(q=>q?.date===day?q.limit:null);
+    const poolLimit=limits.every(Number.isSafeInteger)?limits.reduce((sum,n)=>sum+n,0):null;
+    const out=document.createDocumentFragment();
+    for(const [i,date] of dates.entries()){
+      const d=days.get(date),tr=node('tr');
+      tr.append(node('th','',labels[i]),node('td','',number(d?.mailboxLimit??(i===0?poolLimit:null))),node('td','',i?'—':confirmed(actual,factsComplete)),
+        node('td','',number(d?.initial)),node('td','',number(d?.followups)),
+        node('td','',i?number(d?.expected):projection(factsComplete?actual:null,d?.expected)),node('td','',number(d?.unused)));
+      out.append(tr);
+    }
+    slots.replaceChildren(out);
+    $('pj-plan-asof').textContent=[facts?.checkedAt?'Факт Coldy на '+timestamp(facts.checkedAt)+' МСК':'',
+      plan&&forecastData.generatedAt?'Прогноз на '+timestamp(forecastData.generatedAt)+' МСК':''].filter(Boolean).join(' · ');
+    health('pj-plan-health',[todayError||raw?.message||(!facts?'Получаем факт по рассылкам проекта.':''),
+      forecastError||forecastData?.message||(!plan?'Получаем очереди и лимиты Coldy.':''),
+      factsComplete&&plan&&!comparable?'Уточняем итог на сегодня: факт и очередь получены в разное время.':''].filter(Boolean).join(' '));
+    if(!$('pj-plan-detail').open){$('pj-plan-accounts').replaceChildren();return;}
+    const chooser=$('pj-plan-day');
+    if(chooser.options[0]?.value!==day)chooser.replaceChildren(...dates.map((d,i)=>new Option(labels[i],d)));
+    const index=Math.max(0,dates.indexOf(chooser.value)),isToday=index===0,date=dates[index];
+    const forecastSenders=new Map((plan?.senders||[]).map(a=>[String(a.id),a]));
+    const inventory=new Map((infrastructure.accounts||[]).map(a=>[String(a.id),a]));
+    const factSenders=new Map((facts?.accounts||[]).map(a=>[String(a.id),a]));
+    const plannedCampaigns=new Map((plan?.campaigns||[]).map(c=>[String(c.id),c]));
+    const names=new Map([...(facts?.campaigns||[]),...(infrastructure.capacity?.campaigns||[]),...(plan?.campaigns||[])].map(c=>[String(c.id),c.name||String(c.id)]));
+    const table=document.createDocumentFragment();
+    function line(name,campaign,sent,count,known,group){
+      const tr=node('tr',group?'pj-mail-group':'');
+      tr.append(node('th','',name),node('td','',campaign),node('td','',isToday?confirmed(sent,known):'—'),node('td','',number(count)),
+        node('td','',isToday?projection(known?sent:null,count):number(count)));table.append(tr);
+    }
+    const inactiveInPlan=id=>Array.isArray(plan?.campaigns)&&!!forecastData?.generatedAt&&!plannedCampaigns.has(id);
+    for(const id of new Set([...plannedCampaigns.keys(),...(isToday?byCampaign.keys():[])])){
+      const expected=plannedCampaigns.get(id)?.expectedByDay?.[index]??(inactiveInPlan(id)?0:null);
+      line('Все почты',names.get(id)||id,byCampaign.get(id)||0,expected,completed.has(id),true);
+    }
+    for(const id of ids){
+      const sender=forecastSenders.get(id),account=inventory.get(id)||factSenders.get(id);
+      const counts=byAccount.get(id)||new Map(),alloc=new Map((sender?.campaigns||[]).map(c=>[String(c.id),c]));
+      const expected=sender?.days?.find(d=>d.date===date)?.expected;
+      line(mailLabel(account||sender||{id}),'Все рассылки',Array.from(counts.values()).reduce((a,b)=>a+b,0),expected,factsComplete,true);
+      const assignments=new Set([...(account?.capacity?.campaignIds||[]).map(String),...alloc.keys(),...(isToday?counts.keys():[])]);
+      for(const c of assignments){
+        const amount=alloc.has(c)?alloc.get(c).expectedByDay?.[index]:expected===0||inactiveInPlan(c)?0:null;
+        line('',names.get(c)||c,counts.get(c)||0,amount,completed.has(c),false);
+      }
+    }
+    $('pj-plan-accounts').replaceChildren(table);
+  }
   function renderInfrastructure(){
     const data=infrastructure,accounts=data?.accounts||[];
     renderConnection('infrastructure',data?.configured,data?.connected);
@@ -1357,6 +1472,10 @@
     $('pj-infrastructure-updated').textContent=selectedCount>0?
       [capacity?.updatedAt?'Занятость на '+timestamp(capacity.updatedAt)+' МСК':'','Обновление раз в минуту, пока раздел открыт'].filter(Boolean).join(' · '):'';
     renderMailboxCapacity(all,capacity);
+    renderInfrastructurePlan();
+    if(infrastructurePlanVisible()&&(todayChecked===0||forecastCheckedAt===0)){
+      queueMicrotask(()=>{void readTodayFacts();void readForecast();});
+    }
     if($('pj-infrastructure-diagnostics').open)renderMailboxDiagnostics(accounts);
     else $('pj-diagnostic-rows').replaceChildren();
     if(data?.nextCursor&&!diagnosticCursor)$('pj-infrastructure-continue').textContent='Продолжить обновление расписаний'+(steps?' · '+steps:'');
@@ -1398,15 +1517,17 @@
     if(campaign.lastKnownSchedule)cell.append(node('small','pj-cell-note',['Сохранённый график',poolDate(campaign.scheduleUpdatedAt),note].filter(Boolean).join(' · ')));
   }
   function renderMailboxCapacity(accounts,capacity){
-    const filter=$('pj-capacity-filter').value;
-    if(capacityRowsKey!==null&&capacitySource===infrastructure&&capacityFilter===filter)return;
-    capacitySource=infrastructure;capacityFilter=filter;
-    const key=JSON.stringify([filter,capacity,accounts]);
+    const filter=$('pj-capacity-filter').value,now=Date.now(),day=currentForecastDay();
+    const period=filter+'|'+Math.floor(now/60000);
+    if(capacityRowsKey!==null&&capacitySource===infrastructure&&capacityFilter===period)return;
+    capacitySource=infrastructure;capacityFilter=period;
+    const key=JSON.stringify([period,capacity,accounts]);
     if(capacityRowsKey===key)return;
     capacityRowsKey=key;
     const focused=document.activeElement,focusId=focused?.closest('#pj-schedule-rows')?focused.id:null;
     const accountFocus=focused?.closest('#pj-account-rows [data-account]')?.dataset.account,jumpFocus=focused?.dataset.poolCampaign;
     const campaignMap=new Map((capacity?.campaigns||[]).map(campaign=>[campaign.id,campaign]));
+    const inactiveMap=new Map((capacity?.inactiveCampaigns||[]).map(campaign=>[campaign.id,campaign]));
     const visibleCampaigns=new Set(),rows=$('pj-account-rows');rows.replaceChildren();
     for(const account of accounts){
       const ids=account.capacity?.campaignIds||[],state=poolState(account);
@@ -1418,22 +1539,38 @@
       if(account.missing)identity.append(node('span','pj-cell-note','ID '+text(account.id)));
       const tag=node('span','pj-badge',state==='busy'?'Занята':state==='free'?'Свободна':'Неизвестно');
       tag.dataset.tone=state==='busy'?'busy':state==='free'?'success':'neutral';poolCell(row,'Занятость').append(tag);
-      const assignments=poolCell(row,'Активные рассылки и сегменты');
+      const assignments=poolCell(row,'Рассылки и сегменты');
+      if((ids.length||account.capacity?.outsideActive)&&capacity?.stale)assignments.append(node('small','pj-cell-note','Последние известные назначения'));
       for(const id of ids){
         const campaign=campaignMap.get(id);if(!campaign)continue;
         const group=node('div','pj-assignment');
         const jump=node('button','pj-jump',campaign.name);jump.type='button';jump.dataset.poolCampaign=id;jump.setAttribute('aria-label','Показать расписание · '+text(campaign.name));
         jump.addEventListener('click',()=>document.getElementById('pj-schedule-'+id)?.focus());
-        group.append(jump,node('small','',' · '+segmentLabel(campaign)));assignments.append(group);
+        group.append(jump,node('small','',' · '+segmentLabel(campaign)),badge(campaign.status));assignments.append(group);
       }
       if(account.capacity?.outsideActive)assignments.append(node('div','pj-assignment','Занята в другой рассылке'));
       if(!assignments.childElementCount)assignments.textContent=state==='free'?'Активных рассылок нет':'Нет подтверждённых данных';
+      for(const id of account.capacity?.inactiveCampaignIds||[]){
+        const campaign=inactiveMap.get(id);if(!campaign)continue;
+        const group=node('div','pj-assignment');
+        group.append(node('span','',campaign.name||'Название недоступно'),node('small','',' · '+segmentLabel(campaign)),badge(campaign.status||'Неактивна'));
+        if(campaign.statusFromBinding)group.append(node('small','pj-cell-note','Статус при привязке'));
+        assignments.append(group);
+      }
+      if(account.capacity?.outsideInactive)assignments.append(node('div','pj-assignment','Есть неактивное назначение вне проекта'));
+      const quota=account.todayQuota;
+      const fresh=at=>Number.isFinite(Date.parse(at))&&now>=Date.parse(at)&&now-Date.parse(at)<300000;
+      const limit=fresh(quota?.limitAt)?quota.limit:null;
+      const sent=quota?.date===day&&fresh(quota?.sentAt)?quota.sent:null;
+      const remaining=Number.isSafeInteger(limit)&&Number.isSafeInteger(sent)?Math.max(0,limit-sent):null;
+      poolCell(row,'Дневной лимит',number(limit));
+      poolCell(row,'Отправлено сегодня',number(sent));
+      poolCell(row,'Остаток лимита',number(remaining));
       const cap=account.capacity||{},from=poolDate(cap.idleFrom),until=poolDate(cap.idleUntil);
-      poolCell(row,'Окно без отправок',state==='busy'&&from&&until?from+' — '+until:state==='free'?'Сейчас нет назначений':'Неизвестно');
+      poolCell(row,'Окно без отправок',state==='busy'&&from&&until?from+' — '+until:state==='free'?'Нет активных рассылок':'Неизвестно');
       const blocked=!!account.errors?.length||['failed','error','disabled','paused','disconnected'].includes(text(account.status).toLowerCase());
       const knownConnection=!account.stale&&['connected','active','ready','enabled'].includes(text(account.status).toLowerCase());
-      const limitReached=!account.stale&&Number.isFinite(account.dailyLimit)&&Number.isFinite(account.sentToday)&&account.sentToday>=account.dailyLimit;
-      const available=state==='free'?limitReached?'Исчерпан дневной лимит':blocked?'Проверьте подключение':knownConnection?'Сейчас':'Назначений нет. Проверьте подключение':state==='busy'?poolDate(cap.availableAt)||'Дата неизвестна':'Неизвестно';
+      const available=state==='free'?limit===0||remaining===0?'Исчерпан дневной лимит':blocked?'Проверьте подключение':!knownConnection?'Проверьте подключение':remaining===null?'Уточняется дневной лимит':'Сейчас':state==='busy'?poolDate(cap.availableAt)||'Дата неизвестна':'Неизвестно';
       poolCell(row,'Свободна для новой рассылки',available);rows.append(row);
     }
     const noMatches=$('pj-capacity-empty');noMatches.hidden=!accounts.length||!!rows.childElementCount;
@@ -1500,6 +1637,8 @@
   function isEditing(){const context=currentContext();return view==='infrastructure'?!!mailboxPicker&&(mailboxPicker.open||!!mailboxPicker.operation):view==='analytics'&&!!context&&(context.picker||dirty(context)||!!context.operation||!!recipientImport?.open);}
   function isLoading(){return view==='analytics'?catalogLoading||!!currentContext()?.loading||!!currentContext()?.metricsLoading||hasPending():view==='infrastructure'?infraLoading||!!mailboxPicker?.pending:false;}
   if($('pj-segment')){
+    $('pj-plan-detail').addEventListener('toggle',renderInfrastructurePlan);
+    $('pj-plan-day').addEventListener('change',renderInfrastructurePlan);
     $('pj-history').addEventListener('toggle',()=>{
       if(!$('pj-history').open){pauseHistory();return;}
       if(!ready){health('pj-history-health','Проверяем доступ к отчёту…');$('pj-history-refresh').disabled=true;return;}
@@ -1518,9 +1657,13 @@
     });
     document.addEventListener('visibilitychange',()=>{
       queueSenderUpdate(!document.hidden);
-      if(document.hidden){pauseForecast();pauseHistory();}
+      if(document.hidden){pauseForecast();pauseHistory();clearTimeout(todayTimer);todayTimer=null;}
       else{
         if(historyVisible())scheduleHistory(Math.max(0,historyRetryAt-Date.now()));
+        if(infrastructurePlanVisible()){
+          clearTimeout(todayTimer);
+          todayTimer=setTimeout(()=>void readTodayFacts(),Math.max(0,todayRetry-Date.now()));
+        }
         if(forecastVisible())void readForecast(!forecastData||forecastData.pending);
         if(completionCells().length)queueCompletions();
       }

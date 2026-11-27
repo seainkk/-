@@ -1,8 +1,12 @@
-/** Actual send events for the previous complete Monday–Sunday, for the current selection. */
+/** Actual send events for the current project's monitored accounts and bound campaigns. */
 function projectHistoryWeek_(now) {
   var local = new Date(now + 10800000), today = Date.UTC(local.getUTCFullYear(),local.getUTCMonth(),local.getUTCDate());
   var monday = today - ((local.getUTCDay() + 6) % 7 + 7) * 86400000;
   return Array.from({length:7},function (_,i) { return new Date(monday + i * 86400000).toISOString().slice(0,10); });
+}
+
+function projectHistoryDates_(period,now) {
+  return period === 'today' ? [new Date(now + 10800000).toISOString().slice(0,10)] : projectHistoryWeek_(now);
 }
 
 // Within one request, reuse a verified journal only while Drive still confirms its identity and version.
@@ -80,7 +84,7 @@ function projectHistoryPage_(value, prior, expected, selected) {
 }
 
 // A checkpoint is derived data. Rebuild it if its scope, counters or cursors no longer verify.
-function projectHistoryCheckpoint_(saved,scope) {
+function projectHistoryCheckpoint_(saved,scope,dayCount) {
   var empty = {token:scope.token,entries:{}};
   if (!saved || saved.token !== scope.token || typeof saved.version !== 'string' || !saved.entries) return empty;
   function record(value) { return value && typeof value === 'object' && !Array.isArray(value); }
@@ -92,12 +96,12 @@ function projectHistoryCheckpoint_(saved,scope) {
   var valid = Object.keys(saved.entries).every(function (id) {
     var e = saved.entries[id];
     if (!campaigns.has(id) || !record(e) || !record(e.cells) || e.retryAt !== undefined && !nonnegative(e.retryAt) ||
-        e.reviewAt !== undefined && !nonnegative(e.reviewAt)) return false;
+        e.reviewAt !== undefined && !nonnegative(e.reviewAt) || e.verifiedAt !== undefined && !nonnegative(e.verifiedAt)) return false;
     if (!e.totals) return !Object.keys(e.cells).length;
-    if (!Array.isArray(e.totals) || e.totals.length !== 7 || !e.totals.every(nonnegative)) return false;
+    if (!Array.isArray(e.totals) || e.totals.length !== dayCount || !e.totals.every(nonnegative)) return false;
     return Object.keys(e.cells).every(function (index) {
       var c = e.cells[index];
-      if (!/^[0-6]$/.test(index) || !e.totals[index] || !record(c) || c.retryAt !== undefined && !nonnegative(c.retryAt)) return false;
+      if (!/^[0-6]$/.test(index) || Number(index)>=dayCount || dayCount!==1 && !e.totals[index] || !record(c) || c.retryAt !== undefined && !nonnegative(c.retryAt)) return false;
       if (!c.counts) return !c.done && !c.offset && !!c.retryAt;
       if (!record(c.counts)) return false;
       var sum = 0, inScope = Object.keys(c.counts).every(function (a) {
@@ -116,34 +120,55 @@ function projectHistoryCheckpoint_(saved,scope) {
 }
 
 function projectHistoryJobs_(scope,days,report,now) {
-  var pauseUntil = Infinity, missing = false;
+  var pauseUntil = Infinity, missing = false, oldest = null;
+  function accountTask(index,path,offset) {
+    return {index:index,path:path+'by-account?type=event&start_date='+days[index]+'&end_date='+days[index]+
+      '&sort_by=email&sort_order=asc&limit=500&offset='+offset};
+  }
+  function summaryTasks(path) {
+    var tasks=[{index:-1,path:path+'events?type=event&start_date='+days[0]+'&end_date='+days[days.length-1]}];
+    // Read both views of a changing day together to minimize drift between their timestamps.
+    if(days.length===1)tasks.push(accountTask(0,path,0));
+    return tasks;
+  }
   for (var c=0;c<scope.campaigns.length;c++) {
     var id = scope.campaigns[c].id, entry = report.entries[id] || {}, tasks = [], path = '/analytics/campaigns/' + id + '/';
     if (!entry.totals || entry.reviewAt && entry.reviewAt<=now) {
       missing = true;
-      if (!(entry.retryAt > now)) return {campaign:id,tasks:[{index:-1,path:path+'events?type=event&start_date='+days[0]+'&end_date='+days[6]}]};
+      if (!(entry.retryAt > now)) return {campaign:id,tasks:summaryTasks(path)};
       pauseUntil = Math.min(pauseUntil,entry.retryAt);
       continue;
     }
     for (var i=0;i<days.length;i++) {
       var cell = entry.cells[i] || {};
-      if (!entry.totals[i] || cell.done) continue;
+      if (days.length!==1 && !entry.totals[i] || cell.done) continue;
       missing = true;
       if (cell.retryAt > now) { pauseUntil=Math.min(pauseUntil,cell.retryAt); continue; }
-      tasks.push({index:i,path:path+'by-account?type=event&start_date='+days[i]+'&end_date='+days[i]+
-        '&sort_by=email&sort_order=asc&limit=500&offset='+(cell.offset || 0)});
+      tasks.push(accountTask(i,path,cell.offset || 0));
       if (tasks.length === COLDY.readBatchSize) break;
     }
     if (tasks.length) return {campaign:id,tasks:tasks};
+    if(days.length===1 && entry.cells[0]?.done) {
+      var observed=entry.verifiedAt || 0;
+      if(observed+60000>now)pauseUntil=Math.min(pauseUntil,observed+60000);
+      else if(!oldest || observed<oldest.at)oldest={campaign:id,path:path,at:observed};
+    }
   }
-  return {tasks:[],waiting:missing,retryAt:Number.isFinite(pauseUntil) ? pauseUntil : 0};
+  // A delayed campaign must not freeze the other senders' counters. A completed pass has its own TTL.
+  if(missing && oldest)return {campaign:oldest.campaign,tasks:summaryTasks(oldest.path)};
+  return {tasks:[],waiting:missing,retryAt:missing && Number.isFinite(pauseUntil) ? pauseUntil : 0};
 }
 
 function projectHistoryApply_(report,job,results,scope,days,now) {
   var entry = report.entries[job.campaign] || {cells:{}}, selected = new Set(scope.accounts.map(function (a) { return a.id; }));
+  var verifyingPair=job.tasks.length===2 && job.tasks[0].index<0, freshTimeline=false;
   report.entries[job.campaign] = entry;
   results.forEach(function (result,i) {
     var index = job.tasks[i].index, cell = index < 0 ? entry : entry.cells[index] || {};
+    if(verifyingPair && index===0 && !freshTimeline){
+      if(!result.error)return;
+      index=-1;cell=entry;
+    }
     try {
       if (result.error) throw result.error;
       if (index < 0) {
@@ -151,20 +176,28 @@ function projectHistoryApply_(report,job,results,scope,days,now) {
         totals.forEach(function (value,day) {
           if (entry.totals && value!==entry.totals[day]) delete entry.cells[day];
         });
-        entry.totals=totals;
+        entry.totals=totals; freshTimeline=true;
+        if(verifyingPair)delete entry.cells[0]; // The paired account request starts on the first page.
         delete entry.retryAt; delete entry.reviewAt;
       }
-      else entry.cells[index]=projectHistoryPage_(result.value,cell,entry.totals[index],selected);
+      else {
+        entry.cells[index]=projectHistoryPage_(result.value,cell,entry.totals[index],selected);
+        if(days.length===1 && entry.cells[index].done)entry.verifiedAt=now;
+      }
       report.checkedAt = new Date(now).toISOString();
     } catch (error) {
       var code = error.registryCode;
       if (['COLDY_NETWORK','COLDY_RATE_LIMIT','COLDY_RESPONSE','COLDY_UNAVAILABLE','COLDY_NOT_FOUND','COLDY_PROVIDER','COLDY_CONFLICT','COLDY_FORBIDDEN'].indexOf(code) === -1) throw error;
-      var delay = ['COLDY_RESPONSE','COLDY_NOT_FOUND','COLDY_PROVIDER','COLDY_FORBIDDEN'].indexOf(code) >= 0 ? 3600000 : 60000;
+      var delay = days.length===1 && code==='COLDY_RESPONSE' ? 15000 :
+        ['COLDY_RESPONSE','COLDY_NOT_FOUND','COLDY_PROVIDER','COLDY_FORBIDDEN'].indexOf(code) >= 0 ? 3600000 : 60000;
       var retryAt = now + Math.max(delay,error.retryAfterMs || 0);
       if (code === 'COLDY_FORBIDDEN' || code === 'COLDY_NOT_FOUND') {
         // Invalidate this campaign if Coldy no longer permits access to its analytics.
         entry.revoked=true; entry.retryAt=retryAt;
-      } else if (index < 0) entry.retryAt=retryAt;
+      } else if (index < 0) {
+        entry.retryAt=Math.max(entry.retryAt || 0,retryAt);
+        if(verifyingPair){delete entry.totals;entry.cells={};}
+      }
       else if (code === 'COLDY_RESPONSE') {
         entry.cells[index]={retryAt:retryAt};
         // Coldy can correct a past day between GETs. Refresh its reference total before trying again.
@@ -184,8 +217,10 @@ function projectHistoryResult_(scope,days,report,state) {
     if (!entry || !entry.totals) return;
     days.forEach(function (date,i) {
       var cell = entry.cells[i];
-      if (entry.totals[i] && !(cell && cell.done)) return;
-      checked.push({date:date,campaignId:campaign.id});
+      if ((days.length===1 || entry.totals[i]) && !(cell && cell.done)) return;
+      var verified={date:date,campaignId:campaign.id};
+      if(days.length===1 && entry.verifiedAt)verified.checkedAt=new Date(entry.verifiedAt).toISOString();
+      checked.push(verified);
       Object.keys(cell && cell.counts || {}).forEach(function (id) { rows.push({date:date,accountId:id,campaignId:campaign.id,sent:cell.counts[id]}); });
     });
   });
@@ -194,23 +229,28 @@ function projectHistoryResult_(scope,days,report,state) {
   var message = {not_configured:'Подключите Coldy в настройках.',no_accounts:'Выберите почты для мониторинга в этом проекте.',
     no_campaigns:'В сегментах проекта пока нет подключённых рассылок.'}[state] ||
     (complete ? '' : retryAfter ? 'Coldy пока не подтвердил часть данных. Полученные дни сохранены.' : 'Получаем отправки по подключённым рассылкам.');
-  return {state:state || (complete?'ready':'partial'),from:days[0],to:days[6],days:days,dayBasis:'coldy_calendar',timeZone:null,
+  return {state:state || (complete?'ready':'partial'),period:days.length===1?'today':'previous_week',from:days[0],to:days[days.length-1],days:days,dayBasis:'coldy_calendar',timeZone:null,
     accounts:scope.accounts,campaigns:scope.campaigns,rows:rows,checkedCells:checked,complete:complete,
     pending:!state&&!complete,retryAfterMs:retryAfter,message:message,checkedAt:report.checkedAt || null};
 }
 
 function getProjectSendingHistory_(request) {
   return api_(function () {
-    var input=projectAnalyticsInput_(request,['refresh']);
+    var input=projectAnalyticsInput_(request,['refresh','period']), period=input.period===undefined?'previous_week':input.period;
+    if(period!=='previous_week' && period!=='today')fail_('INVALID_REQUEST','Неизвестный период истории отправок.');
     if (input.refresh !== undefined && typeof input.refresh !== 'boolean') fail_('INVALID_REQUEST','Некорректный запрос обновления истории.');
-    var context=authorize_(), project=registryProjectId_(), settings=coldySettings_(context), now=Date.now(), days=projectHistoryWeek_(now);
+    var context=authorize_(), project=registryProjectId_(), settings=coldySettings_(context), now=Date.now(), days=projectHistoryDates_(period,now);
     if (!registryProjectScoped_()) fail_('OUTSIDE_PROJECT','Выберите проект для просмотра истории отправок.');
     var reads={monitoring:{},inventory:{},bindings:{},checkpoint:{}};
     var scope=settings.configured ? projectHistoryScope_(context,settings,days,reads) : {accounts:[],campaigns:[]};
     var empty=!settings.configured?'not_configured':!scope.accounts.length?'no_accounts':!scope.campaigns.length?'no_campaigns':null;
-    if (empty) return projectHistoryResult_(scope,days,{entries:{}},empty);
-    var owner=projectMonitoringOwner_(settings.credentialHash), kind='sendinghistory', saved=coldyLoad_(context,kind,owner,reads.checkpoint);
-    var before=saved ? saved.version : null, report=projectHistoryCheckpoint_(saved,scope);
+    if (empty){
+      if(days[0]!==projectHistoryDates_(period,Date.now())[0])fail_('COLDY_MONITORING_CHANGED','Дата отчёта изменилась. Обновите историю.');
+      return projectHistoryResult_(scope,days,{entries:{}},empty);
+    }
+    var owner=projectMonitoringOwner_(settings.credentialHash), kind=period==='today'?'sendinghistorytoday':'sendinghistory';
+    var saved=coldyLoad_(context,kind,owner,reads.checkpoint);
+    var before=saved ? saved.version : null, report=projectHistoryCheckpoint_(saved,scope,days.length);
     function current() {
       var fresh=authorize_(), currentSettings=coldySettings_(fresh);
       if (fresh.rootId!==context.rootId || registryProjectId_()!==project || currentSettings.credentialHash!==settings.credentialHash)
@@ -219,13 +259,13 @@ function getProjectSendingHistory_(request) {
       return fresh;
     }
     function confirm() {
-      var fresh=current(), verified=projectHistoryScope_(fresh,settings,projectHistoryWeek_(Date.now()),reads);
-      if (verified.token!==scope.token) fail_('COLDY_MONITORING_CHANGED','Неделя, выбор ящиков или привязки рассылок изменились. Обновите историю.');
+      var fresh=current(), verified=projectHistoryScope_(fresh,settings,projectHistoryDates_(period,Date.now()),reads);
+      if (verified.token!==scope.token) fail_('COLDY_MONITORING_CHANGED','Период, выбор ящиков или привязки рассылок изменились. Обновите историю.');
       scope=verified;
       return fresh;
     }
     var job=projectHistoryJobs_(scope,days,report,now);
-    if (!job.tasks.length && !job.waiting && (input.refresh || now-Date.parse(report.checkedAt) >= 21600000)) {
+    if (!job.tasks.length && !job.waiting && (input.refresh || now-Date.parse(report.checkedAt) >= (period==='today'?60000:21600000))) {
       report={token:scope.token,entries:{}};
       job=projectHistoryJobs_(scope,days,report,now);
     }
@@ -244,7 +284,7 @@ function getProjectSendingHistory_(request) {
     var accepted=locked_(function () {
       var fresh=confirm(), latest=reads.checkpoint.unchanged && reads.checkpoint.unchanged() ? saved : coldyLoad_(fresh,kind,owner);
       if ((latest ? latest.version : null)!==before) {
-        if (latest && latest.token===scope.token) return projectHistoryCheckpoint_(latest,scope);
+        if (latest && latest.token===scope.token) return projectHistoryCheckpoint_(latest,scope,days.length);
         fail_('COLDY_MONITORING_CHANGED','Состав отчёта изменился. Обновите историю.');
       }
       report.version=Utilities.getUuid(); coldySave_(fresh,kind,owner,report); return report;

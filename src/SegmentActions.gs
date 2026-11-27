@@ -36,6 +36,50 @@ function getSourceSheets_(request) {
 function createSegment_(request) { return typeof segmentNormalizedMutation_ === 'function' ? segmentNormalizedMutation_('create', request) : segmentMutation_('create', request); }
 function updateSegment_(request) { return typeof segmentNormalizedMutation_ === 'function' ? segmentNormalizedMutation_('update', request) : segmentMutation_('update', request); }
 
+function setSegmentWorkStatus_(request) {
+  return api_(function () {
+    var access = authorize_(), project = registryProjectId_();
+    if (!registryProjectScoped_()) fail_('OUTSIDE_PROJECT','Выберите проект сегмента.');
+    var input = segmentInput_(request,['segmentId','status','expectedRevision','requestId']);
+    var id = id_(input.segmentId), requestHash = digest_(segmentRequestId_(input.requestId));
+    if (!segmentWorkStatusValid_(input.status) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) {
+      fail_('INVALID_REQUEST','Выберите статус сегмента и обновите его версию.');
+    }
+    return locked_(function () {
+      var context = authorize_();
+      if (context.rootId !== access.rootId || registryProjectId_() !== project) fail_('SOURCE_CHANGED','Проект или реестр изменился.');
+      registryRequireSegment_(context,id);
+      segmentRequireStorageWrite_(sourceBasesStorage_(context));
+      var fresh = authorize_();
+      if (fresh.rootId !== access.rootId || registryProjectId_() !== project) fail_('SOURCE_CHANGED','Проект или реестр изменился.');
+      segmentFolder_(fresh,segmentSourceFolder_(fresh),id,true);
+      registryRequireSegment_(fresh,id);
+      var state = segmentWorkStatusRecord_(fresh,id);
+      var prior = state.receipts.findIndex(function (receipt) { return receipt[0] === requestHash; });
+      if (prior >= 0) {
+        if (state.receipts[prior][1] !== input.status || input.expectedRevision !== state.revision - state.receipts.length + prior) {
+          fail_('REQUEST_REUSED','Этот запрос уже использован для другого изменения статуса.');
+        }
+        return {segmentId:id,workStatus:state.status,workStatusRevision:state.revision};
+      }
+      if (state.revision !== input.expectedRevision) fail_('SEGMENT_STATUS_CONFLICT','Коллега изменил статус сегмента. Обновите список.');
+      if (state.revision === Number.MAX_SAFE_INTEGER) fail_('STORAGE_LIMIT','Исчерпан диапазон версий статуса сегмента.');
+      state.status=input.status;
+      state.revision++;
+      state.receipts.push([requestHash,input.status]);
+      state.receipts=state.receipts.slice(-32);
+      var serialized = JSON.stringify(state);
+      try { fresh.properties.setProperty(state.scope,serialized); }
+      catch (error) {
+        var observed;
+        try { observed = fresh.properties.getProperty(state.scope); } catch (ignored) {}
+        if (observed !== serialized) fail_('SEGMENT_STATUS_UNCERTAIN','Сохранение статуса не подтверждено. Повторите тот же запрос.');
+      }
+      return {segmentId:id,workStatus:state.status,workStatusRevision:state.revision};
+    });
+  });
+}
+
 function segmentMutation_(kind, request) {
   return api_(function () {
     authorize_();

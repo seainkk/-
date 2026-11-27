@@ -12,13 +12,13 @@ def check_source_card(page):
     card = page.locator('[data-source-id="source-companies"]')
     summary = card.locator('.br-source-settings > summary')
     status = card.locator('[data-source-field="status"]')
-    badge = card.locator('.br-source-status')
 
     expect(summary).to_have_text('Сведения')
     expect(page.locator('#br-sources-items .br-source-fields')).to_have_count(0)
     expect(status).to_be_hidden()
     expect(card.locator('h2')).to_be_visible()
-    expect(badge).to_have_text('Готова к добавлению')
+    expect(card.locator('.br-source-status,.br-source-role,.br-source-origin')).to_have_count(0)
+    expect(card.get_by_role('link',name='Открыть на Диске: Готовая база компаний')).to_have_attribute('href','https://docs.google.com/spreadsheets/d/source-companies/edit')
     expect(card.get_by_role('button', name='Готовая база компаний')).to_be_visible()
     expect(card.locator('h2 [data-grid-source]')).to_be_visible()
     expect(card.locator('[data-add-source]')).to_be_hidden()
@@ -41,12 +41,12 @@ def check_source_card(page):
     status.press('Home')
     expect(status).to_have_value('collection')
     card.locator('[data-source-save]').click()
-    expect(badge).to_have_text('Сбор')
+    expect(card.locator('.br-source-persisted')).to_contain_text('Сбор')
     expect(card.locator('[data-add-source]')).to_be_disabled()
     assert page.evaluate("backend.calls.filter(call => call.name === 'updateSourceBase').length") == 1
     summary.click()
     expect(status).to_be_hidden()
-    expect(badge).to_be_visible()
+    expect(card.locator('.br-source-persisted')).to_be_hidden()
 
 def check_lineage(page):
     card = page.locator('[data-source-id="source-companies"]')
@@ -56,17 +56,15 @@ def check_lineage(page):
 
     # External Sheets stay clickable, while an uploaded file has no invented Drive URL.
     draft = page.locator('[data-source-id="source-draft"]')
-    expand_source_details(draft)
-    external = draft.locator('.br-source-relations')
+    external = draft.locator('.br-source-origin')
     expect(external.get_by_role('link',name='Внешний оригинал')).to_have_attribute(
         'href','https://docs.google.com/spreadsheets/d/external_fixture/edit')
     csv = page.locator('[data-source-id="source-csv"]')
-    expand_source_details(csv)
-    upload = csv.locator('.br-source-relations')
+    upload = csv.locator('.br-source-origin')
     expect(upload.get_by_text('Выгрузка.csv',exact=False)).to_be_visible()
     expect(upload.get_by_role('link')).to_have_count(0)
 
-    # A manually assigned parent is immediately visible alongside the existing status and segment.
+    # The origin is visible in the list. Editable status and segments remain in details.
     card.locator('.br-source-settings > summary').click()
     attach = card.get_by_role('button',name='Привязать исходную базу')
     attach.click()
@@ -77,8 +75,9 @@ def check_lineage(page):
     page.locator('#br-origin-save').click()
     expect(page.locator('#br-origin-dialog')).to_be_hidden()
     expect(attach).to_have_count(0)
-    expect(card.locator('.br-source-role')).to_have_text('Выборка')
-    expect(card.locator('.br-source-status')).to_have_text('Готова к добавлению')
+    expect(card.locator('.br-source-origin a')).to_have_attribute('href',original)
+    expect(card.locator('.br-source-origin a')).to_have_text('Готовая база ЛПР')
+    expect(card.locator('[data-source-field="status"]')).to_have_value('ready')
     expect(card.get_by_text('Два региона',exact=False)).to_be_visible()
     expect(card.get_by_role('link',name='Существующий сегмент')).to_be_visible()
 
@@ -93,7 +92,7 @@ def check_lineage(page):
     card.locator('[data-related-source="source-lpr"]').click()
     expect(parent.locator('h2')).to_have_text('Готовая база ЛПР')
     expect(contents).to_have_value('')
-    expect(parent.locator('.br-source-role')).to_have_text('Исходная база')
+    expect(parent.locator('.br-source-origin')).to_have_count(0)
     expand_source_details(parent)
     expect(parent.locator('[data-related-source="source-mixed"]')).to_be_visible()
     page.locator('#br-action-back').click()
@@ -137,6 +136,10 @@ def main():
    backend.sources[4].origin={id:'upload:'+'a'.repeat(43),name:'Выгрузка.csv',criteria:'',url:null};
   """)
   check_lineage(page)
+  reset(boot="""backend.sources[1].origin={id:'source-csv',name:'Старое имя',criteria:'',url:'https://docs.google.com/spreadsheets/d/source-csv/edit'};""")
+  original=page.locator('[data-source-id="source-mixed"] .br-source-origin a')
+  expect(original).to_have_text('Файл CSV')
+  expect(original).to_have_attribute('href','https://drive.google.com/file/d/source-csv/view')
   reset(boot="backend.sources[0].segments.push({id:'existing-segment',name:'Существующий сегмент'});")
   check_source_card(page)
   assert page.locator('[data-source-id="source-lpr"]').is_visible()

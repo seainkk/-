@@ -25,6 +25,8 @@ function projectCapacityValidate_(saved) {
   if (keys.length > PROJECT_INFRASTRUCTURE.maxAccounts) invalid();
   if (cap.outsideActive && (typeof cap.outsideActive !== 'object' || Array.isArray(cap.outsideActive) ||
       Object.keys(cap.outsideActive).some(function (id) { return !Array.isArray(cap.assignments[id]) || cap.outsideActive[id] !== true; }))) invalid();
+  if (cap.outsideInactive !== undefined && (!cap.outsideInactive || typeof cap.outsideInactive !== 'object' || Array.isArray(cap.outsideInactive) ||
+      Object.keys(cap.outsideInactive).some(function (id) { return !Array.isArray(cap.assignments[id]) || cap.outsideInactive[id] !== true; }))) invalid();
   keys.forEach(function (id) {
     var links = cap.assignments[id];
     if (!/^[1-9]\d*$/.test(id) || !Array.isArray(links) || links.length > ids.size ||
@@ -41,6 +43,14 @@ function projectCapacityValidate_(saved) {
             return !coldyUuid_(key) || key !== key.toLowerCase() || ids.has(key);
           })) invalid();
     });
+    if (cap.inactiveCampaigns !== undefined) {
+      var linked = new Set(), seen = new Set();
+      Object.values(inactive).forEach(function (group) { group.forEach(function (id) { linked.add(id); }); });
+      if (!Array.isArray(cap.inactiveCampaigns) || cap.inactiveCampaigns.some(function (item) {
+        if (!item || !linked.has(item.id) || seen.has(item.id) || typeof item.name !== 'string' || ['Draft','Paused','Completed'].indexOf(item.status)<0) return true;
+        seen.add(item.id); return false;
+      })) invalid();
+    }
   }
 }
 
@@ -56,7 +66,7 @@ function projectCapacitySelected_(context, capacity, observation) {
     var owner = owners[id];
     return owner && owner.bindingState === 'linked' && owner.segmentProjectId === project;
   }
-  var outside = Object.assign({}, capacity.outsideActive), assignments = {}, inactive = {};
+  var outside = Object.assign({}, capacity.outsideActive), outsideInactive=Object.assign({},capacity.outsideInactive), assignments = {}, inactive = {};
   Object.keys(capacity.assignments).forEach(function (id) {
     var ids = capacity.assignments[id];
     assignments[id] = ids.filter(visible);
@@ -64,12 +74,17 @@ function projectCapacitySelected_(context, capacity, observation) {
     var other = capacity.inactiveAssignments && capacity.inactiveAssignments[id];
     if (other) {
       var linked = other.filter(visible);
+      if (linked.length !== other.length) outsideInactive[id]=true;
       if (linked.length) inactive[id] = linked;
     }
   });
   var scoped = Object.assign({}, capacity, {assignments:assignments, outsideActive:outside,
     campaigns:capacity.campaigns.filter(function (item) { return visible(item.id); })});
-  if (capacity.inactiveAssignments) scoped.inactiveAssignments = inactive;
+  if (capacity.inactiveAssignments) {
+    scoped.inactiveAssignments = inactive;
+    scoped.outsideInactive = outsideInactive;
+    scoped.inactiveCampaigns = (capacity.inactiveCampaigns || []).filter(function (c) { return visible(c.id); });
+  }
   return {owners:owners, capacity:scoped};
 }
 
@@ -79,7 +94,7 @@ function projectCapacityMappings_(response, selected, key, receivedAt) {
       response.total != null && response.total !== response.items.length) {
     fail_('COLDY_INFRA_INCOMPLETE', 'Coldy не подтвердил полный список назначений почт.');
   }
-  var accounts = Object.create(null), inactive = Object.create(null), used = new Set(), campaigns = new Map(), statuses = new Map(), links = 0;
+  var accounts = Object.create(null), inactive = Object.create(null), used = new Set(), campaigns = new Map(), inactiveCampaigns=new Map(), statuses = new Map(), links = 0;
   selected.forEach(function (id) { accounts[id] = []; });
   response.items.forEach(function (item) {
     var id = projectInfraId_(item && item.account_id);
@@ -95,12 +110,13 @@ function projectCapacityMappings_(response, selected, key, receivedAt) {
         fail_('COLDY_RESPONSE', 'Coldy вернул противоречивые назначения одной рассылки.');
       seen.add(campaignId); statuses.set(campaignId, campaign.status);
       if (++links > 100000) fail_('COLDY_INFRA_INCOMPLETE', 'Карта назначений рассылок слишком велика.');
+      var name = projectInfraText_(campaign.name,key,1000);
       if (campaign.status !== 'Active') {
         if (!inactive[id]) inactive[id] = [];
         inactive[id].push(campaignId);
+        if (name || !inactiveCampaigns.has(campaignId)) inactiveCampaigns.set(campaignId,{id:campaignId,name:name,status:campaign.status});
         return;
       }
-      var name = projectInfraText_(campaign.name, key, 1000);
       if (!name) fail_('COLDY_INFRA_INCOMPLETE', 'Карта активных рассылок неполна.');
       accounts[id].push(campaignId);
       if (!campaigns.has(campaignId)) campaigns.set(campaignId, { id: campaignId, name: name, status: 'Active', waitSchedule: null, schedule: null });
@@ -116,7 +132,8 @@ function projectCapacityMappings_(response, selected, key, receivedAt) {
       if (campaign) campaign.allSendersSelected = false;
     });
   });
-  return { assignments: accounts, inactiveAssignments: inactive, campaigns: Array.from(campaigns.values()), updatedAt: receivedAt || new Date().toISOString(), stale: false };
+  return { assignments:accounts, inactiveAssignments:inactive, inactiveCampaigns:Array.from(inactiveCampaigns.values()),
+    campaigns:Array.from(campaigns.values()), updatedAt:receivedAt || new Date().toISOString(), stale:false };
 }
 
 function projectCapacitySchedule_(value, campaignId) {
@@ -269,7 +286,7 @@ function projectCapacityOwners_(context, ids, observation) {
         folders[binding.segmentId] = { bindingState: 'unknown', segmentId: null, segmentName: null };
       }
     }
-    owners[binding.campaignId] = folders[binding.segmentId];
+    owners[binding.campaignId] = Object.assign({},folders[binding.segmentId],{campaignName:binding.campaignName,campaignStatus:binding.campaignStatus});
   });
   return owners;
 }
@@ -307,12 +324,21 @@ function projectCapacityPublic_(context, settings, saved, result) {
   var partial = list.some(function (item) { return !item.schedule || item.bindingState === 'unknown'; });
   result.capacity = { state: !cap ? 'unknown' : stale || partial || work ? 'partial' : 'ready', stale: !!stale,
     updatedAt: cap ? cap.updatedAt : null, campaigns: list };
+  var inactiveMeta = new Map((cap && cap.inactiveCampaigns || []).map(function (item) { return [item.id,item]; }));
+  var inactiveIds = new Set();
+  Object.values(cap && cap.inactiveAssignments || {}).forEach(function (ids) { ids.forEach(function (id) { inactiveIds.add(id); }); });
+  result.capacity.inactiveCampaigns=Array.from(inactiveIds,function (id) {
+    var detail=inactiveMeta.get(id), owner=owners[id];
+    var fallbackStatus=['Draft','Paused','Completed'].indexOf(owner.campaignStatus)>=0 ? owner.campaignStatus : null;
+    return {id:id,name:projectInfraText_(detail && detail.name || owner.campaignName,settings.key,1000),status:detail ? detail.status : fallbackStatus,
+      statusFromBinding:!detail && !!fallbackStatus,segmentId:owner.segmentId,segmentName:owner.segmentName,segmentProjectName:owner.segmentProjectName};
+  });
   result.accounts.forEach(function (account) {
     var ids = cap && cap.assignments[account.id], outside = !!(cap && cap.outsideActive[account.id]);
     var state = stale || !Array.isArray(ids) ? 'unknown' : ids.length || outside ? 'busy' :
       saved.selectedOnly && (!account.updatedAt || account.stale || account.syncError) ? 'unknown' : 'free';
     var value = { state: state, campaignIds: ids || [], inactiveCampaignIds:ids && cap.inactiveAssignments ? cap.inactiveAssignments[account.id] || [] : null,
-      outsideActive:outside, availableAt: null, idleFrom: null, idleUntil: null };
+      outsideActive:outside, outsideInactive:!!(cap && cap.outsideInactive && cap.outsideInactive[account.id]), availableAt:null, idleFrom:null, idleUntil:null };
     if (state === 'busy' && !outside) {
       var key = ids.slice().sort().join('|');
       if (!idle.has(key)) idle.set(key, projectCapacityIdle_(ids.map(function (id) { return byId.get(id).schedule; }), now, zones));

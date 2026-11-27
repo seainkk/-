@@ -27,6 +27,7 @@ function callApp(request) {
       var contactMethods = {
         getSourceDirectory: typeof getSourceDirectory_ === 'function' ? getSourceDirectory_ : null,
         getSegmentDirectory: typeof getSegmentDirectory_ === 'function' ? getSegmentDirectory_ : null,
+        setSegmentWorkStatus: typeof setSegmentWorkStatus_ === 'function' ? setSegmentWorkStatus_ : null,
         getSegmentSelections: typeof getSegmentSelections_ === 'function' ? getSegmentSelections_ : null,
         saveSegmentFilter: typeof saveSegmentFilter_ === 'function' ? saveSegmentFilter_ : null,
         saveSegmentExport: typeof saveSegmentExport_ === 'function' ? saveSegmentExport_ : null,

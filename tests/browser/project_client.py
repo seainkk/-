@@ -28,10 +28,15 @@ function poolData(accounts){
  for(const item of accounts){
   const busy=item.id==='account-0',unknown=item.id==='account-2'||backend.uncertainCapacity;
   item.capacity={state:unknown?'unknown':busy?'busy':'free',campaignIds:busy?[A,B]:[],availableAt:null,
+   inactiveCampaignIds:busy?[D]:[],
    idleFrom:busy&&!unknown?'2026-11-23T15:30:00.000Z':null,idleUntil:busy&&!unknown?'2026-11-24T06:00:00.000Z':null};
   if(backend.senderAssignments)item.capacity=backend.senderAssignments[item.id];
+  const now=Date.now(),stamp=new Date(now).toISOString();
+  item.todayQuota={date:new Date(now+10800000).toISOString().slice(0,10),limit:40,sent:15,remaining:25,
+   limitAt:stamp,sentAt:unknown?'2020-01-01T00:00:00Z':stamp};
  }
- return {state:backend.uncertainCapacity?'partial':'ready',stale:!!backend.uncertainCapacity,updatedAt:backend.lastSyncAt,campaigns:backend.poolCampaigns||campaignList};
+ return {state:backend.uncertainCapacity?'partial':'ready',stale:!!backend.uncertainCapacity,updatedAt:backend.lastSyncAt,campaigns:backend.poolCampaigns||campaignList,
+  inactiveCampaigns:[{id:D,name:'Поставленная на паузу кампания',status:'Paused',segmentName:'Справочник'}]};
 }
 function infra(){
  const total=backend.monitoringIds.length,completed=backend.detailIds.length,poolOnly=backend.syncMode==='pool';
@@ -506,6 +511,13 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         sender=page.locator('#pj-account-rows tr[data-account="account-0"]')
         expect(sender).to_contain_text('Проект 2 / Кухни')
         expect(sender).to_contain_text('Без сегмента')
+        expect(sender).to_contain_text('Поставленная на паузу кампания')
+        expect(sender).to_contain_text('На паузе')
+        expect(sender.locator('[data-label="Дневной лимит"]')).to_have_text('40')
+        expect(sender.locator('[data-label="Отправлено сегодня"]')).to_have_text('15')
+        expect(sender.locator('[data-label="Остаток лимита"]')).to_have_text('25')
+        expect(page.locator('#pj-account-rows [data-account="account-2"] [data-label="Остаток лимита"]')).to_have_text('—')
+        expect(page.locator('#pj-schedule-rows')).not_to_contain_text('Поставленная на паузу кампания')
         expect(sender).to_contain_text('23.11.2026')
         expect(sender).to_contain_text('Дата неизвестна')
         expect(page.locator('#pj-schedule-rows tr')).to_have_count(2)

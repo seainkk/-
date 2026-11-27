@@ -66,12 +66,23 @@ def main():
         assert bundles and directories
         request = directories.pop(0)
         now = datetime.now(timezone.utc)
-        sources = [{'id':'source-companies','name':'Тестовый каталог'}, {'id':'other-source-file','name':'Архив'}]
+        sources = [{'id':'source-companies','name':'Тестовый каталог','url':'https://example.invalid/untrusted',
+                    'origin':{'name':'Непроверенная исходная база'},'status':'Служебное значение'}, {'id':'other-source-file','name':'Архив'}]
+        segments = [{'id':'test-segment-id','name':'Тестовый сегмент','project':'numshield','section':'clients','contactCount':219}]
         docs = [{'found':{'name':name,'fields':{'schema':{'integerValue':'1'},
             'generatedAt':{'timestampValue':now.isoformat()},'expiresAt':{'timestampValue':(now+timedelta(minutes=5)).isoformat()},
-            'rowsJson':{'stringValue':json.dumps(rows)}}}} for name,rows in zip(request.request.post_data_json['documents'],[sources,[]])]
+            'rowsJson':{'stringValue':json.dumps(rows)}}}} for name,rows in zip(request.request.post_data_json['documents'],[sources,segments])]
         request.fulfill(content_type='application/json',headers={'Access-Control-Allow-Origin':HOST},body=json.dumps(docs))
         expect(page.locator('#entry-preview-list button')).to_have_text('Тестовый каталог')
+        first_row=page.locator('#entry-preview-list li')
+        expect(first_row).to_have_text('Тестовый каталогОткрыть на Диске')
+        expect(first_row.get_by_role('link')).to_have_attribute('href','https://drive.google.com/open?id=source-companies')
+        expect(first_row.get_by_role('link')).to_have_attribute('target','_blank')
+        page.locator('#entry-view-segments').click()
+        expect(first_row).to_have_text('Тестовый сегмент')
+        expect(first_row.get_by_role('button')).to_have_count(1)
+        page.locator('#entry-view-sources').click()
+        page.locator('#entry-search').focus()
 
         release_scripts = True
         started = page.evaluate('performance.now()')

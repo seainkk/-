@@ -358,18 +358,20 @@ function projectForecastSameDemand_(saved,selection,infra) {
 }
 
 function projectForecastInputStamp_(infra) {
+  var now = Date.now();
   var accounts = infra.accounts.map(function (a) {
-    return [a.id,a.name || '',a.email || '',a.sentToday,!!a.stale,!!a.syncError,!!(a.errors && a.errors.length)];
+    return [a.id,a.name || '',a.email || '',projectForecastSenderQuota_(a,now).sent,!!a.stale,!!a.syncError,!!(a.errors && a.errors.length)];
   }).sort(function (a,b) { return a[0]-b[0]; });
   return digest_(JSON.stringify([infra.capacity.state,accounts]));
 }
 
 function projectForecastScope_(selection, infra) {
+  var now = Date.now();
   var campaigns = infra.capacity.campaigns.map(function (c) {
     return [c.id, c.segmentId, c.allSendersSelected, c.schedule];
   }).sort(function (a,b) { return a[0].localeCompare(b[0]); });
   var accounts = infra.accounts.map(function (a) {
-    return [a.id, a.status, a.dailyLimit, a.capacity.outsideActive, a.capacity.campaignIds.slice().sort()];
+    return [a.id, a.status, projectForecastSenderQuota_(a,now).limit, a.capacity.outsideActive, a.capacity.campaignIds.slice().sort()];
   }).sort(function (a,b) { return a[0]-b[0]; });
   return digest_(JSON.stringify([selection,campaigns,accounts]));
 }
