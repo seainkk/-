@@ -14,10 +14,10 @@
     </div>
     <p id="pj-plan-health" class="pj-health" role="status"></p><p id="pj-plan-asof" class="br-muted"></p>
     <div class="pj-table-wrap"><table class="pj-table"><caption class="pj-sr-only">Расчёт за выбранный период</caption>
-      <thead><tr><th scope="col">Период</th><th scope="col">Лимит почт</th><th scope="col">Факт</th><th scope="col">План первых</th><th scope="col">План повторных</th><th scope="col" data-sending-remaining>Ещё ожидается</th><th scope="col" data-sending-total>Прогноз всего</th><th scope="col">Свободно по плану</th></tr></thead><tbody id="pj-plan-days"></tbody></table></div>
+      <thead><tr><th scope="col">Период</th><th scope="col" data-sending-plan>Лимит почт</th><th scope="col" id="pj-sending-fact">Факт</th><th scope="col" id="pj-history-all-senders" hidden>Все отправители рассылок</th><th scope="col" data-sending-plan>План первых</th><th scope="col" data-sending-plan>План повторных</th><th scope="col" data-sending-remaining>Ещё ожидается</th><th scope="col" data-sending-plan data-sending-total>Прогноз всего</th><th scope="col" data-sending-plan>Свободно по плану</th></tr></thead><tbody id="pj-plan-days"></tbody></table></div>
     <details id="pj-plan-detail"><summary>По почтам и рассылкам</summary>
       <label>Период в таблице <select id="pj-plan-day"></select></label>
-      <div class="pj-table-wrap"><table class="pj-table"><thead><tr><th scope="col">Почта</th><th scope="col">Рассылка</th><th scope="col">Факт</th><th scope="col" data-sending-remaining>Ещё ожидается</th><th scope="col" data-sending-total>Прогноз всего</th></tr></thead><tbody id="pj-plan-accounts"></tbody></table></div>
+      <div class="pj-table-wrap"><table class="pj-table"><thead><tr><th scope="col">Почта</th><th scope="col">Рассылка</th><th scope="col">Факт</th><th scope="col" data-sending-remaining>Ещё ожидается</th><th scope="col" data-sending-plan data-sending-total>Прогноз всего</th></tr></thead><tbody id="pj-plan-accounts"></tbody></table></div>
     </details>
   </section>
   <section id="pj-project-completions" class="pj-card" aria-labelledby="pj-project-completions-title">
