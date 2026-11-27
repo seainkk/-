@@ -233,19 +233,18 @@
   function reportVisible(){return view==='analytics'&&pollVisible();}
   function forecastVisible(){return reportVisible()&&$('pj-plan-period').value!=='history';}
   function todayVisible(){return forecastVisible()&&$('pj-plan-period').value==='today';}
-  function historyVisible(){return reportVisible()&&$('pj-plan-period').value==='history';}
+  function historyVisible(){return ready&&view==='analytics'&&!document.hidden&&$('pj-plan-period').value==='history';}
   function stopSendingTimers(){
     clearTimeout(todayTimer);todayTimer=null;
     clearTimeout(forecastTimer);forecastTimer=null;
     pauseHistory();
   }
   function loadSendingPeriod(manual=false){
-    if(!reportVisible())return;
     if(historyVisible()){
       if(historyRetryAt>Date.now()){
         if(historyTimer===null)scheduleHistory(historyRetryAt-Date.now());
       }else if(manual||historyTimer===null)void readHistory(manual);
-    }else{
+    }else if(forecastVisible()){
       void readForecast(manual||!!forecastData?.pending&&forecastTimer===null);
       if(todayVisible()){
         if(todayRetry>Date.now()){
@@ -253,8 +252,8 @@
         }else if(manual||todayTimer===null)void readTodayFacts(manual);
       }
       void preloadForecast();
-    }
-    if(!infraLoadedAt||!recentPoll(infraLoadedAt))void loadInfrastructure();
+    }else return;
+    if(pollVisible()&&(!infraLoadedAt||!recentPoll(infraLoadedAt)))void loadInfrastructure();
   }
   function pauseForecast(){
     if(forecastTimer!==null)clearTimeout(forecastTimer);
@@ -479,6 +478,9 @@
           if(wait>0){completionNext=Date.now()+wait;return;}
         }
       }
+      // The preview is read-only. Let the foreground weekly query finish its journal write
+      // before running a background completion update that uses the same Apps Script lock.
+      if(completionData&&historyVisible()&&historyBusy){completionNext=Date.now()+2500;return;}
       const data=await invoke('getProjectCampaignCompletions',{},mark,valid);
       if(!valid()||!data)return;
       completionData=data;completionMessage='';
@@ -734,7 +736,8 @@
     const useArchive=archive&&!live?.generatedAt&&(!live?.forecast||calendarCovered&&(!needsSenders||Array.isArray(archived?.senders)||!live.forecast.senders));
     const snapshot=history?null:useArchive?archive:live;
     const directory=infrastructure?.monitoring?.accountIds;
-    const accountSource=Array.isArray(directory)?directory:facts?.accounts?.map(a=>a.id)||snapshot?.forecast?.senders?.map(a=>a.id);
+    const factIds=facts?.accounts?.map(a=>a.id);
+    const accountSource=history&&factIds?factIds:Array.isArray(directory)?directory:factIds||snapshot?.forecast?.senders?.map(a=>a.id);
     const pool=Array.isArray(accountSource)?new Set(accountSource.map(String)):null;
     const matches=list=>pool&&Array.isArray(list)&&list.length===pool.size&&new Set(list.map(a=>String(a.id))).size===pool.size&&list.every(a=>pool.has(String(a.id)));
     const trustedFacts=matches(facts?.accounts)?facts:null;
@@ -770,22 +773,30 @@
     if(historyVisible())void readHistory();
   }
   async function readHistory(manual=false){
-    if(!historyVisible()||historyBusy||Date.now()<historyRetryAt||!manual&&!historyReport?.pending&&recentPoll(historyChecked))return;
+    if(!historyVisible()||historyBusy||Date.now()<historyRetryAt||!manual&&!historyError&&!historyReport?.pending&&recentPoll(historyChecked))return;
     const mark=token(),seq=++historySequence,valid=()=>alive(mark)&&historyVisible()&&seq===historySequence;
+    const inventoryAtStart=infrastructure;
     clearTimeout(historyTimer);historyTimer=null;historyBusy=true;
-    historyError='';renderSendingReport();
+    renderSendingReport();
     try{
       const input=manual?{refresh:true}:{},weekOf=$('pj-history-date')?.value;
       if(weekOf)input.weekOf=weekOf;
+      input.cursor=historyReport?.nextCursor||'';
       const result=await invoke('getProjectSendingHistory',input,mark,valid);
-      if(!valid()||!result)return;
-      historyReport=result;historyChecked=Date.now();historyRetryAt=historyChecked+Math.max(0,Number(result.retryAfterMs)||0);
+      if(!valid())return;
+      if(!result?.from||!Array.isArray(result.accounts)||!Array.isArray(result.campaigns))throw new Error('Сервис не подтвердил период и состав истории. Обновите отчёт.');
+      if(inventoryAtStart!==infrastructure&&!historyMatchesInventory(result.accounts,infrastructure?.monitoring?.accountIds)){
+        historyReport=null;historyError='Состав почт изменился. Запрашиваем историю для текущего списка.';scheduleHistory(1500);return;
+      }
+      historyReport=result;historyError='';historyChecked=Date.now();historyRetryAt=historyChecked+Math.max(0,Number(result.retryAfterMs)||0);
       if(result.pending)scheduleHistory(Math.max(1500,historyRetryAt-Date.now()));
     }catch(error){
       if(!valid())return;
       const problem=failure(error);
-      if(historyReport&&['COLDY_NETWORK','COLDY_RATE_LIMIT','COLDY_UNAVAILABLE'].includes(problem.code)){
-        historyError='Показаны ранее полученные данные. '+problem.message;
+      if(['BUSY','DRIVE_BUSY','COLDY_NETWORK','COLDY_RATE_LIMIT','COLDY_UNAVAILABLE','COLDY_CONFLICT'].includes(problem.code)){
+        const delay=problem.code==='BUSY'?5000:30000;
+        historyError=problem.message+' Повторим автоматически.';
+        historyRetryAt=Date.now()+delay;scheduleHistory(delay);
       }else{
         historyReport=null;historyError=problem.message;
       }
@@ -793,6 +804,17 @@
   }
   function scheduleHistory(delay){
     clearTimeout(historyTimer);historyTimer=setTimeout(()=>{historyTimer=null;void readHistory();},delay);
+  }
+  function historyMatchesInventory(accounts,ids){
+    if(!Array.isArray(ids))return true;
+    const previous=new Set(accounts.map(account=>String(account.id)));
+    return ids.length===previous.size&&ids.every(id=>previous.has(String(id)));
+  }
+  function acceptInfrastructure(data){
+    infrastructure=data;infraLoadedAt=Date.now();
+    if(!historyReport||historyMatchesInventory(historyReport.accounts,data.monitoring?.accountIds))return;
+    clearHistory();
+    if(historyVisible())void readHistory();
   }
   function sendingModel(e,dates){
     const {plan,facts,campaigns}=e,today=currentForecastDay(),sf=sendingFilters,scoped=!!(sf.segment||sf.campaign);
@@ -804,6 +826,17 @@
     const factScope=new Set(factCampaigns);
     const quotas=new Map((infrastructure?.accounts||[]).map(a=>[String(a.id),a.todayQuota]));
     const coverage=new Map(),counts=new Map(),seen=new Map(),plansByDate=new Map();
+    const campaignTotals=new Map();
+    if(e.history&&accounts.length&&accounts.length===e.accounts.size)for(const point of facts?.campaignTotals||[]){
+      const id=String(point.campaignId);
+      if(!factScope.has(id)||!dates.includes(point.date)||!knownCount(point.sent))continue;
+      if(!campaignTotals.has(point.date))campaignTotals.set(point.date,new Map());
+      campaignTotals.get(point.date).set(id,point.sent);
+    }
+    function allSendersTotal(days){
+      if(!factCampaigns.length||!campaignTotals.size)return null;
+      return addCounts(days.map(d=>addCounts(factCampaigns.map(id=>campaignTotals.get(d)?.get(id)))));
+    }
     function indexPlan(report) {
       const byAccount=new Map((report.senders||[]).map(a=>[String(a.id),a]));
       const links=new Map(Array.from(byAccount,([id,a])=>[id,new Map((a.campaigns||[]).map(c=>[String(c.id),c]))]));
@@ -893,7 +926,8 @@
       const items=ds.map(d=>at(d,ids,c,pool));
       const result=Object.fromEntries(['limit','initial','followups','expected','free','projection'].map(k=>[k,addCounts(items.map(row=>row[k]))]));
       const fact=items.reduce((sum,r)=>sum+r.fact,0);
-      result.fact=items.every(r=>r.factComplete)?number(fact):fact?'от '+number(fact):'—';
+      result.factComplete=items.every(r=>r.factComplete);
+      result.fact=result.factComplete?number(fact):fact?'от '+number(fact):'—';
       return result;
     }
     function details(id,days){
@@ -902,7 +936,7 @@
       return [...ids].filter(permitted)
         .sort((a,b)=>(campaigns.get(a)?.name||a).localeCompare(campaigns.get(b)?.name||b,'ru'));
     }
-    return {accounts,group,details,archiveCount:plansByDate.size,asyncCounts:()=>asynchronous};
+    return {accounts,group,details,allSendersTotal,archiveCount:plansByDate.size,asyncCounts:()=>asynchronous};
   }
   function renderSendingReport(){
     if(!$('pj-sending')||view!=='analytics')return;
@@ -924,12 +958,23 @@
     sendingSelect('pj-plan-segment',new Map(e.segments),sf.segment);sendingSelect('pj-plan-campaign',campOptions,sf.campaign);
     sendingSenderPicker(e.accounts);
     const model=sendingModel(e,dates),groups=periodGroups(dates),output=document.createDocumentFragment();
+    const showPlan=!history||model.archiveCount>0;
+    for(const th of $('pj-sending').querySelectorAll('[data-sending-plan]'))th.hidden=!showPlan;
+    const summary=Array.from(groups.values(),ds=>({ds,metrics:model.group(ds),allSenders:model.allSendersTotal(ds)}));
+    const showAllSenders=history&&summary.some(row=>!row.metrics.factComplete&&knownCount(row.allSenders));
+    $('pj-history-all-senders').hidden=!showAllSenders;
+    const totalsTime=showAllSenders&&timestamp(e.facts?.campaignTotalsCheckedAt);
+    $('pj-history-all-senders').title=totalsTime?'Самая ранняя сверка сводок Coldy '+totalsTime+' МСК':'';
+    $('pj-sending-fact').textContent=showAllSenders?'Факт по почтам проекта':'Факт';
     const label=ds=>ds.length===1?((ds[0]===today?'Сегодня · ':ds[0]===dateOffset(today,1)?'Завтра · ':'')+forecastDate(ds[0])):
       forecastDate(ds[0])+' – '+forecastDate(ds.at(-1));
-    for(const ds of groups.values()){
-      const m=model.group(ds),row=node('tr'),title=node('th','',label(ds));title.scope='row';row.append(title);
-      const values=[number(m.limit),m.fact,number(m.initial),number(m.followups)];
-      if(!history)values.push(number(m.expected));values.push(number(m.projection),number(m.free));
+    for(const {ds,metrics:m,allSenders} of summary){
+      const row=node('tr'),title=node('th','',label(ds));title.scope='row';row.append(title);
+      const values=showPlan?[number(m.limit),m.fact]:[m.fact];
+      if(showAllSenders)values.push(number(allSenders));
+      if(showPlan)values.push(number(m.initial),number(m.followups));
+      if(!history)values.push(number(m.expected));
+      if(showPlan)values.push(number(m.projection),number(m.free));
       for(const value of values)row.append(node('td','pj-number',value));
       output.append(row);
     }
@@ -945,7 +990,8 @@
         const row=node('tr',bold?'pj-mail-group':''),title=node('th','',name);title.scope='row';
         row.append(title,node('td','',campaign),node('td','pj-number',m.fact));
         if(!history)row.append(node('td','pj-number',number(m.expected)));
-        row.append(node('td','pj-number',number(m.projection)));detail.append(row);
+        if(showPlan)row.append(node('td','pj-number',number(m.projection)));
+        detail.append(row);
       }
       for(const c of e.campaigns.values()){
         if(sf.segment&&c.segmentId!==sf.segment||sf.campaign&&c.id!==sf.campaign)continue;
@@ -961,8 +1007,12 @@
     if(!ready)notices.add('Проверяем доступ к аналитике.');
     else if(history){
       if(historyError||e.facts?.message)notices.add(historyError||e.facts.message);
-      else if(!e.facts)notices.add('Получаем историю отправок.');
-      if(e.facts&&model.archiveCount<dates.length)notices.add(model.archiveCount?'Для части дат нет сохранённого плана. В этих ячейках стоит прочерк.':'За выбранный период пока нет сохранённых планов.');
+      else if(!e.facts)notices.add(historyBusy?'Запрашиваем фактические отправки в Coldy…':'Нажмите «Обновить отчёт», чтобы получить историю отправок.');
+      if(e.facts?.pending&&e.facts.campaigns.length&&!e.facts.complete)
+        notices.add('По почтам проекта проверено дневных отчётов '+number(e.facts.checkedCells?.length||0)+' из '+number(e.facts.campaigns.length*dates.length)+'.');
+      if(Number(e.facts?.retryAfterMs)>=60000&&historyRetryAt>Date.now())notices.add('Следующая проверка '+timestamp(historyRetryAt)+' МСК.');
+      if(showAllSenders)notices.add('В общий итог рассылок могут входить ящики вне мониторинга проекта.');
+      if(e.facts?.complete&&model.archiveCount<dates.length)notices.add(model.archiveCount?'Для части дат нет сохранённого плана. В этих ячейках стоит прочерк.':'За выбранный период сохранён только факт отправок.');
       if(model.archiveCount)notices.add('План и лимит сохранены до начала соответствующего дня по Москве. Факт указан за календарные дни Coldy.');
     }else{
       if(forecastError||forecastData?.message)notices.add(forecastError||forecastData.message);
@@ -976,7 +1026,7 @@
     }
     if(sf.accounts!==null&&!model.accounts.length)notices.add('Выберите хотя бы одну почту.');
     health('pj-plan-health',[...notices].join(' '));
-    $('pj-plan-asof').textContent=[e.facts?.checkedAt?'Факт на '+timestamp(e.facts.checkedAt)+' МСК':'',
+    $('pj-plan-asof').textContent=[history&&dates.length?($('pj-history-date').value?'Период':'Прошлая неделя')+' '+label(dates):'',e.facts?.checkedAt?'Факт на '+timestamp(e.facts.checkedAt)+' МСК':'',
       e.plan&&e.generatedAt?'Прогноз на '+timestamp(e.generatedAt)+' МСК':''].filter(Boolean).join(' · ');
     $('pj-plan-refresh').disabled=!ready||(history?historyBusy||Date.now()<historyRetryAt:forecastBusy||sf.period==='today'&&todayBusy);
     renderProjectCompletionTable();
@@ -1245,7 +1295,7 @@
     if(!ready||infraLoading||mailboxPicker?.open&&infrastructure)return;
     const mark=token(),sequence=++infraSequence;infraLoading=true;infraError='';infraNotice='';render();notify();
     let initial=false,continuation=false;
-    try{const data=await invoke('getProjectInfrastructure',{},mark);if(!alive(mark)||sequence!==infraSequence||!data)return;infrastructure=data;infraLoadedAt=Date.now();paintOpenSenders();
+    try{const data=await invoke('getProjectInfrastructure',{},mark);if(!alive(mark)||sequence!==infraSequence||!data)return;acceptInfrastructure(data);paintOpenSenders();
       continuation=!!(data.nextCursor&&data.poolOnly);
       initial=data.configured===true&&data.monitoring?.accountIds?.length>0&&!initialSyncAttempted&&!data.syncPaused&&!(data.retryAfterMs>0)&&
         (continuation||!data.nextCursor&&!data.error&&(data.stale===true||data.capacity?.stale===true||!recentPoll(Date.parse(data.capacity?.updatedAt))));
@@ -1270,7 +1320,7 @@
         if(cursor)seen.add(cursor);
         const data=await invoke('refreshProjectInfrastructure',cursor?{cursor}:diagnostics?{}:{includeCapacity:true,...(automatic?{live:true}:{})},mark,visible);
         if(!alive(mark)||sequence!==infraSequence||!data)return;
-        infrastructure=data;infraLoadedAt=Date.now();render();paintOpenSenders();
+        acceptInfrastructure(data);render();paintOpenSenders();
         const next=data.nextCursor,completed=(data.syncProgress||data.detailProgress)?.completed;
         if(!next||!visible())break;
         if(data.syncPaused||data.error||data.state==='error'||data.retryAfterMs>0){infraError=data.error?.message||'Синхронизация приостановлена. Повторите продолжение позже.';break;}

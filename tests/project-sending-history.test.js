@@ -47,6 +47,69 @@ function fixture() {
   return f;
 }
 
+function withHistoryCache(f) {
+  const entries=new Map();
+  const get=key=>{const item=entries.get(key);return item&&item.expires>f.weekNow?item.value:null;};
+  f.c.CacheService={getScriptCache:()=>({get,
+    getAll:keys=>Object.fromEntries(keys.map(k=>[k,get(k)]).filter(([,v])=>v!==null)),
+    put:(k,value,seconds)=>entries.set(k,{value,expires:f.weekNow+seconds*1000})})};
+  return entries;
+}
+
+test('a busy shared writer cannot starve a cold weekly history or discard its verified result',()=>{
+  const f=fixture();withHistoryCache(f);
+  const busy=()=>{throw Object.assign(new Error('locked'),{registryCode:'BUSY'});}, unlocked=f.c.locked_;
+  f.c.locked_=busy;
+  let r=f.run({cursor:''});
+  assert.equal(r.checkedCells.length,12);assert.equal(f.writes,0);
+  assert.match(r.nextCursor,/^[\w-]{43}$/);
+  r=f.run({cursor:r.nextCursor});
+  assert.equal(r.rows[0].sent,5);
+  r=f.run({cursor:r.nextCursor});
+  assert.ok(r.complete&&r.pending&&r.retryAfterMs>0);
+  const gets=f.paths.length;
+  f.c.locked_=unlocked;
+  r=f.run({cursor:r.nextCursor});
+  assert.ok(r.complete&&!r.pending);
+  assert.equal(f.paths.length,gets,'save retry must not re-read Coldy');
+  assert.equal(f.writes,1);
+  assert.deepEqual(f.run(),r,'older tabs reuse the completed durable history');
+});
+
+test('a stale cursor cannot resurrect a campaign revoked in a different tab, even on BUSY',()=>{
+  const f=fixture();withHistoryCache(f);
+  const initial=f.run({cursor:''});assert.ok(initial.campaignTotals.some(c=>c.campaignId===first));
+  const fetch=f.fetch;
+  f.fetch=url=>{if(url.pathname.includes(first))throw Object.assign(new Error('gone'),{registryCode:'COLDY_FORBIDDEN'});return fetch(url);};
+  const unlocked=f.c.locked_;
+  f.c.locked_=()=>{throw Object.assign(new Error('locked'),{registryCode:'BUSY'});};
+  const revoked=f.run({cursor:initial.nextCursor});
+  f.c.locked_=unlocked;f.fetch=fetch;
+  assert.ok(!revoked.campaignTotals.some(c=>c.campaignId===first));
+  const otherTab=f.run({cursor:initial.nextCursor});
+  assert.ok(!otherTab.campaignTotals.some(c=>c.campaignId===first));
+  assert.ok(!otherTab.checkedCells.some(c=>c.campaignId===first));
+  assert.ok(!f.run({cursor:initial.nextCursor}).campaignTotals.some(c=>c.campaignId===first));
+});
+
+test('rate-limit checkpoint survives eviction of the partial cache without losing other dates',()=>{
+  const f=fixture(), cache=withHistoryCache(f), a=f.run({cursor:''}), b=f.run({cursor:a.nextCursor});
+  f.fetch=()=>{throw Object.assign(new Error('rate'),{registryCode:'COLDY_RATE_LIMIT',retryAfterMs:3600000});};
+  const paused=f.run({cursor:b.nextCursor}), calls=f.paths.length;
+  assert.equal(paused.retryAfterMs,3600000);assert.equal(f.writes,1);
+  cache.clear();f.weekNow+=16*60000;
+  const still=f.run({cursor:b.nextCursor});
+  assert.deepEqual(still.rows,paused.rows);assert.ok(still.retryAfterMs>0);
+  assert.equal(f.paths.length,calls);
+});
+
+test('a change in project access while waiting for a busy commit fails closed',()=>{
+  const f=fixture();
+  f.c.locked_=()=>{f.selected=['2'];throw Object.assign(new Error('locked'),{registryCode:'BUSY'});};
+  assert.throws(()=>f.run(),e=>e.registryCode==='COLDY_MONITORING_CHANGED');
+  assert.equal(f.writes,0);
+});
+
 test('a completed Moscow Monday–Sunday is selected across a year and the Monday midnight boundary',()=>{
   const c=fixture().c;
   assert.equal(c.projectHistoryWeek_(Date.parse('2027-01-03T20:59:59Z'))[0],'2026-12-21');
@@ -151,8 +214,9 @@ test('seven daily event totals, selected sender IDs and all bound campaigns incl
   const initial=f.run();
   assert.equal(initial.state,'partial');
   assert.deepEqual(initial.rows,[]);
-  assert.equal(initial.checkedCells.length,6);
-  assert.ok(!initial.checkedCells.some(v=>v.date===f.days[0]));
+  assert.equal(initial.checkedCells.length,12);
+  assert.ok(!initial.checkedCells.some(v=>v.campaignId===first&&v.date===f.days[0]));
+  assert.ok(f.paths.every(path=>path.includes('/events?')),'all bound weekly timelines share the first request');
   const r=f.finish();
   assert.equal(r.timeZone,null);assert.equal(r.dayBasis,'coldy_calendar');
   assert.deepEqual(r.accounts.map(a=>a.id),['1','2']);
@@ -163,7 +227,9 @@ test('seven daily event totals, selected sender IDs and all bound campaigns incl
   assert.equal(f.paths.length,4);
   assert.doesNotMatch(JSON.stringify([r,...f.saved.values()]),/not-persisted|888|private-api-key/);
   assert.deepEqual(f.run(),r);assert.equal(f.paths.length,4);
-  assert.equal(f.run({refresh:true}).pending,true);assert.equal(f.paths.length,5);
+  const refreshing=f.run({refresh:true});
+  assert.equal(refreshing.pending,true);assert.equal(f.paths.length,6);
+  assert.deepEqual(refreshing.rows,r.rows,'previously reconciled days stay visible during recheck');
 });
 
 test('pagination reconciles raw sends across every sender and never publishes partial counters',()=>{
@@ -174,7 +240,7 @@ test('pagination reconciles raw sends across every sender and never publishes pa
     return offset===0?f.page(0,3,[[1,2],[888,3]],2):f.page(2,3,[[2,1]],2);
   };
   f.run();const partial=f.run();
-  assert.deepEqual(partial.rows,[]);assert.equal(partial.checkedCells.length,6);
+  assert.deepEqual(partial.rows,[]);assert.equal(partial.checkedCells.length,13);
   assert.doesNotMatch(JSON.stringify([...f.saved.values()]),/not-persisted|888/);
   const complete=f.finish();assert.equal(complete.checkedCells.length,14);
   assert.deepEqual(complete.rows.map(row=>[row.accountId,row.sent]),[['1',2],['2',1]]);
@@ -240,9 +306,9 @@ test('a late caller cannot overwrite a concurrent checkpoint and a rotated crede
   const firstRead=f.run();assert.equal(f.writes,2);
   assert.deepEqual(firstRead.rows.map(v=>v.sent),[5]);
   f.finish();const previous=f.paths.length;f.proofSlot='rotated';assert.equal(f.run().rows.length,0);
-  assert.equal(f.paths.length,previous+1);
+  assert.equal(f.paths.length,previous+2);
   f.finish();const fresh=f.paths.length;f.weekNow+=6*3600000;
-  assert.equal(f.run().pending,true);assert.equal(f.paths.length,fresh+1);
+  assert.equal(f.run().pending,true);assert.equal(f.paths.length,fresh+2);
 });
 
 test('a corrupted checkpoint cannot disclose other sender IDs or stale cells',()=>{
@@ -260,6 +326,20 @@ test('history batching only accepts canonical event and same-day account GETs fo
   for(const paths of [[base+query,base+query],[base+query,(base+query).replace(first,second)],
     [(base+query).replace('end_date='+d,'end_date='+f.days[1])],['/accounts/42'],[base+'summary?period=all&type=event']])
     assert.throws(()=>run(paths),e=>e.registryCode==='INVALID_REQUEST');
+});
+
+test('weekly campaign batch accepts only distinct events queries with identical calendar dates',()=>{
+  const f=fixture(), from=f.days[0],to=f.days.at(-1);
+  const timeline=id=>'/analytics/campaigns/'+id+'/events?type=event&start_date='+from+'&end_date='+to;
+  const run=paths=>f.c.coldyGetBatch_({},paths,()=>{},'sending-week-timelines');
+  assert.equal(run([timeline(first),timeline(second)]).length,2);
+  const invalid=[
+    [timeline(first),timeline(first)],
+    [timeline(first),timeline(second).replace('end_date='+to,'end_date='+from)],
+    [timeline(first),'/accounts/42'],
+    [timeline(first).replace('/events?', '/by-account?')]
+  ];
+  for(const paths of invalid)assert.throws(()=>run(paths),e=>e.registryCode==='INVALID_REQUEST');
 });
 
 test('today uses only the selected project and senders, has its own dated cache, and refreshes after a minute',()=>{
@@ -320,4 +400,45 @@ test('today keeps refreshing confirmed campaigns while another campaign is unava
   const q={period:'today'};f.run(q);const partial=f.run(q);
   assert.equal(partial.retryAfterMs,60000);assert.equal(partial.rows[0].sent,2);assert.equal(partial.checkedCells.length,1);
   total=4;f.weekNow+=60000;assert.equal(f.run(q).rows[0].sent,4);
+});
+
+test('weekly event totals are scoped to allowed campaigns independently of sender attribution',()=>{
+  const f=fixture(), observedAt=new Date(f.weekNow).toISOString();
+  const fetch=f.fetch;
+  f.fetch=url=>{
+    if(url.pathname.includes(second))throw Object.assign(new Error('no campaign access'),{registryCode:'COLDY_FORBIDDEN'});
+    return fetch(url);
+  };
+  const summary=f.run();
+  const expected=f.days.map((date,i)=>({date,campaignId:first,sent:i===0?7:0}));
+  assert.deepEqual(summary.campaignTotals,expected);
+  assert.equal(summary.campaignTotalsCheckedAt,observedAt);
+  assert.deepEqual(summary.rows,[]);
+  f.weekNow+=5000;
+  const attributed=f.run();
+  assert.deepEqual(attributed.rows,[{date:f.days[0],accountId:'1',campaignId:first,sent:5}]);
+  assert.deepEqual(attributed.campaignTotals,expected);
+  assert.equal(attributed.campaignTotalsCheckedAt,observedAt,'reading sender details does not advance the timeline timestamp');
+  assert.notEqual(attributed.checkedAt,observedAt);
+  f.selected=[];
+  assert.deepEqual(f.run().campaignTotals,[]);
+  assert.equal(f.run().campaignTotalsCheckedAt,null);
+  assert.equal('campaignTotals' in f.run({period:'today'}),false);
+});
+
+test('a revoked weekly timeline is removed, and a legacy checkpoint has no inferred timeline timestamp',()=>{
+  const f=fixture(), initial=f.finish();
+  assert.equal(initial.campaignTotals.length,14);
+  for(const value of f.saved.values()) for(const entry of Object.values(value.entries))delete entry.timelineCheckedAt;
+  const cached=f.run();
+  assert.deepEqual(cached.campaignTotals,initial.campaignTotals);
+  assert.equal(cached.campaignTotalsCheckedAt,null);
+  const fetch=f.fetch;
+  f.fetch=url=>{
+    if(url.pathname.includes(first))throw Object.assign(new Error('no access'),{registryCode:'COLDY_NOT_FOUND'});
+    return fetch(url);
+  };
+  const refreshed=f.run({refresh:true});
+  assert.ok(refreshed.campaignTotals.length);
+  assert.ok(refreshed.campaignTotals.every(r=>r.campaignId===second));
 });

@@ -89,7 +89,8 @@ function projectHistoryPage_(value, prior, expected, selected) {
     if (count && selected.has(id)) counts[id] = count;
   });
   var next = offset + value.items.length;
-  if (sum > expected || next === value.total && sum !== expected) projectHistoryInvalid_();
+  if (sum > expected || next === value.total && sum !== expected)
+    fail_('COLDY_HISTORY_TOTALS','Сумма по ящикам в Coldy расходится с дневным числом отправок.');
   return next === value.total ? {done:true,counts:counts} :
     {offset:next,total:value.total,counts:counts,sum:sum,seen:Array.from(seen)};
 }
@@ -142,6 +143,19 @@ function projectHistoryJobs_(scope,days,report,now) {
     if(scope.period==='today')tasks.push(accountTask(0,path,0));
     return tasks;
   }
+  if (scope.period!=='today') {
+    // A single weekly GET proves all zero days for its campaign. Collect those first across the project.
+    var summaries=[];
+    scope.campaigns.some(function (campaign) {
+      var entry=report.entries[campaign.id];
+      if (!entry || !(entry.retryAt>now) && (!entry.totals || entry.reviewAt<=now)) {
+        var task=summaryTasks('/analytics/campaigns/'+campaign.id+'/')[0];
+        task.campaign=campaign.id;summaries.push(task);
+      }
+      return summaries.length===COLDY.readBatchSize;
+    });
+    if (summaries.length) return {timelines:true,tasks:summaries};
+  }
   for (var c=0;c<scope.campaigns.length;c++) {
     var id = scope.campaigns[c].id, entry = report.entries[id] || {}, tasks = [], path = '/analytics/campaigns/' + id + '/';
     if (!entry.totals || entry.reviewAt && entry.reviewAt<=now) {
@@ -152,7 +166,7 @@ function projectHistoryJobs_(scope,days,report,now) {
     }
     for (var i=0;i<days.length;i++) {
       var cell = entry.cells[i] || {};
-      if (scope.period!=='today' && !entry.totals[i] || cell.done) continue;
+      if (scope.period!=='today' && !entry.totals[i] || cell.done && !cell.recheck) continue;
       missing = true;
       if (cell.retryAt > now) { pauseUntil=Math.min(pauseUntil,cell.retryAt); continue; }
       tasks.push(accountTask(i,path,cell.offset || 0));
@@ -171,6 +185,12 @@ function projectHistoryJobs_(scope,days,report,now) {
 }
 
 function projectHistoryApply_(report,job,results,scope,days,now) {
+  if (job.timelines) {
+    job.tasks.forEach(function (task,i) {
+      projectHistoryApply_(report,{campaign:task.campaign,tasks:[task]},[results[i]],scope,days,now);
+    });
+    return;
+  }
   var entry = report.entries[job.campaign] || {cells:{}}, selected = new Set(scope.accounts.map(function (a) { return a.id; }));
   var verifyingPair=job.tasks.length===2 && job.tasks[0].index<0, freshTimeline=false;
   report.entries[job.campaign] = entry;
@@ -188,18 +208,20 @@ function projectHistoryApply_(report,job,results,scope,days,now) {
           if (entry.totals && value!==entry.totals[day]) delete entry.cells[day];
         });
         entry.totals=totals; freshTimeline=true;
+        if (scope.period!=='today') entry.timelineCheckedAt=new Date(now).toISOString();
         if(verifyingPair)delete entry.cells[0]; // The paired account request starts on the first page.
         delete entry.retryAt; delete entry.reviewAt;
       }
       else {
-        entry.cells[index]=projectHistoryPage_(result.value,cell,entry.totals[index],selected);
+        entry.cells[index]=projectHistoryPage_(result.value,cell.recheck ? null : cell,entry.totals[index],selected);
         if(scope.period==='today' && entry.cells[index].done)entry.verifiedAt=now;
       }
       report.checkedAt = new Date(now).toISOString();
     } catch (error) {
       var code = error.registryCode;
-      if (['COLDY_NETWORK','COLDY_RATE_LIMIT','COLDY_RESPONSE','COLDY_UNAVAILABLE','COLDY_NOT_FOUND','COLDY_PROVIDER','COLDY_CONFLICT','COLDY_FORBIDDEN'].indexOf(code) === -1) throw error;
-      var delay = scope.period==='today' && code==='COLDY_RESPONSE' ? 15000 :
+      if (['COLDY_NETWORK','COLDY_RATE_LIMIT','COLDY_RESPONSE','COLDY_HISTORY_TOTALS','COLDY_UNAVAILABLE','COLDY_NOT_FOUND','COLDY_PROVIDER','COLDY_CONFLICT','COLDY_FORBIDDEN'].indexOf(code) === -1) throw error;
+      var inconsistency=code==='COLDY_RESPONSE'||code==='COLDY_HISTORY_TOTALS';
+      var delay = scope.period==='today' && inconsistency ? 15000 : code==='COLDY_HISTORY_TOTALS' ? 60000 :
         ['COLDY_RESPONSE','COLDY_NOT_FOUND','COLDY_PROVIDER','COLDY_FORBIDDEN'].indexOf(code) >= 0 ? 3600000 : 60000;
       var retryAt = now + Math.max(delay,error.retryAfterMs || 0);
       if (code === 'COLDY_FORBIDDEN' || code === 'COLDY_NOT_FOUND') {
@@ -207,10 +229,10 @@ function projectHistoryApply_(report,job,results,scope,days,now) {
         entry.revoked=true; entry.retryAt=retryAt;
       } else if (index < 0) {
         entry.retryAt=Math.max(entry.retryAt || 0,retryAt);
-        if(verifyingPair){delete entry.totals;entry.cells={};}
+        if(verifyingPair || code==='COLDY_RESPONSE'){delete entry.totals;entry.cells={};}
       }
-      else if (code === 'COLDY_RESPONSE') {
-        entry.cells[index]={retryAt:retryAt};
+      else if (inconsistency) {
+        entry.cells[index]={retryAt:retryAt,issue:code==='COLDY_HISTORY_TOTALS'?'totals':'account_format'};
         // Coldy can correct a past day between GETs. Refresh its reference total before trying again.
         entry.reviewAt=Math.min(entry.reviewAt || retryAt,retryAt);
       }
@@ -223,11 +245,15 @@ function projectHistoryApply_(report,job,results,scope,days,now) {
 
 function projectHistoryResult_(scope,days,report,state) {
   var now = Date.now(), checked=[], rows=[], pending = projectHistoryJobs_(scope,days,report,now);
+  var historical=scope.period!=='today', campaignTotals=[], timelineTimes=[], totalsDiffer=false;
   scope.campaigns.forEach(function (campaign) {
     var entry = report.entries[campaign.id];
-    if (!entry || !entry.totals) return;
+    if (!entry || !entry.totals || entry.revoked) return;
+    if (historical) timelineTimes.push(entry.timelineCheckedAt);
     days.forEach(function (date,i) {
+      if (historical) campaignTotals.push({date:date,campaignId:campaign.id,sent:entry.totals[i]});
       var cell = entry.cells[i];
+      if (cell && cell.issue==='totals') totalsDiffer=true;
       if ((scope.period==='today' || entry.totals[i]) && !(cell && cell.done)) return;
       var verified={date:date,campaignId:campaign.id};
       if(scope.period==='today' && entry.verifiedAt)verified.checkedAt=new Date(entry.verifiedAt).toISOString();
@@ -235,21 +261,32 @@ function projectHistoryResult_(scope,days,report,state) {
       Object.keys(cell && cell.counts || {}).forEach(function (id) { rows.push({date:date,accountId:id,campaignId:campaign.id,sent:cell.counts[id]}); });
     });
   });
-  var complete = !state && checked.length === days.length * scope.campaigns.length;
+  var complete = !state && !pending.tasks.length && !pending.waiting && checked.length === days.length * scope.campaigns.length;
   var retryAfter = Math.max(0,(report.pauseUntil || 0)-now,(pending.retryAt || 0)-now);
   var message = {not_configured:'Подключите Coldy в настройках.',no_accounts:'Выберите почты для мониторинга в этом проекте.',
     no_campaigns:'В сегментах проекта пока нет подключённых рассылок.'}[state] ||
-    (complete ? '' : retryAfter ? 'Coldy пока не подтвердил часть данных. Полученные дни сохранены.' : 'Получаем отправки по подключённым рассылкам.');
-  return {state:state || (complete?'ready':'partial'),period:scope.period,from:days[0],to:days[days.length-1],days:days,dayBasis:'coldy_calendar',timeZone:null,
+    (complete ? '' : totalsDiffer ? 'По части дней сумма по ящикам расходится с итогом Coldy по рассылке. Повторяем сверку.' :
+     retryAfter ? 'Coldy пока не подтвердил часть данных. Повторим сверку автоматически.' : 'Получаем отправки по подключённым рассылкам.');
+  var result={state:state || (complete?'ready':'partial'),period:scope.period,from:days[0],to:days[days.length-1],days:days,dayBasis:'coldy_calendar',timeZone:null,
     accounts:scope.accounts,campaigns:scope.campaigns,rows:rows,checkedCells:checked,complete:complete,
     pending:!state&&!complete,retryAfterMs:retryAfter,message:message,checkedAt:report.checkedAt || null};
+  if (historical) {
+    result.campaignTotals=campaignTotals;
+    // A by-account read can happen much later than the campaign's event summary.
+    result.campaignTotalsCheckedAt=timelineTimes.length && timelineTimes.every(function (t) {
+      return typeof t==='string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(t) && Number.isFinite(Date.parse(t));
+    }) ? timelineTimes.sort()[0] : null;
+  }
+  return result;
 }
 
 function getProjectSendingHistory_(request) {
   return api_(function () {
-    var input=projectAnalyticsInput_(request,['refresh','period','weekOf']), period=input.period===undefined?'previous_week':input.period;
+    var input=projectAnalyticsInput_(request,['refresh','period','weekOf','cursor']), period=input.period===undefined?'previous_week':input.period;
     if(period!=='previous_week' && period!=='today')fail_('INVALID_REQUEST','Неизвестный период истории отправок.');
     if (input.refresh !== undefined && typeof input.refresh !== 'boolean') fail_('INVALID_REQUEST','Некорректный запрос обновления истории.');
+    if(input.cursor!==undefined && (period==='today'||typeof input.cursor!=='string'||input.cursor!==''&&!/^[A-Za-z0-9_-]{43}$/.test(input.cursor)))
+      fail_('INVALID_REQUEST','Некорректный курсор истории отправок.');
     var context=authorize_(), project=registryProjectId_(), settings=coldySettings_(context), now=Date.now(), days=projectHistoryDates_(period,now,input.weekOf);
     if (!registryProjectScoped_()) fail_('OUTSIDE_PROJECT','Выберите проект для просмотра истории отправок.');
     var reads={monitoring:{},inventory:{},bindings:{},checkpoint:{}};
@@ -261,9 +298,39 @@ function getProjectSendingHistory_(request) {
       return Object.assign(projectHistoryResult_(scope,days,{entries:{}},empty),{plans:[]});
     }
     var owner=projectMonitoringOwner_(settings.credentialHash), kind=period==='today'?'sendinghistorytoday':'sendinghistory';
-    if(input.weekOf!==undefined)owner=digest_(owner+'|week|'+days[0]);
+    if(input.weekOf!==undefined && days[0]!==projectHistoryWeek_(now)[0])owner=digest_(owner+'|week|'+days[0]);
     var saved=coldyLoad_(context,kind,owner,reads.checkpoint);
     var before=saved ? saved.version : null, report=projectHistoryCheckpoint_(saved,scope,days.length);
+    // A weekly read can take many provider pages. Keep progress per verified scope and exact
+    // durable version so simultaneous analytics/Drive writes cannot starve a read-only report.
+    var cache, cached=false, cacheKey='sending-history-work:'+digest_(JSON.stringify([scope.token,kind,owner,before]))+':';
+    if (period!=='today') try {
+      cache=CacheService.getScriptCache();
+      var raw=input.cursor && cache.get(cacheKey+input.cursor), work=raw && digest_(raw)===input.cursor && JSON.parse(raw);
+      if (work && projectHistoryCheckpoint_(work,scope,days.length)===work) { report=work;cached=true; }
+    } catch (unavailable) {}
+    // A denied campaign must also disappear from still-valid cursors in other tabs,
+    // even while a writer prevents committing the revocation to Drive.
+    var denialPrefix='history-denied:'+scope.planScope+':';
+    function respectDenials(candidate) {
+      if (!cache) return candidate;
+      var blocked=cache.getAll(scope.campaigns.map(function (c){return denialPrefix+c.id;}));
+      scope.campaigns.forEach(function (c) {
+        var until=Number(blocked[denialPrefix+c.id]);
+        if (until>Date.now())candidate.entries[c.id]={cells:{},retryAt:until,issue:'access'};
+      });
+      return candidate;
+    }
+    function keepWork() {
+      if (!cache || input.cursor===undefined) return null;
+      try {
+        var raw=JSON.stringify(Object.assign({version:'progress'},report));
+        if (raw.length>90000) return null;
+        var cursor=digest_(raw);
+        cache.put(cacheKey+cursor,raw,Math.max(900,Math.min(21600,Math.ceil((report.pauseUntil-Date.now())/1000)||0)));
+        return cursor;
+      } catch (unavailable) { return null; }
+    }
     var plans=period==='today'?[]:projectPlanRead_(context,settings,scope,days);
     function current() {
       var fresh=authorize_(), currentSettings=coldySettings_(fresh);
@@ -278,31 +345,76 @@ function getProjectSendingHistory_(request) {
       verified.period=scope.period;scope=verified;
       return fresh;
     }
+    function concurrent(fresh) {
+      if(reads.checkpoint.unchanged && reads.checkpoint.unchanged())return null;
+      var latest=coldyLoad_(fresh,kind,owner);
+      if((latest ? latest.version : null)===before)return null;
+      if(!latest || latest.token!==scope.token)fail_('COLDY_MONITORING_CHANGED','Состав отчёта изменился. Обновите историю.');
+      return projectHistoryCheckpoint_(latest,scope,days.length);
+    }
+    respectDenials(report);
     var job=projectHistoryJobs_(scope,days,report,now);
     if (!job.tasks.length && !job.waiting && (input.refresh || now-Date.parse(report.checkedAt) >= (period==='today'?60000:21600000))) {
-      report={token:scope.token,entries:{}};
+      if(period==='today')report={token:scope.token,entries:{}};
+      else Object.keys(report.entries).forEach(function (id) {
+        var entry=report.entries[id];
+        entry.reviewAt=now;
+        Object.keys(entry.cells).forEach(function (day) { if(entry.cells[day].done)entry.cells[day].recheck=true; });
+      });
       job=projectHistoryJobs_(scope,days,report,now);
     }
-    if (!job.tasks.length || report.pauseUntil>now) {
-      confirm();
-      return Object.assign(projectHistoryResult_(scope,days,report),{plans:plans});
+    if ((!job.tasks.length || report.pauseUntil>now) && !cached) {
+      return Object.assign(projectHistoryResult_(scope,days,respectDenials(concurrent(confirm())||report)),{plans:plans});
     }
-    var results;
-    try { results=coldyGetBatch_(context,job.tasks.map(function (task) { return task.path; }),current,'sending-history'); }
-    catch (error) {
-      if (['COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_RATE_LIMIT'].indexOf(error.registryCode)<0) throw error;
-      results=job.tasks.map(function () { return {error:error}; });
-    }
-    projectHistoryApply_(report,job,results,scope,days,Date.now());
-    // Two browsers can collect the same GET. Only the first verified checkpoint is committed.
-    var accepted=locked_(function () {
-      var fresh=confirm(), latest=reads.checkpoint.unchanged && reads.checkpoint.unchanged() ? saved : coldyLoad_(fresh,kind,owner);
-      if ((latest ? latest.version : null)!==before) {
-        if (latest && latest.token===scope.token) return projectHistoryCheckpoint_(latest,scope,days.length);
-        fail_('COLDY_MONITORING_CHANGED','Состав отчёта изменился. Обновите историю.');
+    var needsSave=false;
+    if(job.tasks.length && !(report.pauseUntil>now)){
+      var results;
+      try { results=coldyGetBatch_(context,job.tasks.map(function (task) { return task.path; }),current,job.timelines?'sending-week-timelines':'sending-history'); }
+      catch (error) {
+        if (['COLDY_NETWORK','COLDY_UNAVAILABLE','COLDY_RATE_LIMIT'].indexOf(error.registryCode)<0) throw error;
+        results=job.tasks.map(function () { return {error:error}; });
       }
+      projectHistoryApply_(report,job,results,scope,days,Date.now());
+      needsSave=results.some(function (r){return !!r.error;});
+      if(cache && needsSave)results.forEach(function (r,i){
+        if(!r.error || !['COLDY_FORBIDDEN','COLDY_NOT_FOUND'].includes(r.error.registryCode))return;
+        var id=job.tasks[i].campaign||job.campaign, until=report.entries[id].retryAt;
+        cache.put(denialPrefix+id,String(until),Math.min(21600,Math.max(1,Math.ceil((until-Date.now())/1000))));
+      });
+    }
+    var cursor=null;
+    if (cache && input.cursor!==undefined && !needsSave) {
+      var partial=projectHistoryResult_(scope,days,report);
+      if (partial.pending && !partial.retryAfterMs) {
+        var latest=concurrent(confirm());
+        if(latest)return Object.assign(projectHistoryResult_(scope,days,respectDenials(latest)),{plans:plans});
+        respectDenials(report);
+        cursor=keepWork();
+        if(cursor)return Object.assign(projectHistoryResult_(scope,days,report),{plans:plans,nextCursor:cursor});
+      }
+    }
+    // Two browsers can collect the same GET. Only the first verified checkpoint is committed.
+    function save() {
+      var fresh=confirm(),latest=concurrent(fresh);
+      if(latest)return latest;
+      respectDenials(report);
       report.version=Utilities.getUuid(); coldySave_(fresh,kind,owner,report); return report;
-    });
-    return Object.assign(projectHistoryResult_(scope,days,accepted),{plans:plans});
+    }
+    var accepted;
+    try { accepted=locked_(save,period==='today'?10000:500); }
+    catch(error) {
+      if(error.registryCode!=='BUSY' || period==='today')throw error;
+      accepted=concurrent(confirm())||report;
+      if(accepted===report)cursor=keepWork();
+    }
+    var response=Object.assign(projectHistoryResult_(scope,days,respectDenials(accepted)),{plans:plans});
+    if(cursor) {
+      response.nextCursor=cursor;
+      if(response.complete) {
+        response.pending=true;response.retryAfterMs=3500;
+        response.message='Факт получен. Сохраняем историю отправок.';
+      }
+    }
+    return response;
   });
 }

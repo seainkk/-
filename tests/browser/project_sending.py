@@ -29,13 +29,22 @@ api.getProjectSendingHistory=(p,project)=>{
       checkedCells:checked.map(c=>({date:day,campaignId:c,checkedAt:oldTime?'2026-11-27T09:40:00Z':clock})),
       rows:[{date:day,campaignId:A,accountId:'account-0',sent:3},...(!partial?[{date:day,campaignId:B,accountId:'account-0',sent:2}]:[])]};
   }
+  (backend.weekReads??=[]).push({...p});
   const current=!!p?.weekOf,start=current?23:16,n=current?4:7;
   const days=Array.from({length:n},(_,i)=>'2026-11-'+(start+i));
+  if(backend.weekMode==='busy')throw new Error('[BUSY] Журнал занят.');
+  if(backend.weekMode==='no_accounts')return {state:'no_accounts',from:days[0],to:days.at(-1),days,accounts:[],campaigns:[],
+    rows:[],checkedCells:[],message:'Выберите почты для мониторинга в этом проекте.'};
+  if(backend.weekMode==='partial')return {state:'partial',from:days[0],to:days.at(-1),days,accounts:projectAccounts,campaigns,plans:[],
+    pending:true,nextCursor:'next-week-step',complete:false,checkedCells:[{date:days[0],campaignId:A}],rows:[{date:days[0],accountId:'account-0',campaignId:A,sent:3}],
+    campaignTotalsCheckedAt:clock,campaignTotals:[
+      {date:days[0],campaignId:A,sent:30},{date:days[0],campaignId:B,sent:20},{date:days[1],campaignId:A,sent:0},
+      {date:days[2],campaignId:A,sent:0},{date:days[2],campaignId:B,sent:0}]};
   const plans=[{date:days[0],generatedAt:'2026-11-'+(start-1)+'T09:00:00Z',expected:10,initial:7,followups:3,mailboxLimit:80,unused:70,
     campaigns:campaigns.map((c,i)=>({...c,expected:i?4:6,initial:i?3:4})),
     senders:[{id:'account-0',dailyLimit:50,expected:8,unused:42,campaigns:[{id:A,expected:4,initial:2},{id:B,expected:4,initial:3}]},
       {id:'account-1',dailyLimit:30,expected:2,unused:28,campaigns:[{id:A,expected:2,initial:2}]}]}];
-  return {state:'ready',from:days[0],to:days.at(-1),days,checkedAt:clock,complete:true,accounts:projectAccounts,campaigns,plans,
+  return {state:'ready',from:days[0],to:days.at(-1),days,checkedAt:clock,complete:true,accounts:projectAccounts,campaigns,plans:backend.noPlan?[]:plans,
     checkedCells:days.flatMap(date=>campaigns.map(c=>({date,campaignId:c.id,checkedAt:clock}))),
     rows:[{date:days[0],campaignId:A,accountId:'account-0',sent:3},{date:days[2],campaignId:B,accountId:'account-1',sent:2}]};
 };
@@ -108,6 +117,35 @@ def main():
         expect(cells).to_have_text(['80','3','7','3','10','70'])
         page.locator('#pj-plan-day').select_option('2026-11-25')
         expect(senders.filter(has_text='two@example.test').locator('td')).to_have_text(['Итого','2','—'])
+        # A historical week can have campaign-level event counts before sender attribution.
+        page.evaluate("backend.weekMode='partial';backend.noPlan=true")
+        page.locator('#pj-history-date').fill('')
+        expect(page.locator('#pj-plan-asof')).to_contain_text('Прошлая неделя 16.11.2026 – 22.11.2026')
+        expect(cells).to_have_text(['от 3','50'])
+        expect(rows.nth(1).locator('td')).to_have_text(['—','—'])
+        expect(rows.nth(2).locator('td')).to_have_text(['—','0'])
+        expect(page.locator('#pj-history-all-senders')).to_be_visible()
+        assert page.evaluate("backend.weekReads[0].cursor")==''
+        pool.get_by_label('two@example.test').uncheck()
+        expect(page.locator('#pj-history-all-senders')).to_be_hidden()
+        expect(cells).to_have_text(['от 3'])
+        pool.get_by_label('Все почты',exact=True).check()
+        campaign.select_option(label='Кухни')
+        expect(cells).to_have_text(['3','30'])
+        expect(rows.nth(1).locator('td')).to_have_text(['—','0'])
+        campaign.select_option('')
+        page.evaluate("backend.weekMode='busy'")
+        expect(page.locator('#pj-plan-health')).to_contain_text('Повторим автоматически',timeout=8000)
+        expect(cells).to_have_text(['от 3','50'])
+        assert page.evaluate("backend.weekReads.at(-1).cursor")=='next-week-step'
+        page.evaluate("backend.weekMode='ready';testClock.now+=5500")
+        expect(cells).to_have_text(['3'],timeout=10000)
+        expect(page.locator('#pj-history-all-senders')).to_be_hidden()
+        expect(page.locator('#pj-plan-health')).to_contain_text('сохранён только факт')
+        page.evaluate("backend.weekMode='no_accounts'")
+        page.locator('#pj-plan-refresh').click()
+        expect(page.locator('#pj-plan-health')).to_contain_text('Выберите почты')
+        expect(cells).to_have_text(['—'])
         period.select_option('today')
         page.evaluate('oldTime=true')
         page.locator('#pj-plan-refresh').click()
