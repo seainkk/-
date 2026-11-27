@@ -16,8 +16,9 @@ function service(id){return {id:'coldy',state:'partial',totals:{sent:100,replies
 function monitoring(){return {configured:backend.monitoringConfigured,revision:backend.monitoringRevision,accountIds:[...backend.monitoringIds],scopeToken:backend.monitoringScope};}
 function inventory(){return backend.inventoryLoaded?Array.from({length:backend.largeInventory||6},(_,i)=>({id:'account-'+i,email:(backend.largeInventory?'large-sender-':backend.accountMarker)+i+'@example.test',name:(backend.senderName||'Sender ')+i,provider:'SMTP'})):[];}
 function selectionDto(query){if(query)backend.inventoryLoaded=true;
- const q=String(query||'').toLowerCase(),accounts=inventory().filter(a=>backend.monitoringIds.includes(a.id)||q&&[a.email,a.name,a.id].some(v=>v.toLowerCase().includes(q))).slice(0,50);
- return {configured:backend.configured,selection:monitoring(),accounts,availableCount:accounts.length,inventoryAt:backend.inventoryLoaded?backend.lastSyncAt:null};}
+ const q=String(query||'').toLowerCase(),all=inventory(),matches=new Set(all.filter(a=>q&&[a.email,a.name,a.id].some(v=>v.toLowerCase().includes(q))).map(a=>a.id));
+ const accounts=all.filter(a=>backend.monitoringIds.includes(a.id)||matches.has(a.id));
+ return {configured:backend.configured,selection:monitoring(),accounts,...(q?{matchIds:[...matches]}:{}),availableCount:accounts.length,inventoryAt:backend.inventoryLoaded?backend.lastSyncAt:null};}
 function poolData(accounts){
  if(!backend.infraSynced||!backend.configured)return {state:'unknown',updatedAt:null,campaigns:[],stale:true};
  const schedule={days:['monday','tuesday','wednesday','thursday','friday'],from:'09:00',to:'18:30',timezone:'Europe/Moscow',gapStartSeconds:60,gapEndSeconds:90};
@@ -196,7 +197,7 @@ RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refr
         before=page.evaluate('backend.calls.length')
         page.locator('#pj-segment').select_option('segment-a')
         forecast=page.locator('#pj-forecast')
-        forecast.locator('summary').click()
+        forecast.locator(':scope > summary').click()
         forecast.get_by_role('button',name='3 дня').click()
         expect(forecast.locator('[data-forecast-days="3"]')).to_have_attribute('aria-pressed','true')
         expect(forecast.locator('#pj-forecast-refresh')).to_be_disabled()
@@ -214,16 +215,17 @@ RegistryProject.show('analytics',{ready:true,epoch:2});void RegistryProject.refr
         search=page.locator('#pj-mailbox-search')
         search.fill('first');page.locator('#pj-mailbox-cancel').click();expect(page.locator('#pj-mailbox-dialog')).to_be_hidden()
         page.locator('#pj-infrastructure-select').click();search.fill('sender2');search.press('Enter')
-        expect(page.locator('#pj-mailbox-inventory')).to_be_disabled()
+        expect(page.locator('#pj-mailbox-inventory')).to_be_hidden()
         expect(page.locator('#pj-mailbox-save')).to_be_disabled()
         assert page.evaluate('backend.calls.length')==before
         page.evaluate("""backend.holdMethods=['getProjectInfrastructureSelection'];
           RegistryProject.show('infrastructure',{ready:true,epoch:4});void RegistryProject.refresh({opening:true})""")
         page.wait_for_function("backend.pending.some(x=>x.name==='getProjectInfrastructureSelection')")
-        search.fill('sender1');expect(page.locator('#pj-mailbox-inventory')).to_be_disabled()
+        search.fill('sender1');expect(page.locator('#pj-mailbox-inventory')).to_be_hidden()
         page.evaluate("backend.holdMethods=[];release('getProjectInfrastructureSelection')");idle()
-        expect(search).to_have_value('sender1');expect(page.locator('#pj-mailbox-inventory')).to_be_enabled()
-        page.locator('#pj-mailbox-inventory').click();idle()
+        expect(search).to_have_value('sender1')
+        page.wait_for_function("backend.calls.some(c=>c.name==='getProjectInfrastructureSelection'&&c.payload?.query==='sender1')")
+        idle()
         expect(page.locator('[data-monitoring-account="account-1"]')).to_be_visible()
         page.evaluate("RegistryProject.lock()")
         expect(page.locator('#pj-mailbox-dialog')).to_be_hidden();expect(search).to_have_value('')
@@ -386,7 +388,8 @@ void RegistryProject.refresh({opening:true})""")
 
         def find_mailbox(query):
             page.locator('#pj-mailbox-search').fill(query)
-            page.locator('#pj-mailbox-inventory').click();idle()
+            page.wait_for_function("q=>backend.calls.some(c=>c.name==='getProjectInfrastructureSelection'&&(c.payload||c.p)?.query===q)",arg=query.lower())
+            idle()
 
         reset()
         expect(page.locator('#pj-segment')).to_be_enabled()
@@ -603,8 +606,7 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         expect(page.locator('#pj-infrastructure-refresh')).to_be_disabled()
         assert count('refreshProjectInfrastructure')==0
 
-        # An empty cached catalog is populated only by the explicit inventory
-        # action. Even that action may not fan out into mailbox detail reads.
+        # A query loads identities only. Opening the dialog does not fetch the directory.
         reset('infrastructure',setup='backend.largeInventory=1159;backend.inventoryLoaded=false')
         open_mailboxes()
         assert page.locator('#pj-mailbox-rows input').count()==0
@@ -616,21 +618,44 @@ backend.bindings.push({id:'binding-pinned',segmentId:'segment-a',campaignId:'pin
         assert page.evaluate('backend.detailIds')==[]
         page.locator('#pj-mailbox-cancel').click()
 
-        # The project already has a verified pool. Typing and changing a
-        # checkbox remain local while an explicit provider search is in flight.
+        reset('infrastructure',setup='backend.largeInventory=1159')
+        open_mailboxes();find_mailbox('@')
+        rows=page.locator('#pj-mailbox-rows')
+        expect(rows.locator('input')).to_have_count(100)
+        expect(page.locator('#pj-mailbox-more')).to_be_visible()
+        rows.evaluate('el=>el.scrollTop=el.scrollHeight')
+        expect(rows.locator('input')).to_have_count(200)
+        search.fill('1158@example.test')
+        expect(rows.locator('input')).to_have_count(1)
+        search.press('ArrowDown');page.keyboard.press('Space')
+        expect(rows.locator('[data-monitoring-account="account-1158"]')).to_be_checked()
+        assert count('getProjectInfrastructureSelection')==1
+        page.locator('#pj-mailbox-cancel').click()
+
+        # A burst of keystrokes sends one final query. Closing drops its late response.
+        open_mailboxes()
+        page.evaluate("backend.holdMethods=['getProjectInfrastructureSelection']")
+        search.press_sequentially('115',delay=10)
+        page.wait_for_function("backend.pending.some(c=>c.name==='getProjectInfrastructureSelection')")
+        assert page.evaluate("backend.calls.filter(c=>c.name==='getProjectInfrastructureSelection').map(c=>c.payload.query)")==['@','115']
+        page.locator('#pj-mailbox-cancel').click()
+        page.evaluate("backend.holdMethods=[];release('getProjectInfrastructureSelection')");idle()
+        open_mailboxes();expect(rows.locator('input')).to_have_count(0)
+        page.locator('#pj-mailbox-cancel').click()
+
+        # Local results and drafts remain usable while an earlier search is in flight.
         reset('infrastructure', setup="backend.monitoringIds=['account-0'];backend.monitoringConfigured=true;backend.senderName='Белоцветов '")
         open_mailboxes()
         assert count('getProjectInfrastructureSelection')==0
+        page.evaluate("backend.holdMethods=['getProjectInfrastructureSelection']")
         search.fill('белоцветов')
         expect(page.locator('#pj-mailbox-rows input')).to_have_count(1)
-        assert count('getProjectInfrastructureSelection')==0
-        page.evaluate("backend.holdMethods=['getProjectInfrastructureSelection']")
-        page.locator('#pj-mailbox-inventory').click()
+        page.wait_for_function("backend.pending.some(c=>c.name==='getProjectInfrastructureSelection')")
         expect(search).to_be_enabled()
         page.locator('[data-monitoring-account="account-0"]').uncheck()
         search.fill('sender1@example.test')
-        page.locator('#pj-mailbox-inventory').click()
-        page.evaluate("release('getProjectInfrastructureSelection');release('getProjectInfrastructureSelection')")
+        page.evaluate("backend.holdMethods=[];release('getProjectInfrastructureSelection')")
+        page.wait_for_function("backend.calls.some(c=>c.name==='getProjectInfrastructureSelection'&&c.payload?.query==='sender1@example.test')")
         idle()
         expect(search).to_have_value('sender1@example.test')
         expect(page.locator('[data-monitoring-account="account-1"]')).to_be_visible()

@@ -508,6 +508,11 @@ test('forecast preview uses the dated report without touching Coldy and requires
   assert.equal(tomorrow.forecast.periods[0].expected,completed.forecast.days[1].expected);
   assert.equal(tomorrow.forecast.periods[2].expected,null);
   assert.equal(tomorrow.forecast.today,null,'A previous whole-day projection cannot be shown as sends still due today');
+  assert.equal(tomorrow.forecast.senders[0].days[0].expected,null);
+  assert.equal(tomorrow.forecast.senders[0].days[1].date,completed.forecast.senders[0].days[2].date);
+  assert.equal(tomorrow.forecast.senders[0].days[7].remainingLimit,null);
+  assert.equal(tomorrow.forecast.senders[0].campaigns[0].expectedByDay[0],null);
+  assert.equal(tomorrow.forecast.periods[0].unused,completed.forecast.days[1].unused);
   assert.equal(tomorrow.generatedAt,completed.generatedAt);
   const owners=f.c.projectCapacityOwners_; f.c.projectCapacityOwners_=()=>({});
   assert.equal(get(),null);
@@ -543,7 +548,8 @@ test('warm forecast preview needs only live metadata, drops changed journals/own
   const get=()=>plain(f.c.getProjectForecastPreview_({}));
   assert.deepEqual(get().forecast,report.forecast);assert.equal(cache.size,1);
   const loads=f.calls.loads.length,lists=scans;
-  assert.deepEqual(get().forecast,report.forecast);assert.equal(f.calls.loads.length,loads);assert.equal(scans,lists+1);
+  const {senders,...aggregate}=report.forecast;
+  assert.ok(senders.length);assert.deepEqual(get().forecast,aggregate);assert.equal(f.calls.loads.length,loads);assert.equal(scans,lists+1);
   assert.doesNotMatch([...cache.values()].join(''),/private recipient|sensitive@example|cohorts|seenIds|sender1@example/);
   project='neosender';assert.equal(get(),null);
   project='numshield';listed.get(segment).parents=['other_scope'];assert.equal(get(),null);
@@ -1454,27 +1460,39 @@ test('infrastructure parameters are strict and cannot carry arbitrary routes, ac
   for (const input of [null, [], { refresh: true }, { cursor: 'A'.repeat(43) }]) assert.throws(() => f.c.getProjectInfrastructure_(input), /INVALID_REQUEST/);
   assert.deepEqual(f.calls.http, []); assert.deepEqual(f.calls.saves, []);
 });
-test('targeted picker does not enumerate or store the directory; explicit text search stores only matches', () => {
+test('typing searches the complete sender identity directory and stores only matches for selection', () => {
   const org = Array.from({length:100},(_,i)=>account(i+1));
-  const f = fixture({accounts:org,monitoringIds:null});
+  const f = fixture({accounts:org,monitoringIds:null}),cache=new Map();
+  f.c.CacheService={getScriptCache:()=>({get:k=>cache.get(k),put:(k,v)=>cache.set(k,v)})};
   f.configure();
   assert.deepEqual(plain(f.c.getProjectInfrastructureSelection_({})).accounts,[]);
   assert.deepEqual(f.calls.http,[]);
   const one = plain(f.c.getProjectInfrastructureSelection_({query:'12'}));
   assert.deepEqual(one.accounts.map(a=>a.id),['12']);
-  assert.deepEqual(f.calls.http,['/accounts/12']);
+  assert.deepEqual(f.calls.http,['/accounts']);
   const same = plain(f.c.getProjectInfrastructureSelection_({query:'sender12@example.test'}));
   assert.deepEqual(same.accounts.map(a=>a.id),['12']);
-  assert.deepEqual(f.calls.http,['/accounts/12']);
+  assert.deepEqual(f.calls.http,['/accounts']);
   const two = plain(f.c.getProjectInfrastructureSelection_({query:'sender95@example.test'}));
   assert.deepEqual(two.accounts.map(a=>a.id),['95']);
-  assert.deepEqual(f.calls.http,['/accounts/12','/accounts']);
+  assert.deepEqual(f.calls.http,['/accounts']);
   assert.equal(f.state(),undefined);
   assert.ok(!JSON.stringify([...f.cache.values()]).includes('sender50@example.test'));
   f.c.saveProjectInfrastructureSelection_({accountIds:['12','95'],expectedRevision:0,scopeToken:one.selection.scopeToken,requestId:'select-found-choices'});
   const checked = f.refresh();
   assert.deepEqual(checked.accounts.map(a=>a.id),['12','95']);
-  assert.deepEqual(f.calls.http.slice(2),['/accounts/12','/accounts/95']);
+  assert.deepEqual(f.calls.http.slice(1),['/accounts/12','/accounts/95']);
+});
+
+test('one-character, numeric and complete email fragments return every matching identity without a 50-item cutoff',()=>{
+  const org=Array.from({length:240},(_,i)=>account(i+1));
+  org[0].email='anna@example.test';org[1].email='joanna@example.test';
+  const f=fixture({accounts:org,monitoringIds:null});f.configure();
+  const find=query=>plain(f.c.getProjectInfrastructureSelection_({query})).matchIds;
+  assert.equal(find('@').length,240);
+  assert.deepEqual(find('24'),['24','124','224','240']);
+  assert.deepEqual(find('anna@example.test'),['1','2']);
+  assert.deepEqual(f.calls.http,['/accounts','/accounts','/accounts']);
 });
 
 test('mailbox lookup finds all matching names and reuses positive and negative results only within the project and credential', () => {
@@ -1490,7 +1508,7 @@ test('mailbox lookup finds all matching names and reuses positive and negative r
   assert.equal(f.calls.saves.length,writes);
   assert.deepEqual(search('несовпадение'),[]);assert.deepEqual(search('несовпадение'),[]);
   assert.deepEqual(search('sender3@'),['3']);
-  assert.deepEqual(f.calls.http,['/accounts/1','/accounts'],'A different query reuses the directory from the first explicit text search');
+  assert.deepEqual(f.calls.http,['/accounts'],'Different queries reuse the same complete directory');
   for(const [key,value] of recent){
     if(key.startsWith('mailbox-directory-')){
       const entry=JSON.parse(value);
@@ -1500,12 +1518,12 @@ test('mailbox lookup finds all matching names and reuses positive and negative r
     }else assert.ok(JSON.parse(value).every(id=>/^\d+$/.test(id)));
   }
   project='neosender';assert.deepEqual(search('несовпадение'),[]);assert.deepEqual(f.calls.http.at(-1),'/accounts');
-  assert.equal(f.calls.http.length,3);
-  f.configure('other_fixture_secret');assert.deepEqual(search('несовпадение'),[]);assert.equal(f.calls.http.length,4);
-  f.configure(KEY);assert.deepEqual(search('несовпадение'),[]);assert.equal(f.calls.http.length,5,'Restoring the same key does not restore its old directory');
+  assert.equal(f.calls.http.length,2);
+  f.configure('other_fixture_secret');assert.deepEqual(search('несовпадение'),[]);assert.equal(f.calls.http.length,3);
+  f.configure(KEY);assert.deepEqual(search('несовпадение'),[]);assert.equal(f.calls.http.length,4,'Restoring the same key does not restore its old directory');
   const settings=f.c.coldySettings_(f.c.authorize_());
   f.properties.set(settings.rejectionSlot,'observed-401');
-  assert.throws(()=>search('Белоцветов'),/COLDY_AUTH/);assert.equal(f.calls.http.length,5);
+  assert.throws(()=>search('Белоцветов'),/COLDY_AUTH/);assert.equal(f.calls.http.length,4);
 });
 
 test('an evicted, incomplete or expired mailbox directory never suppresses an authoritative search',()=>{

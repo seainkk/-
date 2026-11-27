@@ -29,23 +29,28 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
       dailyLimit:projectInfraCount_(demand.dailyLimit), firstDailyLimit:projectInfraCount_(demand.firstDailyLimit), followupDailyLimit:projectInfraCount_(demand.followupDailyLimit),
       owners:[], senderSelection:selection, assigned:new Map(), schedule:schedule, windows:windows, minGap:fast, gap:gap, reasons:new Set(), queues:new Map(), used:[0,0]});
   });
+  var accounts = [];
   selection.forEach(function (id) {
-    var source = observed.get(id);
-    if (!source) return;
+    var source = observed.get(id) || {};
     var cap = source.capacity || {}, status = String(source.status || '').toLowerCase();
     var fresh = !source.stale && !source.syncError && !!source.updatedAt;
     var blocked = fresh && ((source.errors || []).length > 0 || ['failed','error','disabled','paused','disconnected','blocked'].indexOf(status) >= 0);
     var online = fresh && ['connected','active','ready','enabled','ok'].indexOf(status) >= 0;
     var observedAt = Date.parse(source.updatedAt);
-    var account = {id:id, blocked:blocked, online:online, limit:fresh ? projectInfraCount_(source.dailyLimit) : null,
+    var account = {id:id, name:source.name || '', email:source.email || '', blocked:blocked, online:online, limit:fresh ? projectInfraCount_(source.dailyLimit) : null,
       sentToday:fresh && Number.isFinite(observedAt) && date(observedAt) === date(now) ? projectInfraCount_(source.sentToday) : null,
       outside:cap.outsideActive === true, campaigns:[], nextAt:now};
+    if (!completionReports) account.allocations = new Map();
+    accounts.push(account);
     if (!blocked && cap.state !== 'free' && (cap.state !== 'busy' || !Array.isArray(cap.campaignIds))) mappingUnknown = true;
     (cap.campaignIds || []).forEach(function (key) {
       if (inactive.has(key)) return;
       var c = campaigns.get(key);
       if (!c) { mappingUnknown = true; return; }
-      if (!c.assigned.has(id)) { account.campaigns.push(c); c.owners.push(account); c.assigned.set(id,account); }
+      if (!c.assigned.has(id)) {
+        account.campaigns.push(c); c.owners.push(account); c.assigned.set(id,account);
+        if (account.allocations) account.allocations.set(key,Array(8).fill(0));
+      }
     });
   });
   if (mappingUnknown) reasons.add('stale_membership');
@@ -99,19 +104,47 @@ function projectForecastCalculate_(infrastructure, demands, nowMs, completionRep
     var value = period.reduce(function (v, row) { return v + row[key]; }, 0);
     return Number.isSafeInteger(value) ? value : null;
   }
+  var senders = accounts.map(function (account) {
+    var links = account.campaigns.map(function (campaign) {
+      return {id:campaign.id, expectedByDay:mappingUnknown || missing ? Array(8).fill(null) : account.allocations.get(campaign.id)};
+    });
+    var days = rows.map(function (row,index) {
+      var remaining = index ? account.limit : projectForecastRemaining_(account.limit,account.sentToday);
+      var expected = mappingUnknown || missing ? null : 0;
+      for (var j=0; expected !== null && j<links.length; j++) {
+        var quantity = links[j].expectedByDay[index];
+        expected = quantity === null ? null : expected+quantity;
+      }
+      var unused = account.outside ? null : projectForecastRemaining_(remaining,expected);
+      return {date:row.date,remainingLimit:remaining,expected:expected,unused:unused};
+    });
+    return {id:account.id,name:account.name,email:account.email,dailyLimit:account.limit,days:days,campaigns:links};
+  });
+  var gross = sum(senders,'dailyLimit');
+  rows.forEach(function (row,index) {
+    var poolDay = senders.map(function (sender) { return sender.days[index]; });
+    row.mailboxLimit = gross;
+    row.remainingLimit = sum(poolDay,'remainingLimit');
+    row.unused = sum(poolDay,'unused');
+  });
   var breakdown = Array.from(campaigns.values()).map(function (c) {
     return {id:c.id, name:c.name || '', segmentName:c.segmentName || '',
       expectedByDay:mappingUnknown || missing ? Array(8).fill(null) : c.expectedByDay};
   });
-  return {timezone:zone, today:rows[0], startDate:days[0].date, selectedAccounts:selection.size, activeCampaigns:campaigns.size, campaigns:breakdown, days:days,queue:queue,
+  return {timezone:zone, today:rows[0], startDate:days[0].date, selectedAccounts:selection.size, activeCampaigns:campaigns.size, campaigns:breakdown, senders:senders, days:days,queue:queue,
     periods:[1,3,7].map(function (length) {
       var period = days.slice(0,length);
       var modeled = sum(period,'modeled');
       if (modeled === null && period.some(function (r) { return r.modeled > 0; }))
         modeled = sum(period.filter(function (r) { return r.modeled !== null; }),'modeled');
       return {days:length,from:period[0].date,to:period[length-1].date,initial:sum(period,'initial'),
-        followups:sum(period,'followups'),expected:sum(period,'expected'),capacity:sum(period,'capacity'),modeled:modeled};
+        followups:sum(period,'followups'),expected:sum(period,'expected'),capacity:sum(period,'capacity'),modeled:modeled,
+        mailboxLimit:sum(period,'mailboxLimit'),remainingLimit:sum(period,'remainingLimit'),unused:sum(period,'unused')};
     }), reasons:Array.from(reasons).sort()};
+}
+
+function projectForecastRemaining_(limit, consumed) {
+  return limit === 0 ? 0 : limit === null || consumed === null ? null : Math.max(0,limit-consumed);
 }
 
 /** Intersect the weekly local wall-clock schedule with the requested Moscow calendar days, including overnight/DST. */
@@ -146,12 +179,13 @@ function projectForecastWindows_(schedule, from, to, zones) {
 }
 
 /** Minimal time-ordered heap for due groups and events. Counts stay grouped until a send actually fits. */
+function projectForecastEarlier_(a,b) { return a.time < b.time || a.time === b.time && (a.turn || 0) < (b.turn || 0); }
 function projectForecastPush_(heap, item) {
   var i = heap.length;
   heap.push(item);
   while (i > 0) {
     var parent = (i - 1) >> 1;
-    if (heap[parent].time <= item.time) break;
+    if (!projectForecastEarlier_(item,heap[parent])) break;
     heap[i] = heap[parent]; i = parent;
   }
   heap[i] = item;
@@ -161,8 +195,8 @@ function projectForecastPop_(heap) {
   if (!heap.length) return first;
   while (2 * i + 1 < heap.length) {
     var child = 2 * i + 1;
-    if (child + 1 < heap.length && heap[child + 1].time < heap[child].time) child++;
-    if (heap[child].time >= tail.time) break;
+    if (child + 1 < heap.length && projectForecastEarlier_(heap[child+1],heap[child])) child++;
+    if (!projectForecastEarlier_(heap[child],tail)) break;
     heap[i] = heap[child]; i = child;
   }
   heap[i] = tail;
@@ -272,7 +306,14 @@ function projectForecastPool_(pool, rows, reasons, now, today, day, budget, queu
       reasons.add('model_limit'); uncertain = cannotModel = true;
     }
     if (!cannotModel && measured) { daily.modeled += estimate.expected; daily.modeledEvidence = true; }
-    pool.campaigns.forEach(function (c) { c.expectedByDay[index] = uncertain ? null : c.used[0] + c.used[1]; });
+    pool.campaigns.forEach(function (c) {
+      var unknown = uncertain && open(c) && c.dailyLimit !== 0 && (c.firstDailyLimit !== 0 || c.followupDailyLimit !== 0);
+      c.expectedByDay[index] = unknown ? null : c.used[0] + c.used[1];
+      if (unknown) c.owners.forEach(function (a) {
+        if (!a.blocked && a.limit !== 0 && (index || projectForecastRemaining_(a.limit,a.sentToday) !== 0))
+          a.allocations.get(c.id)[index] = null;
+      });
+    });
     if (uncertain) daily.expected = daily.initial = daily.followups = null;
     else if (daily.expected !== null) {
       daily.expected += estimate.expected; daily.initial += estimate.initial; daily.followups += estimate.followups;
@@ -295,7 +336,14 @@ function projectForecastSlotBound_(campaigns, index, start) {
 
 function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
   var events = [];
-  pool.accounts.forEach(function (a) { if (a.remaining > 0 && a.nextAt < end) projectForecastPush_(events,{time:Math.max(start,a.nextAt),account:a}); });
+  // Coldy chooses unassigned recipients' senders at dispatch. Model simultaneous
+  // slots round-robin so equal schedules do not favor incidental heap order.
+  if (pool.nextTurn === undefined) {
+    pool.nextTurn = pool.accounts.length;
+    pool.accounts.forEach(function (a,i) { a.turn = i; });
+  }
+  function enqueue(a,time) { projectForecastPush_(events,{time:time,turn:a.turn,account:a}); }
+  pool.accounts.forEach(function (a) { if (a.remaining > 0 && a.nextAt < end) enqueue(a,Math.max(start,a.nextAt)); });
   while (events.length) {
     var event = projectForecastPop_(events), a = event.account, best = null, earliest = end;
     a.campaigns.forEach(function (c) {
@@ -319,13 +367,15 @@ function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
       });
     });
     if (!best) {
-      if (earliest < end) projectForecastPush_(events,{time:earliest,account:a});
+      if (earliest < end) enqueue(a,earliest);
       continue;
     }
     if (++budget.sends > budget.limit) return false;
     var c = best.c, group = best.group, next = group.index + 1;
     if (--group.count === 0) projectForecastPop_(best.heap);
     c.used[best.kind]++; a.remaining--; c.lastAllocation = budget.sends;
+    a.turn = pool.nextTurn++;
+    if (a.allocations) a.allocations.get(c.id)[index]++;
     if (daily.expected !== null) { daily.expected++; if (best.kind) daily.followups++; else daily.initial++; }
     if (next < c.sequence.steps.length) {
       var due = event.time + c.sequence.steps[next].delayDays * 86400000;
@@ -339,7 +389,7 @@ function projectForecastSimulateDay_(pool, index, start, end, daily, budget) {
       }
     }
     a.nextAt = event.time + c.gap;
-    if (a.remaining > 0 && a.nextAt < end) projectForecastPush_(events,{time:a.nextAt,account:a});
+    if (a.remaining > 0 && a.nextAt < end) enqueue(a,a.nextAt);
   }
   return true;
 }

@@ -168,6 +168,7 @@
   }
   function accessFailure(code){return ['LINK_ACCESS_REQUIRED','LINK_SETUP_REQUIRED'].includes(code);}
   function isReadRpc(method,payload){
+    if(method==='getProjectSendingHistory')return true;
     if(method==='getSourceDirectory'||method==='getSegmentDirectory'||method==='getServiceLimits'||method==='getProjectForecastPreview'||method==='getProjectCampaignCompletions')return true;
     if(method==='getSegmentMailings'&&payload?.live)return false;
     if(method==='getProjectAnalyticsCampaigns')return payload?.refresh!==true;

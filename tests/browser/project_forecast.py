@@ -27,12 +27,13 @@ api.getProjectSendingForecast=(payload,project)=>{
   if(window.forecastState==='empty')return {state:'no_selection',pending:false,forecast:null};
   if(window.forecastState==='changed')throw new Error('[COLDY_MONITORING_CHANGED] Изменились выбранные ящики.');
   const partial=window.forecastState==='partial';
-  const firstPage=window.forecastState==='first_page';
+  const firstPage=window.forecastState==='first_page'||window.forecastState==='scoped_page';
   const days=Array.from({length:7},(_,i)=>({date:'2026-11-'+(23+i),initial:partial?null:2,followups:partial?null:3,
     expected:partial?null:5,modeled:partial&&i!==2?4:null,capacity:9}));
   const periods=[1,3,7].map(n=>({days:n,from:days[0].date,to:days[n-1].date,initial:partial?null:n*2,followups:partial?null:n*3,
     expected:partial?null:n*5,modeled:partial?n*4:null,capacity:n*9}));
   return {state:firstPage?'loading':partial?'partial':'ready',pending:firstPage,generatedAt:firstPage?null:'2026-11-22T08:00:00Z',
+    ...(window.forecastState==='scoped_page'?{day:'2026-11-22',previewScope:'numshield-example',retryAfterMs:120000}:{}),
     forecast:{today:{date:'2026-11-22',expected:3,initial:2,followups:1,capacity:4},days,periods,startDate:days[0].date,timezone:'Europe/Moscow',selectedAccounts:project==='neosender'?9:2,activeCampaigns:1,
     campaigns:[{id:'test',name:project==='neosender'?'Нео · пример':'Кухни · пример',segmentName:'Демонстрационный сегмент',expectedByDay:[3,...Array(7).fill(partial?null:5)]}],
     queue:{pendingInitial:51,pendingFollowups:12,unresolved:partial?2:0,unreadCampaigns:partial?1:0},
@@ -57,14 +58,23 @@ def main():
         assert page.evaluate('forecastCalls')==0
         assert not page.locator('#pj-segment').input_value()
         page.evaluate("backend.holdMethods=['getProjectSendingForecast']")
-        view.locator('summary').click()
+        view.locator(':scope > summary').click()
         totals=view.locator('#pj-forecast-totals dd')
         expect(totals).to_have_text(['41','1','40','90'])
         attribution=view.locator('#pj-forecast-campaigns')
         expect(attribution).to_contain_text('при следующем расчёте')
         expect(view.locator('#pj-forecast-health')).to_contain_text('последний расчёт')
         page.wait_for_function("backend.pending.some(job=>job.method==='getProjectSendingForecast')")
-        page.evaluate("backend.holdMethods=[];releaseRpc('getProjectSendingForecast')")
+        # An aligned archive covers tomorrow but cannot describe the rest of today.
+        page.evaluate("forecastState='scoped_page';backend.holdMethods=[];releaseRpc('getProjectSendingForecast')")
+        expect(totals).to_have_text(['41','1','40','90'])
+        view.get_by_role('button',name='Сегодня').click()
+        expect(totals).to_have_text(['3','2','1','4'])
+        expect(attribution.locator('td').last).to_have_text('3')
+        expect(view.locator('#pj-forecast-health')).not_to_contain_text('Показан последний расчёт')
+        view.get_by_role('button',name='Завтра').click()
+        expect(totals).to_have_text(['41','1','40','90'])
+        page.evaluate("forecastState='ready';tick(120001)")
         expect(totals).to_have_text(['5','2','3','9'])
         expect(attribution.locator('tr')).to_have_text('Кухни · примерДемонстрационный сегмент5')
         view.get_by_role('button',name='Сегодня').click()
@@ -82,7 +92,7 @@ def main():
         expect(attribution.locator('td').last).to_have_text('35')
         expect(view.locator('#pj-forecast-rows tr')).to_have_count(7)
         expect(view.locator('#pj-forecast-context')).to_contain_text('23.11.2026 – 29.11.2026')
-        assert page.evaluate('forecastCalls')==1
+        assert page.evaluate('forecastCalls')==2
         page.evaluate("forecastState='partial';tick(61000)")
         expect(totals).to_have_text(['—','—','—','63','28'])
         expect(attribution).to_contain_text('Уточняется')
@@ -111,13 +121,13 @@ def main():
         page.evaluate("forecastState='waiting'")
         view.get_by_role('button',name='Пересчитать').click()
         expect(view.locator('#pj-forecast-health')).to_contain_text('контактов проверено 27')
-        view.locator('summary').click()
+        view.locator(':scope > summary').click()
         idle_calls=page.evaluate('forecastCalls')
         page.wait_for_timeout(1650)
         assert page.evaluate('forecastCalls')==idle_calls
 
         page.evaluate("forecastState='limited'")
-        view.locator('summary').click()
+        view.locator(':scope > summary').click()
         expect(view.locator('#pj-forecast-refresh')).to_be_disabled()
         limited_calls=page.evaluate('forecastCalls')
         page.evaluate("tick(60000)")
@@ -135,7 +145,7 @@ def main():
         page.wait_for_function("backend.active===0")
         assert not view.evaluate('el=>el.open')
         expect(view.locator('#pj-forecast-report')).to_be_hidden()
-        view.locator('summary').click()
+        view.locator(':scope > summary').click()
         expect(view.locator('#pj-forecast-context')).to_contain_text('выбранных ящиков 9')
         expect(attribution).to_contain_text('Нео · пример')
         expect(attribution).not_to_contain_text('Кухни')

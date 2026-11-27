@@ -217,6 +217,10 @@ function coldyGetBatch_(context, paths, guard, campaignDetailsOnly) {
     if (summary) summaryCampaign = summary[1];
     var detail = address.match(/^\/campaigns\/([\w-]+)$/);
     var campaign = summary || detail || address.match(/^\/leads\/campaign\/([\w-]+)\?limit=\d+&offset=\d+$/);
+    if (campaignDetailsOnly === 'sending-history') {
+      campaign = address.match(/^\/analytics\/campaigns\/([\w-]+)\/(?:events\?type=event&start_date=\d{4}-\d{2}-\d{2}&end_date=\d{4}-\d{2}-\d{2}|by-account\?type=event&start_date=(\d{4}-\d{2}-\d{2})&end_date=\2&sort_by=email&sort_order=asc&limit=500&offset=\d+)$/);
+      if (!campaign) fail_('INVALID_REQUEST', 'Некорректная группа запросов истории отправок.');
+    }
     var suppression = campaignDetailsOnly === 'recipient-suppression' && /^\/blacklist\/(emails|domains)\?search=/.test(address);
     var owner = suppression ? 'recipient-suppression' : campaignDetailsOnly === true ? detail && 'selected-campaign-details' : accounts ? 'accounts' : campaign && campaign[1].toLowerCase();
     if (!owner || scope && owner !== scope || seen.has(address)) fail_('INVALID_REQUEST', 'Запросы Coldy относятся к разным областям или повторяются.');

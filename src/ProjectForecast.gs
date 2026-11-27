@@ -14,11 +14,12 @@ function projectForecastPreviewRange_(archive,day) {
   var days = [];
   for (var i=1;i<=7;i++) {
     var date = new Date(Date.parse(day) + i*86400000).toISOString().slice(0,10);
-    days.push(byDate.get(date) || {date:date,initial:null,followups:null,expected:null,capacity:null,modeled:null});
+    days.push(byDate.get(date) || {date:date,initial:null,followups:null,expected:null,capacity:null,modeled:null,
+      mailboxLimit:null,remainingLimit:null,unused:null});
   }
   var periods = [1,3,7].map(function (count) {
     var rows = days.slice(0,count), result = {days:count,from:rows[0].date,to:rows[count-1].date};
-    ['initial','followups','expected','capacity','modeled'].forEach(function (field) {
+    ['initial','followups','expected','capacity','modeled','mailboxLimit','remainingLimit','unused'].forEach(function (field) {
       result[field] = rows.every(function (r) { return Number.isSafeInteger(r[field]); }) ?
         rows.reduce(function (total,r) { return total+r[field]; },0) : null;
     });
@@ -27,8 +28,12 @@ function projectForecastPreviewRange_(archive,day) {
   // Yesterday's plan for a whole day cannot stand in for the remaining sends today.
   var aligned = Object.assign({},report,{today:null,days:days,periods:periods,startDate:days[0].date,
     reasons:(report.reasons || []).concat('previous_horizon')});
-  if (Array.isArray(report.campaigns)) aligned.campaigns = report.campaigns.map(function (c) {
-    return Object.assign({},c,{expectedByDay:c.expectedByDay.slice(1).concat(null)});
+  function alignCampaign(c) { return Object.assign({},c,{expectedByDay:[null].concat(c.expectedByDay.slice(2),null)}); }
+  if (Array.isArray(report.campaigns)) aligned.campaigns = report.campaigns.map(alignCampaign);
+  if (Array.isArray(report.senders)) aligned.senders = report.senders.map(function (sender) {
+    function unknown(date) { return {date:date,remainingLimit:null,expected:null,unused:null}; }
+    return Object.assign({},sender,{days:[unknown(day)].concat(sender.days.slice(2),unknown(days[6].date)),
+      campaigns:sender.campaigns.map(alignCampaign)});
   });
   return aligned;
 }
@@ -39,7 +44,13 @@ function projectForecastCachedArchive_(archive) {
   var f = archive.forecast, counts = ['initial','followups','expected','capacity','modeled'];
   function count(n) { return Number.isSafeInteger(n) && n >= 0; }
   function date(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s); }
-  function totals(row, output) { counts.forEach(function (field) { output[field] = row[field]; }); return output; }
+  function totals(row, output) {
+    counts.forEach(function (field) { output[field] = row[field]; });
+    ['mailboxLimit','remainingLimit','unused'].forEach(function (field) {
+      if (row[field] === null || count(row[field])) output[field] = row[field];
+    });
+    return output;
+  }
   if (!f || f.timezone !== 'Europe/Moscow' || !date(archive.day) || !Number.isFinite(Date.parse(archive.generatedAt)) ||
       !date(f.startDate) || !count(f.selectedAccounts) || !count(f.activeCampaigns) ||
       !Array.isArray(f.days) || f.days.length !== 7 || !Array.isArray(f.periods) || f.periods.length !== 3 ||
@@ -255,7 +266,8 @@ function getProjectSendingForecast_(request) {
     var demandScope = projectForecastDemandScope_(signature,infra);
     var inputs = projectForecastInputStamp_(infra);
     var now = Date.now(), eligible = saved && saved.scope === scope && saved.day === day;
-    if (ready && eligible && !saved.work && saved.forecast && saved.forecast.today && saved.inputs === inputs && now - Date.parse(saved.generatedAt) < 60000) return projectForecastResult_(saved);
+    if (ready && eligible && !saved.work && saved.forecast && saved.forecast.today && Array.isArray(saved.forecast.senders) &&
+        saved.inputs === inputs && now - Date.parse(saved.generatedAt) < 60000) return projectForecastResult_(saved);
     var receipt = saved && saved.revision;
     var previous = ready && eligible && saved.inputs === inputs && saved.forecast;
     var state = sameDemand ? saved : {
@@ -347,7 +359,7 @@ function projectForecastSameDemand_(saved,selection,infra) {
 
 function projectForecastInputStamp_(infra) {
   var accounts = infra.accounts.map(function (a) {
-    return [a.id,a.sentToday,!!a.stale,!!a.syncError,!!(a.errors && a.errors.length)];
+    return [a.id,a.name || '',a.email || '',a.sentToday,!!a.stale,!!a.syncError,!!(a.errors && a.errors.length)];
   }).sort(function (a,b) { return a[0]-b[0]; });
   return digest_(JSON.stringify([infra.capacity.state,accounts]));
 }
